@@ -76,6 +76,15 @@ tracking_ui <- fluidPage(
             "Set > 0 to force a specific cycle time (overrides hardware model and the ",
             "data-driven estimates). Drives gap-splitting and the MSD."),
           uiOutput("trk_cycle_time_status"),
+          numericInput("trk_sigma_loc_nm",
+                       "Localization precision σ_loc (nm, 0 = auto from MSD)",
+                       value = 0, min = 0, step = 0.5),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "The short-lag noise floor. Leave at 0 to use the σ_loc the unified MSD ",
+            "estimates from its intercept; set > 0 to override. Used by the D-map to ",
+            "subtract the localization-error floor so slow regions aren't reported as ",
+            "diffusing."),
+          uiOutput("trk_sigma_loc_status"),
           conditionalPanel(
             condition = "input.trk_hw_enable == true",
             selectInput("trk_hw_pattern", "Scan pattern (vertices)",
@@ -168,6 +177,51 @@ tracking_ui <- fluidPage(
                 "and segments shorter than the min-length are discarded. ",
                 "The cycle time is auto-detected. Segment 1 of track 42 becomes '42_s1', '42_s2', etc.; ",
                 "length and duration filters then apply per segment.")
+            ),
+
+            tags$hr(),
+
+            checkboxInput("trk_endtrim_enable",
+                          "Trim degraded track ends (bleaching tails)", FALSE),
+            conditionalPanel(
+              condition = "input.trk_endtrim_enable == true",
+              checkboxInput("trk_endtrim_dark", "Trim dark-gap-separated ends", TRUE),
+              conditionalPanel(
+                condition = "input.trk_endtrim_dark == true",
+                numericInput("trk_endtrim_dark_cycles",
+                             "Dark-gap threshold (cycles)", value = 3, min = 2, step = 1)
+              ),
+              checkboxInput("trk_endtrim_efo", "Trim dim (low-EFO) ends", TRUE),
+              conditionalPanel(
+                condition = "input.trk_endtrim_efo == true",
+                numericInput("trk_endtrim_efo_frac",
+                             "EFO threshold (× track median)", value = 0.5, min = 0.05, max = 1, step = 0.05)
+              ),
+              uiOutput("trk_endtrim_hint"),
+              helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+                "Peels localizations from each end of a track (or segment) while they are ",
+                "reached across a dark gap ≥ the threshold, or are dim (EFO below the fraction ",
+                "of the track's median) — until a solid, well-connected localization is reached. ",
+                "Targets the photobleaching tail that inflates Rmax / MSD tails and fakes ",
+                "'exports at track ends'. Idempotent; runs after gap-splitting, before quality.")
+            ),
+
+            tags$hr(),
+
+            checkboxInput("trk_quality_enable",
+                          "Track-quality gate (drop dark-cycle-heavy tracks)", FALSE),
+            conditionalPanel(
+              condition = "input.trk_quality_enable == true",
+              sliderInput("trk_quality_min_integ",
+                          "Min fraction of integrated (single-cycle) steps",
+                          min = 0, max = 1, value = 0.5, step = 0.05),
+              uiOutput("trk_quality_hint"),
+              helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+                "Keeps only tracks that are localized on most cycles. A dark-cycle-heavy ",
+                "track has long gaps → larger positional uncertainty, mis-linking risk, and ",
+                "a bleaching-degraded tail, so it is unreliable for diffusion analysis. Runs ",
+                "after gap-splitting (per segment) and before the length filter; cycle time ",
+                "is auto-detected.")
             ),
 
             tags$hr(),
@@ -402,6 +456,131 @@ tracking_ui <- fluidPage(
     tabPanel("Analysis",
       tags$br(),
 
+      # ── Data Quality & Calibration (do this first) ───────────────────────────
+      fluidRow(
+        column(4,
+          h4("Data Quality & Calibration"),
+          tags$div(class = "well well-sm", style = "font-size:0.84em; color:#555; margin-bottom:8px;",
+            tags$b("Do this first."), " Estimates the localization precision σ_loc directly from ",
+            "the short-lag step covariance (CVE; ", tags$b("no MSD / diffusion fit needed"),
+            ") and scores the data by its integrated/dark-cycle balance. σ_loc becomes the ",
+            "app-wide noise floor for every analysis; the cycle time drives gap-splitting, the ",
+            "track-quality gate and the D-map."),
+          actionButton("trk_cve_run", "Estimate σ_loc & quality",
+                       icon = icon("ruler-combined"),
+                       class = "btn-primary", style = "margin-bottom:6px; width:100%;"),
+          helpText(style = "font-size:0.82em; color:#666; margin-top:0;",
+            "Uses consecutive INTEGRATED (single-cycle) steps only, so dark cycles don't bias it. ",
+            "Set the cycle time / manual σ_loc override in the Display tab's Acquisition Parameters. ",
+            "Strong directed motion (drift) makes σ_loc unresolvable — enter it manually then."),
+          tags$hr(style = "margin:8px 0;"),
+          tags$b("Per-track σ_loc heterogeneity", style = "font-size:0.9em;"),
+          fluidRow(
+            column(6, numericInput("trk_sig_min_integ", "Min integrated steps / track",
+                                   value = 50, min = 10, step = 10)),
+            column(6, numericInput("trk_sig_skip", "Skip first N localizations",
+                                   value = 5, min = 0, step = 1))
+          ),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "One CVE σ_loc per long track; the spread shows whether a single global value is ",
+            "safe. The first few localizations carry MINFLUX lock-on transient and are skipped. ",
+            "The app-wide σ_loc uses the per-track median (robust); pooled is shown for cross-check.")
+        ),
+        column(8,
+          uiOutput("trk_cve_status"),
+          plotlyOutput("trk_sigma_pertrack_plot", height = "220px"),
+          tags$details(style = "margin-top:6px;",
+            tags$summary(style = "cursor:pointer; font-size:0.86em; color:#555;",
+                         "Data-selection funnel (what's excluded, for your methods)"),
+            tags$div(style = "padding:4px 0 0 4px;", uiOutput("trk_quality_funnel"))),
+          tags$div(class = "well well-sm", style = "font-size:0.84em; margin-top:6px;",
+            tags$b("How this feeds every tool:"), tags$br(),
+            "σ_loc → noise-floor subtraction in the D-map, the JDD noise line, the confinement Rg ",
+            "correction, the HMM noise-state flag, and the directionality & speed floors. ",
+            "Cycle time → gap-split threshold, Integrated/Dark classification, D-map integrated filter. ",
+            "Integrated fraction → the track-quality gate (Display tab). ",
+            "The full Δt / Integrated-Dark breakdown is in the TSA section below.")
+        )
+      ),
+
+      tags$hr(),
+
+      # ── Time Signature Analysis (TSA) ────────────────────────────────────────
+      fluidRow(
+        column(4,
+          h4("Time Signature Analysis (TSA)"),
+          tags$div(style = "font-size:0.85em; color:#666; margin-bottom:6px;",
+            "Recovers the acquisition cycle structure from the data: the atomic cycle ",
+            "time, the Integrated/Dark cycle balance, and an overall data-quality verdict. ",
+            "Independent of the MSD — use it to judge whether the data are good for ",
+            "diffusion analysis before you trust D."),
+          checkboxInput("trk_show_tsa", "Enable TSA", FALSE),
+          conditionalPanel(
+            condition = "input.trk_show_tsa == true",
+            tags$b("Sequence file (optional)", style = "font-size:0.9em;"),
+            fileInput("trk_seq_json", "Upload MINFLUX sequence (.json)",
+                      accept = ".json"),
+            uiOutput("trk_seq_json_status"),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Auto-fills the scan pattern (vertices), dimensionality, and the gap ",
+              "threshold (from maxOffTime) into the Acquisition Parameters and gap-split. ",
+              "The cycle time itself is recovered from the data (cluster method), so the ",
+              "sequence is for cross-checking and convenience."),
+            tags$hr(style = "margin:8px 0;"),
+            sliderInput("trk_dt_hist_bins", "Δt histogram bins", min = 10, max = 300, value = 80, step = 5),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Display-only binning for the inter-localization Δt histogram. The median ",
+              "and bin-free typical Δt are marked with vertical lines."),
+            tags$hr(style = "margin:8px 0;"),
+            numericInput("trk_cycle_dark_max", "Max cycles to display", value = 10, min = 4, step = 1),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Each consecutive interval is classified by how many acquisition cycles it ",
+              "spans (round((Δt − offset) / cycle time)). 1 cycle = Integrated (clean); ",
+              "≥2 cycles = Dark cycles preceded it (molecule briefly unseen)."),
+            tags$hr(style = "margin:8px 0;"),
+            actionButton("trk_tsa_run", "Run TSA", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;")
+          )
+        ),
+        column(8,
+          conditionalPanel(
+            condition = "input.trk_show_tsa == true",
+            uiOutput("trk_tsa_quality"),
+            tags$hr(style = "margin:8px 0;"),
+            h5("Inter-localization interval (Δt)"),
+            plotlyOutput("trk_dt_hist_jdd", height = "280px"),
+            uiOutput("trk_dt_stats_ui"),
+            tags$hr(style = "margin:8px 0;"),
+            h5("Integrated / Dark cycle distribution"),
+            plotlyOutput("trk_cycle_class_plot", height = "300px"),
+            uiOutput("trk_cycle_class_summary"),
+            uiOutput("trk_cycle_class_beforeafter"),
+            tags$div(class = "well well-sm", style = "font-size:0.84em; margin-top:6px;",
+              tags$b("How to read this:"), tags$br(),
+              "Each bar is the fraction of consecutive intervals that spanned that many ",
+              "acquisition cycles. ", tags$b("1 cycle (Integrated)"), " = the molecule was ",
+              "localized every cycle ", tags$b("≥2 cycles (Dark)"),
+              " = background/failed cycles occurred before the next localization. ",
+              "A high Integrated fraction means high-quality, gap-free tracking; a long ",
+              "Dark tail indicates frequent dropouts (photophysics, low signal, or fast ",
+              "motion out of range)."
+            ),
+            tags$hr(style = "margin:8px 0;"),
+            h5("Per-track cycle progression"),
+            uiOutput("trk_cycle_prog_tid_ui"),
+            plotlyOutput("trk_cycle_prog_plot", height = "260px"),
+            tags$div(class = "well well-sm", style = "font-size:0.84em; margin-top:6px;",
+              "Dark cycles before each localization along one track ",
+              tags$b("Blue"), " = Integrated (0 dark); ",
+              tags$b("red"), " = Dark cycles present. Bursts of red mark where the ",
+              "molecule was repeatedly lost and re-found."
+            )
+          )
+        )
+      ),
+
+      tags$hr(),
+
       # ── MSD ─────────────────────────────────────────────────────────────────
       fluidRow(
         column(4,
@@ -497,6 +676,11 @@ tracking_ui <- fluidPage(
                 "Off (default) = keep every track in the ensemble (standard eDIFF convention). ",
                 "On = remove non-diffusing tracks from the ensemble too. The per-track ",
                 "tDIFF always keeps only D>0, regardless. Re-click Plot MSD to apply."),
+              checkboxInput("trk_uni_bootstrap",
+                            "Bootstrap 95% CI on eDIFF (slower)", FALSE),
+              helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+                "Resamples tracks with replacement (~300×) and refits — the honest CI given ",
+                "within-track correlation. Adds a few seconds; recomputes on Plot MSD."),
               checkboxInput("trk_uni_show_band", "Show IQR band", TRUE),
               checkboxInput("trk_uni_show_ntau", "Show N(τ)", TRUE),
               checkboxInput("trk_uni_show_spag", "Show individual track TAMSDs (spaghetti)", FALSE),
@@ -616,8 +800,8 @@ tracking_ui <- fluidPage(
                          value = 200, min = 1, step = 10),
             numericInput("trk_speed_drift_minpts", "Min localizations in window",
                          value = 5, min = 2, step = 1),
-            numericInput("trk_speed_sigma_nm", "Localization precision σ (nm) — noise floor √2σ/W & de-biases α",
-                         value = 5, min = 0, step = 1),
+            numericInput("trk_speed_sigma_nm", "Localization precision σ (nm, 0 = auto from MSD) — noise floor √2σ/W & de-biases α",
+                         value = 0, min = 0, step = 1),
             numericInput("trk_speed_fold", "Export threshold (× diffusive baseline) — higher = stricter",
                          value = 3, min = 1, step = 0.5),
             numericInput("trk_speed_onset_thr", "…or absolute threshold (µm/s, 0 = use × baseline above)",
@@ -642,7 +826,10 @@ tracking_ui <- fluidPage(
             numericInput("trk_speed_alpha_maxlag", "α max lag (steps) — raise if α under-reads on strong diffusion",
                          value = 6, min = 2, max = 30, step = 1),
             numericInput("trk_speed_smooth", "Rolling median window (steps)",
-                         value = 5, min = 1, max = 51, step = 2)
+                         value = 5, min = 1, max = 51, step = 2),
+            tags$hr(style = "margin:6px 0;"),
+            actionButton("trk_speed_run", "Run speed & transport", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;")
           )
         ),
         column(8,
@@ -679,79 +866,6 @@ tracking_ui <- fluidPage(
                 tags$b(style = "color:#888;", "Grey dotted = path speed"), ", stays high/flat (noise-dominated). ",
                 downloadButton("trk_dl_speed_csv", "Per-timepoint curves (CSV)", class = "btn-xs btn-default")
               )
-            )
-          )
-        )
-      ),
-
-      tags$hr(),
-
-      # ── Time Signature Analysis (TSA) ────────────────────────────────────────
-      fluidRow(
-        column(4,
-          h4("Time Signature Analysis (TSA)"),
-          tags$div(style = "font-size:0.85em; color:#666; margin-bottom:6px;",
-            "Recovers the acquisition cycle structure from the data: the atomic cycle ",
-            "time, the Integrated/Dark cycle balance, and an overall data-quality verdict. ",
-            "Independent of the MSD — use it to judge whether the data are good for ",
-            "diffusion analysis before you trust D."),
-          checkboxInput("trk_show_tsa", "Enable TSA", FALSE),
-          conditionalPanel(
-            condition = "input.trk_show_tsa == true",
-            tags$b("Sequence file (optional)", style = "font-size:0.9em;"),
-            fileInput("trk_seq_json", "Upload MINFLUX sequence (.json)",
-                      accept = ".json"),
-            uiOutput("trk_seq_json_status"),
-            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-              "Auto-fills the scan pattern (vertices), dimensionality, and the gap ",
-              "threshold (from maxOffTime) into the Acquisition Parameters and gap-split. ",
-              "The cycle time itself is recovered from the data (cluster method), so the ",
-              "sequence is for cross-checking and convenience."),
-            tags$hr(style = "margin:8px 0;"),
-            sliderInput("trk_dt_hist_bins", "Δt histogram bins", min = 10, max = 300, value = 80, step = 5),
-            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-              "Display-only binning for the inter-localization Δt histogram. The median ",
-              "and bin-free typical Δt are marked with vertical lines."),
-            tags$hr(style = "margin:8px 0;"),
-            numericInput("trk_cycle_dark_max", "Max cycles to display", value = 10, min = 4, step = 1),
-            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-              "Each consecutive interval is classified by how many acquisition cycles it ",
-              "spans (round((Δt − offset) / cycle time)). 1 cycle = Integrated (clean); ",
-              "≥2 cycles = Dark cycles preceded it (molecule briefly unseen).")
-          )
-        ),
-        column(8,
-          conditionalPanel(
-            condition = "input.trk_show_tsa == true",
-            uiOutput("trk_tsa_quality"),
-            tags$hr(style = "margin:8px 0;"),
-            h5("Inter-localization interval (Δt)"),
-            plotlyOutput("trk_dt_hist_jdd", height = "280px"),
-            uiOutput("trk_dt_stats_ui"),
-            tags$hr(style = "margin:8px 0;"),
-            h5("Integrated / Dark cycle distribution"),
-            plotlyOutput("trk_cycle_class_plot", height = "300px"),
-            uiOutput("trk_cycle_class_summary"),
-            uiOutput("trk_cycle_class_beforeafter"),
-            tags$div(class = "well well-sm", style = "font-size:0.84em; margin-top:6px;",
-              tags$b("How to read this:"), tags$br(),
-              "Each bar is the fraction of consecutive intervals that spanned that many ",
-              "acquisition cycles. ", tags$b("1 cycle (Integrated)"), " = the molecule was ",
-              "localized every cycle ", tags$b("≥2 cycles (Dark)"),
-              " = background/failed cycles occurred before the next localization. ",
-              "A high Integrated fraction means high-quality, gap-free tracking; a long ",
-              "Dark tail indicates frequent dropouts (photophysics, low signal, or fast ",
-              "motion out of range)."
-            ),
-            tags$hr(style = "margin:8px 0;"),
-            h5("Per-track cycle progression"),
-            uiOutput("trk_cycle_prog_tid_ui"),
-            plotlyOutput("trk_cycle_prog_plot", height = "260px"),
-            tags$div(class = "well well-sm", style = "font-size:0.84em; margin-top:6px;",
-              "Dark cycles before each localization along one track ",
-              tags$b("Blue"), " = Integrated (0 dark); ",
-              tags$b("red"), " = Dark cycles present. Bursts of red mark where the ",
-              "molecule was repeatedly lost and re-found."
             )
           )
         )
@@ -824,8 +938,11 @@ tracking_ui <- fluidPage(
                          value = 0, min = 0, step = 0.1),
             numericInput("trk_jdd_max_dt", "Max Δt (ms, 0 = off)",
                          value = 0, min = 0, step = 1),
-            numericInput("trk_jdd_sigma_loc", "localization error σ_loc (nm, 0 = off)",
+            numericInput("trk_jdd_sigma_loc", "localization error σ_loc (nm, 0 = auto from MSD)",
                          value = 0, min = 0, step = 0.5),
+            actionButton("trk_jdd_run", "Run JDD", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$br(), tags$br(),
             downloadButton("trk_dl_jdd_csv", "Download JDD (CSV)")
           )
         ),
@@ -882,6 +999,15 @@ tracking_ui <- fluidPage(
           conditionalPanel(
             condition = "input.trk_show_conf == true",
             numericInput("trk_conf_min_pts", "Min points per TID", value = 10, min = 4, step = 1),
+            checkboxInput("trk_conf_sub_noise",
+                          "Subtract localization noise from Rg (σ_loc)", TRUE),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Localization error inflates the radius of gyration (Rg² += d·σ_loc²), so ",
+              "immobile molecules look larger than they are. Subtracts it (Rmax is left as-is). ",
+              "Needs σ_loc set (run the unified MSD, or enter it in Acquisition Parameters)."),
+            actionButton("trk_conf_run", "Run confinement", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$br(), tags$br(),
             downloadButton("trk_dl_conf_csv", "Download confinement table (CSV)"),
             tags$hr(style = "margin:8px 0;"),
             checkboxInput("trk_conf_color_tracks", "Color 2D tracks by confinement ratio", FALSE)
@@ -919,6 +1045,9 @@ tracking_ui <- fluidPage(
           conditionalPanel(
             condition = "input.trk_show_dir == true",
             numericInput("trk_dir_min_pts", "Min points per TID", value = 6, min = 4, step = 1),
+            actionButton("trk_dir_run", "Run directionality", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$br(), tags$br(),
             downloadButton("trk_dl_dir_csv", "Download angle data (CSV)")
           )
         ),
@@ -963,10 +1092,19 @@ tracking_ui <- fluidPage(
             numericInput("trk_hmm_min_pts",     "Min localizations per TID",       value = 10,  min = 4, step = 1),
             numericInput("trk_hmm_n_ex",        "Example tracks to display",       value = 6,   min = 1, max = 30,  step = 1),
             numericInput("trk_hmm_max_fit_trk", "Max tracks used for fitting",     value = 100, min = 10, max = 500, step = 10),
+            numericInput("trk_hmm_max_fit_steps", "Max steps per track for fitting (0 = all)",
+                         value = 0, min = 0, step = 100),
             checkboxInput("trk_hmm_norm_dt", "Normalize steps by √Δt (recommended)", TRUE),
             helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-              "Reducing max tracks speeds up fitting significantly with little loss of accuracy. ",
-              "100 longest tracks is usually sufficient for stable EM convergence."),
+              "Fitting time is roughly proportional to (tracks × steps × EM iterations). ",
+              tags$b("Max tracks"), " keeps the longest N tracks; ", tags$b("Max steps"),
+              " truncates each of those to its first N steps for fitting only ",
+              "(0 = use all). Both bound runtime with little loss of accuracy — 100 tracks ",
+              "and ~300–500 steps are usually ample for stable EM. The per-localization ",
+              "state decode always uses the full tracks."),
+            actionButton("trk_hmm_run", "Run HMM", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$br(), tags$br(),
             downloadButton("trk_dl_hmm_csv", "Download state assignments (CSV)")
           )
         ),
@@ -1020,6 +1158,9 @@ tracking_ui <- fluidPage(
             helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
               "Model, fit window, linearized-τ and iterative settings are inherited from the ",
               "Unified MSD panel — switch its 'Fit model' to Confined or Directed and re-view here."),
+            actionButton("trk_seg_msd_run", "Run per-segment MSD", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$br(), tags$br(),
             downloadButton("trk_dl_seg_msd_csv", "Per-state MSD (CSV)", class = "btn-xs btn-default")
           )
         ),
@@ -1051,7 +1192,19 @@ tracking_ui <- fluidPage(
             numericInput("trk_dmap_bins",    "Grid resolution (N×N cells)", value = 10, min = 3, max = 500, step = 1),
             numericInput("trk_dmap_min_pts", "Min steps per cell",               value = 5,  min = 3, step = 1),
             checkboxInput("trk_dmap_show_n", "Overlay step count per cell",      FALSE),
-            helpText("D per cell = median(r² / 4Δt) across all steps whose midpoint falls in that cell."),
+            checkboxInput("trk_dmap_integrated_only",
+                          "Integrated steps only (drop dark-cycle steps)", TRUE),
+            checkboxInput("trk_dmap_sub_noise",
+                          "Subtract localization-noise floor (σ_loc)", TRUE),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "D per cell = median(r²/4Δt) over steps whose midpoint falls in the cell. ",
+              tags$b("Integrated only"), " drops dark-cycle steps (large Δt, meaningless ",
+              "midpoint). ", tags$b("Subtract noise floor"), " removes the σ_loc²/Δt ",
+              "apparent-diffusion offset so immobile regions don't read as diffusing — ",
+              "needs σ_loc set (run the unified MSD, or enter it in Acquisition Parameters)."),
+            actionButton("trk_dmap_run", "Run D-map", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$br(), tags$br(),
             downloadButton("trk_dl_dmap_csv", "Download D-map table (CSV)")
           )
         ),
