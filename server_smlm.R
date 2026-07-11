@@ -681,7 +681,11 @@ smlm_server <- function(input, output, session) {
         img_invert_y = input$img_invert_y,
         img_flip_x   = input$img_flip_x,
         img_opacity  = input$img_opacity,
-        img_rotation = input$img_rotation
+        img_rotation = input$img_rotation,
+        img_lut      = input$img_lut,
+        img_lut_custom = input$img_lut_custom,
+        img_brightness = input$img_brightness,
+        img_contrast   = input$img_contrast
       ),
       # heatmap settings
       heatmap = list(
@@ -742,7 +746,8 @@ smlm_server <- function(input, output, session) {
   overlay_defaults <- reactive({
     list(show_confocal=FALSE, show_bg=FALSE, px_size=10, img_x0=0, img_y0=0,
          img_invert_y=TRUE, img_flip_x=FALSE, img_opacity=0.6, img_rotation="0",
-         bg_image_name=NULL)
+         img_lut="original", img_lut_custom="#00FF00", img_brightness=100,
+         img_contrast=0, bg_image_name=NULL)
   })
   heatmap_defaults <- reactive({
     list(show_heatmap=FALSE, heatmap_n=200, heatmap_opacity=0.35, heatmap_palette="YlOrRd",
@@ -931,6 +936,10 @@ smlm_server <- function(input, output, session) {
     if (!is.null(ov$img_flip_x))   updateCheckboxInput(session,"img_flip_x",   value=ov$img_flip_x)
     if (!is.null(ov$img_opacity))  updateSliderInput(session,"img_opacity",    value=ov$img_opacity)
     if (!is.null(ov$img_rotation)) updateSelectInput(session,"img_rotation",   selected=as.character(ov$img_rotation))
+    if (!is.null(ov$img_lut))      updateSelectInput(session,"img_lut",        selected=as.character(ov$img_lut))
+    if (!is.null(ov$img_lut_custom)) colourpicker::updateColourInput(session,"img_lut_custom", value=as.character(ov$img_lut_custom))
+    if (!is.null(ov$img_brightness)) updateSliderInput(session,"img_brightness", value=ov$img_brightness)
+    if (!is.null(ov$img_contrast))   updateSliderInput(session,"img_contrast",   value=ov$img_contrast)
     if (!is.null(ov$bg_image_name)) {
       cur <- if (!is.null(input$bg_image)) input$bg_image$name else NULL
       if (is.null(cur) || !identical(cur, ov$bg_image_name)) {
@@ -2817,7 +2826,13 @@ smlm_server <- function(input, output, session) {
     if (isTRUE(input$img_flip_x)) {
       img <- magick::image_flop(img)   # horizontal mirror
     }
-    
+    # 3) Optional: recolour through a single-colour LUT (Green, Magenta, ...)
+    #    plus brightness / contrast adjustment.
+    img <- apply_background_lut(img, input$img_lut %||% "original",
+                                custom_color = input$img_lut_custom,
+                                brightness   = input$img_brightness %||% 100,
+                                contrast     = input$img_contrast   %||% 0)
+
     info <- magick::image_info(img)
     raw_png <- magick::image_write(img, format = "png")
     list(
@@ -3000,7 +3015,11 @@ smlm_server <- function(input, output, session) {
         img_invert_y  = input$img_invert_y,
         img_flip_x    = input$img_flip_x,
         img_opacity   = input$img_opacity,
-        img_rotation  = input$img_rotation
+        img_rotation  = input$img_rotation,
+        img_lut       = input$img_lut,
+        img_lut_custom = input$img_lut_custom,
+        img_brightness = input$img_brightness,
+        img_contrast   = input$img_contrast
       )
       writeLines(jsonlite::toJSON(ov, pretty = TRUE, auto_unbox = TRUE, na = "null"),
                  file, useBytes = TRUE)

@@ -2854,4 +2854,178 @@ sim_server <- function(input, output, session) {
     }
   )
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # Diffusion / Tracking ground-truth simulator (Phase 1)
+  # See docs/simulation_module.md. Free surface Brownian on a sphere or rod,
+  # sampled the MINFLUX way (cycle clock + dark cycles + heteroscedastic σ_loc +
+  # photobleaching) → MINFLUX-format tracks + a ground-truth D. The CVE round-trip
+  # in the summary demonstrates the validation loop in-place.
+  # ══════════════════════════════════════════════════════════════════════════
+  sim_trk_result <- eventReactive(input$sim_trk_run, {
+    set.seed(as.integer(input$sim_trk_seed %||% 1L))
+    geom     <- input$sim_trk_geom %||% "rod"
+    D_um2_s  <- max(0, as.numeric(input$sim_trk_D %||% 0.05))
+    D_nm2ms  <- D_um2_s * 1000                        # µm²/s → nm²/ms
+    n_trk    <- max(1L, as.integer(input$sim_trk_ntracks %||% 200L))
+    mean_len <- max(5L, as.integer(input$sim_trk_meanlen %||% 80L))
+    cyc      <- max(0.01, as.numeric(input$sim_trk_cycle %||% 0.5))     # ms
+    p_dark   <- min(0.95, max(0, as.numeric(input$sim_trk_pdark %||% 0.2)))
+    photons  <- max(1, as.numeric(input$sim_trk_photons %||% 100))
+    L_tcp    <- max(1, as.numeric(input$sim_trk_Ltcp %||% 150))
+    proj2d   <- isTRUE(input$sim_trk_project2d)
+    sd_step  <- sqrt(2 * D_nm2ms * cyc)               # per-axis tangent step SD per cycle (nm)
+    R    <- max(1, as.numeric(input$sim_trk_R %||% 500))
+    rr   <- max(1, as.numeric(input$sim_trk_r %||% 400))
+    Lcyl <- max(1, as.numeric(input$sim_trk_Lcyl %||% 2000))
+    circ <- 2 * pi * rr
+    to3d_rod <- function(s, phi) c(rr * cos(phi), rr * sin(phi), s)
+    step_sphere <- function(p) {                      # tangent step + retract to sphere
+      g <- rnorm(3, 0, sd_step); nh <- p / sqrt(sum(p^2))
+      p2 <- p + (g - sum(g * nh) * nh); R * p2 / sqrt(sum(p2^2))
+    }
+
+    rows <- vector("list", n_trk); gt <- vector("list", n_trk); k <- 0L
+    withProgress(message = "Simulating tracks…", value = 0, {
+    for (ti in seq_len(n_trk)) {
+      if (ti %% 20L == 0L) incProgress(20 / n_trk)
+      n_cyc <- max(3L, stats::rgeom(1, 1 / mean_len) + 1L)   # bleach lifetime (cycles)
+      pos <- matrix(NA_real_, n_cyc, 3)               # ground-truth path at cycle resolution
+      if (identical(geom, "sphere")) {
+        v <- rnorm(3); p <- R * v / sqrt(sum(v^2)); pos[1, ] <- p
+        for (i in 2:n_cyc) { p <- step_sphere(p); pos[i, ] <- p }
+      } else {
+        s <- runif(1, 0, Lcyl); phi <- runif(1, 0, 2 * pi); pos[1, ] <- to3d_rod(s, phi)
+        for (i in 2:n_cyc) {
+          s  <- s + rnorm(1, 0, sd_step)              # axial (reflect into [0, Lcyl])
+          period <- 2 * Lcyl; sm <- s %% period; if (sm < 0) sm <- sm + period
+          s  <- if (sm <= Lcyl) sm else period - sm
+          phi <- ((rr * phi + rnorm(1, 0, sd_step)) %% circ) / rr   # azimuthal (periodic)
+          pos[i, ] <- to3d_rod(s, phi)
+        }
+      }
+      integ <- runif(n_cyc) > p_dark; integ[1] <- TRUE  # recorded (integrated) vs dark cycles
+      idx   <- which(integ)
+      if (length(idx) < 5L) next
+      N     <- pmax(1L, stats::rpois(length(idx), photons))
+      sig   <- L_tcp / (2 * sqrt(N))                   # per-localization σ_loc (nm)
+      obs   <- pos[idx, , drop = FALSE] +
+               matrix(rnorm(length(idx) * 3), ncol = 3) * sig
+      k <- k + 1L
+      rows[[k]] <- data.frame(
+        tid = k, tim = ((idx - 1L) * cyc) / 1000,      # SECONDS (importer ×1000 → ms)
+        x = obs[, 1], y = obs[, 2], z = obs[, 3],
+        efo = N / (cyc / 1000), eco = N, stringsAsFactors = FALSE)
+      gt[[k]] <- data.frame(tid = k, D_true_um2_s = D_um2_s, geometry = geom,
+                            n_locs = length(idx), sigma_loc_med = stats::median(sig),
+                            stringsAsFactors = FALSE)
+    }
+    })
+    if (k == 0L) return(NULL)
+    df <- dplyr::bind_rows(rows[seq_len(k)])
+    if (proj2d) df$z <- NULL
+    list(df = df, gt = dplyr::bind_rows(gt[seq_len(k)]),
+         D_um2_s = D_um2_s, cyc = cyc, p_dark = p_dark, proj2d = proj2d)
+  })
+
+  # CVE round-trip: recover D from consecutive single-cycle (Δt = cyc) steps, using
+  # the TOTAL 3D displacement with the SURFACE dimensionality (d_motion = 2). Surface
+  # diffusion has 2 DOF but spreads over 3 Cartesian axes, so a per-axis CVE would
+  # under-estimate D by ⅓ — the correct estimator is D = (⟨|Δr|²⟩ + 2⟨Δr_i·Δr_{i+1}⟩)
+  # / (2·d·Δt) with d=2. n_cart Cartesian axes carry the noise (cov = −n_cart·σ²).
+  sim_trk_cve <- reactive({
+    res <- sim_trk_result(); if (is.null(res)) return(NULL)
+    df <- res$df; cyc <- res$cyc
+    axes  <- c("x", "y", if (!is.null(df$z)) "z")
+    ncart <- length(axes)
+    d_mot <- 2                                          # surface diffusion (Phase 1)
+    r2_sum <- 0; r2_n <- 0L; cov_sum <- 0; cov_n <- 0L
+    for (tb in split(df, df$tid)) {
+      tb  <- tb[order(tb$tim), ]
+      dt  <- c(NA_real_, diff(tb$tim) * 1000)           # ms
+      one <- is.finite(dt) & abs(dt - cyc) < cyc * 0.25 # single-cycle step (ending at this row)
+      # per-step displacement vector (rows = steps ending at row i)
+      dmat <- sapply(axes, function(ax) c(NA_real_, diff(tb[[ax]])))
+      if (is.null(dim(dmat))) dmat <- matrix(dmat, ncol = ncart)
+      r2  <- rowSums(dmat^2)                             # |Δr|² total
+      s1  <- one & is.finite(r2)
+      r2_sum <- r2_sum + sum(r2[s1]); r2_n <- r2_n + sum(s1)
+      nxt  <- c(s1[-1], FALSE); pair <- s1 & nxt         # consecutive single-cycle pair
+      dot  <- rowSums(dmat * rbind(dmat[-1, , drop = FALSE], NA_real_))  # Δr_i · Δr_{i+1}
+      cov_sum <- cov_sum + sum(dot[pair], na.rm = TRUE); cov_n <- cov_n + sum(pair)
+    }
+    if (r2_n < 1L) return(NULL)
+    r2m  <- r2_sum / r2_n                                # ⟨|Δr|²⟩ (nm²)
+    cov1 <- if (cov_n > 0L) cov_sum / cov_n else 0       # ⟨Δr_i·Δr_{i+1}⟩ = −n_cart·σ²
+    list(D_um2_s  = ((r2m + 2 * cov1) / (2 * d_mot * cyc)) / 1000,   # CVE D (µm²/s)
+         sigma_nm = sqrt(max(0, -cov1 / ncart)), n_pairs = cov_n)
+  })
+
+  output$sim_trk_plot <- renderPlotly({
+    res <- sim_trk_result()
+    shiny::validate(shiny::need(!is.null(res), "Set parameters and click 'Simulate tracks'."))
+    df <- res$df; is3d <- !is.null(df$z)
+    show <- head(unique(df$tid), 60L); d <- df[df$tid %in% show, ]
+    if (is3d)
+      plotly::plot_ly(d, x = ~x, y = ~y, z = ~z, split = ~factor(tid),
+                      type = "scatter3d", mode = "lines",
+                      line = list(width = 2), showlegend = FALSE) %>%
+        plotly::layout(title = "Simulated MINFLUX tracks (first 60)",
+          scene = list(xaxis = list(title = "x (nm)"), yaxis = list(title = "y (nm)"),
+                       zaxis = list(title = "z (nm)")))
+    else
+      plotly::plot_ly(d, x = ~x, y = ~y, split = ~factor(tid),
+                      type = "scatter", mode = "lines",
+                      line = list(width = 1), showlegend = FALSE) %>%
+        plotly::layout(title = "Simulated MINFLUX tracks — 2D projection (first 60)",
+          xaxis = list(title = "x (nm)"),
+          yaxis = list(title = "y (nm)", scaleanchor = "x"))
+  })
+
+  output$sim_trk_summary <- renderUI({
+    res <- sim_trk_result(); if (is.null(res)) return(NULL)
+    df <- res$df; cve <- sim_trk_cve()
+    dt_all <- unlist(lapply(split(df$tim, df$tid), function(t) diff(sort(t)) * 1000), use.names = FALSE)
+    frac_int <- if (length(dt_all)) mean(abs(dt_all - res$cyc) < res$cyc * 0.25) else NA_real_
+    recov <- if (!is.null(cve)) {
+      rr  <- cve$D_um2_s / res$D_um2_s
+      col <- if (is.finite(rr) && abs(rr - 1) < 0.25) "#228833" else "#BB7700"
+      htmltools::tags$span(style = sprintf("color:%s; font-weight:bold;", col),
+        sprintf("%.4g µm²/s  (%.0f%% of truth)", cve$D_um2_s, 100 * rr))
+    } else "—"
+    htmltools::div(style = "font-size:0.9em; color:#333; margin-top:8px;",
+      htmltools::tags$table(style = "border-collapse:collapse;",
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Tracks / localizations"),
+          htmltools::tags$td(sprintf("%d / %s", length(unique(df$tid)), format(nrow(df), big.mark=",")))),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Ground-truth D"),
+          htmltools::tags$td(htmltools::tags$b(sprintf("%.4g µm²/s", res$D_um2_s)))),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Recovered D (CVE round-trip)"),
+          htmltools::tags$td(recov)),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Recovered σ_loc"),
+          htmltools::tags$td(if (!is.null(cve)) sprintf("%.2f nm", cve$sigma_nm) else "—")),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Integrated (single-cycle) fraction"),
+          htmltools::tags$td(if (is.finite(frac_int)) sprintf("%.0f%%", 100 * frac_int) else "—")),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Median Δt / mean track length"),
+          htmltools::tags$td(sprintf("%.3g ms / %.0f locs",
+            if (length(dt_all)) stats::median(dt_all) else NA_real_, nrow(df) / length(unique(df$tid)))))),
+      htmltools::tags$p(style = "color:#888; font-size:0.9em; margin-top:6px;",
+        "The CVE round-trip should land near 100 % of truth for a free-diffusion sim — that is the ",
+        "validation loop. Download the tracks (CSV) and load them in the Tracking tab to test the full ",
+        "MSD / confinement pipeline against this known D."))
+  })
+
+  output$sim_trk_dl_csv <- downloadHandler(
+    filename = function() paste0("sim_minflux_tracks_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) {
+      res <- sim_trk_result()
+      shiny::validate(shiny::need(!is.null(res), "Simulate tracks first."))
+      write.csv(res$df, file, row.names = FALSE)
+    })
+  output$sim_trk_dl_gt <- downloadHandler(
+    filename = function() paste0("sim_ground_truth_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) {
+      res <- sim_trk_result()
+      shiny::validate(shiny::need(!is.null(res), "Simulate tracks first."))
+      write.csv(res$gt, file, row.names = FALSE)
+    })
+
 }

@@ -80,7 +80,7 @@ tracking_ui <- fluidPage(
                        "Localization precision σ_loc (nm, 0 = auto from MSD)",
                        value = 0, min = 0, step = 0.5),
           helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
-            "The short-lag noise floor. Leave at 0 to use the σ_loc the unified MSD ",
+            "The short-lag noise floor. Leave at 0 to use the σ_loc the MSD ",
             "estimates from its intercept; set > 0 to override. Used by the D-map to ",
             "subtract the localization-error floor so slow regions aren't reported as ",
             "diffusing."),
@@ -112,43 +112,16 @@ tracking_ui <- fluidPage(
           tags$hr(),
 
           tags$details(class = "sim-group", open = NA,
-          tags$summary(tags$b("Metadata Filtering")),
+          tags$summary(tags$b("Track Cleaning & Filtering")),
+          helpText(style = "font-size:0.8em; color:#666; margin:2px 0 6px 0;",
+            "Order: Split → Trim ends → Quality gate → Metadata → Length → Duration. ",
+            "Cleaning runs on the raw acquisition timing; metadata and length/duration ",
+            "then apply to the cleaned tracks."),
           uiOutput("trk_lifetime_stat"),
           checkboxInput("trk_show_metadata_hist", "Show Filtering Controls", FALSE),
           conditionalPanel(
             condition = "input.trk_show_metadata_hist == true",
 
-            selectInput(
-              "trk_hist_param", "Variable for histogram:",
-              choices = c(
-                "efo"                    = "efo",
-                "cfr"                    = "cfr",
-                "dcr"                    = "dcr",
-                "tim"                    = "tim",
-                "eco"                    = "eco",
-                "Dwell"                  = "dwell",
-                "Fluo"                   = "fluo",
-                "Trace ID length"        = "tid_length",
-                "Trace ID duration (ms)" = "tid_duration"
-              ),
-              selected = "efo"
-            ),
-            plotlyOutput("trk_meta_hist", height = "260px"),
-            sliderInput("trk_hist_bins", "Histogram bins", min = 10, max = 500, value = 80, step = 5),
-            checkboxInput("trk_hist_show_raw", "Show unfiltered data (grey)", value = TRUE),
-            uiOutput("trk_hist_range_ui"),
-
-            tags$hr(),
-
-            uiOutput("trk_efo_ui"),
-            uiOutput("trk_cfr_ui"),
-            uiOutput("trk_dcr_ui"),
-            uiOutput("trk_tim_ui"),
-            uiOutput("trk_eco_ui"),
-            uiOutput("trk_dwell_ui"),
-            uiOutput("trk_fluo_ui"),
-
-            tags$hr(),
 
             checkboxInput("trk_split_gaps_enable",
                           "Split tracks at time gaps", FALSE),
@@ -164,10 +137,14 @@ tracking_ui <- fluidPage(
               ),
               conditionalPanel(
                 condition = "input.trk_split_adaptive == true",
-                numericInput("trk_split_min_len",
-                             "Min localizations per segment", value = 50, min = 1, step = 1),
                 uiOutput("trk_split_adaptive_hint")
               ),
+              # Applies in BOTH modes: segments shorter than this are discarded, so a
+              # split never manufactures 2–3-localization stubs. Also keeps the plot
+              # fast by not emitting a trace per tiny fragment.
+              numericInput("trk_split_min_len",
+                           "Min localizations per segment (shorter segments discarded)",
+                           value = 50, min = 1, step = 1),
               uiOutput("trk_split_gap_ms_hint"),
               helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
                 "Threshold in acquisition cycles: an interval spanning more than this many ",
@@ -209,23 +186,58 @@ tracking_ui <- fluidPage(
             tags$hr(),
 
             checkboxInput("trk_quality_enable",
-                          "Track-quality gate (drop dark-cycle-heavy tracks)", FALSE),
+                          "Track-continuity gate (drop dark-cycle-heavy tracks)", FALSE),
             conditionalPanel(
               condition = "input.trk_quality_enable == true",
+              sliderInput("trk_quality_darktol",
+                          "Dark-cycle tolerance (half-life, cycles)",
+                          min = 0.5, max = 10, value = 3, step = 0.5),
               sliderInput("trk_quality_min_integ",
-                          "Min fraction of integrated (single-cycle) steps",
-                          min = 0, max = 1, value = 0.5, step = 0.05),
+                          "Min continuity score",
+                          min = 0, max = 1, value = 0.6, step = 0.05),
               uiOutput("trk_quality_hint"),
               helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-                "Keeps only tracks that are localized on most cycles. A dark-cycle-heavy ",
-                "track has long gaps → larger positional uncertainty, mis-linking risk, and ",
-                "a bleaching-degraded tail, so it is unreliable for diffusion analysis. Runs ",
-                "after gap-splitting (per segment) and before the length filter; cycle time ",
-                "is auto-detected.")
+                "Each step is scored by how many acquisition cycles it spans, weighted ",
+                "2^(−dark/half-life): 1 = integrated, and a few 1–2-cycle gaps barely hurt ",
+                "while long dark gaps do. ", tags$b("Tolerance"), " sets the half-life — higher ",
+                "forgives more dark cycles. The per-track mean is the continuity score; tracks ",
+                "below the threshold are dropped. Runs after gap-splitting/trim, before metadata.")
             ),
 
             tags$hr(),
 
+            tags$b("Metadata (per-localization) filters", style = "font-size:0.9em;"),
+            selectInput(
+              "trk_hist_param", "Variable for histogram:",
+              choices = c(
+                "efo"                    = "efo",
+                "cfr"                    = "cfr",
+                "dcr"                    = "dcr",
+                "tim"                    = "tim",
+                "eco"                    = "eco",
+                "Dwell"                  = "dwell",
+                "Fluo"                   = "fluo",
+                "Trace ID length"        = "tid_length",
+                "Trace ID duration (ms)" = "tid_duration"
+              ),
+              selected = "efo"
+            ),
+            plotlyOutput("trk_meta_hist", height = "260px"),
+            sliderInput("trk_hist_bins", "Histogram bins", min = 10, max = 500, value = 80, step = 5),
+            checkboxInput("trk_hist_show_raw", "Show unfiltered data (grey)", value = TRUE),
+            uiOutput("trk_hist_range_ui"),
+
+            tags$hr(),
+
+            uiOutput("trk_efo_ui"),
+            uiOutput("trk_cfr_ui"),
+            uiOutput("trk_dcr_ui"),
+            uiOutput("trk_tim_ui"),
+            uiOutput("trk_eco_ui"),
+            uiOutput("trk_dwell_ui"),
+            uiOutput("trk_fluo_ui"),
+
+            tags$hr(),
             uiOutput("trk_tid_len_ui"),
 
             tags$hr(),
@@ -343,6 +355,11 @@ tracking_ui <- fluidPage(
             helpText("Markers & (optional) static lines use one color per TID."),
             checkboxInput("trk_show_moving_trails", "Animate moving trails", FALSE)
           ),
+          checkboxInput("trk_full_raw", "Show ALL raw tracks faintly (background)", FALSE),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "Adds a faint grey overlay of every uploaded (unfiltered) track behind the ",
+            "display — in both Full-tracks and Playback modes — so you can see what the ",
+            "filters removed."),
           checkboxInput("trk_dark_mode", "Dark mode", value = FALSE),
           checkboxInput("trk_hide_grid", "Hide gridlines and axis titles", FALSE),
           checkboxInput("trk_show_scale_bar", "Add scale bar", value = FALSE),
@@ -414,6 +431,29 @@ tracking_ui <- fluidPage(
                      checkboxInput("trk_img_invert_y", "Image origin at top-left (invert Y)", TRUE),
                      checkboxInput("trk_img_flip_x",   "Mirror horizontally (left↔right)", FALSE),
                      sliderInput("trk_img_opacity", "Image opacity", min = 0, max = 1, value = 0.6, step = 0.05),
+                     selectInput("trk_img_lut", "Colour (LUT)",
+                                 choices = c("Original (as uploaded)" = "original",
+                                             "Grayscale"              = "gray",
+                                             "Green"                  = "green",
+                                             "Magenta"                = "magenta",
+                                             "Yellow"                 = "yellow",
+                                             "Cyan"                   = "cyan",
+                                             "Red"                    = "red",
+                                             "Blue"                   = "blue",
+                                             "Orange"                 = "orange",
+                                             "Custom colour…"         = "custom"),
+                                 selected = "original"),
+                     conditionalPanel(
+                       condition = "input.trk_img_lut == 'custom'",
+                       colourpicker::colourInput("trk_img_lut_custom", "Custom colour",
+                                                 value = "#00FF00")
+                     ),
+                     tags$p("Recolours the image to match a fluorophore: converts to grayscale intensity, then tints black→colour.",
+                            style = "font-size:11px; color:#888; margin:-4px 0 8px 0;"),
+                     sliderInput("trk_img_brightness", "Image brightness (%)",
+                                 min = 10, max = 300, value = 100, step = 5),
+                     sliderInput("trk_img_contrast", "Image contrast",
+                                 min = 0, max = 90, value = 0, step = 5),
                      selectInput("trk_img_rotation", "Rotate image",
                                  choices = c("0","90","180","270"), selected = "0"),
                      downloadButton("trk_download_overlay_settings", "Download Overlay Settings"),
@@ -595,7 +635,7 @@ tracking_ui <- fluidPage(
           checkboxInput("trk_show_msd", "Enable MSD", FALSE),
           conditionalPanel(
             condition = "input.trk_show_msd == true",
-            numericInput("trk_msd_min_pts",  "Min points per TID (skip short)", value = 20, min = 5, step = 5),
+            numericInput("trk_msd_min_pts",  "Min localizations per TID (skip short)", value = 50, min = 5, step = 5),
             radioButtons("trk_msd_ndim", "Diffusion dimensionality",
               choices  = c("Auto-detect" = "auto", "2D  (MSD = 4Dτ)" = "2", "3D  (MSD = 6Dτ)" = "3"),
               selected = "auto", inline = TRUE),
@@ -619,16 +659,16 @@ tracking_ui <- fluidPage(
               )
             ),
             tags$hr(style = "margin:6px 0;"),
-            checkboxInput("trk_msd_unified",
-                          "Unified MSD", TRUE),
-            conditionalPanel(
-              condition = "input.trk_msd_unified == true",
+            # The cycle-based MSD (Bela Vogler's the_road_to_minflux_msd workflow) is now
+            # THE MSD — always on. The checkbox is kept hidden (constant TRUE) only so the
+            # server's isTRUE(input$trk_msd_unified) gates and conditionalPanels keep working.
+            div(style = "display:none;", checkboxInput("trk_msd_unified", "MSD", TRUE)),
+            div(
               tags$div(class = "well well-sm", style = "font-size:0.82em; color:#555; margin:4px 0;",
-                tags$b("MINFLUX-optimised MSD."), " Cumulative cycle-index binning, ",
+                tags$b("MINFLUX MSD (cycle-based)."), " Cumulative cycle-index binning, ",
                 "track-weighted ensemble (eMSD) on the linearized lag×cycle timeline, iterative ",
                 "OLSF that converges on the lowest lags. Reports both eDIFF (ensemble) and tDIFF ",
-                "(per-track mean). Untick the toggles below for the robust / real-time alternatives. ",
-                "Method follows Vogler et al. (2025, ", tags$em("Commun. Biol."), ")."),
+                "(per-track mean). Method follows Vogler et al. (2025, ", tags$em("Commun. Biol."), ")."),
               fluidRow(
                 column(6, numericInput("trk_uni_min_lag",
                              "Lower cutoff (cycles)", value = 5, min = 1, step = 1)),
@@ -636,8 +676,12 @@ tracking_ui <- fluidPage(
                              "Upper fit limit (cycles)", value = 50, min = 10, max = 5000, step = 5))
               ),
               helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-                "Fit window = [lower, upper] cycle-lags (default 5–50); OLSF + Michalet pick the ",
-                "optimal point count within it. Lower skips the linker/noise regime. ",
+                "Fit window = [lower, upper] cycle-lags (default 5–50, per Vogler 2025). ",
+                tags$b("Low lags"), " are dominated by localization error (σ_loc) and secondary/linker ",
+                "motion; ", tags$b("high lags"), " have few pairs and huge variance (Qian 1991) — so the ",
+                "fit uses the middle 'diffusion regime'. OLSF + Michalet pick the optimal point count within it. ",
+                tags$b("The exact lower bound is probe-specific"), " (not a universal constant) — inspect the ",
+                "MSD curve for where the noisy low-lag kink ends. ",
                 tags$b("The upper limit also sets how many lags are computed"), " (capped 5000) — ",
                 "raise it (e.g. 500–2000) to reach a confinement plateau, then ", tags$b("re-click Plot MSD"), "."),
               checkboxInput("trk_uni_track_weight",
@@ -712,7 +756,7 @@ tracking_ui <- fluidPage(
               tags$b("Bends down / flattens"), " = confined diffusion. ",
               tags$b("Curves upward"), " = directed motion."
             ),
-            # Unified MSD sub-panel (primary — shown first)
+            # MSD sub-panel (cycle-based, always shown when MSD is enabled)
             conditionalPanel(
               condition = "input.trk_msd_unified == true",
               plotlyOutput("trk_msd_unified_plot", height = "300px"),
@@ -1004,7 +1048,7 @@ tracking_ui <- fluidPage(
             helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
               "Localization error inflates the radius of gyration (Rg² += d·σ_loc²), so ",
               "immobile molecules look larger than they are. Subtracts it (Rmax is left as-is). ",
-              "Needs σ_loc set (run the unified MSD, or enter it in Acquisition Parameters)."),
+              "Needs σ_loc set (run the MSD, or enter it in Acquisition Parameters)."),
             actionButton("trk_conf_run", "Run confinement", icon = icon("play"),
                          class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
             tags$br(), tags$br(),
@@ -1146,7 +1190,7 @@ tracking_ui <- fluidPage(
           h4("Per-Segment MSD (by HMM state)"),
           tags$div(class = "well well-sm", style = "font-size:0.82em; color:#555; margin-bottom:8px;",
             "Splits each track into HMM diffusion-state segments and computes a separate ",
-            "MSD per state, fit with the Unified MSD model + window. Resolves a mixed ",
+            "MSD per state, fit with the MSD model + window. Resolves a mixed ",
             "population: fit ", tags$b("Confined"), " on the slow/wall state for a real ",
             "confinement size L, and ", tags$b("Directed"), " on the fast/exported state for a ",
             "velocity v — instead of one washed-out whole-track MSD. ",
@@ -1157,7 +1201,7 @@ tracking_ui <- fluidPage(
             numericInput("trk_seg_msd_min_pts", "Min points per segment", value = 15, min = 5, step = 5),
             helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
               "Model, fit window, linearized-τ and iterative settings are inherited from the ",
-              "Unified MSD panel — switch its 'Fit model' to Confined or Directed and re-view here."),
+              "MSD panel — switch its 'Fit model' to Confined or Directed and re-view here."),
             actionButton("trk_seg_msd_run", "Run per-segment MSD", icon = icon("play"),
                          class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
             tags$br(), tags$br(),
@@ -1201,7 +1245,7 @@ tracking_ui <- fluidPage(
               tags$b("Integrated only"), " drops dark-cycle steps (large Δt, meaningless ",
               "midpoint). ", tags$b("Subtract noise floor"), " removes the σ_loc²/Δt ",
               "apparent-diffusion offset so immobile regions don't read as diffusing — ",
-              "needs σ_loc set (run the unified MSD, or enter it in Acquisition Parameters)."),
+              "needs σ_loc set (run the MSD, or enter it in Acquisition Parameters)."),
             actionButton("trk_dmap_run", "Run D-map", icon = icon("play"),
                          class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
             tags$br(), tags$br(),
@@ -1224,7 +1268,46 @@ tracking_ui <- fluidPage(
         )
       ),
 
-      tags$br()
+      tags$br(),
+
+      # ── Methods & References (consolidated citation box) ──────────────────────
+      # Provenance for every analysis tool. Full evaluation of appropriateness for
+      # MINFLUX data (irregular Δt, short tracks) is in docs/MINFLUX_analysis_methods.md.
+      tags$details(
+        style = "margin:8px 0 16px; font-size:0.85em; color:#444;",
+        tags$summary(style = "cursor:pointer; font-weight:bold; color:#2c3e50;",
+                     "Methods & References"),
+        tags$div(style = "padding:8px 4px 4px 12px;",
+          tags$p(style = "color:#666; margin:0 0 6px;",
+            "Primary reference for each tool. See ",
+            tags$code("docs/MINFLUX_analysis_methods.md"),
+            " for the full bibliography and a MINFLUX-appropriateness assessment."),
+          tags$table(style = "border-collapse:collapse; line-height:1.5;",
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("MSD / OLSF")),
+                    tags$td("Michalet 2010; Michalet & Berglund 2012 (optimal least-squares fitting); cycle-based binning per Vogler et al. 2025")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("CVE (σ_loc / D)")),
+                    tags$td("Vestergaard, Blainey & Flyvbjerg 2014 — restricted to consecutive integrated (single-cycle) pairs for MINFLUX")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("JDD")),
+                    tags$td("Schütz, Schindler & Schmidt 1997; benchmarked in Weimann et al. 2013")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("HMM states")),
+                    tags$td("Das, Cairo & Coombs 2009; vbSPT (Persson et al. 2013)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Confinement")),
+                    tags$td("Rg/Rmax shape ratio + τ-based MSD confinement index (cf. Simson, Sheets & Jacobson 1995)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Directionality")),
+                    tags$td("Burov et al. 2013 (distribution of directional change)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Change-point")),
+                    tags$td("Killick, Fearnhead & Eckley 2012 (PELT), on log(r²/Δt)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("D_max ceiling")),
+                    tags$td("Vogler et al. 2025 (Commun. Biol.); SimuFLUX (Marin & Ries 2025)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Anomalous α")),
+                    tags$td("Metzler et al. 2014; short-track caveats per Kepten et al. 2015 (ensemble estimate)"))
+          ),
+          tags$p(style = "color:#888; margin:8px 0 0; font-size:0.95em;",
+            "MINFLUX foundational: Balzarotti et al. 2017 (Science); Gwosch et al. 2020; ",
+            "Schmidt et al. 2021; Wolff et al. 2023; Deguchi et al. 2023. ",
+            "Motion blur R≈0 is a modelling assumption for MINFLUX (short cycle + active re-centring), not a published value.")
+        )
+      )
     )  # end tabPanel("Analysis")
 
   )  # end tabsetPanel

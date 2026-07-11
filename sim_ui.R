@@ -870,6 +870,68 @@ sim_ui <- fluidPage(
                   uiOutput("sim_cmp_table")
                 )
               )
+            ),
+
+            # ── Diffusion / Tracking (ground-truth simulator) ────────────────
+            # Phase 1 (see docs/simulation_module.md): free surface Brownian on a
+            # sphere or rod, sampled the MINFLUX way (cycle clock + dark cycles +
+            # heteroscedastic σ_loc + photobleaching) → MINFLUX-format tracks with a
+            # ground-truth D, for validating CVE / MSD / confinement estimators.
+            tabPanel("Diffusion / Tracking",
+              tags$br(),
+              fluidRow(
+                column(3,
+                  tags$div(class = "well well-sm", style = "font-size:0.82em; color:#555;",
+                    tags$b("Ground-truth diffusion simulator."), " Simulates free Brownian motion on a ",
+                    "cell surface, sampled with MINFLUX's irregular Δt (dark cycles) + per-localization ",
+                    "σ_loc + photobleaching. Download the tracks and load them in the Tracking tab to check ",
+                    "that CVE / MSD recover the known D. ", tags$b("Exploratory validation tool.")),
+                  selectInput("sim_trk_geom", "Cell geometry",
+                    choices = c("Sphere (coccus)" = "sphere",
+                                "Rod / spherocylinder (E. coli)" = "rod"),
+                    selected = "rod"),
+                  conditionalPanel("input.sim_trk_geom == 'sphere'",
+                    numericInput("sim_trk_R", "Sphere radius (nm)", value = 500, min = 50, step = 50)),
+                  conditionalPanel("input.sim_trk_geom == 'rod'",
+                    fluidRow(
+                      column(6, numericInput("sim_trk_r", "Radius (nm)", value = 400, min = 50, step = 25)),
+                      column(6, numericInput("sim_trk_Lcyl", "Cyl. length (nm)", value = 2000, min = 100, step = 100)))),
+                  tags$hr(style = "margin:6px 0;"),
+                  numericInput("sim_trk_D", "Diffusion D (µm²/s)", value = 0.05, min = 0, step = 0.01),
+                  helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
+                    "Free surface Brownian. Fast D (≳2–3 µm²/s) is near the MINFLUX trackable ceiling."),
+                  fluidRow(
+                    column(6, numericInput("sim_trk_ntracks", "# tracks", value = 200, min = 1, step = 10)),
+                    column(6, numericInput("sim_trk_meanlen", "Mean locs/track", value = 80, min = 5, step = 5))),
+                  helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
+                    "Track length is photobleaching-limited (geometric around this mean)."),
+                  tags$hr(style = "margin:6px 0;"),
+                  fluidRow(
+                    column(6, numericInput("sim_trk_cycle", "Cycle time (ms)", value = 0.5, min = 0.05, step = 0.05)),
+                    column(6, numericInput("sim_trk_pdark", "Dark-cycle prob.", value = 0.2, min = 0, max = 0.95, step = 0.05))),
+                  helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
+                    "Each cycle is recorded with prob (1−dark); skipped cycles make Δt an integer multiple of the cycle time."),
+                  fluidRow(
+                    column(6, numericInput("sim_trk_photons", "Mean photons/loc", value = 100, min = 5, step = 10)),
+                    column(6, numericInput("sim_trk_Ltcp", "TCP diameter L (nm)", value = 150, min = 20, step = 10))),
+                  helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
+                    "σ_loc = L / (2·√N_photons), drawn per localization (heteroscedastic)."),
+                  tags$hr(style = "margin:6px 0;"),
+                  checkboxInput("sim_trk_project2d", "Project to 2D (drop z)", FALSE),
+                  numericInput("sim_trk_seed", "Random seed", value = 1, min = 1, step = 1),
+                  actionButton("sim_trk_run", "Simulate tracks",
+                               icon = icon("dna"), class = "btn-primary btn-block",
+                               style = "margin-top:4px;"),
+                  tags$br(),
+                  fluidRow(
+                    column(6, downloadButton("sim_trk_dl_csv", "Tracks (CSV)", class = "btn-xs btn-default")),
+                    column(6, downloadButton("sim_trk_dl_gt", "Ground truth (CSV)", class = "btn-xs btn-default")))
+                ),
+                column(9,
+                  plotlyOutput("sim_trk_plot", height = "62vh"),
+                  uiOutput("sim_trk_summary")
+                )
+              )
             )
           )
         )

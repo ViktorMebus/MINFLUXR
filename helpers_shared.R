@@ -764,6 +764,85 @@ make_scale_bar <- function(length_nm, x_range_nm, thickness_nm = 10, dark = FALS
   )
 }
 
+# Single-colour LUT palette for background overlays. Values are the full-intensity
+# colour each LUT ramps up to (black -> colour). Names are the UI/setting keys.
+lut_overlay_colors <- c(
+  green   = "#00FF00",
+  magenta = "#FF00FF",
+  yellow  = "#FFFF00",
+  cyan    = "#00FFFF",
+  red     = "#FF0000",
+  blue    = "#0000FF",
+  orange  = "#FF7F00"
+)
+
+# Recolour + adjust a background overlay image through a single-colour LUT.
+#
+# MINFLUX confocal exports often arrive in a Fire (multi-colour) LUT. To recolour
+# one to match the fluorophore, we first collapse it to intensity (grayscale
+# luminance) and then linearly map black -> chosen colour with a Multiply
+# composite, so intensity v maps to v * colour. This reproduces ImageJ-style
+# single-colour LUTs (Green, Magenta, Yellow, ...). A "custom" LUT tints toward
+# any hex colour.
+#
+# Brightness (gain) and contrast (symmetric linear stretch) are applied to the
+# intensity before tinting, and also apply in "original" mode (adjusting the Fire
+# image in place), so the two sliders behave the same whatever the LUT.
+#
+# NB: grayscale luminance is only an approximate inverse of the Fire LUT — it
+# recovers relative intensity for *display*, not the exact raw photon counts. For
+# an exact recolour the user would need to re-export the raw grayscale image.
+#
+# img          : magick image object.
+# lut          : names(lut_overlay_colors), "original" (keep colours), "gray", or
+#                "custom" (tint toward custom_color).
+# custom_color : hex "#RRGGBB" used when lut == "custom".
+# brightness   : gain in % (100 = unchanged).
+# contrast     : symmetric linear stretch, 0 (none) .. ~90 (strong).
+# Returns a magick image (unchanged when no LUT and both sliders neutral).
+apply_background_lut <- function(img, lut = "original", custom_color = NULL,
+                                 brightness = 100, contrast = 0) {
+  lut <- tolower(as.character(lut %||% "original"))
+  if (length(lut) != 1L) lut <- "original"
+  brightness <- suppressWarnings(as.numeric(brightness %||% 100))
+  if (!is.finite(brightness)) brightness <- 100
+  contrast <- suppressWarnings(as.numeric(contrast %||% 0))
+  if (!is.finite(contrast)) contrast <- 0
+
+  # Resolve the recolour target: NULL = keep original colours; is_gray = desaturate;
+  # otherwise a hex colour to tint toward (preset or custom).
+  is_gray <- lut %in% c("gray", "grays", "grey", "greyscale", "grayscale")
+  col <- if (lut == "custom") {
+           cc <- as.character(custom_color %||% "")[1L]
+           if (grepl("^#[0-9A-Fa-f]{6}$", cc)) cc else NULL
+         } else if (lut %in% names(lut_overlay_colors)) {
+           lut_overlay_colors[[lut]]
+         } else NULL
+  recolor <- is_gray || !is.null(col)
+
+  neutral_bc <- abs(brightness - 100) <= 1e-6 && contrast <= 0
+  if (!recolor && neutral_bc) return(img)            # original, no adjustment -> untouched
+
+  # Collapse to intensity when recolouring (strips the Fire LUT); keep RGB otherwise.
+  if (recolor) img <- magick::image_convert(img, colorspace = "Gray")
+
+  if (abs(brightness - 100) > 1e-6)
+    img <- magick::image_modulate(img, brightness = brightness)
+  if (contrast > 0) {
+    c2  <- min(contrast, 95) / 2
+    img <- magick::image_level(img, black_point = c2, white_point = 100 - c2)
+  }
+
+  if (!recolor) return(img)                                             # original + B/C
+  if (is_gray || is.null(col))
+    return(magick::image_convert(img, colorspace = "sRGB"))            # grayscale + B/C
+
+  gray_rgb <- magick::image_convert(img, colorspace = "sRGB")
+  info <- magick::image_info(gray_rgb)
+  tint <- magick::image_blank(info$width[1L], info$height[1L], color = col)
+  magick::image_composite(gray_rgb, tint, operator = "Multiply")
+}
+
 # Auto-align a confocal overlay image to MINFLUX/SMLM localizations.
 #
 # img      : magick image object (already rotated/flipped as displayed)
