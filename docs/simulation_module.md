@@ -26,6 +26,38 @@ same analysis pipeline**. The loop:
 mixed dark cycles, heteroscedastic σ_loc, short tracks, and re-acquisition survivorship — otherwise it
 validates nothing useful.
 
+## 1a. Workflow — "is my (2D wall) protein confined, or just free diffusion?"
+
+The comparison lives in a **round-trip**: the simulator makes ground-truth data in the *same format*
+as real MINFLUX, so you push **both** real and simulated data through the **same Tracking-tab
+analysis** and overlay the results. The simulator does not plot the comparison — the Tracking tab does.
+
+1. **Analyse the real data.** Tracking tab → upload → apply your filters (split / trim / quality gate /
+   length / duration). Run **MSD** (note the local D and whether the MSD bends over) and **Confinement**
+   (per-track D, confinement index / Rg-Rmax, apparent extent).
+2. **Export the filtered tracks.** Tracking tab → *Export filtered data (.csv)* — this is the
+   post-filter `trk_spatial_filtered()` in canonical MINFLUX format (tim in seconds).
+3. **Calibrate the simulator** on it. Simulator → Diffusion/Tracking → *Calibrate from real MINFLUX
+   data* → load that CSV (min length 100). It fills cycle time, dark-cycle prob, photons, median length.
+4. **Simulate the FREE null.** Geometry = **Rod**, long axis in the image plane; **Surface** diffusion;
+   tick **Project to 2D** (your data is 2D); Motion = **Free**; set **D** to the real local D from step 1.
+   Simulate, then *Download tracks (CSV)*.
+5. **Analyse the simulated-free data** through the **same** Tracking-tab MSD + Confinement.
+6. **Compare.** Overlay real vs simulated-free:
+   - If the simulated **free** diffusion **reproduces** the real MSD shape / confinement index / extent →
+     the apparent confinement is explained by geometry + 2D projection + finite short tracks. **You
+     cannot claim confinement.**
+   - If the **real data is tighter** (lower plateau, smaller extent, CI further below 1) than
+     simulated-free → there is genuine confinement beyond geometry.
+7. **Optional — quantify.** If real is tighter, simulate Motion = **Confined** and tune `L_c` until the
+   simulated confinement statistics match the real ones; that L_c is your estimate. The summary's
+   **resolvability** read-out warns when τ_c = L_c²/D exceeds the track duration (below which free and
+   confined are indistinguishable — see §Phase 3).
+
+**Key caveat:** at typical wall-protein numbers (D ≈ 0.1–0.2 µm²/s, ~20–100 ms tracks) a ~100 nm extent
+is exactly what free diffusion produces, so step 6 is the whole point — do not read confinement off the
+raw extent/MSD alone.
+
 ## 2. Architecture & integration
 
 - New tab **"Diffusion / Tracking"** in `sim_ui.R` (alongside MINFLUX / Confocal / Acquisition /
@@ -130,8 +162,23 @@ Subsample the fine ground-truth path the MINFLUX way:
 - **Phase 1 (first):** rod (spherocylinder) + sphere **surface** diffusion (free Brownian), the MINFLUX
   sampling overlay (cycle + dark cycles + heteroscedastic σ_loc + photobleaching), MINFLUX-format output
   + ground-truth D, and a 3D/2D preview. Validates CVE / cycle-MSD immediately.
-- **Phase 2:** ellipsoid (ovoid), membrane plane, volume diffusion + reflection.
-- **Phase 3:** modifiers (corrals, directed, multi-state CTMC), the survivorship model, and the
-  projection-artifact study → OU-Kalman / HMM validation.
+- **Phase 2 (DONE 2026-07-12):** ellipsoid (ovoid/coccobacillus) geometry, and **volume /
+  intracellular diffusion** for sphere/rod/ellipsoid — free 3D Brownian inside the cell,
+  reflecting off the wall (radial reflect in scaled coords for ellipsoid; cylinder-wall +
+  hemispherical-cap reflect for the rod). A **Surface / Volume** selector. The CVE round-trip uses
+  d = min(motion-DOF, observed axes) — 2 for surface, 3 for volume, capped to 2 under 2D
+  projection. Validated: D recovered 97–101% of truth across all 6 geometry×mode combos.
+  *Still pending in Phase 2:* membrane-plane patch, cytoplasmic slab/half-space.
+- **Phase 3 (DONE 2026-07-12):** motion modifiers on top of any geometry×mode via a unified
+  geometry framework (project / reflect / normal). **Confined** = OU harmonic tether to a per-track
+  home (validated: stationary SD per DOF = L_c exactly; total MSD plateau = 2·d·L_c²). **Directed**
+  = drift v along the rod long axis / random for ellipsoid (validated: recovers v). **Two-state** =
+  mobile↔immobile CTMC at a per-cycle switch prob (HMM ground truth). **Survivorship** = track ends
+  if the true dark-gap displacement exceeds a re-acquisition radius (manufactures apparent
+  confinement). Rod surface now uses tangent-step + cylinder-project (unified with ellipsoid), not
+  the unrolled chart. KEY INSIGHT surfaced: confinement is only visible when τ_c = L_c²/D is shorter
+  than the track — else free diffusion over a short track mimics the same ~extent (the artifact to
+  test for the wall protein). *Still pending:* membrane plane / cyto slab; per-localization state
+  export for full HMM scoring.
 
 Everything is labelled a **simulation / validation tool**; it does not alter the standard analysis path.

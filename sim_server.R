@@ -2861,9 +2861,82 @@ sim_server <- function(input, output, session) {
   # photobleaching) → MINFLUX-format tracks + a ground-truth D. The CVE round-trip
   # in the summary demonstrates the validation loop in-place.
   # ══════════════════════════════════════════════════════════════════════════
+  # --- Calibrate the sampling model from a real MINFLUX file -----------------
+  # Reads a real .csv/.npy/.json and auto-fills cycle time, photons, dark-cycle
+  # probability and mean track length so the simulator matches a real experiment.
+  sim_trk_calib_rv <- reactiveVal(NULL)
+  observeEvent(input$sim_trk_calib, {
+    fi <- input$sim_trk_calib_file
+    shiny::validate(shiny::need(!is.null(fi), "Choose a MINFLUX file first."))
+    p <- fi$datapath; nm <- tolower(fi$name)
+    df <- withProgress(message = "Reading MINFLUX file…", value = 0, {
+      tryCatch({
+        if (grepl("\\.npy$",  nm)) read_minflux_npy_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE)
+        else if (grepl("\\.json$", nm)) read_minflux_json_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE)
+        else if (grepl("\\.csv$",  nm)) {
+          x <- as.data.frame(data.table::fread(p, showProgress = FALSE))
+          if (all(c("tid","tim") %in% names(x))) x else canonicalize_minflux_df(x)
+        } else NULL
+      }, error = function(e) NULL)
+    })
+    shiny::validate(shiny::need(!is.null(df) && nrow(df) > 0 && all(c("tid","tim") %in% names(df)),
+      "Could not read tid / tim from that file."))
+    df <- df[is.finite(df$tim), ]
+    # Calibrate ONLY on analysable traces (≥ MIN_LEN localizations, no upper bound), so
+    # the short-junk traces don't drag the statistics down. The representative length is
+    # the MEDIAN of the kept traces.
+    MIN_LEN  <- max(2L, as.integer(input$sim_trk_calib_minlen %||% 100L))
+    len_all  <- table(df$tid)
+    keep_tid <- names(len_all)[len_all >= MIN_LEN]
+    shiny::validate(shiny::need(length(keep_tid) >= 5, sprintf("Fewer than 5 traces have ≥%d localizations.", MIN_LEN)))
+    n_total  <- length(len_all)
+    df <- df[as.character(df$tid) %in% keep_tid, ]        # keep only the long traces
+    len     <- as.numeric(table(df$tid)); med_len <- stats::median(len)
+    photons <- if ("eco" %in% names(df)) stats::median(df$eco[is.finite(df$eco) & df$eco > 0]) else NA_real_
+    o    <- order(df$tid, df$tim); tid <- df$tid[o]; tim <- df$tim[o]; nrw <- length(tid)
+    same <- c(FALSE, tid[-1] == tid[-nrw]); dt <- c(NA_real_, diff(tim)) * 1000; dt[!same] <- NA_real_  # ms
+    dtv  <- dt[is.finite(dt) & dt > 0]
+    shiny::validate(shiny::need(length(dtv) > 20, "Too few within-track steps to calibrate."))
+    hb   <- hist(dtv[dtv < stats::quantile(dtv, 0.98)], breaks = 400, plot = FALSE)
+    cyc  <- hb$mids[which.max(hb$counts)]                          # modal Δt = cycle time
+    ncyc <- pmax(1L, as.integer(round(dtv / cyc)))
+    p_dark <- sum(ncyc - 1L) / sum(ncyc); integ <- mean(ncyc == 1L)
+    if (is.finite(cyc))     updateNumericInput(session, "sim_trk_cycle",   value = signif(cyc, 3))
+    if (is.finite(p_dark))  updateNumericInput(session, "sim_trk_pdark",   value = round(p_dark, 2))
+    if (is.finite(photons)) updateNumericInput(session, "sim_trk_photons", value = round(photons))
+    if (is.finite(med_len)) updateNumericInput(session, "sim_trk_meanlen", value = round(med_len))
+    sim_trk_calib_rv(list(file = fi$name, n_tracks = length(keep_tid), n_total = n_total,
+      min_len = MIN_LEN, n_loc = nrow(df), med_len = med_len, mean_len = mean(len),
+      photons = photons, cyc = cyc, p_dark = p_dark, integ = integ, med_dt = stats::median(dtv)))
+    showNotification(sprintf("Calibrated on %d traces (≥%d locs) of %d total.",
+                             length(keep_tid), MIN_LEN, n_total), type = "message", duration = 6)
+  })
+
+  output$sim_trk_calib_report <- renderUI({
+    cb <- sim_trk_calib_rv(); if (is.null(cb)) return(NULL)
+    rowf <- function(k, v) htmltools::tags$tr(
+      htmltools::tags$td(style = "padding:1px 10px 1px 0; color:#666;", k),
+      htmltools::tags$td(htmltools::tags$b(v)))
+    htmltools::div(style = "font-size:0.8em; color:#333; margin-top:4px;",
+      htmltools::tags$div(style = "color:#228833;", sprintf("✓ Calibrated from %s", cb$file)),
+      htmltools::tags$table(style = "border-collapse:collapse;",
+        rowf(sprintf("Traces used (≥%d locs)", cb$min_len %||% 50L),
+             sprintf("%s of %s  ·  %s locs", format(cb$n_tracks, big.mark = ","),
+                     format(cb$n_total %||% cb$n_tracks, big.mark = ","), format(cb$n_loc, big.mark = ","))),
+        rowf("Cycle time", sprintf("%.3g ms", cb$cyc)),
+        rowf("Photons/loc (median eco)", if (is.finite(cb$photons)) sprintf("%.0f", cb$photons) else "—"),
+        rowf("Dark-cycle prob.", sprintf("%.2f  (%.0f%% integrated)", cb$p_dark, 100 * cb$integ)),
+        rowf("Track length (median)", sprintf("%.0f · mean %.0f", cb$med_len, cb$mean_len))),
+      htmltools::tags$p(style = "color:#888; margin-top:3px;",
+        "Auto-filled the sampling fields (mean locs/track uses the robust median). Set geometry, D and ",
+        "the effective TCP L, then Simulate."))
+  })
+
   sim_trk_result <- eventReactive(input$sim_trk_run, {
     set.seed(as.integer(input$sim_trk_seed %||% 1L))
     geom     <- input$sim_trk_geom %||% "rod"
+    mode     <- input$sim_trk_mode %||% "surface"      # surface | volume (intracellular)
+    d_mot    <- if (identical(mode, "volume")) 3L else 2L   # motion DOF (used by the CVE check)
     D_um2_s  <- max(0, as.numeric(input$sim_trk_D %||% 0.05))
     D_nm2ms  <- D_um2_s * 1000                        # µm²/s → nm²/ms
     n_trk    <- max(1L, as.integer(input$sim_trk_ntracks %||% 200L))
@@ -2873,38 +2946,101 @@ sim_server <- function(input, output, session) {
     photons  <- max(1, as.numeric(input$sim_trk_photons %||% 100))
     L_tcp    <- max(1, as.numeric(input$sim_trk_Ltcp %||% 150))
     proj2d   <- isTRUE(input$sim_trk_project2d)
-    sd_step  <- sqrt(2 * D_nm2ms * cyc)               # per-axis tangent step SD per cycle (nm)
+    sd_step  <- sqrt(2 * D_nm2ms * cyc)               # per-axis step SD per cycle (nm)
     R    <- max(1, as.numeric(input$sim_trk_R %||% 500))
     rr   <- max(1, as.numeric(input$sim_trk_r %||% 400))
     Lcyl <- max(1, as.numeric(input$sim_trk_Lcyl %||% 2000))
     circ <- 2 * pi * rr
-    to3d_rod <- function(s, phi) c(rr * cos(phi), rr * sin(phi), s)
-    step_sphere <- function(p) {                      # tangent step + retract to sphere
-      g <- rnorm(3, 0, sd_step); nh <- p / sqrt(sum(p^2))
-      p2 <- p + (g - sum(g * nh) * nh); R * p2 / sqrt(sum(p2^2))
+    ea   <- max(1, as.numeric(input$sim_trk_ea %||% 500))
+    eb   <- max(1, as.numeric(input$sim_trk_eb %||% 500))
+    ec   <- max(1, as.numeric(input$sim_trk_ec %||% 900))
+    abc  <- if (identical(geom, "sphere")) c(R, R, R) else c(ea, eb, ec)   # ellipsoid semi-axes
+    # Long-axis orientation for the rod: E. coli on a coverslip lie flat → axis in the
+    # image plane. Generated in canonical coords (axis ∥ X) then permuted to the choice.
+    rod_axis <- input$sim_trk_rod_axis %||% "x"
+    rod_perm <- switch(rod_axis, x = c(1L,2L,3L), y = c(2L,1L,3L), z = c(2L,3L,1L))
+
+    # ── unified geometry operators (rod = spherocylinder body + hemispherical caps;
+    #    else ellipsoid, sphere = a=b=c). project = nearest surface point; reflect =
+    #    back inside the volume; normal = unit outward normal (for the tangent step). ─
+    is_rod <- identical(geom, "rod")
+    geo_normal <- function(p) {
+      if (is_rod) { a <- p[1]
+        n <- if (a >= 0 && a <= Lcyl) c(0, p[2], p[3]) else { cx <- if (a < 0) 0 else Lcyl; p - c(cx,0,0) }
+        m <- sqrt(sum(n^2)); if (m == 0) c(0,1,0) else n / m
+      } else { n <- p / abc^2; n / sqrt(sum(n^2)) }
     }
+    geo_project <- function(p) {
+      if (is_rod) { a <- p[1]
+        if (a >= 0 && a <= Lcyl) { rad <- c(p[2],p[3]); rho <- sqrt(sum(rad^2)); rad <- if (rho == 0) c(rr,0) else rad*rr/rho; c(a, rad) }
+        else { cx <- if (a < 0) 0 else Lcyl; d <- p - c(cx,0,0); dd <- sqrt(sum(d^2)); d <- if (dd == 0) c(if (a<0) -rr else rr,0,0) else d*rr/dd; c(cx,0,0)+d }
+      } else { u <- p/abc; abc * u / sqrt(sum(u^2)) }
+    }
+    geo_reflect <- function(p) {
+      if (is_rod) { a <- p[1]
+        if (a >= 0 && a <= Lcyl) { rad <- c(p[2],p[3]); rho <- sqrt(sum(rad^2)); if (rho > rr) rad <- rad*(2*rr - rho)/rho; c(a, rad) }
+        else { cx <- if (a < 0) 0 else Lcyl; d <- p - c(cx,0,0); dd <- sqrt(sum(d^2)); if (dd > rr) d <- d*(2*rr - dd)/dd; c(cx,0,0)+d }
+      } else { u <- p/abc; nu <- sqrt(sum(u^2)); if (nu > 1) u <- u*(2-nu)/nu; abc*u }
+    }
+    geo_rand_surf <- function() if (is_rod) { s <- runif(1,0,Lcyl); phi <- runif(1,0,2*pi); c(s, rr*cos(phi), rr*sin(phi)) } else geo_project(rnorm(3) * abc)
+    geo_rand_in   <- function() if (is_rod) {
+        repeat { p <- c(runif(1,-rr,Lcyl+rr), runif(1,-rr,rr), runif(1,-rr,rr)); a <- p[1]
+          if ((if (a >= 0 && a <= Lcyl) (p[2]^2+p[3]^2) <= rr^2 else if (a < 0) sum(p^2) <= rr^2 else sum((p-c(Lcyl,0,0))^2) <= rr^2)) return(p) }
+      } else { d <- rnorm(3); d <- d/sqrt(sum(d^2)); abc * d * runif(1)^(1/3) }
+
+    # ── motion modifier (Phase 3): free | confined (OU tether) | directed (drift) |
+    #    twostate (mobile↔immobile CTMC). Applied to the proposed 3D point, then the
+    #    geometry constraint re-projects/reflects it. ──────────────────────────────
+    motion  <- input$sim_trk_motion  %||% "free"
+    L_c     <- max(1, as.numeric(input$sim_trk_Lc %||% 150))         # confinement radius (nm)
+    v_nmms  <- max(0, as.numeric(input$sim_trk_vel %||% 0))          # directed speed (µm/s = nm/ms)
+    kswitch <- min(1, max(0, as.numeric(input$sim_trk_kswitch %||% 0.03)))  # per-cycle state-switch prob
+    tau_c   <- if (D_nm2ms > 0) L_c^2 / D_nm2ms else Inf             # OU relaxation time (ms)
+    phi_c   <- exp(-cyc / tau_c)                                     # per-cycle mean-reversion factor
+    drift0  <- if (is_rod) c(1,0,0) else { v <- rnorm(3); v/sqrt(sum(v^2)) }   # rod drift ∥ long axis
+
+    gen_path <- function(n_cyc) {
+      surface <- identical(mode, "surface")
+      p <- if (surface) geo_rand_surf() else geo_rand_in(); home <- p; st <- 1L
+      pos <- matrix(NA_real_, n_cyc, 3); pos[1,] <- p; states <- integer(n_cyc); states[1] <- 1L
+      for (i in 2:n_cyc) {
+        Dstep <- if (identical(motion,"twostate") && st == 0L) D_nm2ms * 0.01 else D_nm2ms
+        sdi   <- sqrt(2 * Dstep * cyc)
+        if (surface) { g <- rnorm(3,0,sdi); nn <- geo_normal(p); p2 <- p + (g - sum(g*nn)*nn) }  # tangent step
+        else         { p2 <- p + rnorm(3,0,sdi) }
+        if (identical(motion,"directed")) p2 <- p2 + drift0 * v_nmms * cyc
+        if (identical(motion,"confined")) p2 <- home + (p2 - home) * phi_c                       # OU pull to home
+        p  <- if (surface) geo_project(p2) else geo_reflect(p2)
+        if (identical(motion,"twostate") && runif(1) < kswitch) st <- 1L - st
+        pos[i,] <- p; states[i] <- st
+      }
+      if (is_rod) pos <- pos[, rod_perm, drop = FALSE]
+      attr(pos, "states") <- states
+      pos
+    }
+    # Survivorship: a molecule that moves > R_reacq during a dark gap is lost — the
+    # track ends there. Reproduces the dark-cycle bias (long jumps culled → apparent
+    # confinement). Off unless enabled.
+    surv    <- isTRUE(input$sim_trk_surv)
+    R_reacq <- max(1, as.numeric(input$sim_trk_rreacq %||% 300))
 
     rows <- vector("list", n_trk); gt <- vector("list", n_trk); k <- 0L
     withProgress(message = "Simulating tracks…", value = 0, {
     for (ti in seq_len(n_trk)) {
       if (ti %% 20L == 0L) incProgress(20 / n_trk)
-      n_cyc <- max(3L, stats::rgeom(1, 1 / mean_len) + 1L)   # bleach lifetime (cycles)
-      pos <- matrix(NA_real_, n_cyc, 3)               # ground-truth path at cycle resolution
-      if (identical(geom, "sphere")) {
-        v <- rnorm(3); p <- R * v / sqrt(sum(v^2)); pos[1, ] <- p
-        for (i in 2:n_cyc) { p <- step_sphere(p); pos[i, ] <- p }
-      } else {
-        s <- runif(1, 0, Lcyl); phi <- runif(1, 0, 2 * pi); pos[1, ] <- to3d_rod(s, phi)
-        for (i in 2:n_cyc) {
-          s  <- s + rnorm(1, 0, sd_step)              # axial (reflect into [0, Lcyl])
-          period <- 2 * Lcyl; sm <- s %% period; if (sm < 0) sm <- sm + period
-          s  <- if (sm <= Lcyl) sm else period - sm
-          phi <- ((rr * phi + rnorm(1, 0, sd_step)) %% circ) / rr   # azimuthal (periodic)
-          pos[i, ] <- to3d_rod(s, phi)
-        }
-      }
+      # mean_len = target MEDIAN recorded localizations/track. Recorded count is ≈
+      # geometric, whose median ≈ ln(2)·mean, and only (1−p_dark) of cycles are recorded,
+      # so the bleach lifetime in CYCLES has mean = median / (ln2 · (1−p_dark)) to land
+      # the recorded MEDIAN on mean_len despite dark-cycling.
+      n_cyc <- max(3L, stats::rgeom(1, 1 / (mean_len / (log(2) * max(0.05, 1 - p_dark)))) + 1L)
+      pos   <- gen_path(n_cyc)                          # ground-truth path at cycle resolution
       integ <- runif(n_cyc) > p_dark; integ[1] <- TRUE  # recorded (integrated) vs dark cycles
       idx   <- which(integ)
+      if (surv && length(idx) > 1L) {                   # survivorship: cut at first over-range dark-gap jump
+        jmp  <- sqrt(rowSums((pos[idx[-1], , drop = FALSE] - pos[idx[-length(idx)], , drop = FALSE])^2))
+        lost <- which(jmp > R_reacq)
+        if (length(lost)) idx <- idx[seq_len(lost[1])]  # keep up to (and incl.) the pre-jump loc
+      }
       if (length(idx) < 5L) next
       N     <- pmax(1L, stats::rpois(length(idx), photons))
       sig   <- L_tcp / (2 * sqrt(N))                   # per-localization σ_loc (nm)
@@ -2915,7 +3051,9 @@ sim_server <- function(input, output, session) {
         tid = k, tim = ((idx - 1L) * cyc) / 1000,      # SECONDS (importer ×1000 → ms)
         x = obs[, 1], y = obs[, 2], z = obs[, 3],
         efo = N / (cyc / 1000), eco = N, stringsAsFactors = FALSE)
-      gt[[k]] <- data.frame(tid = k, D_true_um2_s = D_um2_s, geometry = geom,
+      gt[[k]] <- data.frame(tid = k, D_true_um2_s = D_um2_s, geometry = geom, mode = mode,
+                            motion = motion, L_c_nm = if (identical(motion,"confined")) L_c else NA_real_,
+                            v_um_s = if (identical(motion,"directed")) v_nmms else NA_real_,
                             n_locs = length(idx), sigma_loc_med = stats::median(sig),
                             stringsAsFactors = FALSE)
     }
@@ -2924,20 +3062,23 @@ sim_server <- function(input, output, session) {
     df <- dplyr::bind_rows(rows[seq_len(k)])
     if (proj2d) df$z <- NULL
     list(df = df, gt = dplyr::bind_rows(gt[seq_len(k)]),
-         D_um2_s = D_um2_s, cyc = cyc, p_dark = p_dark, proj2d = proj2d)
+         D_um2_s = D_um2_s, cyc = cyc, p_dark = p_dark, proj2d = proj2d,
+         mode = mode, d_mot = d_mot, geom = geom,
+         motion = motion, L_c = L_c, v_nmms = v_nmms, surv = surv, R_reacq = R_reacq)
   })
 
-  # CVE round-trip: recover D from consecutive single-cycle (Δt = cyc) steps, using
-  # the TOTAL 3D displacement with the SURFACE dimensionality (d_motion = 2). Surface
-  # diffusion has 2 DOF but spreads over 3 Cartesian axes, so a per-axis CVE would
-  # under-estimate D by ⅓ — the correct estimator is D = (⟨|Δr|²⟩ + 2⟨Δr_i·Δr_{i+1}⟩)
-  # / (2·d·Δt) with d=2. n_cart Cartesian axes carry the noise (cov = −n_cart·σ²).
+  # CVE round-trip: recover D from consecutive single-cycle (Δt = cyc) steps, using the
+  # TOTAL displacement with the MOTION dimensionality. D = (⟨|Δr|²⟩ + 2⟨Δr_i·Δr_{i+1}⟩)
+  # / (2·d·Δt). SURFACE diffusion has d=2 DOF but spreads over 3 Cartesian axes (a
+  # per-axis CVE would under-estimate D by ⅓); VOLUME diffusion has d=3. When projected
+  # to 2D only n_cart=2 axes are seen, so d = min(motion-DOF, n_cart). n_cart Cartesian
+  # axes carry the noise (cov = −n_cart·σ²).
   sim_trk_cve <- reactive({
     res <- sim_trk_result(); if (is.null(res)) return(NULL)
     df <- res$df; cyc <- res$cyc
     axes  <- c("x", "y", if (!is.null(df$z)) "z")
     ncart <- length(axes)
-    d_mot <- 2                                          # surface diffusion (Phase 1)
+    d_mot <- min(res$d_mot %||% 2L, ncart)              # 2 surface / 3 volume, capped by observed axes
     r2_sum <- 0; r2_n <- 0L; cov_sum <- 0; cov_n <- 0L
     for (tb in split(df, df$tid)) {
       tb  <- tb[order(tb$tim), ]
@@ -2992,8 +3133,18 @@ sim_server <- function(input, output, session) {
       htmltools::tags$span(style = sprintf("color:%s; font-weight:bold;", col),
         sprintf("%.4g µm²/s  (%.0f%% of truth)", cve$D_um2_s, 100 * rr))
     } else "—"
+    motion_lbl <- switch(res$motion %||% "free",
+      confined = sprintf("confined (OU tether, L_c = %.0f nm)", res$L_c),
+      directed = sprintf("directed (v = %.3g µm/s)", res$v_nmms),
+      twostate = "two-state (mobile↔immobile)",
+      "free")
+    geom_lbl <- sprintf("%s · %s · %s%s", res$geom %||% "?",
+                        if (identical(res$mode, "volume")) "volume (intracellular)" else "surface",
+                        motion_lbl, if (isTRUE(res$surv)) sprintf(" · survivorship R=%.0fnm", res$R_reacq) else "")
     htmltools::div(style = "font-size:0.9em; color:#333; margin-top:8px;",
       htmltools::tags$table(style = "border-collapse:collapse;",
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Model"),
+          htmltools::tags$td(htmltools::tags$b(geom_lbl))),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Tracks / localizations"),
           htmltools::tags$td(sprintf("%d / %s", length(unique(df$tid)), format(nrow(df), big.mark=",")))),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Ground-truth D"),
@@ -3004,13 +3155,36 @@ sim_server <- function(input, output, session) {
           htmltools::tags$td(if (!is.null(cve)) sprintf("%.2f nm", cve$sigma_nm) else "—")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Integrated (single-cycle) fraction"),
           htmltools::tags$td(if (is.finite(frac_int)) sprintf("%.0f%%", 100 * frac_int) else "—")),
-        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Median Δt / mean track length"),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Median Δt / median track length"),
           htmltools::tags$td(sprintf("%.3g ms / %.0f locs",
-            if (length(dt_all)) stats::median(dt_all) else NA_real_, nrow(df) / length(unique(df$tid)))))),
+            if (length(dt_all)) stats::median(dt_all) else NA_real_, stats::median(as.numeric(table(df$tid))))))),
       htmltools::tags$p(style = "color:#888; font-size:0.9em; margin-top:6px;",
-        "The CVE round-trip should land near 100 % of truth for a free-diffusion sim — that is the ",
-        "validation loop. Download the tracks (CSV) and load them in the Tracking tab to test the full ",
-        "MSD / confinement pipeline against this known D."))
+        if (identical(res$motion, "confined")) {
+          tau_c   <- if (res$D_um2_s > 0) (res$L_c^2 / (res$D_um2_s * 1000)) else Inf   # ms
+          med_dur <- stats::median(unlist(lapply(split(df$tim, df$tid), function(t) (max(t) - min(t)) * 1000)))
+          verdict <- if (is.finite(tau_c) && tau_c < 0.5 * med_dur) "✓ RESOLVABLE" else "⚠ NOT resolvable — looks free"
+          sprintf("Confined (OU, L_c=%.0f nm): CVE gives the LOCAL D at single-cycle lags (≈ truth); confinement is an MSD plateau ≈ 2·d·L_c² in the Tracking tab. Resolvability: τ_c = L_c²/D ≈ %.3g ms vs median track duration ≈ %.3g ms → %s. (If τ_c ≳ track duration, free diffusion over a short track mimics the same extent — the key artifact to test.)",
+                  res$L_c, tau_c, med_dur, verdict)
+        }
+        else if (identical(res$motion, "directed"))
+          "Directed: the CVE local D reflects the diffusive part; the drift shows as an upward-curving MSD / a sustained drift-velocity in the Tracking tab."
+        else if (identical(res$motion, "twostate"))
+          "Two-state: mixed mobile/immobile steps — the CVE gives a population-average D; load in the Tracking tab and fit the HMM to recover the two states."
+        else
+          "Free diffusion: the CVE round-trip should land near 100 % of truth — that is the validation loop.",
+        " Download the tracks (CSV) and load them in the Tracking tab to test the full MSD / confinement pipeline against this known ground truth."),
+      # Projection artifact: 2D imaging of a CURVED-surface protein under-measures the
+      # azimuthal motion (its out-of-plane component is dropped), so the recovered D is a
+      # fixed fraction of truth (~75% for a side-on cylinder) — NOT a bug, and the same
+      # bias applies to real 2D data. The factor is itself a useful geometric calibration.
+      if (identical(res$mode, "surface") && isTRUE(res$proj2d))
+        htmltools::tags$p(style = "color:#b26a00; font-size:0.9em; margin-top:4px;",
+          htmltools::HTML("&#9888; "),
+          htmltools::tags$b("2D projection of a curved surface:"),
+          " recovered D is expected BELOW truth (≈75% for a side-on cylinder) because the ",
+          "out-of-plane part of the azimuthal motion is lost — this is a real geometric bias that ",
+          "also affects your real 2D data. Use this ratio as the correction factor, or acquire in 3D. ",
+          "It applies to free AND confined alike, so it is not the confinement signal."))
   })
 
   output$sim_trk_dl_csv <- downloadHandler(

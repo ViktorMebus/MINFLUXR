@@ -268,7 +268,10 @@ tracking_ui <- fluidPage(
             tags$hr(style = "margin:8px 0;"),
 
             downloadButton("trk_download_filtered_csv", "Export filtered data (.csv)"),
-            helpText("Exports filtered data from the current chunk."),
+            helpText("Exports the post-filtered tracks (canonical MINFLUX .csv). ",
+                     "Load it in the Simulator → Diffusion/Tracking → ",
+                     tags$i("Calibrate from real MINFLUX data"),
+                     " to build a ground-truth simulation matched to this dataset."),
             tags$hr(),
             downloadButton("trk_download_filter_settings", "Save filter settings (.json)"),
             fileInput("trk_load_filter_settings", "Load filter settings (.json)", accept = ".json")
