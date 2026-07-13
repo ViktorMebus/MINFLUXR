@@ -3040,6 +3040,200 @@ smlm_server <- function(input, output, session) {
 
   # --- Main 2D plot -----------------------------------------------------------
 
+  # Shared "exploratory + references" footer for the GT / shape read-outs.
+  gt_exploratory_note <- function() {
+    div(style = "margin-top:8px;padding:6px 8px;border-left:3px solid #e67e22;background:rgba(230,126,34,0.06);font-size:11.5px;color:#7f8c8d;line-height:1.4;",
+        HTML(paste0(
+          "<b style='color:#e67e22;'>Exploratory.</b> This is a model-based estimate, not a direct measurement; validate against your own controls. ",
+          "Methods: gyration-tensor shape anisotropy (Rudnick &amp; Gaspari, <i>J. Phys. A</i> <b>19</b>, L191, 1986); ",
+          "linear/planar/spherical anisotropy coefficients (Westin et&nbsp;al., <i>MICCAI/Med. Image Anal.</i>, 1997/2002); ",
+          "minimum-spanning-tree backbone (Prim, 1957). ",
+          "The labeling-displacement inverse (candidate-GT estimation, complex-radius merge, inward linkage displacement, stoichiometric cross-check) is a heuristic developed in this tool and validated in&nbsp;silico against the simulator — treat quantitatively with care and cite as exploratory.")))
+  }
+
+  # ── Inverse GT-position estimate (labeling-aware) ───────────────────────────
+  # Shared by the 2D/3D overlays and the readout panel. Returns NULL when the
+  # feature is off or there is nothing to estimate.
+  gt_estimate <- reactive({
+    if (!isTRUE(input$show_gt_estimate)) return(NULL)
+    df <- plottable_data()
+    if (is.null(df) || !nrow(df)) return(NULL)
+
+    presets     <- minflux_label_presets()
+    preset_name <- input$gt_label_preset %||% "Primary monoclonal IgG + secondary IgG"
+    preset      <- presets[[preset_name]]
+    if (is.null(preset)) return(NULL)
+
+    # Custom: build the preset from the numeric inputs.
+    if (identical(preset_name, "Custom")) {
+      preset <- list(
+        n_fluor       = max(1, suppressWarnings(as.numeric(input$gt_fluor_custom   %||% 1))),
+        link_nm       = max(0, suppressWarnings(as.numeric(input$gt_link_custom     %||% 5))),
+        dye_spread_nm = max(0, suppressWarnings(as.numeric(input$gt_spread_custom   %||% 0))),
+        footprint_nm  = max(0, suppressWarnings(as.numeric(input$gt_footprint_custom %||% 8))),
+        blink_lambda  = max(0, suppressWarnings(as.numeric(input$gt_blink_custom    %||% 0.3))),
+        note          = "Custom labeling parameters"
+      )
+    }
+
+    eff <- suppressWarnings(as.numeric(input$gt_label_eff)); if (!is.finite(eff)) eff <- 70
+    lvl <- input$gt_model_level %||% "auto"
+    # Merge radius: blank / NA / negative -> auto (NULL); 0 -> no merge; >0 -> override.
+    cr_in <- suppressWarnings(as.numeric(input$gt_complex_r))
+    cr    <- if (length(cr_in) && is.finite(cr_in) && cr_in >= 0) cr_in else NULL
+    # Inward displacement magnitude: blank -> auto (link_nm).
+    dn_in <- suppressWarnings(as.numeric(input$gt_displace_nm))
+    dn    <- if (length(dn_in) && is.finite(dn_in) && dn_in >= 0) dn_in else NULL
+    tryCatch(
+      estimate_gt_from_labeling(
+        df, preset, eff_pct = eff, level = lvl, complex_r = cr,
+        scope_cluster2  = isTRUE(input$gt_scope_cluster2 %||% TRUE),
+        displace_inward = isTRUE(input$gt_displace_inward %||% TRUE),
+        displace_nm     = dn,
+        guided_merge    = isTRUE(input$gt_guided_merge)
+      ),
+      error = function(e) { message("[GT-est] ", conditionMessage(e)); NULL }
+    )
+  })
+
+  # Add the hollow-circle GT candidate overlay to a 2D figure (view-plane aware).
+  add_gt_overlay_2d <- function(fig, vp) {
+    ge <- gt_estimate()
+    if (is.null(ge) || !nrow(ge$points)) return(fig)
+    pts <- ge$points
+    remap_x <- function(x, y, z) switch(vp, XZ = x, YZ = y, x)
+    remap_y <- function(x, y, z) switch(vp, XZ = z, YZ = z, y)
+    px <- remap_x(pts$x, pts$y, pts$z); py <- remap_y(pts$x, pts$y, pts$z)
+    lo  <- ge$meta$link_nm %||% 0
+    hi  <- max(ge$meta$footprint_nm %||% 0, 2 * lo, stats::quantile(pts$pos_sd_nm, 0.9, na.rm = TRUE))
+    col <- gt_uncertainty_colors(pts$pos_sd_nm, lo, hi)
+    sz  <- suppressWarnings(as.numeric(input$gt_circle_size)); if (!is.finite(sz) || sz <= 0) sz <- 15
+    txt <- sprintf("GT candidate<br>± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
+                   pts$pos_sd_nm, ifelse(pts$fused, " (fused: multiple GTs)", ""),
+                   pts$n_units, pts$n_tid, pts$n_loc)
+
+    # Contribution fan-out lines: each member unit centroid -> its GT centroid.
+    if (isTRUE(input$gt_show_lines %||% TRUE) && !is.null(ge$links) && nrow(ge$links)) {
+      lk <- ge$links
+      lx <- as.vector(rbind(remap_x(lk$ux, lk$uy, lk$uz),
+                            remap_x(lk$gx, lk$gy, lk$gz), NA_real_))
+      ly <- as.vector(rbind(remap_y(lk$ux, lk$uy, lk$uz),
+                            remap_y(lk$gx, lk$gy, lk$gz), NA_real_))
+      line_col <- if (isTRUE(input$dark_mode)) "rgba(255,255,255,0.35)" else "rgba(0,0,0,0.35)"
+      fig <- fig %>% plotly::add_trace(
+        x = lx, y = ly, type = "scatter", mode = "lines",
+        line = list(color = line_col, width = 1), name = "GT contributions",
+        showlegend = TRUE, inherit = FALSE, hoverinfo = "skip"
+      )
+    }
+    fig %>% plotly::add_trace(
+      x = px, y = py, type = "scatter", mode = "markers",
+      marker = list(symbol = "circle-open", size = sz,
+                    color = col, line = list(color = col, width = 3)),
+      name = "Estimated GT", showlegend = TRUE, inherit = FALSE,
+      text = txt, hoverinfo = "text"
+    )
+  }
+
+  # Text/HTML readout of the GT estimate: counts, uncertainty floor, crowding.
+  output$gt_estimate_readout <- renderUI({
+    if (!isTRUE(input$show_gt_estimate))
+      return(helpText("Enable the estimate to see candidate GT positions and counts."))
+    ge <- gt_estimate()
+    if (is.null(ge) || !nrow(ge$summary))
+      return(helpText("No estimable structures (need clustered data; try enabling primary + secondary clustering)."))
+    s   <- ge$summary
+    m   <- ge$meta
+    tot_units  <- sum(s$n_units)
+    tot_gt     <- sum(s$n_gt_est)
+    tot_stoich <- sum(s$n_stoich)
+    tot_lo     <- sum(s$n_gt_lo);  tot_hi <- sum(s$n_gt_hi)
+    any_crowd  <- any(s$crowded)
+    any_mm     <- any(s$stoich_mismatch)
+    lvl_lbl    <- if (identical(m$level, "primary")) "primary clusters (de-blinked)" else "raw trace IDs"
+
+    rows <- lapply(seq_len(nrow(s)), function(i) {
+      r <- s[i, ]
+      lab <- if (r$cluster2 == 0) "All (ungrouped)" else paste("Structure", r$cluster2)
+      warn <- if (isTRUE(r$crowded))
+        span(style = "color:#e67e22;font-weight:600;", " ⚠ crowded / under-resolved") else ""
+      mm <- if (isTRUE(r$stoich_mismatch))
+        span(style = "color:#c0392b;font-weight:600;",
+             sprintf(" ⚠ spatial vs stoichiometry disagree (%.0f obs TIDs/GT vs %.0f expected)",
+                     r$tids_per_gt, m$m_tid)) else ""
+      tags$li(HTML(sprintf(
+        "<b>%s</b>: <b>%.0f</b> GT (spatial) vs <b>%.0f</b> (stoichiometry) · CI %.0f–%.0f · %d TID / %d unit%s%s%s%s",
+        lab, r$n_gt_est, r$n_stoich, r$n_gt_lo, r$n_gt_hi, r$n_tid_total, r$n_units,
+        ifelse(r$n_units == 1, "", "s"),
+        ifelse(r$n_fused > 0, sprintf(", %d fused", r$n_fused), ""),
+        as.character(warn), as.character(mm))))
+    })
+
+    tagList(
+      div(style = "font-size:15px;margin-bottom:6px;",
+          HTML(sprintf("Estimated total: <b>%.0f</b> GT molecules (spatial) · <b>%.0f</b> (stoichiometry) · range %.0f–%.0f",
+                  tot_gt, tot_stoich, tot_lo, tot_hi))),
+      tags$ul(style = "margin:4px 0 8px 0;padding-left:18px;", rows),
+      if (any_mm) div(style = "font-size:12px;color:#c0392b;margin-bottom:6px;",
+          HTML("The two independent counts disagree in ≥1 structure — the merge radius or the labeling assumption is off. Try the stoichiometry-guided merge, adjust the merge radius, or re-check the preset/efficiency.")),
+      div(style = "font-size:12px;color:#7f8c8d;line-height:1.45;",
+          HTML(sprintf(
+            "Modeled from %s. Units pooled within <b>%.0f nm</b> (label-complex radius)%s into one molecule%s. Position floor <b>±%.0f nm</b> (linker, irreducible) · ~%.1f TIDs/molecule expected · detection η=%.0f%% · σ<sub>loc</sub>≈%.1f nm.<br>Marker colour = position uncertainty, combining the linker floor, localization sampling (σ<sub>loc</sub>/√n<sub>loc</sub>), a <b>support penalty</b> (fewer TIDs → less certain), inward-displacement direction error, and a fusion penalty.<br><i>Counts are conditional on the labeling calibration; positions cannot be resolved below the linker floor. The two counts bracket the honest range.%s</i>",
+            lvl_lbl, m$complex_r_nm %||% 0,
+            if (isTRUE(m$guided_merge)) " (stoichiometry-guided)" else "",
+            if ((m$displace_nm %||% 0) > 0) sprintf(", then displaced <b>%.0f nm</b> inward toward the structure", m$displace_nm) else "",
+            m$link_nm, m$m_tid, 100 * m$eta, m$sigma_loc_nm,
+            ifelse(any_crowd, " Crowded structures undercount — treat those counts as lower bounds.", ""))),
+      gt_exploratory_note())
+    )
+  })
+
+  # ── Phase B: per-structure shape / polymer morphology ───────────────────────
+  gt_morphology <- reactive({
+    if (!isTRUE(input$gt_show_shape)) return(NULL)
+    df <- plottable_data()
+    if (is.null(df) || !nrow(df)) return(NULL)
+    sp <- suppressWarnings(as.numeric(input$gt_subunit_spacing))
+    if (!is.finite(sp) || sp <= 0) sp <- NA_real_
+    # use the estimated GT candidates as a clean backbone when available
+    bpts <- tryCatch({ ge <- gt_estimate(); if (!is.null(ge)) ge$points else NULL },
+                     error = function(e) NULL)
+    tryCatch(
+      analyze_cluster2_morphology(df, backbone_pts = bpts, subunit_spacing_nm = sp),
+      error = function(e) { message("[GT-morph] ", conditionMessage(e)); NULL }
+    )
+  })
+
+  output$gt_morphology_readout <- renderUI({
+    if (!isTRUE(input$gt_show_shape))
+      return(helpText("Enable to classify each cluster's shape (filament / ring / punctum / sheet / diffuse) and report neutral size descriptors."))
+    mo <- gt_morphology()
+    if (is.null(mo) || !nrow(mo))
+      return(helpText("No analysable structures (need median-clusters / cluster2 with ≥4 traces)."))
+    icon_for <- function(s) switch(s, filament = "――", ring = "○",
+                                   punctum = "●", sheet = "▧", "∴")
+    rows <- lapply(seq_len(nrow(mo)), function(i) {
+      r <- mo[i, ]
+      spc <- if (is.finite(r$spacing_nn_nm)) sprintf(", spacing %.0f nm", r$spacing_nn_nm) else ""
+      detail <- if (r$shape == "filament")
+        sprintf("contour <b>%.0f nm</b> (straight %.0f, width %.0f)%s, %.1f points/µm%s",
+                r$contour_nm, r$extent_nm, r$width_nm, spc, r$lin_density_um,
+                if (is.finite(r$n_subunit_est)) sprintf(" → <b>~%.0f subunits</b>", r$n_subunit_est) else "")
+      else if (r$shape == "ring")
+        sprintf("radius <b>%.0f nm</b> (circumference %.0f nm), R<sub>g</sub> %.0f%s", r$ring_r_nm, r$contour_nm, r$rg_nm, spc)
+      else
+        sprintf("extent <b>%.0f nm</b>, width %.0f, R<sub>g</sub> %.0f%s", r$extent_nm, r$width_nm, r$rg_nm, spc)
+      tags$li(HTML(sprintf("<b>Structure %d</b> — <b>%s</b> %s: %s",
+                           r$cluster2, r$shape, icon_for(r$shape), detail)))
+    })
+    tagList(
+      tags$ul(style = "margin:4px 0 8px 0;padding-left:18px;", rows),
+      div(style = "font-size:12px;color:#7f8c8d;line-height:1.45;",
+          HTML("Shape is <b>inferred from the point distribution</b> (you don't declare it): from the gyration-tensor eigenvalues (linearity / planarity / sphericity) plus a hollow-centre test for rings. Contour length = diameter of the backbone's minimum spanning tree, so it follows curves where the straight extent underestimates. Spacing = median nearest-neighbour distance between estimated points."),
+          gt_exploratory_note())
+    )
+  })
+
   output$scatter2D <- renderPlotly({
     req(input$mode3d == "2D")
     if (is.null(input$file) || is.null(plot_trigger())) {
@@ -3448,6 +3642,9 @@ smlm_server <- function(input, output, session) {
         )
       }
     }
+
+    # ---- Estimated ground-truth candidates (hollow circles, green->red) ----
+    fig <- add_gt_overlay_2d(fig, vp)
 
     fig %>% plotly::event_register('plotly_relayout')
   })
@@ -6261,6 +6458,44 @@ smlm_server <- function(input, output, session) {
         }
       }
     }
+
+    # ---- Estimated ground-truth candidates (hollow spheres, green->red) ----
+    ge_3d <- gt_estimate()
+    if (!is.null(ge_3d) && nrow(ge_3d$points)) {
+      gpts <- ge_3d$points
+      lo3  <- ge_3d$meta$link_nm %||% 0
+      hi3  <- max(ge_3d$meta$footprint_nm %||% 0, 2 * lo3,
+                  stats::quantile(gpts$pos_sd_nm, 0.9, na.rm = TRUE))
+      col3 <- gt_uncertainty_colors(gpts$pos_sd_nm, lo3, hi3)
+      sz3  <- suppressWarnings(as.numeric(input$gt_circle_size))
+      sz3  <- if (!is.finite(sz3) || sz3 <= 0) 7 else max(3, sz3 * 0.5)
+      txt3 <- sprintf("GT candidate<br>± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
+                      gpts$pos_sd_nm, ifelse(gpts$fused, " (fused: multiple GTs)", ""),
+                      gpts$n_units, gpts$n_tid, gpts$n_loc)
+
+      # Contribution fan-out lines in 3D.
+      if (isTRUE(input$gt_show_lines %||% TRUE) && !is.null(ge_3d$links) && nrow(ge_3d$links)) {
+        lk <- ge_3d$links
+        lx <- as.vector(rbind(lk$ux, lk$gx, NA_real_))
+        ly <- as.vector(rbind(lk$uy, lk$gy, NA_real_))
+        lz <- as.vector(rbind(lk$uz, lk$gz, NA_real_))
+        line_col <- if (isTRUE(input$dark_mode)) "rgba(255,255,255,0.35)" else "rgba(0,0,0,0.35)"
+        fig <- fig %>% plotly::add_trace(
+          x = lx, y = ly, z = lz, type = "scatter3d", mode = "lines",
+          line = list(color = line_col, width = 2), name = "GT contributions",
+          showlegend = TRUE, inherit = FALSE, hoverinfo = "skip"
+        )
+      }
+      fig <- fig %>% plotly::add_trace(
+        x = gpts$x, y = gpts$y, z = gpts$z,
+        type = "scatter3d", mode = "markers",
+        marker = list(symbol = "circle-open", size = sz3,
+                      color = col3, line = list(color = col3, width = 2)),
+        name = "Estimated GT", showlegend = TRUE, inherit = FALSE,
+        text = txt3, hoverinfo = "text"
+      )
+    }
+
     fig %>% plotly::event_register('plotly_relayout')
   })
 

@@ -168,7 +168,11 @@ Subsample the fine ground-truth path the MINFLUX way:
   hemispherical-cap reflect for the rod). A **Surface / Volume** selector. The CVE round-trip uses
   d = min(motion-DOF, observed axes) — 2 for surface, 3 for volume, capped to 2 under 2D
   projection. Validated: D recovered 97–101% of truth across all 6 geometry×mode combos.
-  *Still pending in Phase 2:* membrane-plane patch, cytoplasmic slab/half-space.
+- **Phase 2b (DONE 2026-07-12):** **Membrane plane** (flat XY sheet with a thickness; 2D lateral
+  diffusion, z wobbles within the thickness) and **Free diffusion (no boundaries)** (unbounded 3D).
+  Both FLAT → recover D at 99–101% in *both* 3D and 2D (no projection bias) — the clean contrast to
+  the curved cylinder's 75%. A **geometric bias factor** read-out (recovered/truth) is shown in the
+  summary so the projection correction can be lifted directly. *Still pending:* cytoplasmic slab.
 - **Phase 3 (DONE 2026-07-12):** motion modifiers on top of any geometry×mode via a unified
   geometry framework (project / reflect / normal). **Confined** = OU harmonic tether to a per-track
   home (validated: stationary SD per DOF = L_c exactly; total MSD plateau = 2·d·L_c²). **Directed**

@@ -1,6 +1,6 @@
-# MINFLUX Tracking Analysis — Literature & Method-Appropriateness Review
+# MINFLUX Analysis — Literature & Method-Appropriateness Review
 
-*Reference document for the tracking-analysis module of Mini-MINFLUXR.*
+*Reference document for the analysis modules of Mini-MINFLUXR (Tracking §1–5, SMLM/imaging §6).*
 Last reviewed: 2026-07 · Compiled from verified primary literature (see [Bibliography](#bibliography)).
 
 This document (1) records **which analysis tools are ported from which researchers** so the work is
@@ -207,6 +207,82 @@ MINFLUX* and exploratory, with a free-diffusion honesty note on the Linear resul
 
 ---
 
+## 6. SMLM (imaging) analysis tools — sources & appropriateness
+
+The SMLM tab applies established single-molecule-localization-microscopy (SMLM) and spatial
+point-pattern methods to MINFLUX localizations. MINFLUX-specific method development for *imaging*
+statistics barely exists, so the honest position is: **the estimators are standard; the MINFLUX
+caveat is the labelling/blinking geometry**, not the estimator maths.
+
+### 6.0 The pervasive caveat — labelling & blinking inflate every spatial statistic — 🟡 AMBER
+A single molecule is reported as several localizations: fluorophores blink and re-appear, and a
+multivalent antibody label scatters several dyes ~10–40 nm around one epitope. This **over-counts and
+spatially spreads** each molecule, which inflates short-range nearest-neighbour peaks, Ripley/PCF
+signal, and apparent cluster counts as a *label artefact*, not biology (Annibale et al. 2011;
+Sengupta et al. 2011; Veatch et al. 2012). **Our handling:** the "median (de-blinked) clustering"
+tier collapses localizations → trace → primary cluster → median cluster before spatial statistics,
+which removes most multi-blink over-counting; results on *raw* localizations should be read with this
+bias in mind. This is a mitigation, not a cure (it cannot recover true molecule count below the label
+footprint).
+
+### 6.1 Nearest-neighbour, DBSCAN/HDBSCAN/OPTICS clustering — 🟢 GREEN (method)
+- **Source:** Clark & Evans 1954 (NN statistic); Ester, Kriegel, Sander & Xu 1996 (DBSCAN);
+  Ankerst et al. 1999 (OPTICS); Campello, Moulavi & Sander 2013 (HDBSCAN).
+- **Fit:** density-based clustering is well-adapted to SMLM and widely used; DBSCAN in particular is a
+  community standard. MINFLUX's fine precision *helps*. The only caveat is §6.0 (feed de-blinked
+  medians, tune eps to the label footprint).
+
+### 6.2 Ripley's L(r), bivariate L₁₂(r), pair cross-correlation g₁₂(r) — 🟢 GREEN (method) / 🟡 (labelling)
+- **Source:** Ripley 1977; Besag 1977 (L-transform); Lotwick & Silverman 1982 and Dixon 2002
+  (bivariate/cross statistics); Sengupta et al. 2011 (PC-PALM) and Veatch et al. 2012 (correlation
+  functions, over-counting) for the SMLM pair-correlation lineage.
+- **Fit:** correct point-pattern estimators. The §6.0 labelling bias is the dominant confound — PC-PALM
+  was *designed* to separate multiple appearances of one protein from real clusters, so citing it also
+  signals the correct mitigation.
+
+### 6.3 Radius of gyration / gyration-tensor anisotropy — 🟢 GREEN
+- **Source:** standard second-moment cluster size; anisotropy eigenvalue coefficients Rudnick & Gaspari
+  1986; linear/planar/spherical coefficients Westin et al. 1997/2002.
+
+### 6.4 KDE density map + Pearson co-localization — 🟡 AMBER
+- **Source:** kernel density estimation (Silverman 1986); Pearson correlation of two density surfaces as
+  a co-localization index (cf. Dunn et al. 2011).
+- **Caveat:** the Pearson r is strongly bandwidth-dependent (small bandwidth → r≈0 even for true
+  co-localization; large → inflated). Already stated in-UI; treat as a *relative* measure.
+
+### 6.5 Cluster shape fitting (viewer) — 🟠 EXPLORATORY
+- **Method (standard):** orthogonal-distance MLE + AICc/BIC model selection (Akaike 1974; Schwarz 1978;
+  Hurvich & Tsai 1989).
+- **Why exploratory:** the shape dictionary (sphere/ellipsoid/helix/ring/arc) is imposed by this tool and
+  the "best" shape is a model-selection outcome, not proof of biological geometry; with few,
+  blinking-inflated points several shapes are statistically indistinguishable.
+
+### 6.6 Ground-truth position/count estimate & structure size — 🟠 EXPLORATORY
+- Labelling-model inverse developed in this tool, validated *in silico* against the simulator. Contour
+  via minimum-spanning-tree (Prim 1957); anisotropy coefficients as §6.3. Reported as a range, not a
+  single number, below the labelling resolution. See memory `project_gt_estimator`.
+
+### 6.7 Detection-over-time / crowding-vs-timing / NN-vs-size — 🟠 EXPLORATORY
+- Bespoke descriptive diagnostics of this tool with **no published MINFLUX equivalent**. They are
+  correlational, not causal: detection timing and crowding co-vary with photobleaching, blinking and
+  labelling, so a trend is a hypothesis for controls, not a measurement. The detection-rate decay used
+  to calibrate the simulator is characterised empirically from in-house acquisitions (memory
+  `reference_minflux_detection_rate`), not from a publication.
+
+### SMLM summary
+
+| Tool | Source | Rating |
+|---|---|---|
+| NN / DBSCAN / HDBSCAN / OPTICS | Clark & Evans 1954; Ester 1996; Ankerst 1999; Campello 2013 | 🟢 (feed de-blinked) |
+| Ripley L / L₁₂ / PCF g₁₂ | Ripley 1977; Besag 1977; Lotwick & Silverman 1982; Dixon 2002; Sengupta 2011; Veatch 2012 | 🟢 / 🟡 labelling |
+| Radius of gyration / anisotropy | Rudnick & Gaspari 1986; Westin 1997/2002 | 🟢 |
+| KDE + Pearson co-loc | Silverman 1986; Dunn 2011 | 🟡 bandwidth |
+| Shape fitting | Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989 | 🟠 exploratory |
+| GT estimate & structure size | this tool (in-silico validated); Prim 1957 | 🟠 exploratory |
+| Detection-time / crowding / NN-vs-size | this tool | 🟠 exploratory |
+
+---
+
 ## 4. Bibliography
 
 **MINFLUX microscopy & tracking**
@@ -245,6 +321,27 @@ MINFLUX* and exploratory, with a free-diffusion honesty note on the Linear resul
 32. English BP, Hauryliuk V, Sanamrad A, et al. (2011). *Single-molecule investigations of the stringent response machinery in living bacterial cells.* PNAS 108:E365–E373. doi:10.1073/pnas.1102255108
 33. Bakshi S, Bratton BP, Weisshaar JC (2011). *Subdiffraction-limit study of Kaede diffusion and spatial distribution in live Escherichia coli.* Biophys. J. 101:2535–2544. doi:10.1016/j.bpj.2011.10.013
 34. Sadoon AA, Wang Y (2018). *Anomalous, non-Gaussian, viscoelastic, and age-dependent dynamics of histone-like nucleoid-structuring proteins in live E. coli.* Phys. Rev. E 98:042411. doi:10.1103/PhysRevE.98.042411 *(experimental/non-standard, noted for contrast)*
+
+**SMLM / imaging spatial-analysis methods (§6)**
+35. Clark PJ, Evans FC (1954). *Distance to nearest neighbor as a measure of spatial relationships in populations.* Ecology 35:445–453. doi:10.2307/1931034
+36. Ester M, Kriegel HP, Sander J, Xu X (1996). *A density-based algorithm for discovering clusters in large spatial databases with noise* (DBSCAN). KDD-96:226–231.
+37. Ankerst M, Breunig MM, Kriegel HP, Sander J (1999). *OPTICS: Ordering points to identify the clustering structure.* ACM SIGMOD Record 28(2):49–60. doi:10.1145/304181.304187
+38. Campello RJGB, Moulavi D, Sander J (2013). *Density-based clustering based on hierarchical density estimates* (HDBSCAN). PAKDD 2013, LNCS 7819:160–172. doi:10.1007/978-3-642-37456-2_14
+39. Ripley BD (1977). *Modelling spatial patterns.* J. R. Stat. Soc. B 39(2):172–212.
+40. Besag J (1977). *Contribution to the discussion of Dr Ripley's paper* (the L-transform of K). J. R. Stat. Soc. B 39:193–195.
+41. Lotwick HW, Silverman BW (1982). *Methods for analysing spatial processes of several types of points.* J. R. Stat. Soc. B 44(3):406–413.
+42. Dixon PM (2002). *Ripley's K function.* In: Encyclopedia of Environmetrics, Wiley. doi:10.1002/9780470057339.var046
+43. Sengupta P, Jovanovic-Talisman T, Skoko D, et al. (2011). *Probing protein heterogeneity in the plasma membrane using PALM and pair correlation analysis* (PC-PALM). Nature Methods 8:969–975. doi:10.1038/nmeth.1704
+44. Veatch SL, Machta BB, Shelby SA, et al. (2012). *Correlation functions quantify super-resolution images and estimate apparent clustering due to over-counting.* PLoS ONE 7:e31457. doi:10.1371/journal.pone.0031457
+45. Annibale P, Vanni S, Scarselli M, Rothlisberger U, Radenovic A (2011). *Identification of clustering artifacts in photoactivated localization microscopy.* Nature Methods 8:527–528. doi:10.1038/nmeth.1627
+46. Silverman BW (1986). *Density Estimation for Statistics and Data Analysis.* Chapman & Hall.
+47. Dunn KW, Kamocka MM, McDonald JH (2011). *A practical guide to evaluating colocalization in biological microscopy.* Am. J. Physiol. Cell Physiol. 300:C723–C742. doi:10.1152/ajpcell.00462.2010
+48. Akaike H (1974). *A new look at the statistical model identification.* IEEE Trans. Autom. Control 19(6):716–723. doi:10.1109/TAC.1974.1100705
+49. Schwarz G (1978). *Estimating the dimension of a model* (BIC). Ann. Stat. 6(2):461–464. doi:10.1214/aos/1176344136
+50. Hurvich CM, Tsai CL (1989). *Regression and time series model selection in small samples* (AICc). Biometrika 76(2):297–307. doi:10.1093/biomet/76.2.297
+51. Rudnick J, Gaspari G (1986). *The asphericity of random walks.* J. Phys. A: Math. Gen. 19:L191–L193. doi:10.1088/0305-4470/19/4/004
+52. Westin CF, Peled S, Gudbjartsson H, Kikinis R, Jolesz FA (1997). *Geometrical diffusion measures for MRI from tensor basis analysis.* ISMRM 1997. (planar/linear/spherical anisotropy coefficients; see also Westin et al. 2002, Med. Image Anal. 6:93–108.)
+53. Prim RC (1957). *Shortest connection networks and some generalizations* (minimum spanning tree). Bell Syst. Tech. J. 36(6):1389–1401. doi:10.1002/j.1538-7305.1957.tb01515.x
 
 **Reviews**
 22. Saxton MJ, Jacobson K (1997). *Single-Particle Tracking: Applications to Membrane Dynamics.* Annu. Rev. Biophys. Biomol. Struct. 26:373–399. doi:10.1146/annurev.biophys.26.1.373

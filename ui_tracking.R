@@ -711,6 +711,18 @@ tracking_ui <- fluidPage(
                 tags$b("Directed"), " fits Brownian + drift → D + velocity v. ",
                 tags$b("Anomalous"), " fits MSD = Dτ^α (α<1 sub-diffusive/confined, α>1 directed). ",
                 "Non-linear models fit the whole [lower, upper] window; apply on Plot MSD."),
+              conditionalPanel(
+                condition = "input.trk_uni_model != 'linear'",
+                div(style = "margin-top:4px;padding:5px 8px;border-left:3px solid #e67e22;background:rgba(230,126,34,0.06);font-size:11px;color:#7f8c8d;line-height:1.4;",
+                    HTML(paste0(
+                      "<b style='color:#e67e22;'>Exploratory.</b> Confined / directed / anomalous MSD ",
+                      "combined with MINFLUX irregular cycle-time sampling is beyond the standard, ",
+                      "literature-validated free-diffusion workflow (Vogler et&nbsp;al. 2025 build the ",
+                      "irregular-Δt machinery but apply it only to free diffusion; their toolbox flags ",
+                      "anomalous/confined as “implement on your own”). The model forms are standard ",
+                      "(Kusumi et&nbsp;al. 1993 corral; Metzler et&nbsp;al. 2014 power-law) but their fit to short, ",
+                      "cycle-skipped MINFLUX tracks is not validated — treat L, v and α as exploratory. ",
+                      "See docs/MINFLUX_analysis_methods.md §3a.")))),
               checkboxInput("trk_uni_iterative",
                             "Iterative OLSF (converges on lowest lags)", TRUE),
               helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",

@@ -8,6 +8,82 @@ get_ext <- function(filename) {
   tolower(sub("^.*\\.", "", filename))
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Labeling-method presets — SINGLE SOURCE OF TRUTH.
+# Used by the Simulator (forward model: GT -> traces) and by the SMLM tab's
+# inverse GT-estimator (traces -> candidate GT). Keeping one table means the
+# estimator inverts exactly the numbers the simulator generated with.
+#
+#   n_fluor       mean fluorophores per labeled molecule (Poisson-drawn, min 1)
+#   link_nm       mean distance label-complex centre -> molecule centre (nm).
+#                 This is the COMMON-MODE, per-molecule offset shared by every
+#                 fluorophore/blink/localization of that molecule — the
+#                 irreducible position floor for single-molecule GT estimation.
+#   dye_spread_nm Gaussian SD of individual dye positions within the complex
+#   footprint_nm  approximate excluded-zone diameter around each labeled protein
+#   blink_lambda  mean EXTRA TID appearances per fluorophore (dye re-activation)
+# ─────────────────────────────────────────────────────────────────────────────
+minflux_label_presets <- function() {
+  list(
+    # -- Covalent / minimal-linkage tags --------------------------------------
+    "Direct tag (SNAP / Halo / Click, DOL=1)" = list(
+      n_fluor = 1L, link_nm = 3.5, dye_spread_nm = 0,
+      footprint_nm = 2,  blink_lambda = 0.2,
+      note    = "1 fluorophore / molecule — ~3.5 nm linkage (SNAP/Halo tag domain)"
+    ),
+    "Nanobody (DOL ≈1)" = list(
+      n_fluor = 1L, link_nm = 2.5, dye_spread_nm = 0,
+      footprint_nm = 3,  blink_lambda = 0.2,
+      note    = "1 fluorophore / molecule — ~2.5 nm (nanobody VHH domain)"
+    ),
+    # -- Primary monoclonal (1 antibody / epitope) ----------------------------
+    "Primary monoclonal IgG (DOL ≈1)" = list(
+      n_fluor = 1L, link_nm = 8, dye_spread_nm = 0,
+      footprint_nm = 10, blink_lambda = 0.3,
+      note    = "1 fluorophore / molecule — ~8 nm (IgG Fab arm to epitope)"
+    ),
+    "Primary monoclonal IgG (NHS, DOL ≈2–4)" = list(
+      n_fluor = 3L, link_nm = 8, dye_spread_nm = 4,
+      footprint_nm = 10, blink_lambda = 0.5,
+      note    = "~3 fluorophores on one IgG body (~4 nm spread) — ~8 nm from target"
+    ),
+    # -- Primary polyclonal (3-5 antibodies / antigen) ------------------------
+    "Primary polyclonal IgG (NHS, DOL ≈2–4)" = list(
+      n_fluor = 9L, link_nm = 8, dye_spread_nm = 9,
+      footprint_nm = 12, blink_lambda = 0.5,
+      note    = "~9 fluorophores across 3–5 Ab bodies (~9 nm spread) — ~8 nm from target"
+    ),
+    # -- Monoclonal + secondary -----------------------------------------------
+    "Primary monoclonal IgG + secondary nanobody" = list(
+      n_fluor = 2L, link_nm = 10.5, dye_spread_nm = 3,
+      footprint_nm = 10, blink_lambda = 0.4,
+      note    = "~2 fluorophores, nanobody on primary IgG — ~10.5 nm from target"
+    ),
+    "Primary monoclonal IgG + secondary IgG" = list(
+      n_fluor = 8L, link_nm = 20, dye_spread_nm = 12,
+      footprint_nm = 16, blink_lambda = 0.6,
+      note    = "~8 fluorophores across ~3 secondary IgG bodies (~12 nm spread) — ~20 nm from target"
+    ),
+    # -- Polyclonal + secondary -----------------------------------------------
+    "Primary polyclonal IgG + secondary IgG" = list(
+      n_fluor = 18L, link_nm = 20, dye_spread_nm = 18,
+      footprint_nm = 20, blink_lambda = 0.8,
+      note    = "~18 fluorophores, large complex (~18 nm spread) — ~20 nm from target"
+    ),
+    # -- Biotin-streptavidin --------------------------------------------------
+    "Streptavidin (biotinylated Ab + SA-dye)" = list(
+      n_fluor = 3L, link_nm = 15, dye_spread_nm = 3,
+      footprint_nm = 8,  blink_lambda = 0.4,
+      note    = "~3 fluorophores on SA tetramer (~3 nm spread) — ~15 nm from target"
+    ),
+    "Custom" = list(
+      n_fluor = NA_integer_, link_nm = NA_real_,
+      dye_spread_nm = NA_real_, footprint_nm = NA_real_,
+      blink_lambda = NA_real_, note = ""
+    )
+  )
+}
+
 # Read MINFLUX CSV (pyMINFLUX format); uses data.table::fread when available
 read_minflux_csv <- function(path) {
   if (requireNamespace("data.table", quietly = TRUE)) {

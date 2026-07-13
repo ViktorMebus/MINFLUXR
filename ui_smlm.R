@@ -1,6 +1,20 @@
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ui_smlm.R  —  SMLM analysis tab UI (assigned to smlm_ui)
 ## ─────────────────────────────────────────────────────────────────────────────
+
+# Small orange "EXPLORATORY" chip reused by bespoke / not-literature-validated
+# analysis panels (same visual language as the GT-estimation panel).
+.exploratory_badge <- function() {
+  tags$span("EXPLORATORY",
+            style = "margin-left:8px;font-size:10px;font-weight:700;color:#fff;background:#e67e22;border-radius:3px;padding:1px 5px;vertical-align:middle;")
+}
+
+# Short standardised footnote for an exploratory panel.
+.exploratory_note <- function(text) {
+  div(style = "margin-top:4px;padding:5px 8px;border-left:3px solid #e67e22;background:rgba(230,126,34,0.06);font-size:11px;color:#7f8c8d;line-height:1.4;",
+      HTML(paste0("<b style='color:#e67e22;'>Exploratory.</b> ", text)))
+}
+
 smlm_ui <- fluidPage(
   useShinyjs(),
   tags$head(tags$script(HTML("
@@ -904,6 +918,70 @@ smlm_ui <- fluidPage(
       ),  # /Median Clustering (Cluster2)
       tags$hr(),
 
+      ### Estimate ground-truth positions (labeling-aware inverse) ===
+      tags$details(class = "sim-group",
+        tags$summary(tags$b("Estimate Ground-Truth Positions"),
+                     tags$span("EXPLORATORY",
+                               style = "margin-left:8px;font-size:10px;font-weight:700;color:#fff;background:#e67e22;border-radius:3px;padding:1px 5px;vertical-align:middle;")),
+        helpText("Exploratory, model-based estimate (not a direct measurement). Reverse-engineers the labeling model to turn traces / median-clusters back into candidate ground-truth positions, an approximate count, and a crowding flag. Hollow circles are coloured green (low) → red (high) by position uncertainty. See the method/reference notes below the read-outs."),
+        checkboxInput("show_gt_estimate", "Show estimated GT candidates", value = FALSE),
+        conditionalPanel(
+          condition = "input.show_gt_estimate == true",
+          selectInput("gt_label_preset", "Labeling method (same presets as the Simulator)",
+                      choices  = names(minflux_label_presets()),
+                      selected = "Primary monoclonal IgG + secondary IgG"),
+          conditionalPanel(
+            condition = "input.gt_label_preset == 'Custom'",
+            numericInput("gt_fluor_custom",     "Fluorophores / molecule (mean)",     value = 1,  min = 1, step = 1),
+            numericInput("gt_link_custom",      "Linker length (nm)",                 value = 5,  min = 0, step = 0.5),
+            numericInput("gt_spread_custom",    "Dye spread within complex (nm)",     value = 0,  min = 0, step = 0.5),
+            numericInput("gt_footprint_custom", "Footprint / exclusion diam. (nm)",   value = 8,  min = 0, step = 1),
+            numericInput("gt_blink_custom",     "Extra blinks / fluorophore (mean)",  value = 0.3, min = 0, step = 0.1)
+          ),
+          sliderInput("gt_label_eff", "Labeling / detection efficiency (%)",
+                      min = 1, max = 100, value = 70, step = 1),
+          radioButtons("gt_model_level", "Model from",
+                       choices = c(
+                         "Auto (primary clusters if present, else TIDs)" = "auto",
+                         "Primary clusters (de-blinked)"                 = "primary",
+                         "Raw trace IDs"                                 = "tid"),
+                       selected = "auto"),
+          checkboxInput("gt_scope_cluster2",
+                        "Restrict to points inside median-clusters (cluster2)", value = TRUE),
+          helpText("Auto is recommended: primary clustering collapses re-blinks and multivalent labels to ~1 unit per molecule, turning an unstable divide-by-multiplicity count into a divide-by-~1 count."),
+          numericInput("gt_complex_r",
+                       "Label-complex merge radius (nm, blank = auto)",
+                       value = NA, min = 0, step = 5),
+          helpText("Traces / primary clusters within this radius are pooled into ONE candidate GT (a multivalent label scatters many fluorophores around one molecule). Blank = auto, set per labeling preset (max of footprint and 2.5 × dye spread) — big for polyclonal+secondary, tiny for a nanobody; 0 = no merge (one unit = one GT)."),
+          checkboxInput("gt_guided_merge",
+                        "Stoichiometry-guided merge (model-driven)", value = FALSE),
+          helpText("MODEL-DRIVEN: where the spatial merge leaves more GTs than the labeling stoichiometry predicts (TIDs ÷ expected TIDs-per-molecule), collapse further to that target. Only ever reduces the count toward stoichiometry, never splits. Use when the spatial and stoichiometric counts disagree — but treat the result as prior-driven, and always sanity-check against the two-count readout below."),
+          checkboxInput("gt_displace_inward",
+                        "Displace GT inward to structure (linker correction)", value = TRUE),
+          numericInput("gt_displace_nm",
+                       "Inward displacement (nm, blank = auto = linker length)",
+                       value = NA, min = 0, step = 1),
+          helpText("The antibody binds a surface epitope and the linker throws the dye OUTWARD, so the trace cloud sits ~linker-length outside the true structure. This pushes each GT back toward the local structure centre (perpendicular to a filament's axis; toward the centroid for a compact/ring shape). Needs median-clusters (cluster2) defined to know the structure."),
+          checkboxInput("gt_show_lines", "Draw contribution lines (unit → GT)", value = TRUE),
+          sliderInput("gt_circle_size", "GT marker size", min = 4, max = 40, value = 15, step = 1),
+          uiOutput("gt_estimate_readout"),
+          tags$hr(style = "margin:8px 0;"),
+          tags$b("Structure shape & size"),
+          checkboxInput("gt_show_shape",
+                        "Classify shape + measure size (contour, extent, spacing)", value = FALSE),
+          conditionalPanel(
+            condition = "input.gt_show_shape == true",
+            helpText("Infers each cluster's shape from the point distribution (filament / ring / punctum / sheet / diffuse) and reports neutral size descriptors: contour length, straight extent, width, radius of gyration, and the spacing between estimated points."),
+            numericInput("gt_subunit_spacing",
+                         "Assumed subunit spacing (nm, optional — blank = off)",
+                         value = NA, min = 0.1, step = 0.5),
+            helpText("Optional and generic: if your structure has a known periodic subunit spacing, a filament's contour length is divided by it to give an estimated subunit count. Leave blank for pure geometry."),
+            uiOutput("gt_morphology_readout")
+          )
+        )
+      ),
+      tags$hr(),
+
       ### Global reference plane / surface (3D only) ===
       conditionalPanel(
         condition = "input.mode3d == '3D'",
@@ -1139,7 +1217,7 @@ smlm_ui <- fluidPage(
       # ── Cluster2 Detection over Time ──────────────────────────────────────
       fluidRow(
         column(3,
-          h4("Median Clusters Detection over Time"),
+          h4("Median Clusters Detection over Time", .exploratory_badge()),
           helpText("Each trace (TID) is counted once at its median acquisition time (tim),",
                    "split into traces inside Median Cluster structures vs unclustered background.",
                    "Reveals how detection of structures vs background evolves over the acquisition",
@@ -1157,7 +1235,13 @@ smlm_ui <- fluidPage(
                    "(a crowding signature). The KS gap = max distance between the two cumulative curves."),
           checkboxInput("det_time_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
           actionButton("run_det_time", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
-          downloadButton("download_det_time", "Download", class = "btn-sm")
+          downloadButton("download_det_time", "Download", class = "btn-sm"),
+          .exploratory_note(paste(
+            "Bespoke diagnostic of this tool: there is no published MINFLUX detection-timing",
+            "estimator. The clustered-vs-background split and its KS gap are a descriptive comparison,",
+            "not a validated measurement; the drop-off is influenced by photobleaching, blinking and",
+            "labelling as well as crowding. The trace-detection-rate decay itself is characterised",
+            "empirically from in-house long acquisitions and used only to calibrate the simulator."))
         ),
         column(9,
           plotlyOutput("det_time_plot", height = "400px")
@@ -1169,7 +1253,7 @@ smlm_ui <- fluidPage(
       # ── Cluster2 Crowding vs Detection-Time Shift ─────────────────────────
       fluidRow(
         column(3,
-          h4("Median Clusters Crowding vs Detection-Time Shift"),
+          h4("Median Clusters Crowding vs Detection-Time Shift", .exploratory_badge()),
           helpText("One point per Median Cluster structure.",
                    "Crowding = median nearest-neighbour distance among the cluster's trace centroids",
                    "(smaller = more crowded). Detection-time shift = the cluster's median detection time (tim)",
@@ -1182,7 +1266,11 @@ smlm_ui <- fluidPage(
           checkboxInput("crowd_trend", "Show trend (loess)", value = TRUE),
           checkboxInput("crowd_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
           actionButton("run_crowd", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
-          downloadButton("download_crowd", "Download", class = "btn-sm")
+          downloadButton("download_crowd", "Download", class = "btn-sm"),
+          .exploratory_note(paste(
+            "Bespoke correlational diagnostic, not a published estimator. A crowding-vs-timing",
+            "association is descriptive only: density co-varies with labelling, structure size and",
+            "local photophysics, so a trend is a hypothesis to test with controls, not a causal result."))
         ),
         column(9,
           plotlyOutput("crowd_plot", height = "420px")
@@ -1194,7 +1282,7 @@ smlm_ui <- fluidPage(
       # ── Within-Cluster2 NN vs Cluster Size ────────────────────────────────
       fluidRow(
         column(3,
-          h4("Within Median Clusters NN vs Cluster Size"),
+          h4("Within Median Clusters NN vs Cluster Size", .exploratory_badge()),
           helpText("One point per Median Cluster structure across all files.",
                    "Y = median over members of each member's mean distance to its k nearest member",
                    "centroids (k = 1 is nearest-neighbour spacing; centroids are trace-ID medians,",
@@ -1214,7 +1302,12 @@ smlm_ui <- fluidPage(
           checkboxInput("size_nn_trend", "Show trend (loess)", value = TRUE),
           checkboxInput("size_nn_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
           actionButton("run_size_nn", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
-          downloadButton("download_size_nn", "Download", class = "btn-sm")
+          downloadButton("download_size_nn", "Download", class = "btn-sm"),
+          .exploratory_note(paste(
+            "Bespoke scaling diagnostic. The building blocks (k-NN spacing, convex-hull size) are",
+            "standard, but reading the NN-vs-size slope as 'ballooning' vs 'densifying' is an",
+            "interpretation specific to this tool and is confounded by the clustering choice",
+            "(under DBSCAN the within-cluster NN is bounded by the link radius eps2)."))
         ),
         column(9,
           plotlyOutput("size_nn_plot", height = "420px")
@@ -1226,7 +1319,7 @@ smlm_ui <- fluidPage(
       # ── Cluster Viewer (2D / 3D + shape fit) ──────────────────────────────
       fluidRow(
         column(3,
-          h4("Cluster Viewer and Shape Fitting"),
+          h4("Cluster Viewer and Shape Fitting", .exploratory_badge()),
           helpText("Inspect individual Median Cluster structures in the active (plotted) file.",
                    "Press Run to load the current clusters, then step through them; view raw 3D or a",
                    "PCA-normalized 2D projection (PC1 vs PC2 — most differential axes; PCA runs in 3D",
@@ -1258,7 +1351,14 @@ smlm_ui <- fluidPage(
                                     "Sphere" = "sphere", "Ellipsoid" = "ellipsoid",
                                     "Helix" = "helix", "Ring" = "ring", "Arc" = "arc"),
                         selected = "best"),
-            tableOutput("viewer_rmsd_table")
+            tableOutput("viewer_rmsd_table"),
+            .exploratory_note(paste(
+              "The fitting machinery is standard — orthogonal-distance MLE with AICc/BIC model",
+              "selection (Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989) — but the shape",
+              "dictionary (sphere / ellipsoid / helix / ring / arc) is imposed by this tool and the",
+              "'best' shape is a model-selection outcome, not a proof of biological geometry. With",
+              "few, blinking-inflated localisations several shapes are often statistically",
+              "indistinguishable; treat the ranking as a hypothesis."))
           )
         ),
         column(9,
@@ -1508,6 +1608,59 @@ smlm_ui <- fluidPage(
         )
       ),
 
+      tags$br(),
+
+      # ── Methods & References (consolidated citation box) ──────────────────────
+      # Provenance for the SMLM spatial-analysis tools. Panels flagged EXPLORATORY
+      # (orange) are bespoke to this tool and not literature-validated for MINFLUX.
+      tags$details(
+        style = "margin:8px 0 16px; font-size:0.85em; color:#444;",
+        tags$summary(style = "cursor:pointer; font-weight:bold; color:#2c3e50;",
+                     "Methods & References"),
+        tags$div(style = "padding:8px 4px 4px 12px;",
+          tags$p(style = "color:#666; margin:0 0 6px;",
+            "Primary reference for each spatial-analysis tool. MINFLUX is recent and has little",
+            "method development of its own, so most tools are well-established SMLM / point-pattern",
+            "methods applied to MINFLUX localizations. Panels marked ",
+            tags$span("EXPLORATORY", style = "color:#e67e22; font-weight:700;"),
+            " are bespoke to this tool and are not validated against the literature."),
+          tags$table(style = "border-collapse:collapse; line-height:1.5;",
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Nearest-neighbour")),
+                    tags$td("Clark & Evans 1954 (nearest-neighbour distance statistic)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("DBSCAN / HDBSCAN / OPTICS")),
+                    tags$td("Ester, Kriegel, Sander & Xu 1996 (DBSCAN); Ankerst, Breunig, Kriegel & Sander 1999 (OPTICS); Campello, Moulavi & Sander 2013 (HDBSCAN)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Median (de-blinked) clustering")),
+                    tags$td("Two-tier grouping (localizations → trace → primary cluster → median cluster) collapses multi-blink / multivalent overcounting before clustering — an adaptation for MINFLUX/SMLM in the spirit of Annibale et al. 2011; Sengupta et al. 2011 (PC-PALM)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Radius of gyration")),
+                    tags$td("Standard second-moment cluster size (gyration tensor); anisotropy after Rudnick & Gaspari 1986")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Ripley's L(r)")),
+                    tags$td("Ripley 1977; variance-stabilising L-transform, Besag 1977")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Bivariate Ripley L₁₂(r)")),
+                    tags$td("Lotwick & Silverman 1982; Dixon 2002 (bivariate/cross point-pattern statistics)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Pair cross-correlation g₁₂(r)")),
+                    tags$td("Sengupta et al. 2011 (PC-PALM); Veatch et al. 2012 (correlation functions / over-counting)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("KDE density + Pearson co-loc")),
+                    tags$td("Kernel density estimate (Silverman 1986); Pearson coefficient as a bandwidth-dependent, relative co-localization measure (cf. Dunn et al. 2011)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Shape fitting (viewer)")),
+                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                            " — orthogonal-distance MLE with AICc/BIC model selection (Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989); the shape dictionary and biological reading are bespoke")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Ground-truth estimate & structure size")),
+                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                            " — labelling-model inverse (this tool), validated in silico against the simulator; contour via MST (Prim 1957), anisotropy coefficients (Westin et al. 1997/2002)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Detection-time / crowding / NN-vs-size")),
+                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                            " — descriptive diagnostics of this tool with no published MINFLUX equivalent; correlational, not causal"))
+          ),
+          tags$p(style = "color:#888; margin:8px 0 0; font-size:0.95em;",
+            tags$b("MINFLUX caveat for all spatial statistics: "),
+            "multi-blink and multivalent-antibody labelling scatter several localizations around one",
+            "molecule, which inflates short-range clustering, NN peaks and pair-correlation signal as a",
+            "label artefact rather than biology (Annibale et al. 2011; Sengupta et al. 2011). Working from",
+            "median (de-blinked) clusters mitigates this; results on raw localizations should be read with",
+            "that bias in mind. MINFLUX foundational: Balzarotti et al. 2017; Gwosch et al. 2020; ",
+            "Ostersehlt et al. 2022 (DNA-PAINT MINFLUX).")
+        )
+      )
     )  # end tabPanel("Analysis")
 
   )  # end tabsetPanel

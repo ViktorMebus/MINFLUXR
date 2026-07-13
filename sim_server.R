@@ -618,74 +618,9 @@ sim_server <- function(input, output, session) {
   # complex (around the shared complex-centre displaced by link_nm).
   # n_fluor > 1 on the SAME complex → dyes cluster within dye_spread_nm;
   # each molecule's complex is displaced independently by link_nm.
-  LABEL_PRESETS <- list(
-
-    # ── Covalent / minimal-linkage tags ─────────────────────────────────────
-    # footprint_nm:  approximate excluded-zone diameter around each labeled protein.
-    #                If mean protein spacing < footprint_nm, steric exclusion is likely.
-    # blink_lambda:  mean extra TID appearances per fluorophore from dye re-activation.
-    "Direct tag (SNAP / Halo / Click, DOL=1)" = list(
-      n_fluor = 1L, link_nm = 3.5, dye_spread_nm = 0,
-      footprint_nm = 2,  blink_lambda = 0.2,
-      note    = "1 fluorophore / molecule \u2014 ~3.5 nm linkage (SNAP/Halo tag domain)"
-    ),
-    "Nanobody (DOL \u22481)" = list(
-      n_fluor = 1L, link_nm = 2.5, dye_spread_nm = 0,
-      footprint_nm = 3,  blink_lambda = 0.2,
-      note    = "1 fluorophore / molecule \u2014 ~2.5 nm (nanobody VHH domain)"
-    ),
-
-    # ── Primary monoclonal (1 antibody / epitope) ────────────────────────────
-    "Primary monoclonal IgG (DOL \u22481)" = list(
-      n_fluor = 1L, link_nm = 8, dye_spread_nm = 0,
-      footprint_nm = 10, blink_lambda = 0.3,
-      note    = "1 fluorophore / molecule \u2014 ~8 nm (IgG Fab arm to epitope)"
-    ),
-    "Primary monoclonal IgG (NHS, DOL \u22482\u20134)" = list(
-      n_fluor = 3L, link_nm = 8, dye_spread_nm = 4,
-      footprint_nm = 10, blink_lambda = 0.5,
-      note    = "~3 fluorophores on one IgG body (~4 nm spread) \u2014 ~8 nm from target"
-    ),
-
-    # ── Primary polyclonal (3–5 antibodies / antigen) ────────────────────────
-    "Primary polyclonal IgG (NHS, DOL \u22482\u20134)" = list(
-      n_fluor = 9L, link_nm = 8, dye_spread_nm = 9,
-      footprint_nm = 12, blink_lambda = 0.5,
-      note    = "~9 fluorophores across 3\u20135 Ab bodies (~9 nm spread) \u2014 ~8 nm from target"
-    ),
-
-    # ── Monoclonal + secondary ───────────────────────────────────────────────
-    "Primary monoclonal IgG + secondary nanobody" = list(
-      n_fluor = 2L, link_nm = 10.5, dye_spread_nm = 3,
-      footprint_nm = 10, blink_lambda = 0.4,
-      note    = "~2 fluorophores, nanobody on primary IgG \u2014 ~10.5 nm from target"
-    ),
-    "Primary monoclonal IgG + secondary IgG" = list(
-      n_fluor = 8L, link_nm = 20, dye_spread_nm = 12,
-      footprint_nm = 16, blink_lambda = 0.6,
-      note    = "~8 fluorophores across ~3 secondary IgG bodies (~12 nm spread) \u2014 ~20 nm from target"
-    ),
-
-    # ── Polyclonal + secondary ───────────────────────────────────────────────
-    "Primary polyclonal IgG + secondary IgG" = list(
-      n_fluor = 18L, link_nm = 20, dye_spread_nm = 18,
-      footprint_nm = 20, blink_lambda = 0.8,
-      note    = "~18 fluorophores, large complex (~18 nm spread) \u2014 ~20 nm from target"
-    ),
-
-    # ── Biotin–streptavidin ──────────────────────────────────────────────────
-    "Streptavidin (biotinylated Ab + SA-dye)" = list(
-      n_fluor = 3L, link_nm = 15, dye_spread_nm = 3,
-      footprint_nm = 8,  blink_lambda = 0.4,
-      note    = "~3 fluorophores on SA tetramer (~3 nm spread) \u2014 ~15 nm from target"
-    ),
-
-    "Custom" = list(
-      n_fluor = NA_integer_, link_nm = NA_real_,
-      dye_spread_nm = NA_real_, footprint_nm = NA_real_,
-      blink_lambda = NA_real_, note = ""
-    )
-  )
+  # Single source of truth lives in helpers_shared.R so the SMLM tab's inverse
+  # GT-estimator inverts exactly the numbers this forward model generates with.
+  LABEL_PRESETS <- minflux_label_presets()
 
   # Expand labeled molecules to individual fluorophore positions.
   # eff_pct:       labeling efficiency (% of molecules that get labeled)
@@ -2936,7 +2871,10 @@ sim_server <- function(input, output, session) {
     set.seed(as.integer(input$sim_trk_seed %||% 1L))
     geom     <- input$sim_trk_geom %||% "rod"
     mode     <- input$sim_trk_mode %||% "surface"      # surface | volume (intracellular)
-    d_mot    <- if (identical(mode, "volume")) 3L else 2L   # motion DOF (used by the CVE check)
+    mthick   <- max(0, as.numeric(input$sim_trk_mthick %||% 6))              # membrane thickness (nm)
+    # motion DOF (used by the CVE check): free=3, membrane=2 (lateral), else surface=2/volume=3
+    d_mot    <- if (identical(geom, "free")) 3L else if (identical(geom, "membrane")) 2L
+                else if (identical(mode, "volume")) 3L else 2L
     D_um2_s  <- max(0, as.numeric(input$sim_trk_D %||% 0.05))
     D_nm2ms  <- D_um2_s * 1000                        # µm²/s → nm²/ms
     n_trk    <- max(1L, as.integer(input$sim_trk_ntracks %||% 200L))
@@ -2997,20 +2935,31 @@ sim_server <- function(input, output, session) {
     kswitch <- min(1, max(0, as.numeric(input$sim_trk_kswitch %||% 0.03)))  # per-cycle state-switch prob
     tau_c   <- if (D_nm2ms > 0) L_c^2 / D_nm2ms else Inf             # OU relaxation time (ms)
     phi_c   <- exp(-cyc / tau_c)                                     # per-cycle mean-reversion factor
-    drift0  <- if (is_rod) c(1,0,0) else { v <- rnorm(3); v/sqrt(sum(v^2)) }   # rod drift ∥ long axis
+    drift0  <- if (is_rod) c(1,0,0)                                          # rod drift ∥ long axis
+               else if (identical(geom, "membrane")) { a <- runif(1, 0, 2*pi); c(cos(a), sin(a), 0) }  # in-plane
+               else { v <- rnorm(3); v/sqrt(sum(v^2)) }
 
+    is_free <- identical(geom, "free"); is_mem <- identical(geom, "membrane")
     gen_path <- function(n_cyc) {
       surface <- identical(mode, "surface")
-      p <- if (surface) geo_rand_surf() else geo_rand_in(); home <- p; st <- 1L
+      p <- if (is_free) c(0,0,0)
+           else if (is_mem) c(0, 0, if (mthick > 0) runif(1, -mthick/2, mthick/2) else 0)
+           else if (surface) geo_rand_surf() else geo_rand_in()
+      home <- p; st <- 1L
       pos <- matrix(NA_real_, n_cyc, 3); pos[1,] <- p; states <- integer(n_cyc); states[1] <- 1L
       for (i in 2:n_cyc) {
         Dstep <- if (identical(motion,"twostate") && st == 0L) D_nm2ms * 0.01 else D_nm2ms
         sdi   <- sqrt(2 * Dstep * cyc)
-        if (surface) { g <- rnorm(3,0,sdi); nn <- geo_normal(p); p2 <- p + (g - sum(g*nn)*nn) }  # tangent step
-        else         { p2 <- p + rnorm(3,0,sdi) }
+        if (is_free)      { p2 <- p + rnorm(3, 0, sdi) }                    # unbounded 3D
+        else if (is_mem)  { p2 <- p + c(rnorm(2, 0, sdi), 0) }              # 2D lateral (z handled below)
+        else if (surface) { g <- rnorm(3,0,sdi); nn <- geo_normal(p); p2 <- p + (g - sum(g*nn)*nn) }  # tangent step
+        else              { p2 <- p + rnorm(3,0,sdi) }                      # 3D volume
         if (identical(motion,"directed")) p2 <- p2 + drift0 * v_nmms * cyc
-        if (identical(motion,"confined")) p2 <- home + (p2 - home) * phi_c                       # OU pull to home
-        p  <- if (surface) geo_project(p2) else geo_reflect(p2)
+        if (identical(motion,"confined")) p2 <- home + (p2 - home) * phi_c  # OU pull to home
+        p  <- if (is_free) p2
+              else if (is_mem) c(p2[1], p2[2],                              # keep z within the membrane thickness
+                                 if (mthick > 0) max(-mthick/2, min(mthick/2, p[3] + rnorm(1, 0, sdi * 0.2))) else 0)
+              else if (surface) geo_project(p2) else geo_reflect(p2)
         if (identical(motion,"twostate") && runif(1) < kswitch) st <- 1L - st
         pos[i,] <- p; states[i] <- st
       }
@@ -3138,8 +3087,9 @@ sim_server <- function(input, output, session) {
       directed = sprintf("directed (v = %.3g µm/s)", res$v_nmms),
       twostate = "two-state (mobile↔immobile)",
       "free")
-    geom_lbl <- sprintf("%s · %s · %s%s", res$geom %||% "?",
-                        if (identical(res$mode, "volume")) "volume (intracellular)" else "surface",
+    mode_lbl <- if ((res$geom %||% "") %in% c("free","membrane")) ""
+                else if (identical(res$mode, "volume")) " · volume (intracellular)" else " · surface"
+    geom_lbl <- sprintf("%s%s · %s%s", res$geom %||% "?", mode_lbl,
                         motion_lbl, if (isTRUE(res$surv)) sprintf(" · survivorship R=%.0fnm", res$R_reacq) else "")
     htmltools::div(style = "font-size:0.9em; color:#333; margin-top:8px;",
       htmltools::tags$table(style = "border-collapse:collapse;",
@@ -3151,6 +3101,12 @@ sim_server <- function(input, output, session) {
           htmltools::tags$td(htmltools::tags$b(sprintf("%.4g µm²/s", res$D_um2_s)))),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Recovered D (CVE round-trip)"),
           htmltools::tags$td(recov)),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Geometric bias factor"),
+          htmltools::tags$td(if (!is.null(cve) && is.finite(cve$D_um2_s) && res$D_um2_s > 0) {
+            bf <- cve$D_um2_s / res$D_um2_s
+            htmltools::tags$span(style = if (abs(bf - 1) > 0.05) "color:#b26a00;font-weight:bold;" else "",
+              sprintf("%.2f×  →  divide apparent D by %.2f to correct", bf, bf))
+          } else "—")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Recovered σ_loc"),
           htmltools::tags$td(if (!is.null(cve)) sprintf("%.2f nm", cve$sigma_nm) else "—")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Integrated (single-cycle) fraction"),
@@ -3177,7 +3133,7 @@ sim_server <- function(input, output, session) {
       # azimuthal motion (its out-of-plane component is dropped), so the recovered D is a
       # fixed fraction of truth (~75% for a side-on cylinder) — NOT a bug, and the same
       # bias applies to real 2D data. The factor is itself a useful geometric calibration.
-      if (identical(res$mode, "surface") && isTRUE(res$proj2d))
+      if ((res$geom %||% "") %in% c("sphere","rod","ellipsoid") && identical(res$mode, "surface") && isTRUE(res$proj2d))
         htmltools::tags$p(style = "color:#b26a00; font-size:0.9em; margin-top:4px;",
           htmltools::HTML("&#9888; "),
           htmltools::tags$b("2D projection of a curved surface:"),
