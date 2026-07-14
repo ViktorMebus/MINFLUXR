@@ -1,11 +1,21 @@
-# MINFLUX Analysis — Literature & Method-Appropriateness Review
+# MINFLUX Analysis — Methods, Mathematics & Appropriateness
 
-*Reference document for the analysis modules of Mini-MINFLUXR (Tracking §1–5, SMLM/imaging §6).*
-Last reviewed: 2026-07 · Compiled from verified primary literature (see [Bibliography](#bibliography)).
+*Reference document for the analysis and simulation modules of Mini-MINFLUXR.*
+Last reviewed: 2026-07 · Compiled from the source code and from verified primary literature (see [Bibliography](#bibliography)).
 
-This document (1) records **which analysis tools are ported from which researchers** so the work is
-properly cited, and (2) gives an honest **appropriateness rating** of each method against the specific
-statistical character of MINFLUX single-particle-tracking (SPT) data. Ratings:
+This document has **two layers**, both organised around the app's three method families —
+**SMLM (imaging)**, **Tracking (SPT)**, and **Simulation**:
+
+- **Part I — Implementation & Mathematics ([§I](#part-i--implementation--mathematics)).** What each tool
+  actually computes: the estimator, its formula as coded, the modelling assumptions, the MINFLUX-specific
+  handling, and how to read the output. This is the "how it works" layer, extracted from the source.
+- **Part II — Literature & Appropriateness ([§1](#1-why-minflux-data-needs-its-own-treatment) onward).**
+  Which researcher each method is ported from (so the work is cited), and an honest **appropriateness
+  rating** of each method against the statistical character of MINFLUX data.
+
+The two layers cross-reference each other: every Part I entry names its Part II rating, and vice versa.
+
+Part II ratings:
 
 - 🟢 **GREEN** — well-suited; MINFLUX's properties are neutral or an advantage.
 - 🟡 **AMBER** — usable, but an assumption is strained; needs a MINFLUX-aware adaptation.
@@ -16,6 +26,347 @@ statistical character of MINFLUX single-particle-tracking (SPT) data. Ratings:
 > raw textbook rating suggests.
 
 ---
+
+# Part I — Implementation & Mathematics
+
+*What each tool computes, as coded. Formulas are transcribed from the source (`server_tracking.R`,
+`server_smlm.R`, `helpers_smlm.R`, `sim_server.R`); each entry names its Part II appropriateness rating.
+Units in code: positions in **nm**, time internally in **ms** (imported `tim` is seconds → ×1000). D is
+carried internally in **nm²/ms** and displayed in **µm²/s**, with `D_um2_s = D_nm2ms / 1e3`
+(1 µm²/s = 10³ nm²/ms).*
+
+Conventions used throughout:
+- `d` = spatial dimensionality (2 or 3); the MSD prefactor is `2d` (4 in 2D, 6 in 3D).
+- Free Brownian MSD with static localization error σ: **MSD(τ) = 2d·D·τ + 2d·σ²** (blur term R≈0 for
+  MINFLUX, see §5 action item 2).
+- Expected squared step over a gap Δt: **E[|Δr|²] = 2d·D·Δt + 2d·σ²**.
+
+## I-A. SMLM (imaging) analysis
+
+The SMLM tab treats each acquisition as a spatial point pattern of localizations, optionally reduced
+through a **de-blinking hierarchy** before any spatial statistic:
+
+> **localizations → trace (`tid`) median → primary cluster (DBSCAN `cluster`) median → secondary
+> structure (`cluster2`)**
+
+Collapsing to trace/cluster medians is the mitigation for the labelling/blinking over-counting bias
+(Part II §6.0). Most estimators can run on raw localizations or on medians (`enable_clustering`).
+
+### I-A.1 Nearest-neighbour (NN) distances — [Part II §6.1]
+- **Compute:** `nn_index_pairs(coords, k)` returns each point's `k` nearest neighbours (via `dbscan::kNN`).
+  Multiplex/two-colour mode supports `mode = "within"` (same channel) or `"between"` (cross-channel only,
+  never same channel) so a bivariate NN distance distribution can be built.
+- **Output:** the distribution of the k-th NN distance; median/quartiles per group. On de-blinked medians
+  this approximates inter-molecule spacing; on raw localizations it is dominated by the intra-molecule
+  blink/label footprint.
+
+### I-A.2 Density-based clustering (DBSCAN / HDBSCAN / OPTICS) — [Part II §6.1]
+- **Primary clustering** (`cluster`): `dbscan::dbscan(pts, eps, minPts)` on raw localizations → labels
+  blinks/dyes of one region together. **Median clustering** (`cluster2`): the same family run on
+  trace/cluster medians → groups molecules into structures. Two-colour variants cluster each channel
+  separately (channel-2 ids offset by +10000) then lock every TID to its majority cluster.
+- **eps tuning:** an optional **kNN-distance plot** (sorted distance to the k-th neighbour) exposes the
+  density "knee" that DBSCAN's `eps` should sit at.
+- **Density field:** `compute_spatial_density()` uses `dbscan::frNN(pts, eps = r)` to count neighbours
+  within radius `r` per point (fixed-radius local density used for colouring and the acquisition
+  structure/background split).
+
+### I-A.3 Ripley's K / L(r) — [Part II §6.2]
+`compute_ripley_L(x,y,z, r_seq, use_3d)`:
+- Random **subsample to ≤2000 points** for tractable O(n²) pairwise distances (`stats::dist`).
+- Observation window = **axis-aligned bounding box**; `area_vol` = box area (2D) or volume (3D).
+- For each radius r, count ordered pairs within r and form the unbiased estimator
+  **K(r) = area · 2·#{d_ij ≤ r} / (n(n−1))** (the ×2 restores both directions from the lower triangle).
+- **L-transform:** `L(r) = √(K/π)` (2D) or `L(r) = (3K/4π)^{1/3}` (3D). Plotted as **L(r) − r**: 0 under
+  complete spatial randomness (CSR), **>0 clustering**, **<0 dispersion**.
+- **Caveat (implementation):** there is **no analytic edge correction** and the window is the bounding
+  box, so L(r) − r is biased downward near large r (points near the box edge lose neighbours). A
+  `# TODO` remains for a translation/isotropic correction; instead this is handled by the envelope
+  below.
+- **Monte-Carlo CSR envelope (`compute_ripley_envelope`, optional):** generates `nsim` CSR patterns of
+  the *same n* in the **same frozen window** (`window_ranges`, a pre-supplied 2×d bounding box shared by
+  the observed curve and the sims) and returns the pointwise 2.5–97.5% band + mean null curve. Because
+  the sims inherit the identical window, the edge bias is present in the band too and **cancels when the
+  observed curve is read against it** — so the envelope, not the flat zero line, is the interpretive
+  reference (the flat line is relabelled "theoretical CSR (uncorrected)"). A two-sided α≈0.05 test needs
+  `nsim ≥ 39`; default 99, capped 19–199. In all-files mode the envelope is computed for the first few
+  files only (cost = `nsim × files × O(n²)`).
+
+### I-A.4 Bivariate Ripley L₁₂(r) & pair cross-correlation g₁₂(r) — [Part II §6.2]
+- **L₁₂:** cross-type K from the n₁×n₂ distance matrix, **K₁₂(r) = area · #{d ≤ r} / (n₁·n₂)**, same
+  L-transform. Measures co-clustering of two channels (>0 attraction, <0 segregation).
+- **g₁₂ (PCF):** the *derivative* form — count cross pairs in the **annulus/shell** (r−dr/2, r+dr/2],
+  normalise by shell area (2D `π(hi²−lo²)`) or volume (3D `4/3·π(hi³−lo³)`):
+  **g₁₂(r) = area · #{annulus} / (n₁·n₂·shell)**. **g₁₂ = 1 under CSR**, >1 attraction, <1 repulsion.
+  PCF is scale-local (not cumulative like K), so it localises the interaction distance more sharply.
+- Same ≤2000 subsample + bounding-box + no-edge-correction caveat as L(r).
+- **CSR envelope:** the same `compute_ripley_envelope` (with `estimator = "L12"` / `"pcf"` and both `n₁`,
+  `n₂`) randomizes **both channels independently** in the shared window and shades the 2.5–97.5% band.
+  For L₁₂ the observed curve above the band = co-localization at that scale, below = exclusion; for g₁₂
+  the band **brackets g = 1** under CSR and the observed curve rising above it at short r = attraction.
+  The bias cancels in the band exactly as for the univariate L(r).
+
+### I-A.5 KDE density map + Pearson co-localization — [Part II §6.4]
+- `MASS::kde2d` on each channel over a **shared grid** with a common bandwidth.
+- **Bandwidth (auto):** Silverman's rule `bw = 0.9·min(sd, IQR/1.34)·n^{-1/5}`.
+- **Co-localization index:** Pearson r of the two flattened density surfaces. **Explicitly bandwidth-
+  dependent** — small bw → r≈0 even for real co-localization, large bw → inflated; treat as a *relative*
+  measure at a fixed bandwidth (stated in-UI).
+- **Bandwidth-honesty add-ons:**
+  - **`bw_sweep`** recomputes r over a log-spaced range of bandwidths (0.4–20% of the field span) and
+    returns `data.frame(bw, pearson_r)`, plotted as r(bw) so the smoothing-dependence is explicit.
+  - **`costes_nsim`** spatially randomizes Ch2's points uniformly in the shared window `nsim` times,
+    recomputes r at the chosen bandwidth, and returns a one-sided **p-value** = (#{random r ≥ observed}+1)
+    /(nsim+1) plus the null mean/SD — a significance test against spatial independence (p≈0.5 for
+    independent channels, p→0 for co-localized). A Costes-style label-randomization null.
+  - The UI points users to **g₁₂(r)** for a bandwidth-free, scale-resolved alternative.
+
+### I-A.6 Radius of gyration & gyration-tensor anisotropy — [Part II §6.3]
+- **Rg:** `Rg² = mean(‖p − p̄‖²)` per cluster (second moment about the centroid).
+- **Anisotropy:** eigenvalues λ₁≥λ₂≥λ₃ of the gyration tensor give **Westin linear / planar / spherical**
+  coefficients (c_l = (λ₁−λ₂)/Σλ, c_p = 2(λ₂−λ₃)/Σλ, c_s = 3λ₃/Σλ) and the **Rudnick–Gaspari asphericity**
+  — used to *infer* cluster shape (linear filament vs planar vs isotropic) without the user declaring it.
+
+### I-A.7 Cluster shape fitting (3D viewer) — [Part II §6.5, 🟠 EXPLORATORY]
+- **Dictionary:** sphere, ellipsoid, helix, ring, arc. Each is fit by **orthogonal-distance MLE**
+  (minimise Σ of squared point-to-surface distances). The ellipsoid projection solves the exact
+  nearest-point KKT condition by vectorised Newton iteration in the PCA frame
+  (`mle_project_ellipsoid`), with a radial fallback if Newton diverges.
+- **Model selection** (`viewer_rank` = AICc | BIC | RMSD): under an iid isotropic-Gaussian residual model,
+  σ̂² = RMSD², so **−2logL = n·log(2πσ̂²) + n**; **AIC = −2logL + 2k**, **AICc = AIC + 2k(k+1)/(n−k−1)**,
+  **BIC = −2logL + k·log n**, with k = (geometric DOF + 1). AICc is the default (penalises complex shapes
+  hard at small n); it → ∞ when n ≤ k+1 (too few points), which correctly refuses to over-fit tiny clusters.
+- **Why exploratory:** the shape is imposed by the dictionary and "best" is a model-selection outcome, not
+  proof of biology; with few blink-inflated points several shapes are statistically indistinguishable.
+
+### I-A.8 Ground-truth position/count estimator — [Part II §6.6, 🟠 EXPLORATORY]
+`estimate_gt_from_labeling(df, preset, eff)` — a **labelling-model inverse** (`helpers_smlm.R`):
+- **Label preset** parameters: `n_fluor` (mean dyes/molecule), `link_nm` (linker length), `dye_spread_nm`
+  (dye scatter σ within the complex), `footprint_nm`, `blink_lambda` (extra re-appearances), `eff`
+  (labelling efficiency).
+- **Forward model it inverts:** molecule → Poisson(`n_fluor`) fluorophores, each displaced by a
+  half-normal linker (mean ≈ `link_nm`) and scattered by `dye_spread_nm`, each blinking into
+  ~(1+`blink_lambda`) traces. Expected traces per molecule: **m_tid = n_fluor · eff · (1+blink_lambda)**;
+  detection efficiency **η = eff** (single dye) or **η = 1 − e^{−n_fluor·eff}** (multivalent).
+- **Inverse:** build candidate units (trace or primary-cluster medians, ≥`minpts` locs), then **merge**
+  unit centroids within a **complex radius** `complex_r` (auto = max(footprint, 2.5·dye_spread)) via
+  `dbscan(eps = complex_r, minPts = 1)` so several dyes/blinks of one molecule collapse to **one candidate
+  GT position** (this produces the contribution fan-out lines). Optional **stoichiometry-guided merge**
+  further collapses to k = round(ΣN_tid / m_tid) via hierarchical clustering — only ever *reduces* toward
+  the labelling-predicted count, never splits.
+- **Output:** candidate GT positions coloured **green→red by positional uncertainty** (`pos_sd_nm`), a GT
+  **count range** [lo, hi] rather than a single number, and a **crowding flag** when spacing < label
+  footprint (under-resolved). Validated *in silico* against the simulator; quantitatively a heuristic.
+
+### I-A.9 Detection-over-time / crowding / NN-vs-size — [Part II §6.7, 🟠 EXPLORATORY]
+Bespoke descriptive diagnostics (detection-rate vs time, crowding vs timing, NN distance vs cluster size).
+**Correlational, not causal** — detection timing and crowding co-vary with photobleaching/blinking/labelling,
+so a trend is a hypothesis for controls, not a measurement.
+
+## I-B. Tracking (SPT) analysis
+
+### I-B.0 Cycle time & time-signature (the foundation for everything Δt-aware)
+MINFLUX has no fixed clock; the base **cycle time t_c** is inferred (`trk_cycle_time`), in priority order:
+(1) hardware model `t_c = N_iter · t_dwell` if enabled; (2) manual override; (3) **data-driven cluster
+cycle** — cluster the inter-localization Δt values and take the smallest robust cluster centre (the modal
+Δt is *misleading* because dark cycles inflate it); (4) a regression cycle from Δt-vs-index slope. The
+resulting t_c drives gap-splitting, the quality gate, cycle-index MSD binning and the D-map. A step's
+**cycle count** is `n_cyc = round(Δt / t_c)`; **integrated (single-cycle)** steps have n_cyc = 1.
+
+### I-B.1 σ_loc & data-quality calibration (CVE, MSD-free) — [Part II §2.2]
+`trk_cve_bundle`. Consecutive per-axis steps share one localization's error and are anti-correlated by −σ²
+(Vestergaard 2014). With MINFLUX blur R≈0:
+- **σ_loc² = −⟨Δx_i · Δx_{i+1}⟩**, averaged over x, y[, z], using **only consecutive integrated
+  (single-cycle) step pairs** so variable dark-cycle Δt cannot bias the covariance (the constant-Δt
+  restriction the literature prescribes).
+- **Free bias-corrected D:** `D_cve = ⟨Δ²⟩/(2Δt) + cov₁/Δt` per axis (the +cov₁ term removes the
+  localization-error inflation).
+- **Per-track σ heterogeneity:** one CVE σ per track (≥ `n_min` integrated steps, skipping the first
+  ~5 locs of lock-on transient); the median, IQR, CV and a **σ–EFO Spearman ρ** (precision should improve
+  with photons ⇒ negative ρ validates the model) plus a bootstrap 95% CI on the median σ.
+- **QC flags:** *implausible jumps* where `|Δr|² > 25·E[|Δr|²]` (i.e. |Δr| > 5× the expected RMS for that
+  gap, using E[|Δr|²] = 2d·D_cve·Δt + 2d·σ² so long dark gaps aren't falsely flagged); *degenerate* tracks
+  with σ² ≤ 0 (drift-dominated) or σ far in the outlier tail.
+- **Continuity score:** tolerance-weighted `w = 2^{−(n_cyc−1)/H}` averaged over steps (H = dark-cycle
+  tolerance), so a dataset of gentle 1–2-cycle gaps scores higher than its bare integrated fraction.
+- σ_loc from here becomes the **app-wide noise floor** consumed by the D-map, JDD, confinement, HMM,
+  directionality and speed tools.
+
+### I-B.2 Unified MSD, optimal-fit OLSF & fit models — [Part II §2.1, §2.7, §3a]
+`msd_unified_bundle` + `msd_unified_fit` + `.msd_model_fit`.
+- **Binning:** per-track **cumulative cycle-index** lag (Bela's TOT) — `dcyc = round((Δt − sw)/t_c)`,
+  `cycidx = cumsum(dcyc)` — so pairs are grouped by *integer elapsed cycles* (true elapsed time), removing
+  the `round(total/t_c)` sawtooth. Per-track TAMSD = Σdr²/Σpairs; x-axis τ = mean real Δt per bin.
+- **Ensemble:** **pair-weighted** (default, smoother) or **track-weighted** eMSD = mean of per-track TAMSDs
+  (Vogler). Optional **D>0 filter** drops tracks whose TAMSD has a negative OLS slope (Bela's rule); IQR
+  band from per-track quantiles; bins kept only where ≥10% of tracks contribute.
+- **Linear fit — OLSF (Michalet & Berglund optimal point count):** unweighted linear fit
+  `MSD = a + b·τ`, `D = b/(2d)`, `σ² = a/(2d)`, with **separate optimal point counts** for the slope
+  (→D) and intercept (→σ²). Reduced localization error `x = σ²/(D·Δt) − 2R`; optimal p = `f·L/(f³+L³)^{1/3}`
+  with slope `f_b = 2 + 1.35·x^{0.6}, L_b = 0.8 + 0.564·N` and intercept `f_a = 2 + 1.6·x^{0.51},
+  L_a = 3 + (4.5·N^{0.4} − 8.5)^{1.2}` (R = 0 for MINFLUX). Two variants: **anchored** (default — anchors x
+  on a stable whole-window fit so p is reproducible) and **iterative** (Bela's exact loop — converges onto
+  the lowest, least-noisy lags). Fit window default **5–50 cycles** (Vogler `fit_limits`).
+- **Non-linear models** (whole window — they need curvature):
+  - **Confined:** `MSD = A(1 − e^{−τ/t_c}) + C` → local `D = A/(2d·t_c)`, confinement size **L = √(3A)**,
+    plateau A; flagged *degenerate* if t_c > 2·max(τ) (no plateau resolved).
+  - **Directed:** `MSD = 2d·D·τ + (v·τ)² + C` → D and drift speed **v**.
+  - **Anomalous:** `MSD = 2d·D·τ^α + C` → exponent **α** (fit on the *ensemble* MSD, with a parametric
+    α SE from the fit covariance, labelled a lower bound since MSD lags are correlated).
+- **Per-track outputs** (`trk_unified_tdiff`): per-track OLSF D (→ tDIFF mean + 95% CI), and a
+  **confinement index CI = (MSD_late/MSD_early)/(τ_late/τ_early)** from the robust median of the first/last
+  15% of windowed bins: **CI < 1 confined, ≈1 Brownian, >1 directed.** These feed the D/CI **k-means
+  clustering** (feature = z-scored α doubled + log₁₀CI; clusters sorted slow→fast).
+
+### I-B.3 Change-point / motion-state segmentation (PELT + GMM) — [Part II §2.8]
+`cpd_segments_rv`. Per track, segment the series **log(r²/Δt)** (= local log-D, already Δt-aware) with
+**PELT** (`changepoint::cpt.mean`, BIC penalty, `minseglen`). Per-segment **D = mean(r²/Δt)/(2d)** — the
+mean-of-ratios form avoids the Jensen bias of `mean(r²)/(2d·mean(Δt))` when r² and Δt covary. The pooled
+per-segment log₁₀D distribution is then fit with a **BIC-selected Gaussian mixture** (`mclust`, up to
+`max_g` states).
+
+### I-B.4 Jump-distance distribution (JDD) — [Part II §2.3]
+`jdd_bundle`. Fit the step-length histogram with an **N-component Rayleigh mixture**
+**p(r) = Σ_k w_k · (r/σ_k²)·exp(−r²/2σ_k²)** by MLE (Nelder–Mead on the NLL; weights via softmax, σ via
+log-parametrisation). MINFLUX handling:
+- **√Δt normalization ON by default** — pool `r/√Δt` so steps of different cycle counts are comparable
+  (states then map to D, not raw step size).
+- **D per component:** `D = σ²/divisor` (divisor 2 in 2D / 3 in 3D).
+- **σ_loc bias correction:** subtract `2·σ_loc²/dt0` from σ² before D (localization noise adds 2σ_loc² per
+  coordinate), clamped ≥0. A **noise-floor jump distance** `√(2d)·σ_loc/√dt0` marks where peaks are
+  noise-dominated.
+
+### I-B.5 Diffusive-state HMM (Baum–Welch + Viterbi) — [Part II §2.4]
+`hmm_bundle`. Per-step displacement `r` (√Δt-normalised by default) with a **Rayleigh emission**
+`log p(r|state) = log r − 2log σ_k − r²/2σ_k²`, K = 2–4 states. **Baum–Welch EM** entirely in log-space
+(vectorised forward/backward, log-sum-exp), ≤30 iterations with early-stop; **σ_k update =
+√(Σγ·r²/(2·Σγ))** (Rayleigh MLE), transition matrix A from the accumulated log-ξ. Fit on the longest
+`max_fit_trk` tracks (optional contiguous-prefix step cap for speed); **Viterbi** decodes *all* tracks at
+full length. States sorted slow→fast by σ. **Caveat:** emissions are Δt-aware but the transition matrix is
+**discrete-time (per-step)**, so transition *rates* are approximate under heavy dark-gapping (disclosed in
+the summary panel).
+
+### I-B.6 Confinement (Rg / Rmax) — [Part II §2.5]
+`conf_bundle`. Per track: **Rg² = mean(‖p−p̄‖²)**, **Rmax = max‖p−p̄‖**, ratio **Rg/Rmax**. Optional
+noise correction removes localization inflation: **Rg²_true = Rg²_meas − d·σ_loc²·(1 − 1/n)** (the 1−1/n
+accounts for estimating the centroid from the same noisy points), clamped ≥0; Rmax (an extreme value) is
+left uncorrected. Low Rg/Rmax + small extent ⇒ confined — but see the simulator round-trip caveat (free
+diffusion over a short track can mimic the same extent).
+
+### I-B.7 Directionality / turn-angle autocorrelation — [Part II §2.6]
+`dir_bundle`. **Turn angle** between consecutive displacement vectors θ = acos( (Δr_i·Δr_{i+1}) /
+(|Δr_i||Δr_{i+1}|) ), clamped to [−1,1]. **Velocity autocorrelation** of unit step vectors over lags
+1…20: `AC(lag) = ⟨v̂_i · v̂_{i+lag}⟩`. Summaries: median angle, %forward (<60°), %backward (>120°),
+AC(1). A **noise floor** RMS pure-noise step = 2·σ_loc; the fraction of steps below it quantifies how much
+of the backward-peak / lag-1 anti-correlation is localization noise rather than real anti-persistence
+(MINFLUX's small σ_loc largely removes this classic artefact).
+
+### I-B.8 Speed & transport (path speed, drift velocity, local α) — [Part II — Mini-MINFLUXR original]
+`trk_export_summary`. Three complementary per-track curves:
+- **Path speed:** `dr/dt` per step (µm/s), lightly median-smoothed. Cannot distinguish diffusion from
+  transport (diffusion inflates instantaneous speed).
+- **Drift (transport) velocity:** `v_drift(t) = |net displacement over a time window W| / W`. Diffusion's
+  net displacement grows only as √t, so its apparent v ~ √(4D/W) *shrinks* with W, while directed transport
+  gives a sustained v_drift — this is what actually detects export. Windows are defined by **time (ms)**
+  (robust to irregular Δt) with a min-points guard and an **end-guard** (`min_span_frac`) that drops
+  end-of-track windows whose duration collapses (they otherwise fake a terminal velocity spike).
+- **Local α(t):** rolling log-log slope of a short-window MSD (τ = *real* mean elapsed time per step-lag,
+  not step index), with a static-noise offset `2d·σ²` subtracted per lag. α≈1 Brownian, α→2 ballistic.
+- **Export call:** a window is "directed" if v_drift exceeds `max(fold × diffusive baseline, √2·σ/W)` —
+  fold-over-the-track's-own-baseline (validated ≈5% false-positive at fold≈3), floored at the
+  localization-noise velocity.
+
+### I-B.9 Spatially-resolved D-map — [Part II §5 note; single-lag = short-lag CVE limit]
+`dmap_bundle`. Single-lag estimator per step: **D_raw = r²/(4·Δt)** (2D), midpoint-binned on an
+n×n grid; per-cell **D = median(D_raw)** (robust to outlier jumps), cells with < `min_pts` steps left NA.
+Options: **integrated-only** (drop dark-gap steps whose midpoint is spatially meaningless) and **noise
+subtraction** `D_raw − σ_loc²/Δt` (removes the spurious immobile-region diffusion floor). Far more robust
+than a per-cell MSD fit in small cells (e.g. *E. coli*) where no τ-bin has enough steps. *(Citation
+corrected: this is the CVE short-lag limit, Vestergaard 2014 / Vogler 2025 — not Ostersehlt 2022.)*
+
+### I-B.10 Fast-diffusion ceiling (D_max)
+`D_max = (L²/16)·ψ / (N_PL + ψ·t_hw)` (Vogler 2025) — the trackable-D limit before the localization loop
+loses lock; surfaced as a green/amber/red flag. Theoretical form, so it may under-warn near the
+demonstrated ~2.5–3 µm²/s practical ceiling (Part II §3a item 8).
+
+## I-C. Simulation
+
+Two independent simulators share one precision model: **σ_loc = L_TCP / (2·√N_photons)** (so σ_loc is
+*heteroscedastic* — varies per localization with the drawn photon count, as in reality; equivalently the
+effective TCP diameter L_eff = 2·σ·√N).
+
+### I-C.1 SMLM structure + labelling simulator (`sim_server.R`, SMLM tab)
+Generates a *known* super-resolution scene to validate the SMLM estimators and the GT inverse.
+- **Structures:** sphere/shell, ring, double-ring (Z- or Y-separated), stacked rings (helix-like),
+  filament (random-walk backbone), each with a chosen point count and geometry.
+- **Three-level labelling model** (shared with the GT inverse via `helpers_shared.R`):
+  1. *molecule* at the structure point;
+  2. *fluorophores* — count `K ~ Poisson(n_fluor)` (min 1), the shared complex displaced from the epitope
+     by a **half-normal linker** (σ = link_nm·√(π/2) ⇒ mean ≈ link_nm), optionally **direction-aware**
+     (outward from the local structure normal, since an antibody binds a surface epitope not the centre);
+  3. *dyes* — each fluorophore scattered by `dye_spread_nm` (Gaussian).
+- **Blinking / trace length:** each fluorophore emits `n_loc` localizations, drawn **Poisson(trace_length)**
+  or **Geometric(1/λ)** (same mean, heavy right tail — constant per-step bleaching gives many short traces);
+  extra blink re-appearances via `blink_lambda`. Each localization gets Gaussian noise σ_loc.
+- **Acquisition model** (Acquisition mode): detection **rate(t) = structure·(floor + (1−floor)·e^{−t/τ})·
+  bleach(t) + background_floor**, with photobleaching `bleach = e^{−cumulative/cap}` consuming a photon
+  budget; τ and floor calibrated from in-house real runs (`reference_minflux_detection_rate`). A DBSCAN
+  core-point test (≥minPts within eps=60 nm) splits recorded traces into **structure vs background** so the
+  measured rate curves can be overlaid on the model.
+- **Output:** MINFLUX-format `data.frame(tid, tim[s], x, y[,z], efo, eco)` + a molecule/fluorophore
+  ground-truth sidecar — loads straight into the SMLM tab so the GT inverse can be scored against truth.
+
+### I-C.2 Diffusion / tracking ground-truth simulator (`sim_server.R`, Diffusion tab)
+Simulates a *known* diffusion process on a *known* geometry, samples it with **MINFLUX's own pathologies**,
+and emits MINFLUX-format tracks so they flow through the *exact same* Tracking analysis — closing the
+validation loop (see [simulation_module.md](simulation_module.md) for the full design + build phases).
+
+**Geometry operators** (unified `project` / `reflect` / `normal`):
+- **Rod** = spherocylinder (cylinder body radius r, length L_cyl + two hemispherical caps): `project` =
+  nearest surface point, `reflect` = fold back inside, `normal` = outward unit normal.
+- **Sphere / ellipsoid** (a=b=c for sphere): radial project/reflect in scaled coordinates.
+- **Membrane** = flat sheet with thickness (2D lateral + z wobble within thickness); **Free** = unbounded 3D.
+
+**Continuous path** (`gen_path`, per cycle): per-axis step SD **sdi = √(2·D·t_c)**.
+- *Surface* diffusion: tangent-plane step `g − (g·n̂)n̂` then `project` back onto the surface.
+- *Volume* diffusion: 3D step then `reflect` at the wall. *Free/membrane*: unbounded / 2D-lateral.
+
+**Motion modifiers** (each a ground-truth label):
+- **Free** Brownian.
+- **Confined = OU tether** to a per-track home: `p ← home + (p − home)·φ`, **φ = e^{−t_c/τ_c}**,
+  **τ_c = L_c²/D**. Validated: stationary SD per DOF = L_c exactly; total MSD plateau = 2d·L_c².
+- **Directed:** add drift `v·t_c` along the rod long axis (or random direction otherwise).
+- **Two-state:** mobile↔immobile CTMC at per-cycle switch prob `kswitch`; immobile D = 0.01·D. HMM ground truth.
+
+**MINFLUX sampling overlay** (the load-bearing part):
+1. **Cycle clock** t_c; a localization is attempted each cycle.
+2. **Dark cycles → irregular Δt:** each cycle recorded with prob `1 − p_dark`, else skipped, giving
+   variable-cycle gaps.
+3. **Photobleaching → short tracks:** track length in cycles is **Geometric**, with the mean scaled so the
+   *recorded median* (after dark-cycling) lands on the target `mean_len` (median ≈ ln2·mean, only
+   (1−p_dark) recorded ⇒ mean_cycles = median/(ln2·(1−p_dark))).
+4. **Heteroscedastic σ_loc:** per recorded loc draw **N ~ Poisson(photons)**, σ = L_TCP/(2√N), add Gaussian
+   noise per axis; record `eco = N`, `efo = N/(t_c in s)`.
+5. **Survivorship (optional):** if the true displacement across a dark gap exceeds a re-acquisition radius
+   `R_reacq`, the track terminates there — reproduces the dark-cycle survivorship bias (long jumps culled →
+   *manufactured* apparent confinement).
+6. **Projection:** output 2D (drop z) or 3D — a surface protein on a curved cell shows the 2D-projection
+   distortion we want to *study*.
+
+**Built-in CVE round-trip** (`sim_trk_cve`) scores the recovery immediately:
+**D = (⟨|Δr|²⟩ + 2⟨Δr_i·Δr_{i+1}⟩) / (2·d·t_c)** over consecutive single-cycle steps, using the **total**
+displacement with **d = min(motion-DOF, observed axes)** — surface diffusion has 2 DOF but spreads over 3
+Cartesian axes (a per-axis CVE would under-estimate D by ⅓); volume has 3; 2D projection caps d at 2.
+Validated D recovery 97–101% across geometry×mode combos (flat geometries; the curved cylinder's 2D
+projection recovers ~75%, the geometric-bias factor the projection correction can be lifted from).
+
+**Key resolvability caveat:** confinement is only visible when **τ_c = L_c²/D is shorter than the track
+duration**; otherwise free diffusion over a short track mimics the same ~extent — the whole reason the
+round-trip (not the raw MSD/extent) is the test for a candidate confined protein.
+
+---
+
+# Part II — Literature & Appropriateness
 
 ## 1. Why MINFLUX data needs its own treatment
 
@@ -239,6 +590,12 @@ footprint).
 - **Fit:** correct point-pattern estimators. The §6.0 labelling bias is the dominant confound — PC-PALM
   was *designed* to separate multiple appearances of one protein from real clusters, so citing it also
   signals the correct mitigation.
+- **Edge-bias caveat — now mitigated by the same-window CSR envelope.** The lack of an analytic edge
+  correction previously meant L−r was read only for shape/peak, not magnitude. The optional Monte-Carlo
+  envelope (§I-A.3/§I-A.4) simulates CSR in the **identical frozen window**, so the edge bias is present
+  in the band and cancels; significance is read as the observed curve leaving the 2.5–97.5% band rather
+  than departing from the (biased) flat zero. This supersedes an explicit translation/isotropic
+  correction for interpretation (a `# TODO` for the analytic correction remains).
 
 ### 6.3 Radius of gyration / gyration-tensor anisotropy — 🟢 GREEN
 - **Source:** standard second-moment cluster size; anisotropy eigenvalue coefficients Rudnick & Gaspari
@@ -248,7 +605,10 @@ footprint).
 - **Source:** kernel density estimation (Silverman 1986); Pearson correlation of two density surfaces as
   a co-localization index (cf. Dunn et al. 2011).
 - **Caveat:** the Pearson r is strongly bandwidth-dependent (small bandwidth → r≈0 even for true
-  co-localization; large → inflated). Already stated in-UI; treat as a *relative* measure.
+  co-localization; large → inflated). Now made explicit by the optional **r(bandwidth) sweep** plot, and
+  the single-bandwidth r is accompanied by a **Costes-style spatial-randomization p-value** (§I-A.5) that
+  tests it against spatial independence. For a bandwidth-free, scale-resolved alternative the UI points
+  to the pair cross-correlation g₁₂(r) (§6.2). Still treat the raw r as a *relative* measure.
 
 ### 6.5 Cluster shape fitting (viewer) — 🟠 EXPLORATORY
 - **Method (standard):** orthogonal-distance MLE + AICc/BIC model selection (Akaike 1974; Schwarz 1978;

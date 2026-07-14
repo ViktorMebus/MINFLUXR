@@ -964,6 +964,10 @@ smlm_ui <- fluidPage(
           helpText("The antibody binds a surface epitope and the linker throws the dye OUTWARD, so the trace cloud sits ~linker-length outside the true structure. This pushes each GT back toward the local structure centre (perpendicular to a filament's axis; toward the centroid for a compact/ring shape). Needs median-clusters (cluster2) defined to know the structure."),
           checkboxInput("gt_show_lines", "Draw contribution lines (unit → GT)", value = TRUE),
           sliderInput("gt_circle_size", "GT marker size", min = 4, max = 40, value = 15, step = 1),
+          sliderInput("gt_support_strength",
+                      "Support-penalty strength (position certainty)",
+                      min = 0, max = 2, value = 1, step = 0.1),
+          helpText("How hard a GT backed by few trace IDs is penalised in the uncertainty (redder). 0 = off (only the linker floor + sampling); 1 = default (a 1-TID GT ≈ √2× less certain than a well-supported one); lower it if legitimately sparse labelling reads too red."),
           uiOutput("gt_estimate_readout"),
           tags$hr(style = "margin:8px 0;"),
           tags$b("Structure shape & size"),
@@ -1450,6 +1454,16 @@ smlm_ui <- fluidPage(
                      "Curves are interpolated onto a common r-grid (up to the smallest per-file r max).",
                      "Read a group difference against the band, not as a formal test (no CSR envelope).")
           ),
+          checkboxInput("ripley_envelope", "Show CSR envelope (Monte-Carlo)", value = FALSE),
+          helpText("Simulates random (CSR) patterns in the same window as the data and shades the",
+                   "2.5–97.5% band. The observed curve leaving the band = clustering (above) or",
+                   "dispersion (below) beyond chance. The band captures the edge bias, so it — not",
+                   "the flat zero line — is the correct reference. In 'all files' mode the envelope",
+                   "is computed for the first few files only (cost = simulations × files)."),
+          conditionalPanel(
+            condition = "input.ripley_envelope == true",
+            numericInput("ripley_nsim", "Envelope simulations", value = 99, min = 19, max = 199)
+          ),
           actionButton("run_ripley", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_ripley", "Download", class = "btn-sm")
@@ -1533,6 +1547,14 @@ smlm_ui <- fluidPage(
           checkboxInput("ripley12_smooth", "Smooth curve (loess)", value = TRUE),
           numericInput("ripley12_smooth_span", "Smoothing span", value = 0.2, min = 0.05, max = 0.8, step = 0.05),
           checkboxInput("ripley12_aggregate", "Aggregate all datasets into one", value = FALSE),
+          checkboxInput("ripley12_envelope", "Show CSR envelope (Monte-Carlo)", value = FALSE),
+          helpText("Randomizes both channels independently in the shared window and shades the",
+                   "2.5–97.5% band. Observed L₁₂−r above the band = co-localization at that scale;",
+                   "below = exclusion. Computed for the first few files only; not shown in aggregate mode."),
+          conditionalPanel(
+            condition = "input.ripley12_envelope == true",
+            numericInput("ripley12_nsim", "Envelope simulations", value = 99, min = 19, max = 199)
+          ),
           actionButton("run_ripley12", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_ripley12", "Download CSV", class = "btn-sm")
@@ -1558,6 +1580,14 @@ smlm_ui <- fluidPage(
           numericInput("pcf12_r_max", "r max (nm, 0 = auto)", value = 0, min = 0, step = 10),
           numericInput("pcf12_r_steps", "r steps", value = 60, min = 10, max = 300),
           checkboxInput("pcf12_aggregate", "Aggregate all datasets into one", value = FALSE),
+          checkboxInput("pcf12_envelope", "Show CSR envelope (Monte-Carlo)", value = FALSE),
+          helpText("Shades the 2.5–97.5% band of g₁₂(r) under independent randomization of both",
+                   "channels in the shared window. g₁₂ above the band = attraction at that scale;",
+                   "below = repulsion. Computed for the first few files only; not shown in aggregate mode."),
+          conditionalPanel(
+            condition = "input.pcf12_envelope == true",
+            numericInput("pcf12_nsim", "Envelope simulations", value = 99, min = 19, max = 199)
+          ),
           actionButton("run_pcf12", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_pcf12", "Download CSV", class = "btn-sm")
@@ -1598,13 +1628,23 @@ smlm_ui <- fluidPage(
           sliderInput("kde_opacity", "Opacity", min = 0.2, max = 1.0, value = 0.75, step = 0.05),
           numericInput("kde_bandwidth", "Bandwidth (nm, 0 = auto)", value = 0, min = 0, step = 5),
           numericInput("kde_n_grid", "Grid resolution", value = 100, min = 20, max = 300, step = 10),
+          checkboxInput("kde_bw_sweep", "Show r vs bandwidth sweep", value = FALSE),
+          helpText("Recomputes Pearson r across a range of bandwidths to expose how strongly the",
+                   "single-number coefficient depends on the (arbitrary) smoothing choice."),
+          numericInput("kde_costes_nsim", "Costes randomizations (0 = off)", value = 100, min = 0, max = 500, step = 10),
+          helpText("Spatially randomizes Ch2 this many times and recomputes r, yielding a p-value",
+                   "(fraction of random r ≥ observed). Low p = co-localization beyond chance."),
           actionButton("run_kde_coloc", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_kde_coloc", "Download CSV", class = "btn-sm")
         ),
         column(9,
           plotlyOutput("kde_coloc_plot", height = "450px"),
-          uiOutput("kde_pearson_display")
+          uiOutput("kde_pearson_display"),
+          conditionalPanel(
+            condition = "input.kde_bw_sweep == true",
+            plotlyOutput("kde_bw_sweep_plot", height = "280px")
+          )
         )
       ),
 

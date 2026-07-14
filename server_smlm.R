@@ -3090,7 +3090,8 @@ smlm_server <- function(input, output, session) {
         scope_cluster2  = isTRUE(input$gt_scope_cluster2 %||% TRUE),
         displace_inward = isTRUE(input$gt_displace_inward %||% TRUE),
         displace_nm     = dn,
-        guided_merge    = isTRUE(input$gt_guided_merge)
+        guided_merge    = isTRUE(input$gt_guided_merge),
+        support_strength = { v <- suppressWarnings(as.numeric(input$gt_support_strength)); if (is.finite(v)) v else 1 }
       ),
       error = function(e) { message("[GT-est] ", conditionMessage(e)); NULL }
     )
@@ -3108,8 +3109,9 @@ smlm_server <- function(input, output, session) {
     hi  <- max(ge$meta$footprint_nm %||% 0, 2 * lo, stats::quantile(pts$pos_sd_nm, 0.9, na.rm = TRUE))
     col <- gt_uncertainty_colors(pts$pos_sd_nm, lo, hi)
     sz  <- suppressWarnings(as.numeric(input$gt_circle_size)); if (!is.finite(sz) || sz <= 0) sz <- 15
-    txt <- sprintf("GT candidate<br>± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
-                   pts$pos_sd_nm, ifelse(pts$fused, " (fused: multiple GTs)", ""),
+    struct_lbl <- ifelse(pts$cluster2 > 0, paste0("Structure ", pts$cluster2), "ungrouped")
+    txt <- sprintf("<b>%s</b><br>GT candidate · ± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
+                   struct_lbl, pts$pos_sd_nm, ifelse(pts$fused, " (fused: multiple GTs)", ""),
                    pts$n_units, pts$n_tid, pts$n_loc)
 
     # Contribution fan-out lines: each member unit centroid -> its GT centroid.
@@ -6469,8 +6471,9 @@ smlm_server <- function(input, output, session) {
       col3 <- gt_uncertainty_colors(gpts$pos_sd_nm, lo3, hi3)
       sz3  <- suppressWarnings(as.numeric(input$gt_circle_size))
       sz3  <- if (!is.finite(sz3) || sz3 <= 0) 7 else max(3, sz3 * 0.5)
-      txt3 <- sprintf("GT candidate<br>± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
-                      gpts$pos_sd_nm, ifelse(gpts$fused, " (fused: multiple GTs)", ""),
+      struct3 <- ifelse(gpts$cluster2 > 0, paste0("Structure ", gpts$cluster2), "ungrouped")
+      txt3 <- sprintf("<b>%s</b><br>GT candidate · ± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
+                      struct3, gpts$pos_sd_nm, ifelse(gpts$fused, " (fused: multiple GTs)", ""),
                       gpts$n_units, gpts$n_tid, gpts$n_loc)
 
       # Contribution fan-out lines in 3D.
@@ -7963,7 +7966,8 @@ smlm_server <- function(input, output, session) {
   )
 
   ## ── Ripley's L(r) ─────────────────────────────────────────────────────────
-  ripley_results <- reactiveVal(NULL)
+  ripley_results     <- reactiveVal(NULL)
+  ripley_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
 
   observeEvent(input$run_ripley, {
     unit      <- input$ripley_unit %||% "tid"
@@ -7971,6 +7975,9 @@ smlm_server <- function(input, output, session) {
     r_max_in  <- as.numeric(input$ripley_r_max  %||% 0)
     r_steps   <- max(10L, as.integer(input$ripley_r_steps %||% 60L))
     all_files <- isTRUE(input$ripley_all_files)
+    want_env  <- isTRUE(input$ripley_envelope)
+    nsim      <- max(19L, min(199L, as.integer(input$ripley_nsim %||% 99L)))
+    env_file_cap <- 6L  # cap envelope work in all-files mode (nsim × files is O(n²)-heavy)
 
     needs_cluster <- unit == "cluster"
 
@@ -7992,14 +7999,26 @@ smlm_server <- function(input, output, session) {
       }
     }
 
-    compute_ripley_for_df <- function(df, tag, r_seq_use) {
+    compute_ripley_for_df <- function(df, tag, r_seq_use, do_env) {
       pts <- get_pts_flat(df)
       if (is.null(pts) || nrow(pts) < 2L) return(NULL)
+      # Freeze the observation window from the observed points so the curve and
+      # its CSR envelope share one identical window (edge bias then cancels).
+      axes <- if (use_3d) c("x", "y", "z") else c("x", "y")
+      win  <- apply(as.matrix(pts[, axes, drop = FALSE]), 2, range)
       curve <- compute_ripley_L(pts$x, pts$y, if (use_3d) pts$z else NULL,
-                                r_seq = r_seq_use, use_3d = use_3d)
+                                r_seq = r_seq_use, use_3d = use_3d,
+                                window_ranges = win)
       if (!nrow(curve)) return(NULL)
       curve$dataset <- tag
-      curve
+      env <- NULL
+      if (do_env) {
+        env <- compute_ripley_envelope(n = min(nrow(pts), 2000L),
+                                       window_ranges = win, r_seq = curve$r,
+                                       use_3d = use_3d, nsim = nsim, estimator = "L")
+        if (!is.null(env)) env$dataset <- tag
+      }
+      list(curve = curve, env = env)
     }
 
     get_df_list <- function() {
@@ -8031,13 +8050,33 @@ smlm_server <- function(input, output, session) {
 
     df_list <- get_df_list()
 
-    all_curves <- lapply(df_list, function(item) {
-      r_seq_use <- if (r_max_in > 0) seq(0, r_max_in, length.out = r_steps + 1L)[-1] else NULL
-      compute_ripley_for_df(item$df, item$tag, r_seq_use)
-    })
-    all_curves <- do.call(rbind, Filter(Negate(is.null), all_curves))
+    if (want_env && length(df_list) > env_file_cap) {
+      showNotification(sprintf(
+        "CSR envelope computed for the first %d of %d files only (cost is nsim × files).",
+        env_file_cap, length(df_list)), type = "message")
+    }
+
+    run_all <- function() {
+      lapply(seq_along(df_list), function(i) {
+        item      <- df_list[[i]]
+        r_seq_use <- if (r_max_in > 0) seq(0, r_max_in, length.out = r_steps + 1L)[-1] else NULL
+        do_env    <- want_env && i <= env_file_cap
+        out <- compute_ripley_for_df(item$df, item$tag, r_seq_use, do_env)
+        if (want_env) incProgress(1 / length(df_list))
+        out
+      })
+    }
+    all_out <- if (want_env) {
+      withProgress(message = "Ripley L + CSR envelope...", value = 0, run_all())
+    } else run_all()
+
+    all_out    <- Filter(Negate(is.null), all_out)
+    all_curves <- do.call(rbind, lapply(all_out, `[[`, "curve"))
     shiny::validate(shiny::need(!is.null(all_curves) && nrow(all_curves) > 0, "Ripley computation returned no data."))
     ripley_results(all_curves)
+
+    envs <- Filter(Negate(is.null), lapply(all_out, `[[`, "env"))
+    ripley_env_results(if (length(envs)) do.call(rbind, envs) else NULL)
 
   })
 
@@ -8056,6 +8095,7 @@ smlm_server <- function(input, output, session) {
       cc <- grDevices::col2rgb(hex); sprintf("rgba(%d,%d,%d,%.2f)", cc[1], cc[2], cc[3], a)
     }
     grouped <- (input$analysis_by %||% "file") == "group"
+    env_res <- ripley_env_results()
     fig <- plotly::plot_ly()
 
     if (!grouped) {
@@ -8063,9 +8103,24 @@ smlm_server <- function(input, output, session) {
       pal <- series_palette(datasets)
       for (nm in datasets) {
         sub <- res[res$dataset == nm, ]
+        # CSR envelope band (drawn first so the observed curve sits on top)
+        if (!is.null(env_res) && nm %in% env_res$dataset) {
+          e <- env_res[env_res$dataset == nm, ]
+          e <- e[order(e$r), ]
+          fig <- fig %>%
+            plotly::add_trace(x = e$r, y = e$hi, type = "scatter", mode = "lines",
+              line = list(width = 0), legendgroup = nm, showlegend = FALSE, hoverinfo = "skip") %>%
+            plotly::add_trace(x = e$r, y = e$lo, type = "scatter", mode = "lines", fill = "tonexty",
+              fillcolor = hex2rgba(unname(pal[nm]), 0.15), line = list(width = 0),
+              legendgroup = nm, name = paste0(nm, " CSR 95% envelope"),
+              showlegend = TRUE, hoverinfo = "skip") %>%
+            plotly::add_trace(x = e$r, y = e$null_mean, type = "scatter", mode = "lines",
+              line = list(color = unname(pal[nm]), width = 1, dash = "dot"),
+              legendgroup = nm, showlegend = FALSE, hoverinfo = "skip")
+        }
         fig <- fig %>% plotly::add_trace(
           x = sub$r, y = smooth_vec(sub$r, sub$Lr_minus_r),
-          type = "scatter", mode = "lines", name = nm,
+          type = "scatter", mode = "lines", name = nm, legendgroup = nm,
           line = list(color = unname(pal[nm]), width = 2))
       }
     } else {
@@ -8116,10 +8171,12 @@ smlm_server <- function(input, output, session) {
       }
     }
 
+    csr_label <- if (!is.null(env_res) && !grouped)
+      "theoretical CSR (uncorrected — see envelope)" else "CSR (L−r = 0)"
     fig %>%
       plotly::add_trace(
         x = range(res$r), y = c(0, 0), type = "scatter", mode = "lines",
-        name = "CSR (L−r = 0)",
+        name = csr_label,
         line = list(color = "black", width = 1, dash = "dash"), showlegend = TRUE) %>%
       plotly::layout(
         xaxis  = list(title = "r (nm)"),
@@ -8328,7 +8385,8 @@ smlm_server <- function(input, output, session) {
   )
 
   # ── Two-Color: Bivariate Ripley's L12 ────────────────────────────────────
-  ripley12_results <- reactiveVal(NULL)
+  ripley12_results     <- reactiveVal(NULL)
+  ripley12_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
 
   observeEvent(input$run_ripley12, {
     store <- smlm_file_store()
@@ -8338,6 +8396,9 @@ smlm_server <- function(input, output, session) {
     use_3d    <- isTRUE(input$ripley12_use_3d)
     r_max_raw <- as.numeric(input$ripley12_r_max %||% 0)
     r_steps   <- as.integer(input$ripley12_r_steps %||% 60L)
+    want_env  <- isTRUE(input$ripley12_envelope)
+    nsim      <- max(19L, min(199L, as.integer(input$ripley12_nsim %||% 99L)))
+    env_file_cap <- 6L
     needs_cluster <- unit == "cluster"
 
     get_pts_for_grp <- function(d, grp) {
@@ -8364,7 +8425,8 @@ smlm_server <- function(input, output, session) {
     two_color_mode <- isTRUE(input$enable_two_color)
     mplex_pair     <- mplex_cross_pair()
 
-    results <- list()
+    results  <- list()
+    env_list <- list()
     withProgress(message = "Bivariate Ripley L12...", value = 0, {
       for (i in seq_along(store)) {
         incProgress(1 / length(store))
@@ -8388,24 +8450,38 @@ smlm_server <- function(input, output, session) {
 
         pts1 <- get_pts_for_grp(df, 1L)
         pts2 <- get_pts_for_grp(df, 2L)
-        lr <- if (nrow(pts1) && nrow(pts2)) {
-          compute_ripley_L12(
-            x1=pts1$x, y1=pts1$y, z1=if(use_3d) pts1$z else NULL,
-            x2=pts2$x, y2=pts2$y, z2=if(use_3d) pts2$z else NULL,
-            r_seq=r_seq, use_3d=use_3d
-          )
-        } else NULL
+        if (!nrow(pts1) || !nrow(pts2)) next
+        # Shared window for observed curve and CSR envelope (bounding box of both
+        # channels' points), so the edge bias cancels in the envelope.
+        axes <- if (use_3d) c("x", "y", "z") else c("x", "y")
+        win  <- apply(as.matrix(rbind(pts1[, axes, drop = FALSE],
+                                      pts2[, axes, drop = FALSE])), 2, range)
+        lr <- compute_ripley_L12(
+          x1=pts1$x, y1=pts1$y, z1=if(use_3d) pts1$z else NULL,
+          x2=pts2$x, y2=pts2$y, z2=if(use_3d) pts2$z else NULL,
+          r_seq=r_seq, use_3d=use_3d, window_ranges = win
+        )
         if (is.null(lr) || !nrow(lr)) next
         results[[nm]] <- cbind(dataset = nm, lr)
+
+        if (want_env && length(env_list) < env_file_cap) {
+          env <- compute_ripley_envelope(
+            n = min(nrow(pts1), 2000L), n2 = min(nrow(pts2), 2000L),
+            window_ranges = win, r_seq = lr$r, use_3d = use_3d,
+            nsim = nsim, estimator = "L12")
+          if (!is.null(env)) { env$dataset <- nm; env_list[[nm]] <- env }
+        }
       }
     })
 
     if (!length(results)) {
       showNotification("No results. Ensure both channels are present.", type = "warning")
       ripley12_results(NULL)
+      ripley12_env_results(NULL)
       return()
     }
     ripley12_results(do.call(rbind, results))
+    ripley12_env_results(if (length(env_list)) do.call(rbind, env_list) else NULL)
   })
 
   output$ripley12_plot <- renderPlotly({
@@ -8415,10 +8491,14 @@ smlm_server <- function(input, output, session) {
     aggregate <- isTRUE(input$ripley12_aggregate)
     do_smooth <- isTRUE(input$ripley12_smooth)
     span_val  <- as.numeric(input$ripley12_smooth_span %||% 0.2)
+    env_res   <- ripley12_env_results()
     smooth_y  <- function(sub) {
       if (!do_smooth || nrow(sub) < 5L) return(sub$Lr_minus_r)
       tryCatch(predict(loess(Lr_minus_r ~ r, data = sub, span = span_val)),
                error = function(e) sub$Lr_minus_r)
+    }
+    hex2rgba <- function(hex, a) {
+      cc <- grDevices::col2rgb(hex); sprintf("rgba(%d,%d,%d,%.2f)", cc[1], cc[2], cc[3], a)
     }
     fig <- plotly::plot_ly()
 
@@ -8439,19 +8519,34 @@ smlm_server <- function(input, output, session) {
       names(pal) <- datasets
       for (nm in datasets) {
         sub <- res[res$dataset == nm, ]
+        if (!is.null(env_res) && nm %in% env_res$dataset) {
+          e <- env_res[env_res$dataset == nm, ]; e <- e[order(e$r), ]
+          fig <- fig %>%
+            plotly::add_trace(x = e$r, y = e$hi, type = "scatter", mode = "lines",
+              line = list(width = 0), legendgroup = nm, showlegend = FALSE, hoverinfo = "skip") %>%
+            plotly::add_trace(x = e$r, y = e$lo, type = "scatter", mode = "lines", fill = "tonexty",
+              fillcolor = hex2rgba(unname(pal[nm]), 0.15), line = list(width = 0),
+              legendgroup = nm, name = paste0(nm, " CSR 95% envelope"),
+              showlegend = TRUE, hoverinfo = "skip") %>%
+            plotly::add_trace(x = e$r, y = e$null_mean, type = "scatter", mode = "lines",
+              line = list(color = unname(pal[nm]), width = 1, dash = "dot"),
+              legendgroup = nm, showlegend = FALSE, hoverinfo = "skip")
+        }
         fig <- fig %>% plotly::add_trace(
           x = sub$r, y = smooth_y(sub),
-          type = "scatter", mode = "lines", name = nm,
+          type = "scatter", mode = "lines", name = nm, legendgroup = nm,
           line = list(color = pal[nm], width = 2)
         )
       }
     }
 
+    csr_label <- if (!is.null(env_res) && !aggregate)
+      "theoretical CSR (uncorrected — see envelope)" else "Random (L−r = 0)"
     fig %>%
       plotly::add_trace(
         x = range(res$r), y = c(0, 0),
         type = "scatter", mode = "lines",
-        name = "Random (L−r = 0)",
+        name = csr_label,
         line = list(color = "black", width = 1, dash = "dash"),
         showlegend = TRUE
       ) %>%
@@ -8516,7 +8611,8 @@ smlm_server <- function(input, output, session) {
   }
 
   # ── Pair Cross-Correlation g₁₂(r) ────────────────────────────────────────
-  pcf12_results <- reactiveVal(NULL)
+  pcf12_results     <- reactiveVal(NULL)
+  pcf12_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
 
   observeEvent(input$run_pcf12, {
     store <- smlm_file_store()
@@ -8526,9 +8622,13 @@ smlm_server <- function(input, output, session) {
     use_3d        <- isTRUE(input$pcf12_use_3d)
     r_max_raw     <- as.numeric(input$pcf12_r_max %||% 0)
     r_steps       <- as.integer(input$pcf12_r_steps %||% 60L)
+    want_env      <- isTRUE(input$pcf12_envelope)
+    nsim          <- max(19L, min(199L, as.integer(input$pcf12_nsim %||% 99L)))
+    env_file_cap  <- 6L
     needs_cluster <- unit == "cluster"
 
-    results <- list()
+    results  <- list()
+    env_list <- list()
     withProgress(message = "Pair cross-correlation g₁₂...", value = 0, {
       for (i in seq_along(store)) {
         incProgress(1 / length(store))
@@ -8539,18 +8639,30 @@ smlm_server <- function(input, output, session) {
         pts2 <- get_tc_pts(df, 2L, unit)
         if (!nrow(pts1) || !nrow(pts2)) next
         r_seq <- if (r_max_raw > 0) seq(0, r_max_raw, length.out = r_steps) else NULL
+        axes  <- if (use_3d) c("x", "y", "z") else c("x", "y")
+        win   <- apply(as.matrix(rbind(pts1[, axes, drop = FALSE],
+                                       pts2[, axes, drop = FALSE])), 2, range)
         g <- compute_pcf12(pts1$x, pts1$y, if (use_3d) pts1$z else NULL,
                            pts2$x, pts2$y, if (use_3d) pts2$z else NULL,
-                           r_seq = r_seq, use_3d = use_3d)
-        if (nrow(g)) results[[nm]] <- cbind(dataset = nm, g)
+                           r_seq = r_seq, use_3d = use_3d, window_ranges = win)
+        if (!nrow(g)) next
+        results[[nm]] <- cbind(dataset = nm, g)
+        if (want_env && length(env_list) < env_file_cap) {
+          env <- compute_ripley_envelope(
+            n = min(nrow(pts1), 2000L), n2 = min(nrow(pts2), 2000L),
+            window_ranges = win, r_seq = g$r, use_3d = use_3d,
+            nsim = nsim, estimator = "pcf")
+          if (!is.null(env)) { env$dataset <- nm; env_list[[nm]] <- env }
+        }
       }
     })
 
     if (!length(results)) {
       showNotification("No results. Check that both channels are present.", type = "warning")
-      pcf12_results(NULL); return()
+      pcf12_results(NULL); pcf12_env_results(NULL); return()
     }
     pcf12_results(do.call(rbind, results))
+    pcf12_env_results(if (length(env_list)) do.call(rbind, env_list) else NULL)
   })
 
   output$pcf12_plot <- renderPlotly({
@@ -8558,6 +8670,10 @@ smlm_server <- function(input, output, session) {
     shiny::validate(shiny::need(!is.null(res) && nrow(res) > 0, "Run g₁₂ first."))
 
     aggregate <- isTRUE(input$pcf12_aggregate)
+    env_res   <- pcf12_env_results()
+    hex2rgba  <- function(hex, a) {
+      cc <- grDevices::col2rgb(hex); sprintf("rgba(%d,%d,%d,%.2f)", cc[1], cc[2], cc[3], a)
+    }
     fig <- plotly::plot_ly()
 
     if (aggregate) {
@@ -8574,8 +8690,21 @@ smlm_server <- function(input, output, session) {
       names(pal) <- datasets
       for (nm in datasets) {
         sub <- res[res$dataset == nm, ]
+        if (!is.null(env_res) && nm %in% env_res$dataset) {
+          e <- env_res[env_res$dataset == nm, ]; e <- e[order(e$r), ]
+          fig <- fig %>%
+            plotly::add_trace(x = e$r, y = e$hi, type = "scatter", mode = "lines",
+              line = list(width = 0), legendgroup = nm, showlegend = FALSE, hoverinfo = "skip") %>%
+            plotly::add_trace(x = e$r, y = e$lo, type = "scatter", mode = "lines", fill = "tonexty",
+              fillcolor = hex2rgba(unname(pal[nm]), 0.15), line = list(width = 0),
+              legendgroup = nm, name = paste0(nm, " CSR 95% envelope"),
+              showlegend = TRUE, hoverinfo = "skip") %>%
+            plotly::add_trace(x = e$r, y = e$null_mean, type = "scatter", mode = "lines",
+              line = list(color = unname(pal[nm]), width = 1, dash = "dot"),
+              legendgroup = nm, showlegend = FALSE, hoverinfo = "skip")
+        }
         fig <- fig %>% plotly::add_trace(x = sub$r, y = sub$g12,
-          type = "scatter", mode = "lines", name = nm,
+          type = "scatter", mode = "lines", name = nm, legendgroup = nm,
           line = list(color = pal[nm], width = 2))
       }
     }
@@ -8624,6 +8753,8 @@ smlm_server <- function(input, output, session) {
     unit          <- input$kde_unit %||% "tid"
     bw_raw        <- as.numeric(input$kde_bandwidth %||% 0)
     n_grid        <- as.integer(input$kde_n_grid %||% 100L)
+    do_sweep      <- isTRUE(input$kde_bw_sweep)
+    costes_n      <- max(0L, as.integer(input$kde_costes_nsim %||% 0L))
     needs_cluster <- unit == "cluster"
 
     df <- prep_tc_df(raw, input, needs_cluster)
@@ -8650,8 +8781,21 @@ smlm_server <- function(input, output, session) {
     }
 
     bw  <- if (bw_raw > 0) bw_raw else NULL
-    res <- compute_kde_coloc(pts1[[ax[1]]], pts1[[ax[2]]],
-                             pts2[[ax[1]]], pts2[[ax[2]]], bw, n_grid)
+
+    # Bandwidth sweep grid: log-spaced fractions of the field span (0.4%–20%),
+    # so the bandwidth-dependence of Pearson r is visible.
+    bw_sweep <- NULL
+    if (do_sweep) {
+      a1 <- c(pts1[[ax[1]]], pts2[[ax[1]]]); a2 <- c(pts1[[ax[2]]], pts2[[ax[2]]])
+      span <- min(diff(range(a1, na.rm = TRUE)), diff(range(a2, na.rm = TRUE)))
+      if (is.finite(span) && span > 0)
+        bw_sweep <- span * exp(seq(log(0.004), log(0.2), length.out = 12))
+    }
+
+    res <- withProgress(message = "KDE co-localization...", value = 0.3,
+      compute_kde_coloc(pts1[[ax[1]]], pts1[[ax[2]]],
+                        pts2[[ax[1]]], pts2[[ax[2]]], bw, n_grid,
+                        bw_sweep = bw_sweep, costes_nsim = costes_n))
     if (is.null(res)) {
       showNotification("KDE computation failed.", type = "warning")
       kde_coloc_results(NULL); return()
@@ -8710,12 +8854,41 @@ smlm_server <- function(input, output, session) {
   output$kde_pearson_display <- renderUI({
     r <- kde_coloc_results()
     if (is.null(r)) return(NULL)
+    costes_line <- if (!is.null(r$costes_p)) {
+      sig <- if (r$costes_p < 0.05) "significant co-localization" else "not significant"
+      tags$p(sprintf("Costes spatial-randomization p = %.3f  (%s; %d randomizations, null r = %.3f ± %.3f)",
+                     r$costes_p, sig, r$costes_nsim, r$costes_null_mean, r$costes_null_sd),
+             style = "font-size:13px; margin:2px 0; color:#555;")
+    } else NULL
     tags$div(
       style = "margin-top:6px;",
       tags$b("Density-density Pearson r:"),
       tags$p(sprintf("%.3f  (bandwidth = %.1f nm)", r$pearson_r, r$bandwidth),
-             style = "font-size:13px; margin:2px 0;")
+             style = "font-size:13px; margin:2px 0;"),
+      costes_line,
+      tags$p(HTML("Pearson r is bandwidth-dependent. For a bandwidth-free, scale-resolved colocalization measure use Pair Cross-Correlation g₁₂(r)."),
+             style = "font-size:12px; margin:4px 0 0; color:#888; font-style:italic;")
     )
+  })
+
+  output$kde_bw_sweep_plot <- renderPlotly({
+    r <- kde_coloc_results()
+    shiny::validate(shiny::need(!is.null(r) && !is.null(r$bw_sweep),
+                                "Enable 'Bandwidth sweep' and run KDE to see r(bandwidth)."))
+    sw <- r$bw_sweep
+    plotly::plot_ly() %>%
+      plotly::add_trace(x = sw$bw, y = sw$pearson_r, type = "scatter", mode = "lines+markers",
+        line = list(color = "#7B2D8B", width = 2), marker = list(size = 5),
+        name = "Pearson r") %>%
+      plotly::add_trace(x = r$bandwidth, y = r$pearson_r, type = "scatter", mode = "markers",
+        marker = list(color = "#e41a1c", size = 10, symbol = "diamond"),
+        name = "chosen bandwidth") %>%
+      plotly::layout(
+        xaxis = list(title = "KDE bandwidth (nm)"),
+        yaxis = list(title = "Density-density Pearson r"),
+        title = "Bandwidth dependence of Pearson r",
+        hovermode = "x unified",
+        paper_bgcolor = "white", plot_bgcolor = "white")
   })
 
   output$download_kde_coloc <- downloadHandler(

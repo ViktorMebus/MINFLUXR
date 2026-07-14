@@ -4077,7 +4077,8 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
                                       complex_r = NULL,
                                       displace_inward = TRUE,
                                       displace_nm = NULL,
-                                      guided_merge = FALSE) {
+                                      guided_merge = FALSE,
+                                      support_strength = 1) {
   level <- match.arg(level)
   empty_pts <- data.frame(x = numeric(0), y = numeric(0), z = numeric(0),
                           pos_sd_nm = numeric(0), n_loc = integer(0),
@@ -4350,7 +4351,7 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   s_link    <- link_nm
   s_sample  <- sqrt(member_spread^2 / pmax(1, mols$n_units) +
                     sigma_loc_nm^2   / pmax(1, mols$n_loc))
-  s_support <- link_nm / sqrt(pmax(1, mols$n_tid))
+  s_support <- max(0, support_strength) * link_nm / sqrt(pmax(1, mols$n_tid))
   s_disp    <- mols$disp_step * (1 - mols$dir_conf)
   s_fused   <- ifelse(mols$fused, mol_extent, 0)
   mols$pos_sd_nm <- sqrt(s_link^2 + s_sample^2 + s_support^2 + s_disp^2 + s_fused^2)
@@ -4671,7 +4672,7 @@ compute_cluster_rog <- function(df, cluster_col = "cluster") {
 # No edge correction is applied; K(r) is underestimated at large r due to border effects.
 # Restrict interpretation to r << min(window width, window height) / 2.
 compute_ripley_L <- function(x, y, z = NULL, r_seq = NULL, use_3d = FALSE,
-                             max_subsample = 2000L) {
+                             max_subsample = 2000L, window_ranges = NULL) {
   coords <- cbind(x, y)
   if (use_3d && !is.null(z)) coords <- cbind(x, y, z)
 
@@ -4685,8 +4686,11 @@ compute_ripley_L <- function(x, y, z = NULL, r_seq = NULL, use_3d = FALSE,
     n <- max_subsample
   }
 
-  # observation window (bounding box)
-  rng <- apply(coords, 2, range)
+  # observation window (bounding box). A pre-supplied window_ranges (a 2×d matrix
+  # of per-axis min/max, as from apply(coords, 2, range)) lets the observed curve
+  # and the Monte-Carlo CSR envelope share one identical window so the edge bias
+  # cancels between them.
+  rng <- if (!is.null(window_ranges)) window_ranges else apply(coords, 2, range)
   area_vol <- prod(rng[2, ] - rng[1, ])
   if (!is.finite(area_vol) || area_vol <= 0) {
     return(data.frame(r = numeric(0), Lr_minus_r = numeric(0)))
@@ -4935,7 +4939,7 @@ compute_cross_nn <- function(df, unit = "tid", k = 1L) {
 ## ── Bivariate Ripley's L12(r) ───────────────────────────────────────────────
 compute_ripley_L12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
                                r_seq = NULL, use_3d = FALSE,
-                               max_subsample = 2000L) {
+                               max_subsample = 2000L, window_ranges = NULL) {
   if (use_3d && (!is.null(z1)) && (!is.null(z2))) {
     pts1 <- cbind(x1, y1, z1)
     pts2 <- cbind(x2, y2, z2)
@@ -4953,7 +4957,10 @@ compute_ripley_L12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
   n1 <- nrow(pts1); n2 <- nrow(pts2)
 
   all_pts <- rbind(pts1, pts2)
-  rng <- apply(all_pts, 2, function(v) diff(range(v, na.rm = TRUE)))
+  # per-axis extents; a pre-supplied window_ranges (2×d min/max matrix) makes the
+  # observed curve and its CSR envelope share one identical window.
+  rng <- if (!is.null(window_ranges)) (window_ranges[2, ] - window_ranges[1, ])
+         else apply(all_pts, 2, function(v) diff(range(v, na.rm = TRUE)))
   if (use_3d) {
     area_vol <- prod(rng)
     if (!is.finite(area_vol) || area_vol == 0) return(data.frame())
@@ -4982,7 +4989,8 @@ compute_ripley_L12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
 ## g12(r) = (area × N_pairs_in_annulus) / (n1 × n2 × annulus_area)
 ## g12 = 1 under CSR; > 1 = attraction; < 1 = repulsion.
 compute_pcf12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
-                           r_seq = NULL, use_3d = FALSE, max_subsample = 2000L) {
+                           r_seq = NULL, use_3d = FALSE, max_subsample = 2000L,
+                           window_ranges = NULL) {
   if (use_3d && !is.null(z1) && !is.null(z2)) {
     pts1 <- cbind(x1, y1, z1); pts2 <- cbind(x2, y2, z2)
   } else {
@@ -4996,7 +5004,10 @@ compute_pcf12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
   n1 <- nrow(pts1); n2 <- nrow(pts2)
 
   all_pts <- rbind(pts1, pts2)
-  rng     <- apply(all_pts, 2, function(v) diff(range(v, na.rm = TRUE)))
+  # per-axis extents; a pre-supplied window_ranges (2×d min/max matrix) makes the
+  # observed curve and its CSR envelope share one identical window.
+  rng     <- if (!is.null(window_ranges)) (window_ranges[2, ] - window_ranges[1, ])
+             else apply(all_pts, 2, function(v) diff(range(v, na.rm = TRUE)))
   area_vol <- if (use_3d) prod(rng) else prod(rng[1:2])
   if (!is.finite(area_vol) || area_vol == 0) return(data.frame())
 
@@ -5023,10 +5034,93 @@ compute_pcf12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
   data.frame(r = r_seq, g12 = g12)
 }
 
+## ── Monte-Carlo CSR envelope for L(r) / L₁₂(r) / g₁₂(r) ──────────────────────
+## Generates `nsim` complete-spatial-randomness (CSR) patterns of `n` points
+## (and `n2` for the cross statistics) uniformly inside the SAME window as the
+## observed pattern (`window_ranges`, a 2×d matrix of per-axis min/max), and runs
+## the identical estimator on each. Returns pointwise lo/hi quantiles (default
+## 2.5% / 97.5% → a 95% band; a two-sided α≈0.05 test needs nsim ≥ 39) and the
+## mean null curve, on the supplied `r_seq`.
+##
+## Because the sims share the observed window, the (uncorrected) edge bias that
+## drags L(r)−r negative at large r is present in the envelope too and cancels
+## when the observed curve is read against the band — this envelope is the
+## interpretive tool, superseding an explicit edge correction.
+compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
+                                     nsim = 99L, estimator = c("L", "L12", "pcf"),
+                                     n2 = NULL, probs = c(0.025, 0.975)) {
+  estimator <- match.arg(estimator)
+  if (is.null(r_seq) || !length(r_seq)) return(NULL)
+  if (is.null(window_ranges) || any(!is.finite(window_ranges))) return(NULL)
+  nsim <- max(1L, as.integer(nsim))
+  n    <- as.integer(n)
+  if (n < 3L) return(NULL)
+  if (estimator != "L") {
+    if (is.null(n2)) return(NULL)
+    n2 <- as.integer(n2)
+    if (n2 < 2L) return(NULL)
+  }
+
+  d    <- ncol(window_ranges)
+  lo_v <- window_ranges[1, ]; hi_v <- window_ranges[2, ]
+  is3d <- isTRUE(use_3d) && d >= 3L
+
+  gen <- function(m) {
+    list(x = stats::runif(m, lo_v[1], hi_v[1]),
+         y = stats::runif(m, lo_v[2], hi_v[2]),
+         z = if (is3d) stats::runif(m, lo_v[3], hi_v[3]) else NULL)
+  }
+
+  nr  <- length(r_seq)
+  mat <- matrix(NA_real_, nrow = nr, ncol = nsim)
+  cap <- if (estimator == "L") n else max(n, n2)
+
+  for (s in seq_len(nsim)) {
+    p1 <- gen(n)
+    col <- if (estimator == "L") {
+      cv <- compute_ripley_L(p1$x, p1$y, p1$z, r_seq = r_seq, use_3d = is3d,
+                             max_subsample = cap, window_ranges = window_ranges)
+      cv$Lr_minus_r
+    } else if (estimator == "L12") {
+      p2 <- gen(n2)
+      cv <- compute_ripley_L12(p1$x, p1$y, p1$z, p2$x, p2$y, p2$z,
+                               r_seq = r_seq, use_3d = is3d,
+                               max_subsample = cap, window_ranges = window_ranges)
+      cv$Lr_minus_r
+    } else {
+      p2 <- gen(n2)
+      cv <- compute_pcf12(p1$x, p1$y, p1$z, p2$x, p2$y, p2$z,
+                          r_seq = r_seq, use_3d = is3d,
+                          max_subsample = cap, window_ranges = window_ranges)
+      cv$g12
+    }
+    if (length(col) == nr) {
+      mat[, s] <- col
+    } else if (length(col) > 0L) {
+      k <- min(length(col), nr)
+      mat[seq_len(k), s] <- col[seq_len(k)]
+    }
+  }
+
+  lo <- apply(mat, 1, stats::quantile, probs = probs[1], na.rm = TRUE)
+  hi <- apply(mat, 1, stats::quantile, probs = probs[2], na.rm = TRUE)
+  data.frame(r = r_seq, lo = as.numeric(lo), hi = as.numeric(hi),
+             null_mean = rowMeans(mat, na.rm = TRUE))
+}
+
 ## ── 2D KDE density co-localization map ──────────────────────────────────────
 ## Returns KDE grids for Ch1 and Ch2 on a shared spatial grid,
 ## plus Pearson r of the two density surfaces.
-compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L) {
+## Optional honesty add-ons:
+##   bw_sweep    – vector of bandwidths; returns $bw_sweep = data.frame(bw,
+##                 pearson_r) so the bandwidth-dependence of Pearson r is visible.
+##   costes_nsim – >0 spatially randomizes channel 2's points uniformly in the
+##                 shared window this many times, recomputes Pearson r at the
+##                 chosen bandwidth, and returns a one-sided p-value (fraction of
+##                 randomized r ≥ observed) plus the null mean/SD — a spatial-
+##                 independence significance test for the observed r.
+compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L,
+                              bw_sweep = NULL, costes_nsim = 0L) {
   all_x <- c(x1, x2); all_y <- c(y1, y2)
   xlim  <- range(all_x, na.rm = TRUE); ylim <- range(all_y, na.rm = TRUE)
   if (diff(xlim) == 0 || diff(ylim) == 0) return(NULL)
@@ -5044,8 +5138,41 @@ compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L) {
 
   pearson_r <- stats::cor(as.vector(k1$z), as.vector(k2$z))
 
-  list(x = k1$x, y = k1$y, z1 = k1$z, z2 = k2$z,
-       pearson_r = pearson_r, bandwidth = bandwidth)
+  out <- list(x = k1$x, y = k1$y, z1 = k1$z, z2 = k2$z,
+              pearson_r = pearson_r, bandwidth = bandwidth)
+
+  # ── Bandwidth sweep: r(bw) ─────────────────────────────────────────────────
+  if (!is.null(bw_sweep) && length(bw_sweep)) {
+    bw_sweep <- sort(unique(bw_sweep[is.finite(bw_sweep) & bw_sweep > 0]))
+    if (length(bw_sweep)) {
+      sweep_r <- vapply(bw_sweep, function(h) {
+        ka <- MASS::kde2d(x1, y1, h = h, n = n_grid, lims = c(xlim, ylim))
+        kb <- MASS::kde2d(x2, y2, h = h, n = n_grid, lims = c(xlim, ylim))
+        stats::cor(as.vector(ka$z), as.vector(kb$z))
+      }, numeric(1L))
+      out$bw_sweep <- data.frame(bw = bw_sweep, pearson_r = sweep_r)
+    }
+  }
+
+  # ── Costes-style spatial randomization test ───────────────────────────────
+  costes_nsim <- as.integer(costes_nsim %||% 0L)
+  if (isTRUE(costes_nsim > 0L)) {
+    n2 <- length(x2)
+    null_r <- vapply(seq_len(costes_nsim), function(i) {
+      rx <- stats::runif(n2, xlim[1], xlim[2])
+      ry <- stats::runif(n2, ylim[1], ylim[2])
+      kb <- MASS::kde2d(rx, ry, h = bandwidth, n = n_grid, lims = c(xlim, ylim))
+      stats::cor(as.vector(k1$z), as.vector(kb$z))
+    }, numeric(1L))
+    # one-sided p: how often randomized co-localization matches/exceeds observed
+    out$costes_p         <- (sum(null_r >= pearson_r, na.rm = TRUE) + 1) /
+                            (sum(is.finite(null_r)) + 1)
+    out$costes_null_mean <- mean(null_r, na.rm = TRUE)
+    out$costes_null_sd   <- stats::sd(null_r, na.rm = TRUE)
+    out$costes_nsim      <- costes_nsim
+  }
+
+  out
 }
 
 ## ── Grid-based density correlation (multi-scale) ─────────────────────────────
