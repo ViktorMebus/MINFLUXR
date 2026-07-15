@@ -2872,6 +2872,15 @@ sim_server <- function(input, output, session) {
     geom     <- input$sim_trk_geom %||% "rod"
     mode     <- input$sim_trk_mode %||% "surface"      # surface | volume (intracellular)
     mthick   <- max(0, as.numeric(input$sim_trk_mthick %||% 6))              # membrane thickness (nm)
+    # Membrane tilt: the sheet is primarily in XY but inclined by mtilt°, so the plane
+    # is spanned by e1,e2 (normal n̂ near ẑ). The path is generated flat (local u,v,w)
+    # then rotated by R_mem = [e1 e2 n̂] → z varies across the plane. 0° = flat.
+    mtilt <- max(0, min(89, as.numeric(input$sim_trk_mtilt %||% 15))) * pi / 180
+    maz   <- runif(1, 0, 2 * pi)
+    n_hat <- c(sin(mtilt) * cos(maz), sin(mtilt) * sin(maz), cos(mtilt))
+    e1    <- { cx <- c(-n_hat[2], n_hat[1], 0); m <- sqrt(sum(cx^2)); if (m < 1e-9) c(1,0,0) else cx / m }  # ẑ×n̂ (in XY)
+    e2    <- c(n_hat[2]*e1[3] - n_hat[3]*e1[2], n_hat[3]*e1[1] - n_hat[1]*e1[3], n_hat[1]*e1[2] - n_hat[2]*e1[1])  # n̂×e1
+    R_mem <- cbind(e1, e2, n_hat)                                            # local (u,v,w) → world
     # motion DOF (used by the CVE check): free=3, membrane=2 (lateral), else surface=2/volume=3
     d_mot    <- if (identical(geom, "free")) 3L else if (identical(geom, "membrane")) 2L
                 else if (identical(mode, "volume")) 3L else 2L
@@ -2964,6 +2973,7 @@ sim_server <- function(input, output, session) {
         pos[i,] <- p; states[i] <- st
       }
       if (is_rod) pos <- pos[, rod_perm, drop = FALSE]
+      if (is_mem) pos <- pos %*% t(R_mem)              # tilt the flat local sheet into 3D
       attr(pos, "states") <- states
       pos
     }
@@ -3061,7 +3071,8 @@ sim_server <- function(input, output, session) {
                       line = list(width = 2), showlegend = FALSE) %>%
         plotly::layout(title = "Simulated MINFLUX tracks (first 60)",
           scene = list(xaxis = list(title = "x (nm)"), yaxis = list(title = "y (nm)"),
-                       zaxis = list(title = "z (nm)")))
+                       zaxis = list(title = "z (nm)"),
+                       aspectmode = "data"))   # equal nm-per-unit on X/Y/Z (no axis stretching)
     else
       plotly::plot_ly(d, x = ~x, y = ~y, split = ~factor(tid),
                       type = "scatter", mode = "lines",
