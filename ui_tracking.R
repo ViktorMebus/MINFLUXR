@@ -335,11 +335,6 @@ tracking_ui <- fluidPage(
                 )
               ),
 
-              checkboxInput("trk_show_dt_hist", "Show Δt histogram (per TID)", FALSE),
-              conditionalPanel(
-                condition = "input.trk_show_dt_hist == true",
-                plotlyOutput("trk_dt_hist", height = "220px")
-              ),
               downloadButton("trk_download_playback_settings", "Save playback settings (.json)"),
               fileInput("trk_load_playback_settings", "Load playback settings (.json)", accept = ".json"),
               tags$hr()

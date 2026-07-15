@@ -3759,15 +3759,29 @@ tracking_server <- function(input, output, session) {
       }
     }
 
-    # ----- Title: update every frame, but throttle to every 3rd during playback -----
-    # title-only relayout is cheap and does not trigger scaleanchor recalculation.
+    # ----- Title (+ range re-pin while trails animate) -----
+    # A title relayout re-runs plotly's layout solver, which \u2014 with scaleanchor on \u2014
+    # re-fits the axes and jitters the FOV. When trails are animating we therefore fold
+    # the current view's ranges into the SAME (atomic) relayout, every frame, so the view
+    # can't drift. We pin to the USER'S CURRENT VIEW (trk_zoom_ranges, updated live by the
+    # plotly_relayout observer when they zoom/pan) and fall back to the full extent only
+    # when they haven't zoomed \u2014 so zooming in DURING playback sticks instead of snapping
+    # back. Without trails the markers are one stable-extent trace, so the plain title
+    # relayout (throttled) is safe. (3D manages its own camera via aspectmode.)
     playing_now <- isTRUE(loop$gplaying) || isTRUE(loop$playing)
-    if (!playing_now || (k %% 3L) == 1L) {
+    trails_on   <- identical(tm$trails_mode, "per_tid")
+    if (trails_on || !playing_now || (k %% 3L) == 1L) {
       n_pts <- length(fr$markers_x)
-      plotlyProxyInvoke(
-        proxy, "relayout",
-        list(title = list(text = sprintf("frame %d \u00B7 markers: %d", k, n_pts)))
-      )
+      rl <- list(title = list(text = sprintf("frame %d \u00B7 markers: %d", k, n_pts)))
+      if (trails_on && !is3d) {
+        lr <- isolate(trk_zoom_ranges())              # live user view (zoom/pan)
+        if (is.null(lr)) lr <- isolate(trk_locked_ranges())   # else full extent
+        if (!is.null(lr)) rl <- c(rl, list(
+          `xaxis.range[0]` = lr$x[1], `xaxis.range[1]` = lr$x[2],
+          `yaxis.range[0]` = lr$y[1], `yaxis.range[1]` = lr$y[2],
+          `xaxis.autorange` = FALSE,  `yaxis.autorange` = FALSE))
+      }
+      plotlyProxyInvoke(proxy, "relayout", rl)
     }
 
     # ----- Slider sync (throttled to every 5 frames during playback) -----
@@ -3971,18 +3985,6 @@ tracking_server <- function(input, output, session) {
     })
   })
   # --- dt histogram ---------------------------------------------------------
-  output$trk_dt_hist <- renderPlotly({
-    req(isTRUE(input$trk_show_dt_hist))
-    dts <- dt_vectors()
-    vec <- unlist(dts, use.names = FALSE)
-    vec <- vec[is.finite(vec) & vec >= 0]
-    shiny::validate(shiny::need(length(vec) > 0, "No dt values found (need >=2 time points per TID)."))
-    plot_ly(x = vec, type = "histogram", nbinsx = 80) %>%
-      layout(xaxis = list(title = "dt (consecutive samples, ms)"),
-             yaxis  = list(title = "Count"),
-             bargap = 0.05)
-  })
-  outputOptions(output, "trk_dt_hist", suspendWhenHidden = FALSE)
 
   # --- ÃÂt histogram in analysis tab (richer version with stats) ---------------
   output$trk_dt_hist_jdd <- renderPlotly({
@@ -9371,11 +9373,22 @@ tracking_server <- function(input, output, session) {
     x0 <- suppressWarnings(as.numeric(ed[["xaxis.range[0]"]]))
     x1 <- suppressWarnings(as.numeric(ed[["xaxis.range[1]"]]))
     if (length(x0) == 1 && length(x1) == 1 && is.finite(x0) && is.finite(x1) && x1 > x0) {
-      trk_axis_x_span(x1 - x0)
       y0 <- suppressWarnings(as.numeric(ed[["yaxis.range[0]"]]))
       y1 <- suppressWarnings(as.numeric(ed[["yaxis.range[1]"]]))
-      if (length(y0) == 1 && length(y1) == 1 && is.finite(y0) && is.finite(y1) && y1 > y0)
-        trk_zoom_ranges(list(x = c(x0, x1), y = c(y0, y1)))
+      if (length(y0) == 1 && length(y1) == 1 && is.finite(y0) && is.finite(y1) && y1 > y0) {
+        # Capture only GENUINE user zoom/pan. During trail playback draw_frame re-pins
+        # the view every frame (an identical-range relayout) and scaleanchor can nudge
+        # it sub-% — both echo back as plotly_relayout events. Capturing those would
+        # churn trk_zoom_ranges and let the re-pin race a fresh user zoom (snapping it
+        # back). So only update when the range moved by > 1% of its span.
+        cur <- isolate(trk_zoom_ranges())
+        changed <- is.null(cur) || {
+          sx <- max(1e-9, x1 - x0); sy <- max(1e-9, y1 - y0)
+          abs(cur$x[1] - x0) > 0.01 * sx || abs(cur$x[2] - x1) > 0.01 * sx ||
+          abs(cur$y[1] - y0) > 0.01 * sy || abs(cur$y[2] - y1) > 0.01 * sy
+        }
+        if (changed) { trk_axis_x_span(x1 - x0); trk_zoom_ranges(list(x = c(x0, x1), y = c(y0, y1))) }
+      }
     } else if (isTRUE(ed[["xaxis.autorange"]])) {
       axis_state <- trk_default_axis_state()
       if (!is.null(axis_state)) trk_axis_x_span(axis_state$x_span)
