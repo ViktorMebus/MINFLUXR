@@ -317,14 +317,19 @@ tracking_ui <- fluidPage(
                 selected = "simul"
               ),
               numericInput("trk_play_total",     "Total playback window (ms)", value = 4000, min = 0.001, step = 0.001),
-              numericInput("trk_bin_dt",         "Bin width (ms)",             value = 20,   min = 0.0001, step = 0.001),
+              numericInput("trk_bin_dt",         "Bin width (ms)",             value = 5,   min = 0.0001, step = 0.001),
               helpText("Frame count is derived automatically: window ÷ bin width."),
 
               checkboxInput("trk_playback_ctrl", "Show/Hide Playback Controls", TRUE),
               conditionalPanel(
                 condition = "input.trk_playback_ctrl == true",
-                numericInput("trk_trail_len",     "Trail length (ms)",                  value = 3, min = 0,    step = 1),
-                numericInput("trk_ms_per_unit",   "ms per time unit (per-TID mode)",    value = 1,   min = 0.01, step = 0.01),
+                checkboxInput("trk_show_moving_trails", "Animate moving trails", FALSE),
+                conditionalPanel(
+                  condition = "input.trk_show_moving_trails == true",
+      
+                ),
+                numericInput("trk_trail_len",     "Trail length (ms)",                  value = 20, min = 0,    step = 1),
+                uiOutput("trk_trail_warn"),
                 checkboxInput("trk_show_advanced", "Show advanced options", FALSE),
                 conditionalPanel(
                   condition = "input.trk_show_advanced == true",
@@ -347,11 +352,26 @@ tracking_ui <- fluidPage(
           tags$summary(tags$b("Display Options")),
           uiOutput("trk_view_mode_ui"),
           numericInput("trk_pt_size", "Marker size", value = 6, min = 1),
+          radioButtons("trk_color_mode", "Color localizations by",
+                       choices = c("Track ID" = "tid", "Dark cycles (integration)" = "dark"),
+                       selected = "tid"),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "Dark-cycle mode colors each localization blue when integrated (a fix every ",
+            "cycle) through a red gradient by how many dark cycles preceded it ",
+            "(cycle time from Acquisition Parameters). Full-tracks view shows a colorbar; ",
+            "in moving-trails playback the colored dots overlay the trails."),
+          radioButtons("trk_dark_show", "Show localizations",
+                       choices = c("All" = "all", "Integrated only" = "integrated",
+                                   "Dark-cycle only" = "dark"),
+                       selected = "all"),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "Filters which localizations are drawn by integration status. Integrated = a ",
+            "fix every cycle (n_dark = 0); dark-cycle = one or more missed cycles before it. ",
+            "Markers only — trails keep the full path for context."),
           conditionalPanel(
             condition = "input.trk_view_mode_main == 'playback'",
             checkboxInput("trk_show_full_tracks_faint", "Show full tracks faintly", TRUE),
-            helpText("Markers & (optional) static lines use one color per TID."),
-            checkboxInput("trk_show_moving_trails", "Animate moving trails", FALSE)
+            helpText("Markers & (optional) static lines use one color per TID.")
           ),
           checkboxInput("trk_full_raw", "Show ALL raw tracks faintly (background)", FALSE),
           helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",

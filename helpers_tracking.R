@@ -67,12 +67,14 @@ nearest_idx <- function(tt, t) {
   if (abs(tt[i+1] - t) < abs(tt[i] - t)) i + 1L else i
 }
 
-decimate_per_tid <- function(df, max_pts = 400, tcol = "tim0") {
+decimate_per_tid <- function(df, max_pts = 400, tcol = "tim0", extra_cols = character()) {
   has_z <- "z" %in% names(df)
+  extra_cols <- intersect(extra_cols, names(df))     # carry these through unchanged (e.g. per-point colour)
   outx <- outy <- outt <- outid <- NULL
-  outz <- if (has_z) NULL else NULL  # initialise only when needed
-  sel_cols <- c("tid","x","y", if (has_z) "z", tcol)
-  df_ord <- df[order(df$tid, df[[tcol]]), sel_cols]
+  outz <- NULL
+  out_extra <- stats::setNames(vector("list", length(extra_cols)), extra_cols)
+  sel_cols <- c("tid","x","y", if (has_z) "z", tcol, extra_cols)
+  df_ord <- df[order(df$tid, df[[tcol]]), sel_cols, drop = FALSE]
   sp <- split(df_ord, df_ord$tid)
   for (nm in names(sp)) {
     tb <- sp[[nm]]; n <- nrow(tb)
@@ -82,9 +84,12 @@ decimate_per_tid <- function(df, max_pts = 400, tcol = "tim0") {
     outy  <- c(outy,  tb$y[keep])
     if (has_z) outz <- c(outz, tb$z[keep])
     outt  <- c(outt,  tb[[tcol]][keep])
+    for (ec in extra_cols) out_extra[[ec]] <- c(out_extra[[ec]], tb[[ec]][keep])
   }
-  out <- data.frame(tid = outid, x = outx, y = outy, t = outt, row.names = NULL, check.names = FALSE)
+  out <- data.frame(tid = outid, x = outx, y = outy, t = outt,
+                    row.names = NULL, check.names = FALSE, stringsAsFactors = FALSE)
   if (has_z) out$z <- outz
+  for (ec in extra_cols) out[[ec]] <- out_extra[[ec]]
   out
 }
 

@@ -2998,7 +2998,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
                                           arc_span_hint = 0) {
   
   df <- df %>% dplyr::filter(!is.na(cluster2) & cluster2 != 0)
-  if (nrow(df) == 0) return(list(fig = fig, log = "No cluster2 points found."))
+  if (nrow(df) == 0) return(list(fig = fig, log = "No Median Cluster points found."))
   
   log_msgs <- character(0)
   result_table <- data.frame()
@@ -3047,7 +3047,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
   medians_df <- medians_df %>% dplyr::filter(is.finite(x), is.finite(y), is.finite(z))
 
   if (nrow(medians_df) < 4) {
-    log_msgs <- c(log_msgs, paste("Cluster2", cluster_id, "- Not enough representative medians (<4)."))
+    log_msgs <- c(log_msgs, paste("Median Cluster", cluster_id, "- Not enough representative medians (<4)."))
     next
   }
   need_rmsd <- isTRUE(compute_rmsd_metrics)
@@ -3254,7 +3254,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     hull <- tryCatch(
       geometry::convhulln(coords_matrix, options = "FA"),
       error = function(e) {
-        log_msgs <<- c(log_msgs, paste("Cluster2", cluster_id, "- Convex hull error:", e$message))
+        log_msgs <<- c(log_msgs, paste("Median Cluster", cluster_id, "- Convex hull error:", e$message))
         NULL
       }
     )
@@ -3496,7 +3496,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
       
       
       hover_txt <- paste0(
-        "cluster2: ", cluster_id,
+        "Median cluster: ", cluster_id,
         "<br>CH Surface Area=", fmt(surface_area, 1)
       )
       
@@ -3534,7 +3534,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
         hoverlabel = list(font = list(size = 13)),
         showlegend = FALSE,
         inherit = FALSE,
-        name = paste0("cluster2 ", cluster_id)
+        name = paste0("Median cluster ", cluster_id)
       )
     }
 
@@ -3572,7 +3572,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     ))
     
     msg <- paste0(
-      "Cluster2 ", cluster_id,
+      "Median cluster ", cluster_id,
       ": CH Area=", fmt(surface_area, 2),
       ", CH Vol=",  fmt(convex_volume, 2)
     )

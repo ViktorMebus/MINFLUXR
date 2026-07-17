@@ -2128,6 +2128,13 @@ tracking_server <- function(input, output, session) {
       if (length(rx) && length(ry))
         trk_rechunk_bbox(list(x = range(rx), y = range(ry)))
 
+      # Auto-fit the total playback window to the longest remaining trace so the whole
+      # longest track plays without being cut off. tid_sum_new is sorted longest-first,
+      # so [1] is the max duration (ms). The user can still lower it afterwards.
+      max_dur <- suppressWarnings(tid_sum_new$duration_ms[1])
+      if (length(max_dur) == 1 && is.finite(max_dur) && max_dur > 0)
+        updateNumericInput(session, "trk_play_total", value = signif(max_dur, 4))
+
       # The split (if any) is now BAKED into the saved segment TIDs. Live splitting
       # can stay ON: trk_gap_split strips the "_s<N>" suffix before splitting, so the
       # reloaded segments are recombined and re-split to the SAME segments rather than
@@ -2327,7 +2334,6 @@ tracking_server <- function(input, output, session) {
         trk_play_speed     = input$trk_play_speed,
         trk_target_markers = input$trk_target_markers,
         trk_trail_len      = input$trk_trail_len,
-        trk_ms_per_unit    = input$trk_ms_per_unit,
         trk_per_tid_cap    = input$trk_per_tid_cap,
         trk_trail_nmax     = input$trk_trail_nmax,
         trk_max_pts_tid    = input$trk_max_pts_tid
@@ -2348,10 +2354,25 @@ tracking_server <- function(input, output, session) {
     if (!is.null(s$trk_play_speed) && is.finite(as.numeric(s$trk_play_speed)))
       updateSliderInput(session, "trk_play_speed", value = as.numeric(s$trk_play_speed))
     for (id in c("trk_play_total","trk_bin_dt","trk_target_markers",
-                 "trk_trail_len","trk_ms_per_unit",
+                 "trk_trail_len",
                  "trk_per_tid_cap","trk_trail_nmax","trk_max_pts_tid"))
       upd_num(id)
     showNotification("Playback settings loaded.", type = "message", duration = 3)
+  })
+
+  # Warn when the trail is shorter than one bin: each frame advances by one bin width,
+  # so a trail shorter than a bin can't bridge consecutive frames — it skips ahead and
+  # looks jumpy. Smooth, continuous trails need trail length >= bin width.
+  output$trk_trail_warn <- renderUI({
+    if (!isTRUE(input$trk_show_moving_trails)) return(NULL)
+    tl <- suppressWarnings(as.numeric(input$trk_trail_len))
+    bw <- suppressWarnings(as.numeric(input$trk_bin_dt))
+    if (!is.finite(tl) || !is.finite(bw) || bw <= 0 || tl >= bw) return(NULL)
+    div(style = "color:#b8860b; font-size:12px; line-height:1.3; margin:-4px 0 6px 0;",
+        sprintf(paste0("⚠ Trail length (%g ms) is below the bin width (%g ms). The trail ",
+                       "advances one bin per frame, so a trail shorter than a bin skips ahead ",
+                       "each frame and looks jumpy. Set trail length ≥ bin width for smooth trails."),
+                tl, bw))
   })
 
   output$trk_download_overlay_settings <- downloadHandler(
@@ -2685,7 +2706,8 @@ tracking_server <- function(input, output, session) {
   observeEvent(list(
     input$trk_play_mode,
     input$trk_view_mode_main, input$trk_full_connect, input$trk_full_raw,
-    input$trk_show_full_tracks_faint, input$trk_show_moving_trails
+    input$trk_show_full_tracks_faint, input$trk_show_moving_trails, input$trk_color_mode,
+    input$trk_dark_show
     # trk_show_heatmap deliberately NOT here — the dwell-time heatmap is heavy, so it
     # applies on the next Plot Data (heatmap_store is plot_trigger-gated). Toggling the
     # checkbox alone no longer forces a full rebuild that showed nothing until Plot Data.
@@ -2726,6 +2748,27 @@ tracking_server <- function(input, output, session) {
   # where the filtered dataframe is identical to the previous run.
   # frames_store() still runs on every plot_trigger; it reads isolate(trk()) and
   # gets the cached result when data_ver did not change.
+  # ── Dark-cycle colouring ─────────────────────────────────────────────────────
+  # A step spanning k = round(dt / cycle_time) acquisition cycles has k-1 DARK cycles
+  # (k=1 = integrated, i.e. a localization every cycle). Each localization inherits the
+  # dark-cycle count of the step LEADING INTO it. Colour scheme: integrated = blue,
+  # 1+ dark cycles = light→deep red gradient (capped at DARK_NMAX; higher = deeper red).
+  DARK_NMAX <- 6L
+  .dark_hex <- function(nmax = DARK_NMAX) {
+    reds <- grDevices::colorRampPalette(c("#fca9a4", "#e34a33", "#7f000d"))(nmax)
+    c("#2c7fb8", reds)                       # length nmax+1; index = n_dark + 1
+  }
+  dark_cycle_cols <- function(n_dark, nmax = DARK_NMAX) {
+    pal <- .dark_hex(nmax)
+    i <- pmin(pmax(as.integer(n_dark), 0L), nmax) + 1L
+    i[!is.finite(i)] <- 1L
+    pal[i]
+  }
+  dark_cycle_colorscale <- function(nmax = DARK_NMAX) {
+    pal <- .dark_hex(nmax)                   # colours for values 0..nmax
+    lapply(0:nmax, function(k) list(k / nmax, pal[k + 1]))
+  }
+
   trk <- eventReactive(data_ver(), {
     df <- isolate(trk_spatial_filtered()); req(nrow(df) > 0)
     df$tid <- as.character(df$tid)
@@ -2758,6 +2801,20 @@ tracking_server <- function(input, output, session) {
 
     df$col <- unname(cmap[as.character(df$tid)])
     attr(df, "col_map") <- cmap
+
+    # Per-localization dark-cycle count + colour (df is sorted by tid,tim here).
+    # dt uses RAW tim (ms); normalization only offsets per-TID so diffs are real.
+    t_c <- tryCatch(isolate(trk_cycle_time()), error = function(e) NA_real_)
+    n2   <- nrow(df)
+    same <- if (n2 > 1) c(FALSE, df$tid[-1] == df$tid[-n2]) else FALSE
+    dt   <- if (n2 > 1) c(NA_real_, diff(df$tim)) else NA_real_
+    dt[!same] <- NA_real_
+    if (is.finite(t_c) && t_c > 0) {
+      ndk <- pmax(0L, as.integer(round(dt / t_c)) - 1L)   # k-1 dark cycles; k=round(dt/t_c)
+    } else ndk <- rep(0L, n2)
+    ndk[is.na(ndk)] <- 0L                                 # first loc of each TID → integrated
+    df$n_dark   <- ndk
+    df$col_dark <- dark_cycle_cols(ndk)
     df
   }, ignoreNULL = TRUE)
 
@@ -2837,7 +2894,8 @@ tracking_server <- function(input, output, session) {
       # Progress feedback: building the per-track overlay (decimate + split into one
       # trace per track) is the visible cost of each Plot Data / upload-settle render.
       full_build <- withProgress(message = "Building track view…", value = 0.2, {
-        df_static <- decimate_per_tid(df, max_pts = max_pts, tcol = "tim")
+        df_static <- decimate_per_tid(df, max_pts = max_pts, tcol = "tim",
+                                      extra_cols = c("col_dark", "n_dark"))
         setProgress(0.5, detail = sprintf("%s tracks", format(length(unique(df_static$tid)), big.mark = ",")))
         sp_static <- split(df_static, df_static$tid)
         if (use3d_f) {
@@ -2952,7 +3010,12 @@ tracking_server <- function(input, output, session) {
       for (nm in names(override_cm)) if (nm %in% names(cm)) cm[[nm]] <- override_cm[[nm]]
       cm
     } else base_col_map
-    
+
+    # Colour markers per-localization by dark-cycle count instead of by TID?
+    color_by_dark <- identical(isolate(input$trk_color_mode), "dark")
+    # Display filter by integration status: "all" | "integrated" (n_dark==0) | "dark" (n_dark>=1)
+    dark_show <- isolate(input$trk_dark_show %||% "all")
+
     # Frame grid from bin width OR #frames over [tmin, tmax]
     bin_dt <- suppressWarnings(as.numeric(isolate(input$trk_bin_dt)))
     if (!is.finite(bin_dt) || bin_dt <= 0) bin_dt <- (tmax - tmin) / 120  # fallback
@@ -2983,6 +3046,10 @@ tracking_server <- function(input, output, session) {
       tb  <- sp_full[[tid]]
       bi  <- findInterval(tb[[tcol_play]], edges)
       valid <- bi >= 1L & bi <= n_frames
+      # Integration-status display filter (markers only; trails keep the full path).
+      if (dark_show != "all" && "n_dark" %in% names(tb)) {
+        valid <- valid & (if (dark_show == "integrated") tb$n_dark == 0L else tb$n_dark >= 1L)
+      }
       if (!any(valid)) return(list())
       split(which(valid), bi[valid])   # named list: "k" -> integer row-indices
     })
@@ -3050,7 +3117,11 @@ tracking_server <- function(input, output, session) {
           mx    <- c(mx, tb$x[keep])
           my    <- c(my, tb$y[keep])
           if (use3d) mz <- c(mz, tb$z[keep])
-          mcols <- c(mcols, rep(unname(as.character(col_map[[tids[i]]])), length(keep)))
+          if (color_by_dark && "col_dark" %in% names(tb)) {
+            mcols <- c(mcols, as.character(tb$col_dark[keep]))
+          } else {
+            mcols <- c(mcols, rep(unname(as.character(col_map[[tids[i]]])), length(keep)))
+          }
         }
       }
 
@@ -3134,7 +3205,8 @@ tracking_server <- function(input, output, session) {
       bin_width   = bin_width,
       using_bins  = TRUE,
       step_dt     = if (length(edges) >= 2) (edges[2] - edges[1]) else NA_real_,
-      has_3d      = use3d      # TRUE when z column is present and 3D mode is active
+      has_3d      = use3d,     # TRUE when z column is present and 3D mode is active
+      color_by_dark = color_by_dark   # markers coloured by dark-cycle count (overlaid even in trails mode)
     )
   }, ignoreNULL = TRUE)
   
@@ -3230,6 +3302,16 @@ tracking_server <- function(input, output, session) {
       dark     <- isTRUE(isolate(input$trk_dark_mode))
       bg_col   <- if (dark) "#000000" else "#FFFFFF"
       fg_col   <- if (dark) "#FFFFFF" else "#63666A"
+      color_by_dark <- identical(isolate(input$trk_color_mode), "dark") &&
+                       any(vapply(sp_all, function(p) "col_dark" %in% names(p), logical(1)))
+      dark_line_col <- if (dark) "rgba(200,200,200,0.30)" else "rgba(120,120,120,0.30)"
+      # Integration-status display filter: keep all / integrated (n_dark==0) / dark (>=1).
+      dark_show <- isolate(input$trk_dark_show %||% "all")
+      dark_keep <- function(pts) {
+        if (dark_show == "all" || !("n_dark" %in% names(pts))) return(pts)
+        m <- if (dark_show == "integrated") pts$n_dark == 0L else pts$n_dark >= 1L
+        pts[m, , drop = FALSE]
+      }
 
       fig <- draw_heatmap(fig)     # dwell-time heatmap background (2D only; no-op otherwise)
       fig <- draw_raw_faint(fig)   # all-raw-tracks background (behind the filtered tracks)
@@ -3242,20 +3324,26 @@ tracking_server <- function(input, output, session) {
           pts <- sp_all[[nm]]
           if (!nrow(pts)) next
           pts <- pts[order(pts$t), ]
+          pts <- dark_keep(pts)
+          if (!nrow(pts)) next
           col_i    <- as.character(cmap[[nm]])
           tim_col  <- if ("tim" %in% names(pts)) pts$tim else pts$t
           hover_z  <- if (use3d && "z" %in% names(pts))
                         sprintf("<br>z: %.1f nm", pts$z) else
                         rep("", nrow(pts))
-          hover_txt <- sprintf("TID: %s<br>t: %.1f ms<br>x: %.1f nm<br>y: %.1f nm%s",
-                               nm, tim_col, pts$x, pts$y, hover_z)
+          hover_d  <- if ("n_dark" %in% names(pts))
+                        sprintf("<br>dark cycles: %d", pts$n_dark) else rep("", nrow(pts))
+          hover_txt <- sprintf("TID: %s<br>t: %.1f ms<br>x: %.1f nm<br>y: %.1f nm%s%s",
+                               nm, tim_col, pts$x, pts$y, hover_z, hover_d)
+          mk_col <- if (color_by_dark && "col_dark" %in% names(pts)) as.character(pts$col_dark) else col_i
+          ln_col <- if (color_by_dark) dark_line_col else col_i
           tr_args <- list(
             x = pts$x, y = pts$y,
             type = tr_type, mode = "lines+markers",
-            line   = list(width = 1, color = col_i),
-            marker = list(size = isolate(input$trk_pt_size), color = col_i),
+            line   = list(width = 1, color = ln_col),
+            marker = list(size = isolate(input$trk_pt_size), color = mk_col),
             text = hover_txt, hovertemplate = "%{text}<extra></extra>",
-            showlegend = (i == 1L), legendgroup = "Localizations",
+            showlegend = (i == 1L && !color_by_dark), legendgroup = "Localizations",
             name = if (i == 1L) "Localizations" else paste0("tid_", nm)
           )
           if (use3d) tr_args$z <- pts$z
@@ -3264,28 +3352,48 @@ tracking_server <- function(input, output, session) {
       } else {
         # Single fast scattergl trace with per-point colors + hover text
         tr_type <- if (use3d) "scatter3d" else "scattergl"
-        x_v <- c(); y_v <- c(); z_v <- c(); col_v <- c(); txt_v <- c()
+        x_v <- c(); y_v <- c(); z_v <- c(); col_v <- c(); nd_v <- c(); txt_v <- c()
         for (nm in all_tids) {
           pts   <- sp_all[[nm]]
+          if (!nrow(pts)) next
+          pts <- dark_keep(pts)
           if (!nrow(pts)) next
           col_i   <- as.character(cmap[[nm]])
           tim_col <- if ("tim" %in% names(pts)) pts$tim else pts$t
           hover_z <- if (use3d && "z" %in% names(pts))
                        sprintf("<br>z: %.1f nm", pts$z) else
                        rep("", nrow(pts))
-          txt_v <- c(txt_v, sprintf("TID: %s<br>t: %.1f ms<br>x: %.1f nm<br>y: %.1f nm%s",
-                                    nm, tim_col, pts$x, pts$y, hover_z))
+          hover_d <- if ("n_dark" %in% names(pts))
+                       sprintf("<br>dark cycles: %d", pts$n_dark) else rep("", nrow(pts))
+          txt_v <- c(txt_v, sprintf("TID: %s<br>t: %.1f ms<br>x: %.1f nm<br>y: %.1f nm%s%s",
+                                    nm, tim_col, pts$x, pts$y, hover_z, hover_d))
           x_v   <- c(x_v,   pts$x)
           y_v   <- c(y_v,   pts$y)
           if (use3d) z_v <- c(z_v, pts$z)
           col_v <- c(col_v, rep(col_i, nrow(pts)))
+          if ("n_dark" %in% names(pts)) nd_v <- c(nd_v, pts$n_dark)
+        }
+        # Dark-cycle colouring uses a numeric colour array + colorscale so plotly draws
+        # a self-documenting colorbar (0 = integrated/blue → deeper red = more dark cycles).
+        if (color_by_dark && length(nd_v) == length(x_v)) {
+          mk <- list(size = isolate(input$trk_pt_size), color = nd_v,
+                     colorscale = dark_cycle_colorscale(), cmin = 0, cmax = DARK_NMAX,
+                     showscale = TRUE,
+                     colorbar = list(title = list(text = "dark<br>cycles", font = list(color = fg_col)),
+                                     tickmode = "array", tickvals = 0:DARK_NMAX,
+                                     ticktext = c(as.character(0:(DARK_NMAX - 1L)), paste0(DARK_NMAX, "+")),
+                                     tickfont = list(color = fg_col), len = 0.5, thickness = 14))
+          show_lg <- FALSE
+        } else {
+          mk <- list(size = isolate(input$trk_pt_size), color = col_v)
+          show_lg <- TRUE
         }
         tr_args <- list(
           x = x_v, y = y_v,
           type = tr_type, mode = "markers",
-          marker = list(size = isolate(input$trk_pt_size), color = col_v),
+          marker = mk,
           text = txt_v, hovertemplate = "%{text}<extra></extra>",
-          showlegend = TRUE, name = "Localizations", legendgroup = "Localizations"
+          showlegend = show_lg, name = "Localizations", legendgroup = "Localizations"
         )
         if (use3d) tr_args$z <- z_v
         fig <- do.call(add_trace, c(list(fig), tr_args))
@@ -3736,10 +3844,20 @@ tracking_server <- function(input, output, session) {
       if (is3d) restyle_data$z <- zs
       plotlyProxyInvoke(proxy, "restyle", restyle_data,
         seq(tm$trail_start, tm$trail_start + n - 1L))
-      # Markers stay empty while trails are shown
-      empty_mk <- list(x = list(NA_real_), y = list(NA_real_))
-      if (is3d) empty_mk$z <- list(NA_real_)
-      plotlyProxyInvoke(proxy, "restyle", empty_mk, tm$markers_idx)
+      # Markers normally stay empty while trails are shown (lines replace dots). But in
+      # dark-cycle colour mode the per-localization colour lives on the MARKERS, so keep
+      # them visible (colored dots overlaid on the trails) or the toggle would do nothing.
+      if (isTRUE(pre$color_by_dark) && length(fr$markers_x)) {
+        mk_data <- list(x = list(fr$markers_x), y = list(fr$markers_y),
+                        `marker.size` = if (is.finite(pt_size)) pt_size else 6,
+                        `marker.color` = list(as.character(fr$marker_cols)))
+        if (is3d) mk_data$z <- list(fr$markers_z %||% numeric(0))
+        plotlyProxyInvoke(proxy, "restyle", mk_data, tm$markers_idx)
+      } else {
+        empty_mk <- list(x = list(NA_real_), y = list(NA_real_))
+        if (is3d) empty_mk$z <- list(NA_real_)
+        plotlyProxyInvoke(proxy, "restyle", empty_mk, tm$markers_idx)
+      }
     } else {
       # ----- Markers (no trails active) -----
       if (length(fr$markers_x)) {
@@ -3759,29 +3877,20 @@ tracking_server <- function(input, output, session) {
       }
     }
 
-    # ----- Title (+ range re-pin while trails animate) -----
-    # A title relayout re-runs plotly's layout solver, which \u2014 with scaleanchor on \u2014
-    # re-fits the axes and jitters the FOV. When trails are animating we therefore fold
-    # the current view's ranges into the SAME (atomic) relayout, every frame, so the view
-    # can't drift. We pin to the USER'S CURRENT VIEW (trk_zoom_ranges, updated live by the
-    # plotly_relayout observer when they zoom/pan) and fall back to the full extent only
-    # when they haven't zoomed \u2014 so zooming in DURING playback sticks instead of snapping
-    # back. Without trails the markers are one stable-extent trace, so the plain title
-    # relayout (throttled) is safe. (3D manages its own camera via aspectmode.)
+    # ----- Title (only when NOT playing) -----
+    # During playback we RESTYLE ONLY and never relayout. Any relayout \u2014 even a title-only
+    # one \u2014 makes plotly re-solve the scaleanchor aspect constraint, which jitters the FOV
+    # (the sequential loop skips relayout for exactly this reason; see
+    # run_sequential_loop_plain). The layout's uirevision keeps the view stable across the
+    # restyles AND preserves a zoom/pan the user makes mid-playback, so no per-frame range
+    # pinning is needed or wanted. We refresh the frame/marker title only when paused
+    # (single frame / slider scrub), where one relayout is harmless.
     playing_now <- isTRUE(loop$gplaying) || isTRUE(loop$playing)
-    trails_on   <- identical(tm$trails_mode, "per_tid")
-    if (trails_on || !playing_now || (k %% 3L) == 1L) {
+    if (!playing_now) {
       n_pts <- length(fr$markers_x)
-      rl <- list(title = list(text = sprintf("frame %d \u00B7 markers: %d", k, n_pts)))
-      if (trails_on && !is3d) {
-        lr <- isolate(trk_zoom_ranges())              # live user view (zoom/pan)
-        if (is.null(lr)) lr <- isolate(trk_locked_ranges())   # else full extent
-        if (!is.null(lr)) rl <- c(rl, list(
-          `xaxis.range[0]` = lr$x[1], `xaxis.range[1]` = lr$x[2],
-          `yaxis.range[0]` = lr$y[1], `yaxis.range[1]` = lr$y[2],
-          `xaxis.autorange` = FALSE,  `yaxis.autorange` = FALSE))
-      }
-      plotlyProxyInvoke(proxy, "relayout", rl)
+      plotlyProxyInvoke(
+        proxy, "relayout",
+        list(title = list(text = sprintf("frame %d \u00B7 markers: %d", k, n_pts))))
     }
 
     # ----- Slider sync (throttled to every 5 frames during playback) -----
@@ -8842,7 +8951,7 @@ tracking_server <- function(input, output, session) {
       loop$frames_per_tid <- max(2L, n_frames_eff())
       loop$speed         <- as.numeric(input$trk_play_speed)
       loop$interval_sec  <- play_interval_for(loop$speed)
-      loop$ms_per_unit   <- as.numeric(input$trk_ms_per_unit)
+      loop$ms_per_unit   <- 0   # sequential mode uses a fixed frame interval scaled by the Playback speed slider
       loop$times <- lapply(loop$tids, function(nm) {
         tb <- loop$sp[[nm]]; r <- range(tb$t, na.rm = TRUE)
         if (!is.finite(r[1]) || !is.finite(r[2]) || r[1] == r[2]) r <- c(0, 1)
@@ -8977,7 +9086,6 @@ tracking_server <- function(input, output, session) {
     updateNumericInput(session, "trk_play_total",      value = s$nice_total)
     updateNumericInput(session, "trk_trail_len",       value = signif(s$trail_len, 3))
     updateNumericInput(session, "trk_target_markers",  value = s$target_markers)
-    updateNumericInput(session, "trk_ms_per_unit",     value = s$ms_per_unit)
     updateNumericInput(session, "trk_bin_dt",          value = s$nice_total / s$n_frames)
 
     # Delay fire_frames until after input round-trips arrive (~200-400 ms),
@@ -9373,22 +9481,11 @@ tracking_server <- function(input, output, session) {
     x0 <- suppressWarnings(as.numeric(ed[["xaxis.range[0]"]]))
     x1 <- suppressWarnings(as.numeric(ed[["xaxis.range[1]"]]))
     if (length(x0) == 1 && length(x1) == 1 && is.finite(x0) && is.finite(x1) && x1 > x0) {
+      trk_axis_x_span(x1 - x0)
       y0 <- suppressWarnings(as.numeric(ed[["yaxis.range[0]"]]))
       y1 <- suppressWarnings(as.numeric(ed[["yaxis.range[1]"]]))
-      if (length(y0) == 1 && length(y1) == 1 && is.finite(y0) && is.finite(y1) && y1 > y0) {
-        # Capture only GENUINE user zoom/pan. During trail playback draw_frame re-pins
-        # the view every frame (an identical-range relayout) and scaleanchor can nudge
-        # it sub-% — both echo back as plotly_relayout events. Capturing those would
-        # churn trk_zoom_ranges and let the re-pin race a fresh user zoom (snapping it
-        # back). So only update when the range moved by > 1% of its span.
-        cur <- isolate(trk_zoom_ranges())
-        changed <- is.null(cur) || {
-          sx <- max(1e-9, x1 - x0); sy <- max(1e-9, y1 - y0)
-          abs(cur$x[1] - x0) > 0.01 * sx || abs(cur$x[2] - x1) > 0.01 * sx ||
-          abs(cur$y[1] - y0) > 0.01 * sy || abs(cur$y[2] - y1) > 0.01 * sy
-        }
-        if (changed) { trk_axis_x_span(x1 - x0); trk_zoom_ranges(list(x = c(x0, x1), y = c(y0, y1))) }
-      }
+      if (length(y0) == 1 && length(y1) == 1 && is.finite(y0) && is.finite(y1) && y1 > y0)
+        trk_zoom_ranges(list(x = c(x0, x1), y = c(y0, y1)))
     } else if (isTRUE(ed[["xaxis.autorange"]])) {
       axis_state <- trk_default_axis_state()
       if (!is.null(axis_state)) trk_axis_x_span(axis_state$x_span)

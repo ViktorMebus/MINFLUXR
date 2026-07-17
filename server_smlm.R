@@ -1498,7 +1498,7 @@ smlm_server <- function(input, output, session) {
   
   output$cluster2_settings_file_ui <- renderUI({
     cluster2_file_reset_key()  
-    fileInput("cluster2_settings_file", "Load Cluster2 settings (.json)", accept = c(".json"))
+    fileInput("cluster2_settings_file", "Load Median Cluster settings (.json)", accept = c(".json"))
   })
   
   observeEvent(input$cluster2_settings_file, {
@@ -1513,7 +1513,7 @@ smlm_server <- function(input, output, session) {
     
     showNotification(
       paste0(
-        "Cluster2 settings loaded: ",
+        "Median Cluster settings loaded: ",
         input$cluster2_settings_file$name
       ),
       type = "message",
@@ -1540,7 +1540,7 @@ smlm_server <- function(input, output, session) {
     mp <- as.integer(input$minpts2 %||% 4L)
     if (!is.na(mp) && mp < 4L) {
       updateNumericInput(session, "minpts2", value = 4L)
-      showNotification("Cluster2 minPts raised to 4 to keep geometry stable (convex hull / fits need ≥4 points).",
+      showNotification("Median Cluster minPts raised to 4 to keep geometry stable (convex hull / fits need ≥4 points).",
                        type = "warning", duration = 4)
     }
   })
@@ -2738,7 +2738,7 @@ smlm_server <- function(input, output, session) {
     filename = function() paste0("cluster2_metrics_", Sys.Date(), ".xlsx"),
     content  = function(file) {
       tbl <- cluster2_table_store()
-      if (is.null(tbl) || nrow(tbl) == 0) stop("No Cluster2 metrics to download.")
+      if (is.null(tbl) || nrow(tbl) == 0) stop("No Median Cluster metrics to download.")
       
       membrane_mode <- isTRUE(input$membrane_protein_options)
       
@@ -2755,7 +2755,7 @@ smlm_server <- function(input, output, session) {
       openxlsx::write.xlsx(
         x         = tbl,
         file      = file,
-        sheetName = "Cluster2 metrics",
+        sheetName = "Median Cluster metrics",
         rowNames  = FALSE
       )
     }
@@ -3211,7 +3211,7 @@ smlm_server <- function(input, output, session) {
       return(helpText("Enable to classify each cluster's shape (filament / ring / punctum / sheet / diffuse) and report neutral size descriptors."))
     mo <- gt_morphology()
     if (is.null(mo) || !nrow(mo))
-      return(helpText("No analysable structures (need median-clusters / cluster2 with ≥4 traces)."))
+      return(helpText("No analysable structures (need Median Clusters with ≥4 traces)."))
     icon_for <- function(s) switch(s, filament = "――", ring = "○",
                                    punctum = "●", sheet = "▧", "∴")
     rows <- lapply(seq_len(nrow(mo)), function(i) {
@@ -3600,7 +3600,7 @@ smlm_server <- function(input, output, session) {
                 fill = "toself",
                 fillcolor = fill_col,
                 line = list(color = base_col, width = 2),
-                name = paste("Cluster2", cl2),
+                name = paste("Median Cluster", cl2),
                 showlegend = TRUE,
                 inherit = FALSE
               )
@@ -4579,7 +4579,7 @@ smlm_server <- function(input, output, session) {
           ""),
         ifelse(
           isTRUE(input$enable_two_color) & !is.na(tc2_lbl),
-          paste0("<br>2-color cluster2: ", tc2_lbl),
+          paste0("<br>2-color Median cluster: ", tc2_lbl),
           ""
         )
         )
@@ -4829,11 +4829,11 @@ smlm_server <- function(input, output, session) {
     filename = function() paste0("cluster2_fit_metrics_", Sys.Date(), ".xlsx"),
     content  = function(file) {
       tbl <- cluster2_table_store()
-      if (is.null(tbl) || nrow(tbl) == 0) stop("No Cluster2 metrics to download.")
+      if (is.null(tbl) || nrow(tbl) == 0) stop("No Median Cluster metrics to download.")
       openxlsx::write.xlsx(
         x         = tbl,
         file      = file,
-        sheetName = "Cluster2 metrics",
+        sheetName = "Median Cluster metrics",
         rowNames  = FALSE
       )
     },
@@ -4847,7 +4847,7 @@ smlm_server <- function(input, output, session) {
       openxlsx::write.xlsx(
         x         = nn_table_cluster2(),
         file      = file,
-        sheetName = "NN cluster2",
+        sheetName = "NN Median Cluster",
         rowNames  = FALSE
       )
     },
@@ -5723,7 +5723,7 @@ smlm_server <- function(input, output, session) {
       df_cluster2 <- df_full %>% dplyr::filter(!is.na(cluster2) & cluster2 != 0)
       clusters <- df_cluster2 %>% dplyr::group_by(cluster2) %>% dplyr::group_split()
       if (!length(clusters)) {
-        fit_log_rv("No cluster2 structures available for fitting. Check Cluster2 DBSCAN settings (eps2/minpts2).")
+        fit_log_rv("No Median Cluster structures available for fitting. Check Median Clustering DBSCAN settings (eps2/minpts2).")
       }
       fit_alpha <- as.numeric(input$alpha_value_hull %||% 200)
       if (!is.finite(fit_alpha) || fit_alpha <= 0) fit_alpha <- 200
@@ -6449,7 +6449,7 @@ smlm_server <- function(input, output, session) {
                 i = tris[, 1] - 1, j = tris[, 2] - 1, k = tris[, 3] - 1,
                 opacity = input$hull_opacity,
                 color = I(col_hex),           
-                name = paste("Cluster2", cl2),
+                name = paste("Median Cluster", cl2),
                 hoverinfo = "skip",
                 hovertemplate = "",
                 showlegend = FALSE,
@@ -6809,8 +6809,8 @@ smlm_server <- function(input, output, session) {
     unit_lbl <- switch(input$nn_batch_unit %||% "tid",
       tid           = "TID centroid",
       pcid          = "Primary cluster centroid",
-      cluster2_tid  = "TID-within-Cluster2",
-      cluster2_pcid = "Primary cluster centroid-within-Cluster2",
+      cluster2_tid  = "TID-within-Median-Cluster",
+      cluster2_pcid = "Primary cluster centroid-within-Median-Cluster",
       input$nn_batch_unit %||% "tid"
     )
     fig %>% plotly::layout(
@@ -7095,7 +7095,7 @@ smlm_server <- function(input, output, session) {
     }
     det_time_results(res)
     showNotification(
-      sprintf("Detection over time: %d traces across %d file(s); %.0f%% in Cluster2.",
+      sprintf("Detection over time: %d traces across %d file(s); %.0f%% in Median Cluster",
               nrow(res), length(unique(res$dataset)), 100 * mean(res$in_c2)),
       type = "message", duration = 4)
   })
@@ -7142,7 +7142,7 @@ smlm_server <- function(input, output, session) {
       yy <- yvals(cnt_c2, cnt_bg); ytitle <- yy$yt
       fig <- fig %>%
         plotly::add_trace(x = ctr, y = yy$c2, type = "scatter", mode = "lines+markers",
-                          line = list(color = "#2C7FB8"), marker = list(color = "#2C7FB8"), name = "In Cluster2") %>%
+                          line = list(color = "#2C7FB8"), marker = list(color = "#2C7FB8"), name = "In Median Cluster") %>%
         plotly::add_trace(x = ctr, y = yy$bg, type = "scatter", mode = "lines+markers",
                           line = list(color = "#9E9E9E"), marker = list(color = "#9E9E9E"), name = "Unclustered")
       if (normalized && is.finite(yy$ks))
@@ -7159,7 +7159,7 @@ smlm_server <- function(input, output, session) {
         fig <- fig %>%
           plotly::add_trace(x = ctr, y = yy$c2, type = "scatter", mode = "lines",
                             line = list(color = pal[g], width = 2),
-                            name = paste0(g, " — In Cluster2", kslab)) %>%
+                            name = paste0(g, " — In Median Cluster", kslab)) %>%
           plotly::add_trace(x = ctr, y = yy$bg, type = "scatter", mode = "lines",
                             line = list(color = pal[g], width = 2, dash = "dash"),
                             name = paste0(g, " — Unclustered"))
@@ -7183,7 +7183,7 @@ smlm_server <- function(input, output, session) {
     }
   )
 
-  ## ── Cluster2 Crowding vs Detection-Time Shift ─────────────────────────────
+  ## ── Median Cluster (cluster2) Crowding vs Detection-Time Shift ─────────────────────────────
   # One row per Cluster2 structure (built from its member TID centroids):
   #   nn_median  = median nearest-neighbour distance among members (smaller = denser)
   #   time_shift = median(member tim_med) - median(unclustered background tim_med),
@@ -7217,7 +7217,7 @@ smlm_server <- function(input, output, session) {
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) next
         df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) next
+        if (is.null(df) || !nrow(df) || !"Median cluster" %in% names(df)) next
         if (use_3d && !"z" %in% names(df)) next
 
         per_tid <- df %>%
@@ -7261,7 +7261,7 @@ smlm_server <- function(input, output, session) {
     res <- if (length(rows)) do.call(rbind, rows) else NULL
     if (is.null(res) || !nrow(res)) {
       showNotification(
-        sprintf("No Cluster2 structures with >= %d traces and an unclustered background found.", min_n),
+        sprintf("No Median Cluster structures with >= %d traces and an unclustered background found.", min_n),
         type = "warning")
       crowd_results(NULL); return()
     }
@@ -7290,7 +7290,7 @@ smlm_server <- function(input, output, session) {
         name = if (n_ds > 1) ds else "Structures",
         marker = list(color = pal[ds], size = 7, opacity = 0.7,
                       line = list(color = "white", width = 0.5)),
-        text = paste0("cluster2 ", sub$cluster2, "<br>n = ", sub$n_tids,
+        text = paste0("Median cluster ", sub$cluster2, "<br>n = ", sub$n_tids,
                       "<br>NN median = ", round(sub$nn_median, 1), " nm",
                       "<br>time shift = ", round(sub$time_shift, 2)),
         hoverinfo = "text"
@@ -7366,7 +7366,7 @@ smlm_server <- function(input, output, session) {
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) next
         df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) next
+        if (is.null(df) || !nrow(df) || !"Median Cluster" %in% names(df)) next
         if (use_3d && !"z" %in% names(df)) next
 
         id_col <- if (use_primary && "cluster" %in% names(df) &&
@@ -7409,7 +7409,7 @@ smlm_server <- function(input, output, session) {
 
     res <- if (length(rows)) do.call(rbind, rows) else NULL
     if (is.null(res) || !nrow(res)) {
-      showNotification(sprintf("No Cluster2 structures with >= %d members found.", min_n), type = "warning")
+      showNotification(sprintf("No Median Cluster structures with >= %d members found.", min_n), type = "warning")
       size_nn_results(NULL); return()
     }
     size_nn_results(res)
@@ -7458,7 +7458,7 @@ smlm_server <- function(input, output, session) {
       fig <- fig %>% plotly::add_markers(x = sub$xv, y = sub$nn_median,
         name = if (n_ds > 1) ds else "Structures",
         marker = list(color = pal[ds], size = 7, opacity = 0.7, line = list(color = "white", width = 0.5)),
-        text = paste0("cluster2 ", sub$cluster2, "<br>", xname, " ", signif(sub$xv, 4),
+        text = paste0("Median cluster ", sub$cluster2, "<br>", xname, " ", signif(sub$xv, 4),
                       "<br>median NN ", round(sub$nn_median, 1), " nm<br>", sub$dataset),
         hoverinfo = "text")
     }
@@ -7542,12 +7542,12 @@ smlm_server <- function(input, output, session) {
     }
     ids <- sort(unique(df$cluster2[!is.na(df$cluster2) & df$cluster2 > 0L]))
     if (!length(ids)) {
-      showNotification("No Cluster2 structures found in the plotted data.", type = "warning")
+      showNotification("No Median Cluster structures found in the plotted data.", type = "warning")
       viewer_snapshot(NULL); return()
     }
     viewer_snapshot(list(df = df, ids = ids))
     viewer_idx(1L)
-    showNotification(sprintf("Loaded %d Cluster2 structure(s).", length(ids)),
+    showNotification(sprintf("Loaded %d Median Cluster structure(s).", length(ids)),
                      type = "message", duration = 3)
   })
 
@@ -7565,7 +7565,7 @@ smlm_server <- function(input, output, session) {
   viewer_current <- reactive({
     s   <- viewer_snapshot()
     shiny::validate(shiny::need(!is.null(s) && length(s$ids) > 0,
-      "Press 'Run' to load the plotted file's Cluster2 structures."))
+      "Press 'Run' to load the plotted file's Median Cluster structures."))
     ids <- s$ids; n <- length(ids)
     idx <- min(max(viewer_idx(), 1L), n)
     id  <- ids[idx]

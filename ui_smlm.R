@@ -722,7 +722,7 @@ smlm_ui <- fluidPage(
         ),
         conditionalPanel(
           condition = "input.enable_cluster2 == true",
-          checkboxInput("nn_within_cluster2", "Within cluster2 only", value = FALSE)
+          checkboxInput("nn_within_cluster2", "Within Median Cluster only", value = FALSE)
         ),
         downloadButton("download_nn_table", "Download NN Distance Table")
       ),
@@ -947,7 +947,7 @@ smlm_ui <- fluidPage(
                          "Raw trace IDs"                                 = "tid"),
                        selected = "auto"),
           checkboxInput("gt_scope_cluster2",
-                        "Restrict to points inside median-clusters (cluster2)", value = TRUE),
+                        "Restrict to points inside Median Clusters", value = TRUE),
           helpText("Auto is recommended: primary clustering collapses re-blinks and multivalent labels to ~1 unit per molecule, turning an unstable divide-by-multiplicity count into a divide-by-~1 count."),
           numericInput("gt_complex_r",
                        "Label-complex merge radius (nm, blank = auto)",
@@ -961,7 +961,7 @@ smlm_ui <- fluidPage(
           numericInput("gt_displace_nm",
                        "Inward displacement (nm, blank = auto = linker length)",
                        value = NA, min = 0, step = 1),
-          helpText("The antibody binds a surface epitope and the linker throws the dye OUTWARD, so the trace cloud sits ~linker-length outside the true structure. This pushes each GT back toward the local structure centre (perpendicular to a filament's axis; toward the centroid for a compact/ring shape). Needs median-clusters (cluster2) defined to know the structure."),
+          helpText("The antibody binds a surface epitope and the linker throws the dye OUTWARD, so the trace cloud sits ~linker-length outside the true structure. This pushes each GT back toward the local structure centre (perpendicular to a filament's axis; toward the centroid for a compact/ring shape). Needs Median Clusters defined to know the structure."),
           checkboxInput("gt_show_lines", "Draw contribution lines (unit → GT)", value = TRUE),
           sliderInput("gt_circle_size", "GT marker size", min = 4, max = 40, value = 15, step = 1),
           sliderInput("gt_support_strength",
@@ -1501,7 +1501,7 @@ smlm_ui <- fluidPage(
           h4("Cross-Channel NN & Co-localization"),
           helpText("Requires '2-color MINFLUX' to be enabled in the Display tab.",
                    "Channel assignment and clustering (tc1/tc2) are taken from the 2-color settings.",
-                   "Median  modes restrict comparisons to molecules within the same Cluster2 group."),
+                   "Median  modes restrict comparisons to molecules within the same Median Cluster group."),
           selectInput("cross_nn_unit", "Unit",
             choices = c(
               "TID centroids"                            = "tid",
