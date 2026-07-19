@@ -2,6 +2,25 @@
 ## ui_tracking.R  —  Tracking tab UI (assigned to tracking_ui)
 ## All input/output IDs prefixed with trk_ to avoid collisions with SMLM IDs.
 ## ─────────────────────────────────────────────────────────────────────────────
+
+# Collapsible per-method infobox: what the method is, where it is from, how it is
+# adapted for MINFLUX (irregular Δt / short tracks / nm precision), and the honest
+# caveat. `rating` is a 🟢/🟡/🟠 chip (well-suited / strained-but-adapted / exploratory).
+.method_box <- function(rating, source, adaptation, caveat) {
+  chip <- switch(rating,
+    green  = tags$span("🟢 well-adapted",  style = "color:#1a8a1a;"),
+    amber  = tags$span("🟡 adapted, with caveats", style = "color:#b26a00;"),
+    orange = tags$span("🟠 exploratory for MINFLUX", style = "color:#e67e22;"),
+    tags$span(rating))
+  tags$details(style = "margin:4px 0 10px; font-size:0.82em;",
+    tags$summary(style = "cursor:pointer; color:#2c3e50; font-weight:600;",
+                 "ℹ Method & MINFLUX adaptation  ", chip),
+    tags$div(style = "padding:6px 4px 2px 10px; color:#555; line-height:1.5; border-left:3px solid #cfe0ee;",
+      tags$p(style = "margin:2px 0;", tags$b("Origin: "), source),
+      tags$p(style = "margin:2px 0;", tags$b("MINFLUX adaptation: "), adaptation),
+      tags$p(style = "margin:2px 0; color:#7a5c00;", tags$b("Caveat: "), caveat)))
+}
+
 tracking_ui <- fluidPage(
   tags$head(tags$style(HTML("
     details.sim-group { margin: 2px 0 6px 0; }
@@ -77,13 +96,14 @@ tracking_ui <- fluidPage(
             "data-driven estimates). Drives gap-splitting and the MSD."),
           uiOutput("trk_cycle_time_status"),
           numericInput("trk_sigma_loc_nm",
-                       "Localization precision σ_loc (nm, 0 = auto from MSD)",
+                       "Localization precision σ_loc (nm, 0 = auto)",
                        value = 0, min = 0, step = 0.5),
           helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
-            "The short-lag noise floor. Leave at 0 to use the σ_loc the MSD ",
-            "estimates from its intercept; set > 0 to override. Used by the D-map to ",
-            "subtract the localization-error floor so slow regions aren't reported as ",
-            "diffusing."),
+            "The short-lag noise floor. Leave at 0 to use the app-wide σ_loc, which comes from the ",
+            tags$b("Data Quality & Calibration"), " panel (CVE — MSD-free) when you have run it, ",
+            "falling back to the MSD-fit intercept otherwise; set > 0 to override. Used by the D-map, ",
+            "JDD, confinement, HMM, directionality and speed to subtract the localization-error floor ",
+            "so slow regions aren't reported as diffusing."),
           uiOutput("trk_sigma_loc_status"),
           conditionalPanel(
             condition = "input.trk_hw_enable == true",
@@ -518,6 +538,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Data Quality & Calibration"),
+          .method_box("green",
+            "Covariance-based estimator, CVE (Vestergaard, Blainey & Flyvbjerg 2014). Reads σ_loc from the lag-1 anti-correlation of consecutive steps — no MSD fit needed.",
+            HTML("Motion blur R=0 for MINFLUX (no exposure integration), so σ_loc² = −⟨Δxᵢ·Δxᵢ₊₁⟩. Restricted to consecutive <b>single-cycle (integrated)</b> pairs so irregular dark-cycle Δt cannot bias the covariance. Optionally inverse-variance-weighted by the per-localization photon count (EFO). This is the app-wide σ_loc source."),
+            "Needs enough integrated pairs; strongly directed motion (drift) makes σ_loc unresolvable (flagged degenerate — enter it manually then)."),
           tags$div(class = "well well-sm", style = "font-size:0.84em; color:#555; margin-bottom:8px;",
             tags$b("Do this first."), " Estimates the localization precision σ_loc directly from ",
             "the short-lag step covariance (CVE; ", tags$b("no MSD / diffusion fit needed"),
@@ -542,7 +566,14 @@ tracking_ui <- fluidPage(
           helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
             "One CVE σ_loc per long track; the spread shows whether a single global value is ",
             "safe. The first few localizations carry MINFLUX lock-on transient and are skipped. ",
-            "The app-wide σ_loc uses the per-track median (robust); pooled is shown for cross-check.")
+            "The app-wide σ_loc uses the per-track median (robust); pooled is shown for cross-check."),
+          checkboxInput("trk_cve_precision_weight",
+                        "Weight σ_loc / D by photon count (EFO)", value = TRUE),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "Uses MINFLUX's per-localization photon proxy (EFO): fits σ_loc ∝ EFO^p from the ",
+            "per-track CVE and inverse-variance-weights the pooled σ_loc and D, so bright, ",
+            "well-localized steps count more than dim/noisy ones. When on and resolvable, the ",
+            "photon-weighted value becomes the app-wide σ_loc. Falls back to unweighted without EFO.")
         ),
         column(8,
           uiOutput("trk_cve_status"),
@@ -567,6 +598,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Time Signature Analysis (TSA)"),
+          .method_box("green",
+            "Mini-MINFLUXR original — not a ported method. Characterises the acquisition timeline (integrated vs dark-cycle balance, cluster cycle time, gap-split diagnostics).",
+            "This is the MINFLUX-native layer every estimator below depends on: it recovers the atomic cycle time and the dark-cycle structure that make Δt irregular, driving the gap-split, the quality gate, and all cycle-index binning.",
+            "Descriptive, not inferential. The cycle time is an estimate; cross-check against the sequence JSON / hardware when available."),
           tags$div(style = "font-size:0.85em; color:#666; margin-bottom:6px;",
             "Recovers the acquisition cycle structure from the data: the atomic cycle ",
             "time, the Integrated/Dark cycle balance, and an overall data-quality verdict. ",
@@ -643,6 +678,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("MSD (diffusion)"),
+          .method_box("green",
+            "Mean-squared-displacement with optimal least-squares fitting (Michalet 2010; Michalet & Berglund 2012); cycle-based binning and the D-ceiling from Vogler et al. 2025 — the only published MINFLUX MSD workflow.",
+            HTML("Binned by <b>integer cycle count = true elapsed time</b>, not step index, so cycle-skipping doesn't corrupt the curve. OLSF + Michalet optimal-point selection, fit window 5–50 cycles, non-diffusing (D≤0) tracks dropped, eDIFF (ensemble) and tDIFF (per-track) both reported."),
+            HTML("Optimal-point theory is <b>linear/free-diffusion only</b> — the Confined/Directed/Anomalous models are flagged exploratory. R=0 makes D under-estimated above the ~2–3 µm²/s trackable ceiling (D_max warning).")),
           tags$div(class = "well well-sm", style = "font-size:0.82em; color:#555; margin-bottom:8px;",
             tags$b("How MSD is computed:"), tags$br(),
             "Per-track displacements are binned by acquisition cycle (cumulative cycle index), ",
@@ -855,6 +894,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Speed & Transport"),
+          .method_box("amber",
+            "Mini-MINFLUXR original: per-step path speed, drift velocity over a time window, and a noise-corrected local anomalous exponent α(t).",
+            "Built directly on the irregular-Δt data: speeds use real Δt; the drift velocity averages net displacement over a time window W (µm/s); local α is de-biased with σ_loc. MINFLUX's nm precision makes instantaneous kinetics meaningful.",
+            HTML("<b>Path speed cannot separate diffusion from transport</b> — diffusion inflates instantaneous speed, so a high path speed is not evidence of directed motion. Prefer the drift velocity and α, and confirm with the HMM/MSD directed model.")),
           tags$div(class = "well well-sm", style = "font-size:0.82em; color:#555; margin-bottom:8px;",
             tags$b("Three per-track curves:"), tags$br(),
             tags$b("Path speed"), " vᵢ = |Δrᵢ|/Δtᵢ — dominated by diffusion + localization ",
@@ -874,7 +917,7 @@ tracking_ui <- fluidPage(
                          value = 200, min = 1, step = 10),
             numericInput("trk_speed_drift_minpts", "Min localizations in window",
                          value = 5, min = 2, step = 1),
-            numericInput("trk_speed_sigma_nm", "Localization precision σ (nm, 0 = auto from MSD) — noise floor √2σ/W & de-biases α",
+            numericInput("trk_speed_sigma_nm", "Localization precision σ (nm, 0 = auto: CVE calibration, MSD fallback) — noise floor √2σ/W & de-biases α",
                          value = 0, min = 0, step = 1),
             numericInput("trk_speed_fold", "Export threshold (× diffusive baseline) — higher = stricter",
                          value = 3, min = 1, step = 0.5),
@@ -951,6 +994,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Track Segmentation — Change-Point + GMM"),
+          .method_box("green",
+            "PELT change-point detection (Killick, Fearnhead & Eckley 2012) on the local-D signal, then a Gaussian mixture (BIC-selected) over the per-segment diffusivities.",
+            HTML("Segments on <b>log(r²/Δt)</b> — i.e. local D — so the change-point cost is already Δt-aware and robust to irregular sampling. Per-segment D = mean(r²/Δt)/(2d) (not mean(r²)/mean(Δt)), which avoids the Jensen bias when r² and Δt covary."),
+            "Single-step D is noisy, so PELT can over-segment (the min-segment length guards this). The σ_loc noise floor σ²·⟨1/Δt⟩ is subtracted from each segment's D (toggle below) so immobile segments read ~0 rather than a small non-zero D."),
           tags$div(style = "font-size:0.85em; color:#666; margin-bottom:6px;",
             "Splits each track into diffusive-state segments using PELT change-point",
             " detection on log(r²/Δt), then fits a Gaussian mixture model (GMM) to the",
@@ -963,6 +1010,11 @@ tracking_ui <- fluidPage(
               column(6, numericInput("trk_cpd_min_seg", "Min segment length (steps)", value = 8L, min = 3L, max = 50L, step = 1L)),
               column(6, numericInput("trk_cpd_max_g",   "Max GMM components",         value = 4L, min = 2L, max = 6L,  step = 1L))
             ),
+            checkboxInput("trk_cpd_sub_noise",
+                          "Subtract localization-noise floor (σ_loc) from segment D", TRUE),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Removes the σ²·⟨1/Δt⟩ apparent-diffusion offset so immobile segments read ~0, not a ",
+              "small non-zero D. Needs σ_loc set (Data Quality & Calibration panel, or Acquisition Parameters)."),
             actionButton("trk_cpd_compute", "Run Segmentation",
                          class = "btn-primary", style = "margin-bottom:8px;"),
             downloadButton("trk_dl_cpd_csv", "Download segments (CSV)")
@@ -983,6 +1035,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Jump Distance Distribution (JDD)"),
+          .method_box("amber",
+            "Jump-distance distribution fit with an N-component Rayleigh mixture (Schütz, Schindler & Schmidt 1997; benchmarked in Weimann et al. 2013).",
+            HTML("Each jump is normalised by its own <b>√Δt</b> so steps of different cycle counts pool into one comparable distribution; a σ_loc bias term removes localization-error broadening of the Rayleigh peaks (small for MINFLUX, an advantage)."),
+            "The √Δt pooling assumes free diffusion — under confinement/anomaly it distorts the distribution. Short MINFLUX tracks give few jumps per state, so multi-component fits can be unstable; restrict the Δt window and keep component count low."),
           checkboxInput("trk_show_jdd", "Enable JDD", FALSE),
           conditionalPanel(
             condition = "input.trk_show_jdd == true",
@@ -1012,7 +1068,7 @@ tracking_ui <- fluidPage(
                          value = 0, min = 0, step = 0.1),
             numericInput("trk_jdd_max_dt", "Max Δt (ms, 0 = off)",
                          value = 0, min = 0, step = 1),
-            numericInput("trk_jdd_sigma_loc", "localization error σ_loc (nm, 0 = auto from MSD)",
+            numericInput("trk_jdd_sigma_loc", "localization error σ_loc (nm, 0 = auto: CVE calibration, MSD fallback)",
                          value = 0, min = 0, step = 0.5),
             actionButton("trk_jdd_run", "Run JDD", icon = icon("play"),
                          class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
@@ -1042,7 +1098,7 @@ tracking_ui <- fluidPage(
                 tags$li("Open the ", tags$b("Δt histogram"), " in the Time Signature Analysis section. The tallest bar (mode) is your instrument's typical acquisition interval."),
                 tags$li("Set ", tags$b("Min Δt"), " to just below that modal value. Steps shorter than one acquisition interval are dominated by measurement noise rather than real molecular motion, and will create a spurious fast peak."),
                 tags$li("Set ", tags$b("Max Δt"), " to 3–5× the modal value to exclude long gaps where the molecule was not being tracked."),
-                tags$li("Run the ", tags$b("MSD analysis"), " — the reported σ_loc value (localization error) is shown directly below the MSD plot. This is the random positional error per measurement: a smaller number means more accurate positions. Copy that value into the ", tags$b("σ_loc correction"), " field above to remove its effect from the D estimates. The MSD estimates panel also shows this as a blue hint.")
+                tags$li("Get σ_loc from the ", tags$b("Data Quality & Calibration"), " panel (the CVE estimate, which needs no MSD fit), or read it below the MSD plot. This is the random positional error per measurement: a smaller number means more accurate positions. Leaving the ", tags$b("σ_loc correction"), " field at 0 already uses that app-wide value; set it only to override. The MSD estimates panel also shows this as a blue hint.")
               ),
               tags$br(),
 
@@ -1069,16 +1125,21 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Confinement Analysis"),
+          .method_box("amber",
+            "Per-track shape ratio Rg/Rmax (radius of gyration vs. maximum excursion), in the lineage of confinement-detection SPT (Simson, Sheets & Jacobson 1995).",
+            "Purely spatial, so it is inherently Δt-independent — irregular sampling does not bias it. The σ_loc² noise floor is subtracted from both Rg and Rmax (first-order), and MINFLUX's nm precision resolves domains far below the camera-SMLM floor.",
+            HTML("A small ratio still conflates <b>true confinement with a short observation time or slow diffusion</b> (a briefly-watched free molecule also looks compact). Rmax is an extreme value: the first-order σ_loc subtraction removes its <i>average</i> noise inflation, but a small extreme-value selection bias remains (no closed form), so it stays mildly conservative on short tracks. Corroborate with the MSD confinement index / plateau.")),
           checkboxInput("trk_show_conf", "Enable confinement analysis", FALSE),
           conditionalPanel(
             condition = "input.trk_show_conf == true",
             numericInput("trk_conf_min_pts", "Min points per TID", value = 10, min = 4, step = 1),
             checkboxInput("trk_conf_sub_noise",
-                          "Subtract localization noise from Rg (σ_loc)", TRUE),
+                          "Subtract localization noise from Rg and Rmax (σ_loc)", TRUE),
             helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-              "Localization error inflates the radius of gyration (Rg² += d·σ_loc²), so ",
-              "immobile molecules look larger than they are. Subtracts it (Rmax is left as-is). ",
-              "Needs σ_loc set (run the MSD, or enter it in Acquisition Parameters)."),
+              "Localization error inflates both the radius of gyration (Rg² += d·σ_loc²) and the maximum ",
+              "excursion Rmax, so immobile molecules look larger and falsely confined. Subtracts the ",
+              "first-order noise variance from both (Rmax keeps a small residual extreme-value bias — no ",
+              "closed form). Needs σ_loc set (run the Data Quality & Calibration panel, or enter it in Acquisition Parameters)."),
             actionButton("trk_conf_run", "Run confinement", icon = icon("play"),
                          class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
             tags$br(), tags$br(),
@@ -1115,10 +1176,21 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Directionality / Autocorrelation"),
+          .method_box("green",
+            "Turn-angle distribution and velocity autocorrelation vs. the isotropic-Brownian null (Burov et al. 2013, distribution of directional change).",
+            HTML("The turn-angle null is Δt-independent (the angle between two isotropic steps is uniform regardless of their durations). The velocity autocorrelation is binned by <b>elapsed time</b> (cycle lag × cycle time), not step index, and both use only integrated-ish steps (≤ max dark cycles). MINFLUX's small σ_loc removes most of the classic noise anti-persistence artefact."),
+            "Single short tracks lack power — pool across tracks. A small negative first-lag value is the expected σ_loc signature for a diffusing molecule, not evidence of confinement."),
           checkboxInput("trk_show_dir", "Enable directionality analysis", FALSE),
           conditionalPanel(
             condition = "input.trk_show_dir == true",
             numericInput("trk_dir_min_pts", "Min points per TID", value = 6, min = 4, step = 1),
+            numericInput("trk_dir_max_dark", "Max dark cycles per step", value = 2, min = 0, step = 1),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Steps spanning more than this many skipped (dark) cycles are excluded from the ",
+              "turn-angle and autocorrelation. 1–2 dark cycles are tolerable; long gaps break the ",
+              "irregular-Δt link and may hide a track merged from another molecule. ",
+              "The autocorrelation lag axis is real elapsed time (cycles × cycle time), not step count, ",
+              "so irregular sampling is not misrepresented as evenly spaced."),
             actionButton("trk_dir_run", "Run directionality", icon = icon("play"),
                          class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
             tags$br(), tags$br(),
@@ -1139,14 +1211,16 @@ tracking_ui <- fluidPage(
             plotlyOutput("trk_dir_autocorr_plot", height = "300px"),
             tags$div(class = "well well-sm", style = "font-size:0.84em; margin-top:6px;",
               tags$b("Velocity autocorrelation — how to read it:"), tags$br(),
-              "C(lag): if the molecule moved in direction X, is it still moving in direction X after N steps? ",
+              "C(τ): if the molecule moved in direction X, is it still moving in direction X after a time τ? ",
+              "The lag axis is ", tags$b("real elapsed time"), " (cycle count × cycle time), not step ",
+              "count, so irregularly-spaced localizations are placed at their true time separation. ",
               tags$b("Positive and slowly decaying"), " = persistent, directed motion. ",
-              tags$b("Negative at lag 1 and near zero at higher lags"), " = consistent with free Brownian diffusion. ",
+              tags$b("Negative at the first lag and near zero after"), " = consistent with free Brownian diffusion. ",
               tags$b("Important caveat:"), " localization noise introduces an ",
-              "inherent anti-correlation at lag 1 even for purely Brownian motion ",
-              "(C(1) ≈ −σ²_loc / MSD₁step). For MINFLUX data a small negative C(1) is expected ",
+              "inherent anti-correlation at the shortest lag even for purely Brownian motion ",
+              "(C ≈ −σ²_loc / MSD₁cycle). For MINFLUX data a small negative first-lag value is expected ",
               "for diffusing molecules and does not by itself indicate confinement or active transport. ",
-              "Only C(lag) substantially more negative than C(lag 2, 3, …) is informative."
+              "Only a first-lag value substantially more negative than the next lags is informative."
             ),
             uiOutput("trk_dir_summary")
           )
@@ -1159,6 +1233,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Diffusion State Segmentation (HMM)"),
+          .method_box("green",
+            "Per-track Gaussian/Rayleigh-emission hidden Markov model, Baum–Welch + Viterbi (Das, Cairo & Coombs 2009; short-track pooling in the spirit of vbSPT, Persson et al. 2013).",
+            HTML("Emission steps are <b>r/√Δt</b>-normalised so states correspond to diffusivities, not raw step sizes, despite variable Δt. Transition <b>rates are continuous-time</b>: a generator Q estimated from the decoded path using real elapsed time gives switching rates (s⁻¹) and mean dwell times that are invariant to dark cycles."),
+            "The Viterbi decode still uses the per-step transition prior (emission-dominated, so state assignments stay robust); states at or below the σ_loc noise floor are flagged noise/immobile-limited."),
           checkboxInput("trk_show_hmm", "Fit HMM to tracks", FALSE),
           conditionalPanel(
             condition = "input.trk_show_hmm == true",
@@ -1218,6 +1296,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Per-Segment MSD (by HMM state)"),
+          .method_box("amber",
+            "Pools each HMM state's contiguous same-state runs into a per-state ensemble MSD and fits it with the chosen MSD model — the payoff for mixed-motion tracks.",
+            "Inherits the MSD's cycle-index binning and fit window. Lets the Confined model fit the slow/wall state (→ confinement size L) and the Directed model the fast/exported state (→ velocity v), avoiding the whole-track wash-out that mixes phases.",
+            "Confined/anomalous MSD on MINFLUX is exploratory (see the MSD model note). State assignment quality caps this — a poor HMM makes the per-state MSD meaningless."),
           tags$div(class = "well well-sm", style = "font-size:0.82em; color:#555; margin-bottom:8px;",
             "Splits each track into HMM diffusion-state segments and computes a separate ",
             "MSD per state, fit with the MSD model + window. Resolves a mixed ",
@@ -1260,6 +1342,10 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Spatially Resolved D-map"),
+          .method_box("green",
+            HTML("Single-lag diffusivity per spatial cell, D = median(r²/2dΔt). This is the short-lag limit of the CVE (Vestergaard 2014 / Vogler 2025) — <b>not</b> Ostersehlt 2022, which is a DNA-PAINT imaging paper with no diffusion mapping."),
+            "The 'integrated only' option drops dark-cycle steps (whose midpoint is meaningless), and the σ_loc²/Δt apparent-diffusion floor is subtracted so immobile regions don't read as diffusing. Uses real Δt per step.",
+            "Single-lag D ignores confinement/anomaly (it is an instantaneous estimate); cells need enough steps to be reliable (blank otherwise). Spatial heterogeneity of the sampling can imprint on the map."),
           checkboxInput("trk_show_dmap", "Compute D-map", FALSE),
           conditionalPanel(
             condition = "input.trk_show_dmap == true",
@@ -1275,7 +1361,7 @@ tracking_ui <- fluidPage(
               tags$b("Integrated only"), " drops dark-cycle steps (large Δt, meaningless ",
               "midpoint). ", tags$b("Subtract noise floor"), " removes the σ_loc²/Δt ",
               "apparent-diffusion offset so immobile regions don't read as diffusing — ",
-              "needs σ_loc set (run the MSD, or enter it in Acquisition Parameters)."),
+              "needs σ_loc set (run the Data Quality & Calibration panel, or enter it in Acquisition Parameters)."),
             actionButton("trk_dmap_run", "Run D-map", icon = icon("play"),
                          class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
             tags$br(), tags$br(),

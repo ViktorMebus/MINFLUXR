@@ -295,6 +295,58 @@ tracking_server <- function(input, output, session) {
     } else NA_integer_
     n_tracks_pt <- if (!is.null(pertrack_sigma)) nrow(pertrack_sigma) else NA_integer_
 
+    # ── Precision-weighted CVE from the photon channel (EFO) ────────────────────
+    # MINFLUX reports a photon-rate proxy (EFO) per localization; precision scales
+    # with photons (σ_loc ∝ EFO^p, p≈−0.5 in the shot-noise limit). We fit that
+    # relationship from the per-track CVE σ vs per-track median EFO, assign each
+    # localization a σ, and use inverse-variance weights so bright, well-localized
+    # steps count more than dim/noisy ones in the pooled σ_loc and D. This is the
+    # honest way to exploit MINFLUX's quality metrics instead of a hard EFO cut.
+    # Falls back to unweighted when EFO is absent or too few tracks anchor the fit.
+    prec_ok <- FALSE; efo_slope <- NA_real_; sigma_w <- NA_real_
+    D_cve_w <- NA_real_; n_prec_tracks <- 0L
+    have_efo <- "efo" %in% names(df) && any(is.finite(df$efo) & df$efo > 0)
+    if (have_efo && !is.null(pertrack_sigma) && nrow(pertrack_sigma) >= 8L) {
+      fitd <- pertrack_sigma[!pertrack_sigma$degenerate &
+                             is.finite(pertrack_sigma$sigma)   & pertrack_sigma$sigma   > 0 &
+                             is.finite(pertrack_sigma$efo_med) & pertrack_sigma$efo_med > 0, , drop = FALSE]
+      n_prec_tracks <- nrow(fitd)
+      if (n_prec_tracks >= 8L) {
+        cf <- tryCatch(stats::coef(stats::lm(log(sigma) ~ log(efo_med), data = fitd)),
+                       error = function(e) c(NA_real_, NA_real_))
+        efo_a <- cf[[1]]; efo_slope <- cf[[2]]
+        if (is.finite(efo_a) && is.finite(efo_slope)) {
+          med_sig <- stats::median(fitd$sigma)
+          sl <- exp(efo_a + efo_slope * log(df$efo))         # per-localization σ (nm)
+          sl[!is.finite(sl)] <- med_sig                      # missing EFO → median σ
+          sl <- pmin(pmax(sl, 0.2 * med_sig), 5 * med_sig)   # clamp extreme weights
+          n_all  <- nrow(df)
+          sl_im1 <- c(NA_real_, sl[-n_all])                  # σ of loc starting step i
+          sl_ip1 <- c(sl[-1], NA_real_)                      # σ of loc ending step i+1
+          # Inverse-variance–style weights (heuristic): summed displacement-noise
+          # variance of the displacements entering each quantity. Step i uses locs
+          # {i-1,i}; the lag-1 product of steps i,i+1 uses {i-1,i,i+1} (loc i shared).
+          w_pair_row <- 1 / (sl_im1^2 + 2 * sl^2 + sl_ip1^2)
+          w_step_row <- 1 / (sl_im1^2 + sl^2)
+          wv <- c(w_pair_row[pair], w_pair_row[pair]); vv <- c(prod_x[pair], prod_y[pair])
+          if (has_z) { wv <- c(wv, w_pair_row[pair]); vv <- c(vv, prod_z[pair]) }
+          okw <- is.finite(vv) & is.finite(wv) & wv > 0
+          if (any(okw)) {
+            cov1_w  <- sum(wv[okw] * vv[okw]) / sum(wv[okw])
+            sigma_w <- sqrt(max(0, -cov1_w))
+            ws  <- c(w_step_row[integ_step], w_step_row[integ_step])
+            sqv <- c(dx[integ_step]^2, dy[integ_step]^2)
+            if (has_z) { ws <- c(ws, w_step_row[integ_step]); sqv <- c(sqv, dz[integ_step]^2) }
+            oks   <- is.finite(sqv) & is.finite(ws) & ws > 0
+            msq_w <- if (any(oks)) sum(ws[oks] * sqv[oks]) / sum(ws[oks]) else NA_real_
+            D_cve_w <- if (is.finite(msq_w) && is.finite(dt_int) && dt_int > 0)
+                         msq_w / (2 * dt_int) + cov1_w / dt_int else NA_real_
+            prec_ok <- cov1_w < 0    # only meaningful when σ² = −cov > 0
+          }
+        }
+      }
+    }
+
     list(sigma = sigma, sigma2 = sigma2, cov1 = cov1, n_pairs = length(vals),
          D_cve = D_cve, dt_int = dt_int, t_cycle = t_c, has_z = has_z,
          frac_integ = frac_integ_raw, frac_integ_filt = frac_integ_filt,
@@ -304,7 +356,9 @@ tracking_server <- function(input, output, session) {
          sig_pt_iqr = sig_pt_iqr, sig_pt_cv = sig_pt_cv, sig_pt_lo = sig_ci[["lo"]],
          sig_pt_hi = sig_ci[["hi"]], n_pt = length(sig_pt_ok), sig_efo_rho = sig_efo_rho,
          n_implaus = n_implaus, frac_implaus = frac_implaus,
-         n_suspect = n_suspect, n_tracks_pt = n_tracks_pt)
+         n_suspect = n_suspect, n_tracks_pt = n_tracks_pt,
+         prec_ok = prec_ok, sigma_w = sigma_w, D_cve_w = D_cve_w,
+         efo_slope = efo_slope, n_prec_tracks = n_prec_tracks)
   })
 
   # Feed the CVE σ_loc into the app-wide value: prefer the per-track median (robust
@@ -312,7 +366,12 @@ tracking_server <- function(input, output, session) {
   # degenerate = drift-dominated).
   observeEvent(trk_cve_bundle(), {
     b <- trk_cve_bundle(); if (is.null(b)) return()
-    val <- if (is.finite(b$sig_pt_med) && b$sig_pt_med > 0) b$sig_pt_med
+    # Prefer the photon-weighted pooled σ_loc when precision weighting is enabled and
+    # resolvable; else the robust per-track median; else the plain pooled estimate.
+    use_prec <- isTRUE(input$trk_cve_precision_weight) && isTRUE(b$prec_ok) &&
+                is.finite(b$sigma_w) && b$sigma_w > 0
+    val <- if (use_prec) b$sigma_w
+           else if (is.finite(b$sig_pt_med) && b$sig_pt_med > 0) b$sig_pt_med
            else if (is.finite(b$sigma) && b$sigma > 0 && !isTRUE(b$degenerate)) b$sigma
            else NA_real_
     if (is.finite(val)) trk_sigma_loc_cve(val)
@@ -364,17 +423,32 @@ tracking_server <- function(input, output, session) {
     else
       htmltools::span(htmltools::tags$b(sprintf("σ_loc = %.2f nm", b$sigma)),
         sprintf("  (CVE pooled, %s consecutive integrated pairs)", format(b$n_pairs, big.mark = ",")))
+    prec_line <- if (isTRUE(input$trk_cve_precision_weight) && isTRUE(b$prec_ok) && is.finite(b$sigma_w)) {
+      htmltools::span(style = "color:#2a6; font-size:0.92em;", htmltools::br(),
+        htmltools::tags$b(sprintf("σ_loc = %.2f nm (photon-weighted)", b$sigma_w)),
+        sprintf(" — EFO-inverse-variance weighted, n=%d anchor tracks; σ ∝ EFO^%.2f%s. This is the app-wide value.",
+                b$n_prec_tracks, b$efo_slope,
+                if (is.finite(b$efo_slope) && b$efo_slope < 0) " (precision improves with photons ✓)" else ""))
+    } else if (isTRUE(input$trk_cve_precision_weight)) {
+      htmltools::span(style = "color:#888; font-size:0.92em;", htmltools::br(),
+        "Photon (EFO) weighting unavailable — no EFO column, too few anchor tracks (need ≥8), or unresolvable; using the unweighted σ_loc above.")
+    } else NULL
     htmltools::div(style = "font-size:0.92em; margin:4px 0;",
-      sigma_line, htmltools::br(),
+      sigma_line, prec_line, htmltools::br(),
       htmltools::span(htmltools::tags$b("Data quality (analyzed): "),
         htmltools::span(style = sprintf("color:%s; font-weight:bold;", q_verdict[2]), q_verdict[1]),
         frac_line),
       htmltools::br(),
       htmltools::span(style = "color:#888; font-size:0.94em;",
-        sprintf("cycle time = %s  ·  free D (CVE) = %s µm²/s  ·  %s steps",
-                if (is.finite(b$t_cycle)) sprintf("%.4g ms", b$t_cycle) else "unknown",
-                if (is.finite(b$D_cve))   sprintf("%.3g", b$D_cve / 1e3) else "—",
-                format(b$n_steps, big.mark = ","))),
+        {
+          d_use   <- if (isTRUE(input$trk_cve_precision_weight) && isTRUE(b$prec_ok) && is.finite(b$D_cve_w)) b$D_cve_w else b$D_cve
+          d_tag   <- if (isTRUE(input$trk_cve_precision_weight) && isTRUE(b$prec_ok) && is.finite(b$D_cve_w)) " (photon-weighted)" else ""
+          sprintf("cycle time = %s  ·  free D (CVE)%s = %s µm²/s  ·  %s steps",
+                  if (is.finite(b$t_cycle)) sprintf("%.4g ms", b$t_cycle) else "unknown",
+                  d_tag,
+                  if (is.finite(d_use)) sprintf("%.3g", d_use / 1e3) else "—",
+                  format(b$n_steps, big.mark = ","))
+        }),
       if (is.finite(b$frac_implaus %||% NA_real_) || is.finite(b$n_suspect %||% NA_real_)) {
         bad <- (is.finite(b$frac_implaus) && b$frac_implaus > 0.01) ||
                (is.finite(b$n_suspect) && is.finite(b$n_tracks_pt) && b$n_tracks_pt > 0 &&
@@ -4550,6 +4624,16 @@ tracking_server <- function(input, output, session) {
     ndim       <- if (use_z_cpd) 3L else 2L
     coef_D     <- 2L * ndim   # 4 (2D) or 6 (3D): MSD = coef_D * D * dt
 
+    # Optional σ_loc noise-floor subtraction on the per-segment D. A pure-noise step
+    # has E[|Δr|²] = coef_D·σ² (each of the two localizations contributes σ² per axis),
+    # so the apparent D of an immobile segment is σ²·⟨1/Δt⟩. Subtract it at the D level
+    # (not per step — that would rectify and bias upward), clamped ≥ 0. Same floor the
+    # D-map uses, so immobile segments no longer read as a small non-zero D. No-op when
+    # σ_loc is unset or the toggle is off.
+    sig_cpd    <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
+    sub_noise_cpd <- isTRUE(input$trk_cpd_sub_noise) && is.finite(sig_cpd) && sig_cpd > 0
+    noise_D_off   <- if (sub_noise_cpd) sig_cpd^2 else 0   # × ⟨1/Δt⟩ per segment below
+
     tids <- split(df, df$tid)
 
     seg_rows <- withProgress(message = "Segmenting tracks…", value = 0, {
@@ -4587,6 +4671,10 @@ tracking_server <- function(input, output, session) {
           # Use mean(r²/ÃÂt) / coef_D, not mean(r²) / (coef_D * mean(ÃÂt)):
           # the latter is biased when r² and ÃÂt covary (Jensen's inequality).
           D_nm2_ms <- mean(r2[idx] / dt[idx]) / coef_D
+          # Subtract the σ_loc noise floor σ²·⟨1/Δt⟩ (clamped ≥ 0) so immobile
+          # segments don't read as a small non-zero D — same floor the D-map uses.
+          if (noise_D_off > 0)
+            D_nm2_ms <- max(0, D_nm2_ms - noise_D_off * mean(1 / dt[idx]))
           data.frame(
             tid      = tid_val,
             seg_idx  = s,
@@ -7317,8 +7405,13 @@ tracking_server <- function(input, output, session) {
     # Optional σ_loc correction: localization noise inflates Rg. Measured per-axis
     # variance = true variance + σ_loc², so Rg²_meas = Rg²_true + d·σ_loc²·(1−1/n)
     # (d = 2 or 3; the (1−1/n) accounts for estimating the centroid from the same
-    # noisy points). Subtract it, clamped ≥ 0. Rmax (an extreme value) is not
-    # noise-corrected and left as-is. No-op when σ_loc is unset.
+    # noisy points). Subtract it, clamped ≥ 0.
+    # Rmax is an extreme value: E[d²_meas of the argmax] ≈ d²_true + d·σ_loc²·(1−1/n),
+    # so we apply the SAME first-order subtraction to Rmax². This removes the AVERAGE
+    # noise inflation of the extreme point but NOT the extreme-value selection bias
+    # (the max is chosen partly because its noise was positive), which has no closed
+    # form — so Rmax stays mildly conservative (biased slightly high) on short tracks.
+    # No-op when σ_loc is unset.
     d_dim     <- if (use_z_conf) 3 else 2
     sig_loc   <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
     sub_noise <- isTRUE(input$trk_conf_sub_noise) && is.finite(sig_loc) && sig_loc > 0
@@ -7332,10 +7425,11 @@ tracking_server <- function(input, output, session) {
       cx <- mean(tb$x); cy <- mean(tb$y)
       cz <- if (use_z_conf) mean(tb$z) else 0
       d2 <- (tb$x - cx)^2 + (tb$y - cy)^2 + if (use_z_conf) (tb$z - cz)^2 else 0
+      noise2 <- if (sub_noise) d_dim * sig_loc^2 * (1 - 1 / nrow(tb)) else 0
       rg2 <- mean(d2)
-      if (sub_noise) rg2 <- rg2 - d_dim * sig_loc^2 * (1 - 1 / nrow(tb))
+      if (sub_noise) rg2 <- rg2 - noise2
       Rg   <- sqrt(max(0, rg2))
-      Rmax <- max(sqrt(d2))
+      Rmax <- sqrt(max(0, max(d2) - noise2))   # first-order noise-corrected extreme
       if (!is.finite(Rmax) || Rmax == 0) return(NULL)
       ratio <- Rg / Rmax
       data.frame(tid = nm, Rg_nm = Rg, Rmax_nm = Rmax,
@@ -7437,15 +7531,24 @@ tracking_server <- function(input, output, session) {
   dir_bundle <- eventReactive(input$trk_dir_run, {
     req(isTRUE(input$trk_show_dir))
     df <- trk(); req(nrow(df) > 0)
-    min_pts <- max(4L, as.integer(input$trk_dir_min_pts))
+    min_pts  <- max(4L, as.integer(input$trk_dir_min_pts))
+    max_dark <- max(0L, as.integer(input$trk_dir_max_dark %||% 2L))
 
     df <- df[is.finite(df$x) & is.finite(df$y) & is.finite(df$tim), ]
     df <- df[order(df$tid, df$tim), ]
     sp <- split(df, df$tid)
 
+    # Cycle time: the autocorrelation lag is measured in ELAPSED TIME, expressed as
+    # integer cycle counts (like the MSD), not raw step index. On irregular MINFLUX
+    # sampling a "step" is not a fixed Δt, so a step-index lag would misrepresent
+    # unevenly-spaced points as evenly spaced. When the cycle time is unknown we fall
+    # back to step-index lags and say so.
+    t_c       <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    have_cyc  <- is.finite(t_c) && t_c > 0
+    max_lag   <- 20L                       # cycles (or steps in fallback)
+
     # Pre-allocate angle storage as a list then unlist once at the end
     angle_list <- vector("list", length(sp))
-    max_lag    <- 20L
     ac_sums    <- rep(0,  max_lag)
     ac_n       <- rep(0L, max_lag)
     # Localization-noise floor on a 2D step magnitude: RMS pure-noise step = 2·σ_loc.
@@ -7454,24 +7557,30 @@ tracking_server <- function(input, output, session) {
     # directionality signal is noise. Uses the app-wide σ_loc.
     sig_dir <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
     r_noise <- if (is.finite(sig_dir) && sig_dir > 0) 2 * sig_dir else NA_real_
-    n_steps_tot <- 0L; n_below <- 0L
+    n_steps_tot <- 0L; n_below <- 0L; n_dropped_dark <- 0L
 
     withProgress(message = "Computing directionality…", value = 0, {
     for (ii in seq_along(sp)) {
       if (ii %% 50L == 0L) incProgress(50 / length(sp))
       tb <- sp[[ii]]
       if (nrow(tb) < min_pts) next
-      dx <- diff(tb$x); dy <- diff(tb$y)
+      dx  <- diff(tb$x); dy <- diff(tb$y)
+      dtt <- diff(tb$tim)
       if (length(dx) < 2) next
 
-      # --- Turn angles: fully vectorised ---
-      # mag of each displacement vector
       mag <- sqrt(dx^2 + dy^2)
-      ok  <- mag > 0
-      n_steps_tot <- n_steps_tot + length(mag)
-      if (is.finite(r_noise)) n_below <- n_below + sum(mag < r_noise)
-      # consecutive pairs where both vectors are non-zero
-      ok_pair <- ok[-length(ok)] & ok[-1]
+      # Per-step dark-cycle count. A "usable" step spans ≤ max_dark dark cycles
+      # (integrated = 0 dark) and has non-zero length. Steps across long gaps are
+      # dropped: the direction over a big gap is unreliable and may bridge a merge
+      # with another molecule.
+      n_cyc  <- if (have_cyc) pmax(1L, as.integer(round(dtt / t_c))) else rep(1L, length(dtt))
+      usable <- mag > 0 & is.finite(n_cyc) & ((n_cyc - 1L) <= max_dark)
+      n_steps_tot    <- n_steps_tot + length(mag)
+      n_dropped_dark <- n_dropped_dark + sum(mag > 0 & (n_cyc - 1L) > max_dark, na.rm = TRUE)
+      if (is.finite(r_noise)) n_below <- n_below + sum(mag < r_noise & usable, na.rm = TRUE)
+
+      # --- Turn angles: only between two CONSECUTIVE usable steps (share a loc) ---
+      ok_pair <- usable[-length(usable)] & usable[-1]
       if (any(ok_pair)) {
         dot   <- dx[-length(dx)] * dx[-1] + dy[-length(dy)] * dy[-1]
         denom <- mag[-length(mag)] * mag[-1]
@@ -7480,31 +7589,40 @@ tracking_server <- function(input, output, session) {
         angle_list[[ii]] <- acos(cos_a) * 180 / pi
       }
 
-      # --- Velocity autocorrelation ---
-      # unit vectors (only for non-zero steps)
-      vx <- ifelse(ok, dx / mag, NA_real_)
-      vy <- ifelse(ok, dy / mag, NA_real_)
-      n_v <- length(vx)
-      for (lag in seq_len(min(max_lag, n_v - 1L))) {
-        i1   <- seq_len(n_v - lag)
-        i2   <- i1 + lag
-        keep <- !is.na(vx[i1]) & !is.na(vx[i2])
-        if (!any(keep)) next
-        dots <- vx[i1[keep]] * vx[i2[keep]] + vy[i1[keep]] * vy[i2[keep]]
-        ac_sums[lag] <- ac_sums[lag] + sum(dots)
-        ac_n[lag]    <- ac_n[lag]    + length(dots)
+      # --- Velocity autocorrelation, binned by ELAPSED-TIME (cycle-index) lag ---
+      # Each usable step's reference position on the track's cumulative cycle
+      # timeline is the cycle index of its start localization. Pairs of usable steps
+      # are accumulated into the bin = difference of those cycle indices, so a lag of
+      # k means k cycles of real time, however many localizations were skipped.
+      cyc_start <- c(0L, cumsum(n_cyc))          # per-loc cumulative cycle index
+      cyc_start <- cyc_start[-length(cyc_start)] # start-of-step index (length = #steps)
+      ux <- ifelse(usable, dx / mag, NA_real_)
+      uy <- ifelse(usable, dy / mag, NA_real_)
+      idx_u <- which(usable)
+      for (a in idx_u) {
+        ca <- cyc_start[a]
+        for (b in idx_u[idx_u > a]) {
+          lag <- cyc_start[b] - ca
+          if (lag < 1L) next
+          if (lag > max_lag) break            # cyc_start is increasing → no closer pairs beyond
+          ac_sums[lag] <- ac_sums[lag] + ux[a]*ux[b] + uy[a]*uy[b]
+          ac_n[lag]    <- ac_n[lag]    + 1L
+        }
       }
     }
 
     all_angles <- unlist(angle_list, use.names = FALSE)
 
     shiny::validate(shiny::need(length(all_angles) >= 10,
-      "Too few steps — lower 'Min points per TID' or relax filters."))
+      "Too few usable steps — lower 'Min points per TID', raise 'Max dark cycles', or relax filters."))
 
-    ac_vals <- ifelse(ac_n > 0, ac_sums / ac_n, NA_real_)
+    ac_vals  <- ifelse(ac_n > 0, ac_sums / ac_n, NA_real_)
+    lag_time <- if (have_cyc) seq_len(max_lag) * t_c else NA_real_   # ms, real elapsed time
     list(angles = all_angles, ac = ac_vals, lags = seq_len(max_lag),
+         lag_time = lag_time, have_cyc = have_cyc, t_cycle = t_c, max_dark = max_dark,
          r_noise = r_noise, sigma_loc = if (is.finite(r_noise)) sig_dir else NA_real_,
-         frac_below_noise = if (n_steps_tot > 0) n_below / n_steps_tot else NA_real_)
+         frac_below_noise = if (n_steps_tot > 0) n_below / n_steps_tot else NA_real_,
+         frac_dropped_dark = if (n_steps_tot > 0) n_dropped_dark / n_steps_tot else NA_real_)
     })  # withProgress
   })
 
@@ -7537,16 +7655,20 @@ tracking_server <- function(input, output, session) {
     bg_col <- if (dark) "#000000" else "#FFFFFF"
     fg_col <- if (dark) "#FFFFFF" else "#333333"
 
+    # x-axis is real elapsed time (cycle lag × cycle time) when the cycle time is
+    # known; step-index only as a labelled fallback.
+    xv    <- if (isTRUE(bd$have_cyc)) bd$lag_time else bd$lags
+    xlab  <- if (isTRUE(bd$have_cyc)) "Time lag (ms)" else "Lag (steps — cycle time unknown)"
     plot_ly() %>%
-      add_lines(x = bd$lags, y = bd$ac,
+      add_lines(x = xv, y = bd$ac,
                 line = list(color = "#D06030", width = 2)) %>%
-      add_markers(x = bd$lags, y = bd$ac,
+      add_markers(x = xv, y = bd$ac,
                   marker = list(color = "#D06030", size = 5)) %>%
-      add_lines(x = range(bd$lags), y = c(0, 0),
+      add_lines(x = range(xv, na.rm = TRUE), y = c(0, 0),
                 line = list(color = fg_col, width = 1, dash = "dot"),
                 showlegend = FALSE) %>%
       layout(
-        xaxis  = list(title = "Lag (steps)", color = fg_col),
+        xaxis  = list(title = xlab, color = fg_col),
         yaxis  = list(title = "Velocity autocorrelation", range = c(-1.05, 1.05),
                       color = fg_col),
         paper_bgcolor = bg_col, plot_bgcolor = bg_col,
@@ -7561,6 +7683,12 @@ tracking_server <- function(input, output, session) {
     pct_fwd  <- mean(bd$angles <  60, na.rm = TRUE) * 100
     pct_back <- mean(bd$angles > 120, na.rm = TRUE) * 100
     ac1 <- if (length(bd$ac) >= 1 && is.finite(bd$ac[1])) round(bd$ac[1], 3) else NA
+    ac1_lbl <- if (isTRUE(bd$have_cyc)) sprintf("AC(%.0f ms)", bd$t_cycle) else "AC(lag 1 step)"
+    dark_note <- if (is.finite(bd$frac_dropped_dark %||% NA_real_) && (bd$frac_dropped_dark %||% 0) > 0)
+      tags$span(style = "color:#888;", tags$br(),
+        sprintf("%.0f%% of steps span > %d dark cycle(s) and were excluded (long gaps break the irregular-Δt link / may bridge a merged molecule).",
+                100 * bd$frac_dropped_dark, bd$max_dark))
+    else NULL
     noise_note <- if (is.finite(bd$frac_below_noise %||% NA_real_))
       tags$span(style = "color:#b26a00;", tags$br(),
         sprintf("⚠ %.0f%% of steps are below the localization-noise floor (2·σ_loc = %.1f nm) — their directions are noise-dominated and inflate the backward (180°) peak / lag-1 anti-correlation.",
@@ -7571,9 +7699,10 @@ tracking_server <- function(input, output, session) {
     tags$div(style = "font-size:0.88em; margin:4px 0;",
       tags$b(sprintf("n = %d turn angles", length(bd$angles))),
       tags$span(sprintf(
-        "  |  median angle = %.1f\u00B0  |  forward (<60\u00B0): %.0f%%  |  backward (>120\u00B0): %.0f%%  |  AC(lag 1) = %s",
-        med_ang, pct_fwd, pct_back, if (is.na(ac1)) "—" else ac1
+        "  |  median angle = %.1f\u00B0  |  forward (<60\u00B0): %.0f%%  |  backward (>120\u00B0): %.0f%%  |  %s = %s",
+        med_ang, pct_fwd, pct_back, ac1_lbl, if (is.na(ac1)) "—" else ac1
       )),
+      dark_note,
       noise_note
     )
   })
@@ -7583,14 +7712,15 @@ tracking_server <- function(input, output, session) {
     content  = function(file) {
       bd <- dir_bundle()
       # Two sheets packed into one CSV with a blank-row separator
-      ac_df  <- data.frame(lag_steps = bd$lags, velocity_autocorr = bd$ac)
+      lag_ms <- if (isTRUE(bd$have_cyc)) bd$lag_time else rep(NA_real_, length(bd$lags))
+      ac_df  <- data.frame(lag_cycles = bd$lags, lag_ms = lag_ms, velocity_autocorr = bd$ac)
       ang_df <- data.frame(turn_angle_deg = bd$angles)
       out <- rbind(
         cbind(sheet = "autocorrelation", ac_df,
               data.frame(turn_angle_deg = rep(NA, nrow(ac_df)))),
-        data.frame(sheet = NA, lag_steps = NA, velocity_autocorr = NA,
+        data.frame(sheet = NA, lag_cycles = NA, lag_ms = NA, velocity_autocorr = NA,
                    turn_angle_deg = NA),
-        cbind(sheet = "angles", lag_steps = NA, velocity_autocorr = NA,
+        cbind(sheet = "angles", lag_cycles = NA, lag_ms = NA, velocity_autocorr = NA,
               turn_angle_deg = ang_df$turn_angle_deg)
       )
       write.csv(out, file, row.names = FALSE)
@@ -8076,6 +8206,7 @@ tracking_server <- function(input, output, session) {
     min_pts  <- max(4L, as.integer(input$trk_hmm_min_pts))
     n_ex     <- max(1L, as.integer(input$trk_hmm_n_ex))
     norm_dt  <- isTRUE(input$trk_hmm_norm_dt)
+    t_c      <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
 
     df <- df[is.finite(df$x) & is.finite(df$y) & is.finite(df$tim), ]
     df <- df[order(df$tid, df$tim), ]
@@ -8345,11 +8476,46 @@ tracking_server <- function(input, output, session) {
     } else NA_real_
     noise_state <- if (is.finite(D_noise)) D_vals <= D_noise else rep(FALSE, K)
 
+    # ── Continuous-time transition RATES (generator Q) — the Δt-correct output ──
+    # The per-step matrix A conflates state switching with each step's (irregular)
+    # Δt: a step spanning 3 dark cycles is counted as one transition opportunity,
+    # exactly like a single-cycle step, so per-step probabilities are NOT rates.
+    # The Δt-honest quantity is the generator Q of the underlying Markov jump
+    # process. For a path observed in continuous time its MLE is
+    #   q[a,b] = N[a,b] / T[a]   (b≠a),   q[a,a] = −Σ_{b≠a} q[a,b],
+    # with N[a,b] = decoded a→b jumps and T[a] = REAL time spent in state a. Using
+    # actual elapsed time makes the rates and mean dwell times (τ_a = −1/q[a,a])
+    # invariant to dark cycles. Intervals spanning a long gap (> gap_tol_cyc cycles),
+    # where an unobserved switch could hide, are excluded from the counts so a single
+    # big gap can't masquerade as a long dwell. States are ordered slow→fast (as A).
+    gap_tol_cyc <- 4L                       # count steps of ≤ 3 dark cycles
+    Tstate <- rep(0, K); Njump <- matrix(0L, K, K)
+    for (sg in seg_list) {
+      st <- sg$state; tm <- sg$tim
+      m  <- length(st); if (m < 2L) next
+      dseg <- diff(tm)
+      kc   <- if (is.finite(t_c) && t_c > 0) round(dseg / t_c) else rep(1, length(dseg))
+      for (i in seq_along(dseg)) {
+        if (!is.finite(dseg[i]) || dseg[i] <= 0) next
+        if (is.finite(kc[i]) && kc[i] > gap_tol_cyc) next       # skip long gaps
+        a <- st[i]; Tstate[a] <- Tstate[a] + dseg[i]
+        b <- st[i + 1L]; if (b != a) Njump[a, b] <- Njump[a, b] + 1L
+      }
+    }
+    Qrate <- matrix(0, K, K)                # per ms (tim is ms)
+    for (a in seq_len(K)) if (Tstate[a] > 0) {
+      for (b in seq_len(K)) if (b != a) Qrate[a, b] <- Njump[a, b] / Tstate[a]
+      Qrate[a, a] <- -sum(Qrate[a, -a])
+    }
+    dwell_ms <- ifelse(diag(Qrate) < 0, -1 / diag(Qrate), NA_real_)  # mean dwell (ms)
+
     list(K = K, sigma = sigma, A = A, pi = pi_v,
          D_vals = D_vals, fracs = fracs,
          norm_dt = norm_dt,
          seg_list = seg_list, n_tracks = length(obs_list),
-         dt_med_ms = dt_med,
+         dt_med_ms = dt_med, t_cycle_ms = t_c,
+         Qrate = Qrate, dwell_ms = dwell_ms, Njump = Njump, Tstate = Tstate,
+         gap_tol_cyc = gap_tol_cyc,
          sigma_loc_nm = sig_loc, D_noise = D_noise, noise_state = noise_state)
   })
 
@@ -8483,13 +8649,17 @@ tracking_server <- function(input, output, session) {
     sig_unit <- if (norm_dt) "nm/\u221Ams" else "nm"
 
     is_noise <- if (!is.null(bd$noise_state)) bd$noise_state else rep(FALSE, K)
+    fmt_time <- function(ms) if (!is.finite(ms)) "\u2014"
+                             else if (ms >= 1000) sprintf("%.2f s", ms / 1000)
+                             else sprintf("%.0f ms", ms)
+    dwell <- if (!is.null(bd$dwell_ms)) bd$dwell_ms else rep(NA_real_, K)
     rows <- lapply(seq_len(K), function(k)
       tags$tr(
         tags$td(sprintf("State %d", k),                                     style = "padding:2px 8px;"),
         tags$td(sprintf("%.1f%%",  bd$fracs[k] * 100),                     style = "padding:2px 8px;"),
         tags$td(sprintf("\u03C3 = %.1f %s", bd$sigma[k], sig_unit),        style = "padding:2px 8px;"),
         tags$td(sprintf("D = %.3g %s", bd$D_vals[k], d_unit),              style = "padding:2px 8px;"),
-        tags$td(sprintf("self-trans = %.3f", bd$A[k,k]),                   style = "padding:2px 8px;"),
+        tags$td(sprintf("dwell \u2248 %s", fmt_time(dwell[k])),            style = "padding:2px 8px;"),
         tags$td(if (isTRUE(is_noise[k]))
                   tags$span("\u26A0 noise/immobile-limited", style = "color:#b26a00;")
                 else "",                                                    style = "padding:2px 8px;")
@@ -8502,7 +8672,7 @@ tracking_server <- function(input, output, session) {
       tags$table(
         style = "border-collapse:collapse;",
         tags$thead(tags$tr(lapply(
-          c("", "Fraction", "Width (\u03C3)", "Diffusivity (D)", "Self-transition", ""),
+          c("", "Fraction", "Width (\u03C3)", "Diffusivity (D)", "Mean dwell", ""),
           function(h) tags$th(h, style = "padding:2px 8px; border-bottom:1px solid #ccc;")
         ))),
         tags$tbody(rows)
@@ -8515,15 +8685,27 @@ tracking_server <- function(input, output, session) {
         tags$p(style = "color:#888; font-size:0.92em; margin-top:4px;",
           "Set \u03C3_loc (run the unified MSD, or enter it in Acquisition Parameters) to flag noise/immobile-limited states.")
       ,
-      # MINFLUX caveat: emissions are \u221A\u0394t-normalised (state \u03C3/D handle variable \u0394t),
-      # but the transition matrix A is DISCRETE-TIME (per-step), so self-transition /
-      # switching probabilities assume a roughly uniform \u0394t. Under heavy dark-gapping a
-      # step spanning several skipped cycles is still counted as one transition
-      # opportunity, so transition RATES are approximate. Read state \u03C3/D as robust,
-      # transition probabilities as indicative. (See docs/MINFLUX_analysis_methods.md.)
-      tags$p(style = "color:#888; font-size:0.85em; margin-top:6px; border-top:1px dashed #ddd; padding-top:4px;",
-        "\u2139 Transition probabilities are per-step (discrete-time) and assume ~uniform \u0394t; ",
-        "treat them as indicative under heavy dark-gapping. State \u03C3/D use \u221A\u0394t-normalised steps and are robust.")
+      # Continuous-time transition rates (\u0394t-correct). The per-step matrix A conflates
+      # switching with each step's irregular \u0394t; the generator Q, estimated from the
+      # decoded path using REAL elapsed time, gives rates (s\u207B\u00B9) and mean dwell times
+      # that are invariant to dark cycles. This replaces the old "rates approximate"
+      # caveat with an actual \u0394t-honest estimate. (See docs/MINFLUX_analysis_methods.md.)
+      {
+        Q <- bd$Qrate
+        rate_txt <- if (!is.null(Q) && K >= 2) {
+          off <- character(0)
+          for (a in seq_len(K)) for (b in seq_len(K)) if (a != b && is.finite(Q[a, b]) && Q[a, b] > 0)
+            off <- c(off, sprintf("S%d\u2192S%d %.3g s\u207B\u00B9", a, b, Q[a, b] * 1000))  # \u00D71000: per-ms \u2192 per-s
+          if (length(off)) paste(off, collapse = "  \u00B7  ") else "no state switches observed in the decoded paths"
+        } else "\u2014"
+        tags$div(style = "margin-top:6px; border-top:1px dashed #ddd; padding-top:4px;",
+          tags$p(style = "color:#444; font-size:0.9em; margin:2px 0;",
+            tags$b("Transition rates (continuous-time, \u0394t-corrected): "), rate_txt),
+          tags$p(style = "color:#888; font-size:0.82em; margin:2px 0;",
+            sprintf("Generator Q from the decoded path using real elapsed time (mean dwell = \u22121/q\u2090\u2090); dark cycles no longer bias the rates. Steps spanning > %d cycles are excluded from the counts. ",
+                    bd$gap_tol_cyc %||% 4L),
+            "State \u03C3/D use \u221A\u0394t-normalised steps and are robust; the per-step matrix A (heatmap) is retained for reference only."))
+      }
     )
   })
 

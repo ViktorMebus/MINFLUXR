@@ -184,6 +184,13 @@ resulting t_c drives gap-splitting, the quality gate, cycle-index MSD binning an
 - **Per-track σ heterogeneity:** one CVE σ per track (≥ `n_min` integrated steps, skipping the first
   ~5 locs of lock-on transient); the median, IQR, CV and a **σ–EFO Spearman ρ** (precision should improve
   with photons ⇒ negative ρ validates the model) plus a bootstrap 95% CI on the median σ.
+- **Photon-quality weighting (2026-07, `input$trk_cve_precision_weight`, default on):** fit
+  `log σ ~ log EFO` across tracks (needs ≥8 anchor tracks) → per-localization σ = `exp(a)·EFO^p`
+  (clamped 0.2–5× median). Pooled σ_loc and D are then **inverse-variance-weighted** by the summed
+  displacement-noise variance of the localizations entering each product (`w_pair = 1/(σ²_{i−1}+2σ²_i+
+  σ²_{i+1})`, `w_step = 1/(σ²_{i−1}+σ²_i)`), so bright/precise steps dominate. When on and resolvable
+  (cov₁ < 0), the photon-weighted σ_w becomes the app-wide σ_loc; unweighted per-track median is kept
+  as cross-check. Heuristic weight (exact product variance is more complex) — labelled as such.
 - **QC flags:** *implausible jumps* where `|Δr|² > 25·E[|Δr|²]` (i.e. |Δr| > 5× the expected RMS for that
   gap, using E[|Δr|²] = 2d·D_cve·Δt + 2d·σ² so long dark gaps aren't falsely flagged); *degenerate* tracks
   with σ² ≤ 0 (drift-dominated) or σ far in the outlier tail.
@@ -221,7 +228,10 @@ resulting t_c drives gap-splitting, the quality gate, cycle-index MSD binning an
 ### I-B.3 Change-point / motion-state segmentation (PELT + GMM) — [Part II §2.8]
 `cpd_segments_rv`. Per track, segment the series **log(r²/Δt)** (= local log-D, already Δt-aware) with
 **PELT** (`changepoint::cpt.mean`, BIC penalty, `minseglen`). Per-segment **D = mean(r²/Δt)/(2d)** — the
-mean-of-ratios form avoids the Jensen bias of `mean(r²)/(2d·mean(Δt))` when r² and Δt covary. The pooled
+mean-of-ratios form avoids the Jensen bias of `mean(r²)/(2d·mean(Δt))` when r² and Δt covary. An optional
+**σ_loc noise-floor subtraction** (default on) removes the immobile offset **σ_loc²·⟨1/Δt⟩** at the D
+level (clamped ≥0, not per-step — that would rectify and bias upward), the same floor the D-map uses, so
+truly immobile segments read ~0 instead of a small non-zero D (validated in silico). The pooled
 per-segment log₁₀D distribution is then fit with a **BIC-selected Gaussian mixture** (`mclust`, up to
 `max_g` states).
 
@@ -242,24 +252,41 @@ log-parametrisation). MINFLUX handling:
 (vectorised forward/backward, log-sum-exp), ≤30 iterations with early-stop; **σ_k update =
 √(Σγ·r²/(2·Σγ))** (Rayleigh MLE), transition matrix A from the accumulated log-ξ. Fit on the longest
 `max_fit_trk` tracks (optional contiguous-prefix step cap for speed); **Viterbi** decodes *all* tracks at
-full length. States sorted slow→fast by σ. **Caveat:** emissions are Δt-aware but the transition matrix is
-**discrete-time (per-step)**, so transition *rates* are approximate under heavy dark-gapping (disclosed in
-the summary panel).
+full length. States sorted slow→fast by σ.
+**Continuous-time transition rates (2026-07):** the fitted per-step matrix A conflates switching with
+each step's irregular Δt (a 3-dark-cycle step counts as one transition opportunity, like a 1-cycle
+step), so per-step probabilities are *not* rates. We therefore also estimate the **generator Q** of the
+underlying Markov jump process from the decoded state path using *real elapsed time*: the
+continuously-observed-path MLE `q[a,b] = N[a,b]/T[a]` (b≠a; N = decoded a→b jumps, T = time spent in a),
+`q[a,a] = −Σq[a,b]`, giving rates in s⁻¹ and **mean dwell times** τ_a = −1/q[a,a] that are invariant to
+dark cycles. Intervals spanning > `gap_tol_cyc` (=4) cycles are excluded from the counts so one big gap
+can't masquerade as a long dwell. Recovers injected rates within ~15% in silico. A is retained (heatmap)
+for reference; state σ/D remain the √Δt-robust emission quantities.
 
 ### I-B.6 Confinement (Rg / Rmax) — [Part II §2.5]
 `conf_bundle`. Per track: **Rg² = mean(‖p−p̄‖²)**, **Rmax = max‖p−p̄‖**, ratio **Rg/Rmax**. Optional
 noise correction removes localization inflation: **Rg²_true = Rg²_meas − d·σ_loc²·(1 − 1/n)** (the 1−1/n
-accounts for estimating the centroid from the same noisy points), clamped ≥0; Rmax (an extreme value) is
-left uncorrected. Low Rg/Rmax + small extent ⇒ confined — but see the simulator round-trip caveat (free
+accounts for estimating the centroid from the same noisy points), clamped ≥0. **Rmax is now given the same
+first-order subtraction** (**Rmax²_true = Rmax²_meas − d·σ_loc²·(1 − 1/n)**, clamped ≥0): this removes the
+*average* noise inflation of the extreme point. The residual **extreme-value selection bias** (the max is
+picked partly because its noise was positive) has no closed form and is left in place, so Rmax stays
+mildly conservative on short tracks (validated in silico: an immobile track's Rmax shrinks substantially
+but not to zero). Low Rg/Rmax + small extent ⇒ confined — but see the simulator round-trip caveat (free
 diffusion over a short track can mimic the same extent).
 
 ### I-B.7 Directionality / turn-angle autocorrelation — [Part II §2.6]
 `dir_bundle`. **Turn angle** between consecutive displacement vectors θ = acos( (Δr_i·Δr_{i+1}) /
-(|Δr_i||Δr_{i+1}|) ), clamped to [−1,1]. **Velocity autocorrelation** of unit step vectors over lags
-1…20: `AC(lag) = ⟨v̂_i · v̂_{i+lag}⟩`. Summaries: median angle, %forward (<60°), %backward (>120°),
-AC(1). A **noise floor** RMS pure-noise step = 2·σ_loc; the fraction of steps below it quantifies how much
-of the backward-peak / lag-1 anti-correlation is localization noise rather than real anti-persistence
-(MINFLUX's small σ_loc largely removes this classic artefact).
+(|Δr_i||Δr_{i+1}|) ), clamped to [−1,1]. **Velocity autocorrelation** of unit step vectors,
+`AC(lag) = ⟨v̂_i · v̂_{i+lag}⟩`. Summaries: median angle, %forward (<60°), %backward (>120°), AC(first
+lag). A **noise floor** RMS pure-noise step = 2·σ_loc; the fraction of steps below it quantifies how
+much of the backward-peak / first-lag anti-correlation is localization noise rather than real
+anti-persistence (MINFLUX's small σ_loc largely removes this classic artefact).
+**Irregular-Δt handling (2026-07):** both quantities use only **integrated-ish steps** — those spanning
+≤ `input$trk_dir_max_dark` dark cycles (default 2; `n_dark = round(Δt/t_cycle) − 1`); longer-gap steps
+are dropped (unreliable direction, possible cross-molecule merge). The autocorrelation lag is
+**elapsed time**, binned by integer cumulative-cycle index (as in the MSD) rather than step index, so
+the x-axis is real time (cycle lag × t_cycle) and unevenly-spaced points are not misrepresented as
+evenly spaced. Step-index fallback only when t_cycle is unknown.
 
 ### I-B.8 Speed & transport (path speed, drift velocity, local α) — [Part II — Mini-MINFLUXR original]
 `trk_export_summary`. Three complementary per-track curves:
@@ -405,16 +432,23 @@ ways that matter for every downstream estimator:
   cycle-based path*; the plain step-index MSD retains the AMBER caveat.
 
 ### 2.2 CVE — covariance-based D & σ_loc estimator — 🔴 RED (textbook) → 🟡 mitigated
-- **Implemented as:** `σ_loc² = −⟨Δxᵢ·Δxᵢ₊₁⟩` over **consecutive integrated (single-cycle) step
-  pairs** only; also returns bias-corrected `D_cve`.
+- **Implemented as:** `σ_loc² = −⟨Δxᵢ·Δxᵢ₊₁⟩` (Vestergaard's R=0 / no-motion-blur case) over
+  **consecutive integrated (single-cycle) step pairs** only; also returns bias-corrected `D_cve`.
 - **Source:** Vestergaard, Blainey & Flyvbjerg 2014.
 - **MINFLUX caveat:** the CVE algebra is derived for a **constant** Δt. Applied naively across
   variable-Δt MINFLUX steps it biases D — hence the raw RED rating.
-- **Our handling:** we **restrict to consecutive single-cycle pairs**, i.e. we pre-segment into
-  constant-Δt sub-runs — precisely the mitigation the literature prescribes. ✅ This makes our CVE
-  statistically valid on MINFLUX data at the cost of discarding dark-gap-adjacent steps. Note the
-  σ_loc co-estimation is inherently *less* valuable for MINFLUX (σ_loc is already ~nm), so we use CVE
-  primarily as an MSD-free precision/plausibility check, which is the appropriate role.
+- **Our handling:** we **restrict to consecutive single-cycle pairs** that share a midpoint within one
+  track (`n_cyc = round(Δt/t_cycle) == 1` on both steps), i.e. we pre-segment into constant-Δt
+  sub-runs — precisely the mitigation the literature prescribes. ✅ Statistically valid on MINFLUX at
+  the cost of discarding dark-gap-adjacent steps.
+- **Photon-quality weighting (2026-07):** MINFLUX reports a per-localization photon proxy (EFO), and
+  precision scales with photons. We fit `σ_loc ∝ EFO^p` from the per-track CVE σ vs per-track median
+  EFO, assign each localization a σ, and **inverse-variance-weight** the pooled σ_loc and D so bright,
+  well-localized steps count more than dim/noisy ones — the honest way to exploit the quality channel
+  rather than a hard EFO cut. Weights are a heuristic (summed displacement-noise variance of the
+  displacements entering each product; the exact product variance is more complex). Falls back to
+  unweighted without EFO or with <8 anchor tracks. σ_loc co-estimation is inherently less critical for
+  MINFLUX (σ is already ~nm), so CVE serves mainly as an MSD-free precision/plausibility check.
 
 ### 2.3 JDD — jump-distance / Rayleigh-mixture — 🟡 AMBER
 - **Implemented as:** jump-distance distribution with an N-component Rayleigh mixture; user σ_loc and
@@ -434,15 +468,28 @@ ways that matter for every downstream estimator:
   precision (better state separability) are a good match — but the discrete-time transition matrix
   assumes a **uniform Δt per step**. Irregular cycles need either resampling to a common grid or a
   continuous-time-rate transition model.
-- **Our handling:** the `norm_dt` option addresses emission scaling; the **transition model remains
-  discrete-time** — treat transition-rate outputs as approximate under heavy dark-gapping.
+- **Our handling (updated 2026-07):** the `norm_dt` option addresses emission scaling (state σ/D robust),
+  and the reported **transition rates are now continuous-time**: a generator Q estimated from the decoded
+  path using real elapsed time (rates in s⁻¹, mean dwell τ = −1/qₐₐ), invariant to dark cycles. The
+  per-step matrix A is kept for reference. Residual: the *decode* still uses the Δt-agnostic A as its
+  transition prior (emission-dominated, so state assignments are robust); a fully continuous-time decode
+  (A^Δt propagation) is the remaining refinement. Rating lifts toward 🟢 for the rate outputs.
 
-### 2.5 Confinement analysis — 🟢 GREEN
-- **Implemented as:** sliding-window local-variance vs. free-diffusion expectation, noise-subtraction option.
-- **Source:** Simson, Sheets & Jacobson 1995 (confinement index); lineage Saxton, Kusumi.
-- **MINFLUX fit:** nm precision resolves confinement domains far below the camera-SMLM ~20–30 nm floor
-  — a genuine strength. Only caveat: the window should be **time-weighted** (elapsed time), not
-  point-count-weighted, for irregular Δt — a minor implementation detail, not a fundamental mismatch.
+### 2.5 Confinement analysis — 🟢 GREEN (spatial) / 🟡 (short-track & Rmax bias)
+- **Implemented as:** a **per-track spatial shape ratio Rg/Rmax** (radius of gyration vs. maximum
+  excursion), with an optional σ_loc² subtraction from Rg. *(NB: this is a static spatial descriptor, not
+  Simson's temporal sliding-window confinement index — the two share the confinement-detection goal but
+  differ in construction; the app also exposes a τ-based MSD confinement index separately.)*
+- **Source:** confinement-detection SPT lineage — Simson, Sheets & Jacobson 1995; Saxton, Kusumi.
+- **MINFLUX fit:** being purely spatial it is **Δt-independent** (irregular sampling does not bias it), and
+  nm precision resolves domains far below the camera-SMLM ~20–30 nm floor — a genuine strength.
+- **Caveats (honest):** (a) a low Rg/Rmax **conflates true confinement with short observation time or slow
+  diffusion** — a briefly-watched free molecule also looks compact (the simulator round-trip caveat).
+  (b) **Rmax is an extreme value.** A first-order σ_loc² subtraction is now applied to Rmax² as well as
+  Rg² (removing the *average* noise inflation), but the **extreme-value selection bias** — the max is
+  chosen partly because its noise was positive — has no closed form and remains, so Rmax stays mildly
+  conservative on short/noisy tracks and confinement can still be slightly over-called. Corroborate with
+  the τ-based MSD confinement index / plateau before concluding confinement.
 
 ### 2.6 Directionality / turn-angle autocorrelation — 🟢 GREEN
 - **Implemented as:** turn-angle distribution + directional autocorrelation vs. the isotropic-Brownian null.
