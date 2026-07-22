@@ -2,6 +2,96 @@
 ## server_smlm.R  —  SMLM analysis server logic
 ## Called from server.R inside the combined server function.
 ## ─────────────────────────────────────────────────────────────────────────────
+##
+## GOAL OF THIS FILE
+##   Everything behind the SMLM (imaging) tab: load localization data, filter it,
+##   group it into molecules and structures, and run the spatial analyses
+##   (nearest neighbour, Ripley, clustering, shape fitting, two-colour
+##   co-localization, ground-truth estimation). One large Shiny server function.
+##
+##   The Tracking tab asks how molecules MOVE. This tab asks where they ARE and
+##   how they are ARRANGED.
+##
+## HOW TO READ A SHINY SERVER FILE
+##   Reactives are LAZY — file order is NOT execution order. Follow the CALLS.
+##   The dependency chain is drawn below.
+##
+## ── 1. THE DATA FLOW ─────────────────────────────────────────────────────────
+##
+##   upload (.json / .csv / .npy)
+##        |   readers + canonicalisation live in helpers_shared.R
+##        v
+##   uploaded_df_rv -> uploaded_df() ..... the raw, unfiltered dataset
+##        v
+##   ---- THE FILTER PIPELINE (three stages, each feeds the next) --------------
+##   metadata_filtered_df .... Stage 1  per-LOCALIZATION quality ranges
+##                                      (efo / cfr / dcr / eco / tim ...).
+##                                      Drops individual points.
+##   spread_filtered_df ...... Stage 2  per-TRACE spread (SD) filter.
+##                                      Drops whole traces that are too diffuse
+##                                      — i.e. a "trace" that is really drift or
+##                                      two molecules merged.
+##   filtered_df ............. Stage 3  per-TRACE localization count.
+##                                      Drops traces that are too short/long.
+##        v
+##   plottable_data() ........ THE analysis-ready dataset. Adds the trimmer, the
+##                             2D crop, and — importantly — runs the CLUSTERING.
+##                             Almost every analysis starts by calling this.
+##
+##   ORDER MATTERS AND IS DELIBERATE: rows are filtered first (Stage 1), then
+##   whole traces are judged on what survived (Stages 2-3). Filtering traces
+##   before cleaning their points would judge them on data you already rejected.
+##
+## ── 2. THE GROUPING HIERARCHY (the key concept of this tab) ──────────────────
+##   localizations -> tid -> cluster (primary) -> cluster2 (secondary)
+##
+##     tid ....... one continuous blink of one fluorophore
+##     cluster ... primary DBSCAN, SMALL eps (~10-30 nm). Job: DE-BLINKING —
+##                 collapse repeat appearances of one molecule into one object.
+##     cluster2 .. secondary clustering over the medians above, LARGE eps
+##                 (~100-300 nm). Job: STRUCTURE — group molecules into the
+##                 biological object they form.
+##
+##   WHY IT EXISTS: a fluorophore blinks many times, and an antibody carries
+##   several dyes 10-40 nm from its target. Statistics run on RAW localizations
+##   therefore measure the LABEL, not the biology. Cluster ID 0 ALWAYS means
+##   noise/unassigned and must be excluded before counting.
+##   (Implementation: apply_clustering_pipeline() in helpers_smlm.R.)
+##
+## ── 3. MAP OF THE ANALYSES (grep the name; line numbers drift) ───────────────
+##   Upload & settings ......... uploaded_df, get_ui_settings, raw_df, df_full_raw
+##   Filter pipeline ........... metadata_filtered_df / spread_filtered_df /
+##                               filtered_df   (+ the sd_* trace-spread helpers)
+##   Analysis-ready data ....... plottable_data
+##   Nearest neighbour ......... nn_table, nn_table_cluster2, secondary_nn_lines,
+##                               nn_batch_filtered (batch across files/channels)
+##   Two-colour / multiplex .... mplex_split_active, mplex_cross_pair,
+##                               cross_dcr_nn_table, two_color_nn_edges
+##   Ground-truth estimate ..... gt_estimate, gt_morphology   [EXPLORATORY]
+##   Cluster viewer / shapes ... viewer_ids, viewer_current, viewer_fit_core,
+##                               viewer_fit                    [EXPLORATORY]
+##   Dataset groups ............ file_group_map, group_color_map
+##   Image overlay ............. confocal_meta, image_overlay
+##
+##   The heavy spatial statistics themselves (Ripley L/L12, PCF, KDE
+##   co-localization, RoG, batch NN) live in helpers_smlm.R — this file wires
+##   them to inputs and outputs.
+##
+## ── 4. CONVENTIONS & GOTCHAS ─────────────────────────────────────────────────
+##   * Units: nanometres. `tim` stays in SECONDS here (the Tracking tab converts
+##     to ms; this tab does not).
+##   * plottable_data is an eventReactive on plot_trigger(): analyses refresh
+##     when Plot is pressed, not on every keystroke.
+##   * Multiplex: when active, clustering is forced to run PER CHANNEL so
+##     molecules from different exchange rounds are never merged.
+##   * Retired code is in deadcode_smlm.R (NOT sourced). Several reactives were
+##     previously defined TWICE at this scope — the later definition silently
+##     shadowed the earlier, so the first never ran. Before adding a reactive,
+##     check the name is not already used further down the file.
+##
+##   Method provenance and MINFLUX-appropriateness of each statistic:
+##   docs/MINFLUX_analysis_methods.md (Part II §6).
+## ─────────────────────────────────────────────────────────────────────────────
 
 smlm_server <- function(input, output, session) {
   smlm_axis_x_span  <- reactiveVal(NULL)
@@ -1074,9 +1164,29 @@ smlm_server <- function(input, output, session) {
   tid_reset_flag <- reactiveVal(FALSE)
   
   
+  # ==========================================================================
+  # FILTER PIPELINE — Stage 1 of 3: per-LOCALIZATION quality
+  # ==========================================================================
+  # GOAL: drop individual localizations that fail the microscope's own quality
+  # metrics, before any trace-level judgement is made.
+  #
+  # These are the per-point columns MINFLUX reports (see the canonical schema in
+  # helpers_shared.R):
+  #     efo  photon rate      -> low efo = few photons = poor precision
+  #     cfr  centre-freq ratio-> molecule poorly centred in the doughnut
+  #     eco  photon count     dcr  channel ratio (the 2-colour axis)
+  #     tim  acquisition time -> lets you cut the drifty tail of a long run
+  #
+  # KEY DESIGN CHOICE — `rng_filter` only applies a filter when the user's range
+  # actually DIFFERS from the dataset's full range. A slider sitting at its
+  # default must be a true no-op: comparing floating-point widget values against
+  # data maxima otherwise drops boundary points for no reason.
+  #
+  # INPUT : uploaded_df()   OUTPUT: same columns, fewer rows
+  # ==========================================================================
   metadata_filtered_df <- reactive({
     df <- uploaded_df()
-    
+
     # Apply range filter ONLY if user range differs from the dataset's full range
     rng_filter <- function(dat, nm, rng_val, full_rng) {
       if (!nm %in% names(dat)) return(dat)
@@ -1118,7 +1228,30 @@ smlm_server <- function(input, output, session) {
   #  Stage 3 because it derives its range from the spread-filtered data.
   # ===========================================================================
 
-  # --------- 6) FILTER CORE (shared by 2D+3D) ----------
+  # ==========================================================================
+  # FILTER PIPELINE — Stage 2 of 3: per-TRACE spread (the SD filter)
+  # ==========================================================================
+  # GOAL: remove whole traces whose localizations are too SCATTERED to be one
+  # stationary molecule.
+  #
+  # THE REASONING. In SMLM a `tid` should be one fluorophore sitting still while
+  # blinking, so its localizations should scatter only by the localization
+  # precision — a few nm. A trace with a much larger spread is not a molecule:
+  # it is usually stage drift during a long blink, or two nearby molecules whose
+  # localizations were merged into one trace ID. Either way its median position
+  # is meaningless, and the median is exactly what the clustering and every
+  # spatial statistic downstream will use.
+  #
+  # So the filter is per-axis SD of each trace's localizations, computed AFTER
+  # Stage 1 (a trace should be judged on its surviving good points, not on
+  # points already rejected as low quality).
+  #
+  # `sd_filt` holds the committed bounds. An upper bound of Inf means "no
+  # filter" — an explicit sentinel, chosen so no floating-point comparison
+  # against a data maximum is needed to express "keep everything".
+  #
+  # INPUT : metadata_filtered_df()   OUTPUT: whole traces removed
+  # ==========================================================================
   # Stage 2: spread filter — per-trace SD applied after metadata row filters
   spread_filtered_df <- reactive({
     df <- metadata_filtered_df()
@@ -1148,6 +1281,26 @@ smlm_server <- function(input, output, session) {
 
     df %>% dplyr::filter(tid %in% keep_tids)
   })
+  # ==========================================================================
+  # FILTER PIPELINE — Stage 3 of 3: per-TRACE localization count
+  # ==========================================================================
+  # GOAL: keep only traces with a sensible number of localizations. This is the
+  # last stage; its output is what the analyses consume.
+  #
+  # BOTH ENDS OF THE RANGE ARE MEANINGFUL:
+  #   too FEW  localizations -> the trace's median position is poorly determined,
+  #                             and it may be a spurious detection rather than a
+  #                             real fluorophore.
+  #   too MANY localizations -> often not a single molecule at all: a persistent
+  #                             bright contaminant, or several molecules sharing
+  #                             one trace ID. Such a trace would also dominate
+  #                             any per-localization statistic by sheer count.
+  #
+  # Counting happens AFTER Stages 1-2 for the same reason as before: the count
+  # that matters is of localizations that actually passed quality control.
+  #
+  # INPUT : spread_filtered_df()   OUTPUT: the analysis-ready trace set
+  # ==========================================================================
   # Stage 3: trace ID length filter — applied after spread filter
   filtered_df <- reactive({
     df <- spread_filtered_df()
@@ -2500,129 +2653,8 @@ smlm_server <- function(input, output, session) {
   # --- 2D helpers --------------------------------------------------------------
   
   # Build a dataURI for the uploaded background image and optionally rotate (0/90/180/270)
-  # ---- Enhanced NN table (2D) with metadata ----
-  nn_table <- reactive({
-    req(plot_trigger())
-    df <- plottable_data()
-    
-    if (isTRUE(input$enable_clustering)) {
-      # Use cluster medians
-      df_geo <- df %>%
-        dplyr::filter(!is.na(cluster) & cluster != 0) %>%
-        dplyr::group_by(cluster) %>%
-        dplyr::summarise(
-          id        = dplyr::first(cluster),
-          tid       = dplyr::first(tid),
-          x         = stats::median(x, na.rm = TRUE),
-          y         = stats::median(y, na.rm = TRUE),
-          cluster2  = dplyr::first(cluster2),
-          color = dplyr::first(color),
-          mplex_channel = if ("mplex_channel" %in% names(df)) dplyr::first(mplex_channel) else NA_integer_,
-          .groups   = "drop"
-        )
-      id_label <- "cluster"
-    } else {
-      # Use tid medians
-      df_geo <- df %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(
-          id        = dplyr::first(tid),
-          x         = stats::median(x, na.rm = TRUE),
-          y         = stats::median(y, na.rm = TRUE),
-          cluster   = dplyr::first(cluster),
-          cluster2  = dplyr::first(cluster2),
-          color = dplyr::first(color),
-          mplex_channel = if ("mplex_channel" %in% names(df)) dplyr::first(mplex_channel) else NA_integer_,
-          .groups   = "drop"
-        )
-      id_label <- "tid"
-    }
-
-    if (nrow(df_geo) < 2) return(df_geo[0, ])
-
-    coords <- as.matrix(df_geo[, c("x","y")])
-    pm <- .nn_pairs_scoped(df_geo, coords, input)
-
-    rows <- list()
-    for (r in seq_len(nrow(pm))) {
-      i <- pm[r, 1]; ni <- pm[r, 2]; dist <- pm[r, 3]
-      if (dist >= input$distance_range[1] && dist <= input$distance_range[2]) {
-        rows[[length(rows) + 1]] <- data.frame(
-          source_id = df_geo$id[i],
-          target_id = df_geo$id[ni],
-          distance  = round(dist, 2),
-          source_x  = df_geo$x[i],
-          source_y  = df_geo$y[i],
-          target_x  = df_geo$x[ni],
-          target_y  = df_geo$y[ni],
-          source_cluster  = if ("cluster" %in% names(df_geo)) df_geo$cluster[i] else NA,
-          source_cluster2 = df_geo$cluster2[i],
-          target_cluster  = if ("cluster" %in% names(df_geo)) df_geo$cluster[ni] else NA,
-          target_cluster2 = df_geo$cluster2[ni],
-          stringsAsFactors = FALSE
-        )
-      }
-    }
-    out <- if (length(rows)) dplyr::bind_rows(rows) else df_geo[0, ]
-    names(out)[names(out) == "source_id"] <- paste0("source_", id_label)
-    names(out)[names(out) == "target_id"] <- paste0("target_", id_label)
-    out
-  })
-  
-  # ---- Secondary cluster median-to-median NN lines (green, 2D) ----
-  secondary_nn_lines <- reactive({
-    df <- plottable_data()
-    req(isTRUE(input$enable_cluster2))
-    
-    df_geo <- df %>%
-      dplyr::filter(!is.na(cluster2) & cluster2 != 0) %>%
-      dplyr::group_by(cluster2) %>%
-      dplyr::summarise(
-        x = stats::median(x, na.rm = TRUE),
-        y = stats::median(y, na.rm = TRUE),
-        color = dplyr::first(color),    
-        .groups = "drop"
-      )
-    if (nrow(df_geo) < 2) return(list())
-    
-    coords <- as.matrix(df_geo[, c("x","y")])
-    k_eff  <- min(input$nn_k_cluster2 + 1, nrow(coords))
-    nn     <- RANN::nn2(coords, k = k_eff)
-    
-    lines <- list()
-    for (i in 1:nrow(coords)) {
-      for (j in 2:k_eff) {
-        ni   <- nn$nn.idx[i, j]
-        dist <- as.numeric(nn$nn.dists[i, j])
-        if (dist >= input$distance_range_cluster2[1] && dist <= input$distance_range_cluster2[2]) {
-          nn_off <- suppressWarnings(as.numeric(input$c2_label_offset %||% 5))
-          if (!is.finite(nn_off) || nn_off < 0) nn_off <- 5
-          midpoint <- perp_offset_xy(coords[i, ], coords[ni, ], nn_off)
-          lines[[length(lines) + 1]] <- list(
-            x = c(coords[i, 1], coords[ni, 1]),
-            y = c(coords[i, 2], coords[ni, 2]),
-            text = round(dist, 2),
-            midpoint = midpoint
-          )
-        }
-      }
-    }
-    lines
-  })
-  
-  # ---- Downloads ----
-  output$download_nn_table <- downloadHandler(
-    filename = function() paste0("nn_distances_", Sys.Date(), ".xlsx"),
-    content  = function(file) openxlsx::write.xlsx(nn_table(), file, row.names = FALSE),
-    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  )
   
   
-  output$download_nn_table2 <- downloadHandler(
-    filename = function() paste0("nn_distances_cluster2_", Sys.Date(), ".xlsx"),
-    content  = function(file) openxlsx::write.xlsx(nn_table_cluster2(), file, row.names = FALSE),
-    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  )
   
   # ---- NN Table for Cluster2 (2D) ----
   nn_table_cluster2 <- reactive({
@@ -2734,32 +2766,6 @@ smlm_server <- function(input, output, session) {
     shiny::validate(shiny::need(!is.null(df) && nrow(df) > 0, "No data uploaded"))
     df
   })
-  output$download_cluster2_table <- downloadHandler(
-    filename = function() paste0("cluster2_metrics_", Sys.Date(), ".xlsx"),
-    content  = function(file) {
-      tbl <- cluster2_table_store()
-      if (is.null(tbl) || nrow(tbl) == 0) stop("No Median Cluster metrics to download.")
-      
-      membrane_mode <- isTRUE(input$membrane_protein_options)
-      
-      if (!membrane_mode) {
-        # Drop membrane-specific columns if they exist
-        drop_cols <- c(
-          "perceived_radius", "bending_radius",
-          "distance_to_plane", "angle_to_plane",
-          "plane_normal_x", "plane_normal_y", "plane_normal_z"
-        )
-        tbl <- tbl[, setdiff(names(tbl), drop_cols), drop = FALSE]
-      }
-      
-      openxlsx::write.xlsx(
-        x         = tbl,
-        file      = file,
-        sheetName = "Median Cluster metrics",
-        rowNames  = FALSE
-      )
-    }
-  )
   
   observeEvent(input$hist_variable, {
     df <- filtered_df()
@@ -4107,6 +4113,43 @@ smlm_server <- function(input, output, session) {
   
   
   
+  # ==========================================================================
+  # plottable_data() — THE ANALYSIS-READY DATASET
+  # ==========================================================================
+  #
+  # GOAL
+  #   The single hand-off point between the filter pipeline and everything that
+  #   analyses or draws the data. Nearly every analysis below begins with
+  #   `df <- plottable_data()`. If a filter change is not reaching an analysis,
+  #   this is the first place to look.
+  #
+  #   It is the SMLM counterpart of trk() in the tracking tab, but it does more:
+  #   as well as delivering the filtered data it performs the CLUSTERING, so
+  #   every consumer sees the same cluster / cluster2 assignment. That is
+  #   deliberate — if each analysis clustered independently they could disagree.
+  #
+  # WHAT IT ADDS ON TOP OF filtered_df()
+  #   1. apply_trimmer() ..... optional outlier/edge trimming
+  #   2. 2D crop ............. applies the zoom rectangle SERVER-SIDE, so the
+  #                            crop affects the analyses too and behaves
+  #                            identically in 2D and 3D (rather than relying on
+  #                            a browser round-trip that only changes the view)
+  #   3. CLUSTERING .......... primary (de-blinking) and/or secondary
+  #                            (structure) via apply_clustering_pipeline().
+  #                            Multiplex datasets are clustered PER CHANNEL.
+  #   4. colour columns ...... per-point colour for the chosen colour mode
+  #
+  # WHY eventReactive(plot_trigger())
+  #   Clustering a large localization table is expensive. Recomputing on every
+  #   keystroke would make the app unusable, so the analyses refresh when Plot is
+  #   pressed. Consequence worth knowing: after changing a clustering parameter
+  #   you must press Plot before the numbers update.
+  #
+  # RETURNS the filtered data.frame plus (when enabled):
+  #   cluster ..... primary cluster ID   (0 = noise, EXCLUDE before counting)
+  #   cluster2 .... secondary/structure ID (0 = noise)
+  #   colour columns, and the multiplex channel/label columns when active
+  # ==========================================================================
   plottable_data <- eventReactive(plot_trigger(), {
     df <- filtered_df()
     df <- apply_trimmer(df, input)

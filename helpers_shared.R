@@ -1,9 +1,58 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## helpers_shared.R  —  helpers used by both SMLM and tracking modes
+## helpers_shared.R  —  helpers used by BOTH the SMLM and Tracking tabs
+## ─────────────────────────────────────────────────────────────────────────────
+##
+## PURPOSE
+##   This is the app's FRONT DOOR. Almost all of it is the import layer: it
+##   turns the several file formats an Abberior MINFLUX microscope can emit into
+##   ONE canonical data.frame that the rest of the app can rely on. If data looks
+##   wrong everywhere in the app, the bug is probably in here.
+##
+## THE CANONICAL DATA.FRAME (the contract everything downstream assumes)
+##   x, y, z ... position in NANOMETRES (files store metres — converted on read)
+##   tid ....... trace ID: one tracked molecule / one blinking event. Character.
+##   tim ....... timestamp. SECONDS on disk; the tracking tab multiplies by 1000
+##               and works in ms from then on. The SMLM tab keeps seconds.
+##   itr ....... MINFLUX iteration index (the localization refinement stage)
+##   efo ....... effective photon rate  -> proxy for brightness/precision
+##   cfr ....... centre-frequency ratio -> localization quality metric
+##   eco ....... effective photon count
+##   dcr ....... detector-channel ratio -> the colour axis for 2-colour work
+##   Optional: dwell, fluo, lnc, fbg, ...
+##
+## WHAT LIVES HERE (in reading order)
+##   1. Tiny utilities .......... `%||%`, get_ext()
+##   2. Labelling presets ....... minflux_label_presets()  <- SINGLE SOURCE OF
+##                                TRUTH shared by the Simulator's forward model
+##                                and the SMLM tab's inverse GT estimator
+##   3. Readers, one per format:
+##        CSV  read_minflux_csv()          (pyMINFLUX export)
+##        NPY  read_npy() + read_minflux_npy_as_df()   (pure R, no Python)
+##        JSON read_minflux_json_as_df()   (Imspector export)
+##      All of them converge on .minflux_finalize_df(), which applies the shared
+##      post-processing so every format ends up identical downstream.
+##   4. Format normalisation .... canonicalize_minflux_df(),
+##                                collapse_minflux_iterations()
+##   5. Image overlay ........... make_scale_bar(), apply_background_lut(),
+##                                auto_align_overlay()
+##   6. Geometry ................ .pnpoly_vec(), filter_by_cell_boundary()
+##
+## WHY A HAND-WRITTEN .npy READER
+##   Abberior also exports .npy, which is far smaller than JSON. Rather than take
+##   a Python/reticulate dependency for one file format, read_npy() decodes the
+##   NumPy container directly. It handles the structured (record) dtypes those
+##   exports use, including the float16 fields R's readBin cannot read natively.
+##
+## CONVENTION: jsonlite is NOT attached — always call jsonlite:: explicitly, or
+## its `validate` shadows shiny::validate.
 ## ─────────────────────────────────────────────────────────────────────────────
 
+# Null-coalescing operator: `a %||% b` returns a unless it is NULL, else b.
+# Used constantly to give Shiny inputs a default before they have rendered.
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+# Lower-case file extension of a path/filename ("Sample.NPY" -> "npy").
+# Used to dispatch an upload to the right reader.
 get_ext <- function(filename) {
   tolower(sub("^.*\\.", "", filename))
 }
@@ -698,6 +747,29 @@ read_minflux_npy_as_df <- function(path,
   )
 }
 
+# ── collapse_minflux_iterations() ────────────────────────────────────────────
+# GOAL: reduce MINFLUX's multi-stage localization to ONE row per localization.
+#
+# MINFLUX does not measure a position in one shot. It ITERATES: each iteration
+# (`itr`) tightens the doughnut pattern around the molecule, so a single
+# localization event appears in the raw file as several rows — one per
+# iteration, progressively more precise. Downstream we want the final answer,
+# not the refinement history.
+#
+# The grouping key is (tid, gri): one trace, one localization event.
+#
+# Two different rules are needed, which is the subtlety here:
+#   pick_itr()       take the value from the TARGET iteration (the last, most
+#                    refined one). Used for position and most metrics — an
+#                    earlier, coarser iteration would simply be wrong.
+#   latest_finite()  take the value from the highest iteration that actually
+#                    has one. Used for `cfr`, which is not reported at every
+#                    iteration, so demanding the target iteration would give NA.
+#   vld              TRUE if ANY iteration flagged the event valid.
+#
+# df       : raw long-format table with tid, gri, itr (+ the value columns)
+# keep_itr : which iteration is the final one (default 9)
+# returns  : one row per (tid, gri)
 collapse_minflux_iterations <- function(df, keep_itr = 9L) {
   stopifnot(is.data.frame(df))
   if (!nrow(df)) return(df)
@@ -734,6 +806,24 @@ collapse_minflux_iterations <- function(df, keep_itr = 9L) {
     )
 }
 
+# ── canonicalize_minflux_df() ────────────────────────────────────────────────
+# GOAL: accept the many column-naming conventions found in the wild and rename
+# them to the ONE canonical schema documented in the file header, so nothing
+# downstream ever has to guess.
+#
+# The same quantity is spelled differently by different exporters and software
+# versions — "x", "X", "x_nm", "x [nm]", "pos_x", "xPosition" are all the same
+# column. `map` lists the accepted aliases for each canonical name, in priority
+# order, and `pick()` takes the first one actually present.
+#
+# It also repairs the things that are legitimately ABSENT rather than misnamed:
+#   * missing `cfr` -> set to 0. Some acquisitions skip the centre-frequency
+#     check to keep cycle times short. Setting 0 makes the CFR filter a harmless
+#     no-op instead of leaving NA to propagate through every later filter.
+#   * numeric coercion, because CSV readers sometimes infer character.
+#
+# df      : a data.frame from any reader / any MINFLUX export vintage
+# returns : the same data with canonical column names and types
 canonicalize_minflux_df <- function(df) {
   stopifnot(is.data.frame(df))
 

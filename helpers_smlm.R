@@ -1,8 +1,101 @@
 ## ─────────────────────────────────────────────────────────────────────────────
 ## helpers_smlm.R  —  SMLM-only helper functions
 ## ─────────────────────────────────────────────────────────────────────────────
-#Helper functions for the 2D MINFLUX part
-#Helper: Equal limits:
+##
+## PURPOSE
+##   All the computation behind the SMLM (imaging) tab. Unlike the Tracking tab —
+##   which asks how molecules MOVE — this tab asks where molecules ARE and how
+##   they are ARRANGED: clustering, shape fitting, spatial statistics and
+##   two-colour comparison. Nothing here is reactive; every function is a plain
+##   input -> output transform testable in the console.
+##
+## THE DATA HIERARCHY (understand this and the whole file makes sense)
+##   localizations          raw points. One BLINK produces many of them.
+##      -> tid              trace ID: one continuous blink of one fluorophore
+##      -> cluster          "primary" DBSCAN over localizations. Its job is
+##                          DE-BLINKING: collapse repeated appearances of the
+##                          same molecule into one object.
+##      -> cluster2         "median"/secondary clustering, run over the medians
+##                          of the level above. Its job is STRUCTURE: group
+##                          molecules into the biological object they form.
+##   Most functions take a level as input and summarise to the level above, so
+##   "which level am I on?" is the first question to ask of any function here.
+##
+##   WHY THIS MATTERS SCIENTIFICALLY: a fluorophore blinking 10 times looks like
+##   10 molecules, and an antibody carries several dyes ~10-40 nm from its
+##   target. Feeding RAW localizations into a clustering or spatial statistic
+##   therefore measures the LABEL, not the biology. The tiering exists to
+##   collapse that artefact before any counting or spatial statistic is applied.
+##
+## MAP OF THIS FILE (grep the name; line numbers drift, names do not)
+##
+##   1. AXES & COLOUR
+##      get_equal_limits_2d/get_equal_limits ... equal aspect ratio (never let
+##                                               plotly distort real geometry)
+##      hex_to_rgb, rgb_to_hex, scale_hex_at, colorscale_to_hex, get_palette_hex,
+##      palette_colors, plotly_colorscale, map_value_to_scale_hex
+##      build_colors_for_pts, color_mapping_for_pts ... per-point colour
+##
+##   2. TWO-COLOUR / MULTIPLEX
+##      assign_two_color_group, auto_detect_dcr_split ... split channels on DCR
+##      assign_analysis_group(_from_mplex/_legacy), parse_tc_label, format_tc_id
+##      mplex_default_colors
+##
+##   3. POINT BUILDING & SUMMARISING
+##      build_pts_2d, build_pts_3d ..... collapse a level to plottable points
+##      median_points_df, medianize_coords, compute_spatial_density
+##      remove_unstable_traces, flag_rogue_tids, remove_rogue_traces
+##      trace_spread_table(_legacy), sd_* family ... per-trace spread / SD filter
+##
+##   4. CLUSTERING
+##      apply_clustering_pipeline ...... THE main entry point (primary + cluster2)
+##      run_cluster2_grouping, .cluster2_core, .prune_sparse_members
+##      apply_two_color_clustering_pipeline
+##
+##   5. NEAREST NEIGHBOUR
+##      nn_index_pairs ................. within / between / global channel scope
+##      build_nn_edges, pair_passes_scope, compute_batch_nn, compute_cross_nn
+##      safe_nn2, safe_k
+##
+##   6. SHAPE FITTING (the biggest block — see its own banner below)
+##      For each shape S in {sphere, ellipsoid, helix, ring, arc}:
+##          fit_S_geometry / mle_fit_S ... fit the shape to the points
+##          mle_project_S ................ nearest point ON the shape (residuals)
+##          mle_sample_S ................. sample the surface (for drawing)
+##          make_S_mesh / make_S_tube_mesh  3D geometry for plotly
+##          generate_S_from_cluster2 ..... convenience wrapper per cluster
+##      calculate_distance_to_fit, add_distance_lines_to_plot
+##
+##   7. GROUND-TRUTH ESTIMATION (flagged EXPLORATORY in the UI)
+##      estimate_gt_from_labeling ...... inverse of the labelling model
+##      gt_uncertainty_colors, analyze_cluster2_morphology,
+##      mst_contour_length, .grid_thin
+##
+##   8. SPATIAL STATISTICS
+##      compute_cluster_rog ............ radius of gyration per cluster
+##      compute_ripley_L, compute_ripley_L12, compute_pcf12,
+##      compute_ripley_envelope ........ CSR envelope by randomisation
+##      compute_kde_coloc .............. 2D KDE + Pearson co-localization
+##
+##   9. SURFACES / PLANES
+##      fit_poly_surface, create_global_surface, generate_xy_plane,
+##      compute_cluster2_plane_distances, estimate_cluster2_curvature,
+##      build_curvature_table, add_cluster2_lines_and_angles
+##
+## UNITS: nanometres throughout. `tim` is seconds in the SMLM tab (the Tracking
+## tab converts to ms; this tab does not).
+##
+## Method provenance and the MINFLUX-appropriateness of each spatial statistic
+## are documented in docs/MINFLUX_analysis_methods.md (Part II §6).
+## ─────────────────────────────────────────────────────────────────────────────
+
+# ── get_equal_limits_2d() ────────────────────────────────────────────────────
+# GOAL: return x/y axis limits that span the SAME distance, so a nanometre on
+# screen is the same length on both axes.
+# This is not cosmetic: with unequal limits plotly stretches one axis, and a
+# round cluster renders as an ellipse — which would corrupt every visual shape
+# judgement the user makes. Padding adds a small margin so points do not sit on
+# the frame.
 get_equal_limits_2d <- function(x, y, padding = 0.05) {
   xr <- range(x, na.rm = TRUE)
   yr <- range(y, na.rm = TRUE)
@@ -1825,6 +1918,69 @@ robust_center <- function(X) {
     }
   )
 }
+# =============================================================================
+# SHAPE FITTING — fit a geometric primitive to a cluster of localizations
+# =============================================================================
+#
+# GOAL OF THIS WHOLE BLOCK
+#   Given the points belonging to one cluster, ask "what SHAPE is this?" and fit
+#   the best sphere / ellipsoid / helix / ring / arc to it. That turns a cloud of
+#   localizations into interpretable numbers: a radius, a pitch, an axis length.
+#
+# THE FITTING PRINCIPLE — ORTHOGONAL-DISTANCE (total least squares)
+#   For a shape S with parameters θ, minimise the sum of squared PERPENDICULAR
+#   distances from each point to the SURFACE:
+#
+#        θ* = argmin_θ  Σ_i  || x_i − P_S(x_i; θ) ||²
+#
+#   where P_S(x) is the nearest point on the shape. This is the right criterion
+#   here because localization error is isotropic in space — there is no
+#   privileged "vertical" axis to measure residuals along, as ordinary least
+#   squares would assume. It is the same reason these are called MLE fits: for
+#   isotropic Gaussian error, minimising orthogonal distance IS the maximum
+#   likelihood solution.
+#
+#   Because P_S has no closed form for the curved shapes, several fits iterate:
+#   project -> re-fit parameters -> re-project, until the residual stops falling.
+#
+# THE NAMING CONVENTION (this is the key to navigating ~30 functions)
+#   For each shape S in {sphere, ellipsoid, helix, ring, arc} there is a family:
+#
+#     fit_S_geometry(X) ...... convenience wrapper: fit and return the geometry
+#                              in one call (what most callers actually use)
+#     mle_fit_S(X, w) ........ the real optimiser. Returns the fitted parameters
+#                              plus the residual/RMSD used for model ranking.
+#     mle_project_S(X, ...) .. nearest point ON the shape for each input point.
+#                              This is what residuals and the "distance to fit"
+#                              lines are computed from.
+#     mle_sample_S(...) ...... sample points along/over the fitted shape, used
+#                              to DRAW it (not to fit it).
+#     make_S_mesh() /
+#       make_S_tube_mesh() ... turn the sampled shape into plotly 3D geometry.
+#                              "tube" variants sweep a small circle along a
+#                              curve, because a 1D curve is invisible in 3D.
+#     generate_S_from_cluster2(...)  per-cluster wrapper used by the server.
+#
+#   So: to change how a shape is FITTED edit mle_fit_S; to change how it LOOKS
+#   edit mle_sample_S / make_S_*_mesh. They are deliberately independent.
+#
+# MODEL SELECTION — which shape wins?
+#   RMSD always favours the most flexible shape (more parameters always fit
+#   better), so ranking uses AICc/BIC, which penalise parameter count. AICc is
+#   preferred for the small point counts typical of one cluster, and is left
+#   blank when a cluster has too few points to justify that model (n <= params+2).
+#
+# HONEST CAVEAT (mirrored by the EXPLORATORY badge in the UI)
+#   The shape dictionary is IMPOSED by this tool — a cluster is scored only
+#   against the five shapes offered, so "best" means best OF THESE, never proof
+#   of biological geometry. With few, blinking-inflated localizations several
+#   shapes are often statistically indistinguishable. Treat the ranking as a
+#   hypothesis, and check the residuals rather than the label.
+# =============================================================================
+
+# Triangle index list for a parametric (nu x nv) surface grid — the connectivity
+# plotly's mesh3d needs. Splits every grid quad into two triangles. Shared by all
+# the surface meshes below, which differ only in their vertex coordinates.
 .make_triangles <- function(nu, nv) {
   # grid indices (0-based for plotly mesh3d i/j/k)
   idx <- matrix(seq_len(nu*nv) - 1L, nrow = nu, ncol = nv, byrow = TRUE)
@@ -3868,10 +4024,60 @@ run_cluster2_grouping <- function(pts, method = "dbscan", eps = 200, minPts = 15
   as.integer(dbscan::dbscan(pts, eps = eps, minPts = minPts)$cluster)
 }
 
-## ── Batch clustering pipeline ─────────────────────────────────────────────────
-# Applies the same primary + secondary DBSCAN clustering as plottable_data() to
-# any already-filtered data frame, using current UI input values.
-# Returns df with `cluster` and/or `cluster2` columns appended.
+# =============================================================================
+# apply_clustering_pipeline() — THE TWO-TIER CLUSTERING ENTRY POINT
+# =============================================================================
+#
+# GOAL
+#   Turn raw localizations into the two grouping levels the whole SMLM tab is
+#   built on. This mirrors exactly what the interactive plot does
+#   (`plottable_data()` in server_smlm.R), so batch tools and the on-screen plot
+#   can never disagree — that duplication is the reason this function exists.
+#
+# THE TWO TIERS AND WHY THERE ARE TWO
+#   PRIMARY clustering (`cluster`) — DE-BLINKING.
+#     Runs DBSCAN over RAW localizations with a SMALL eps (~10-30 nm, i.e. a few
+#     times the localization precision). A single fluorophore blinking on and off
+#     produces many localizations within a few nm of each other; this collapses
+#     them into one object. Without it, one molecule is counted many times and
+#     every downstream count and spatial statistic is inflated.
+#
+#   SECONDARY / "median" clustering (`cluster2`) — STRUCTURE.
+#     Runs over the MEDIAN position of each unit from the level above, with a
+#     LARGE eps (~100-300 nm). Its job is biological: group molecules into the
+#     structure they form (a filament, a ring, a complex).
+#
+#   The two eps values are doing completely different jobs — primary eps is set
+#   by the MICROSCOPE (precision + label size), secondary eps by the BIOLOGY
+#   (how far apart molecules in one structure sit). Tuning them together is the
+#   most common source of confusion.
+#
+# WHY DBSCAN (and its alternatives here)
+#   DBSCAN needs no pre-set cluster count, finds arbitrary shapes, and labels
+#   sparse points as noise (cluster 0) rather than forcing them into a group —
+#   all three matter for SMLM data. It does assume roughly uniform density, so
+#   the secondary level also offers:
+#     HDBSCAN ... adaptive density; only a minimum cluster size, no eps
+#     OPTICS .... adaptive; keeps small structures a single eps would merge
+#
+# MULTIPLEX RULE (enforced, not optional)
+#   When a multiplex dataset is active, clustering runs SEPARATELY PER CHANNEL
+#   and the IDs are offset. Molecules imaged in different exchange rounds must
+#   never be merged into one cluster — that would invent structures that were
+#   never simultaneously present.
+#
+# ARGUMENTS
+#   df    : an ALREADY-FILTERED data.frame (x, y, z, tid [, mplex_channel])
+#   input : the Shiny input list — read directly so batch tools use exactly the
+#           settings the user sees. Relevant: enable_clustering, eps, minpts,
+#           enable_cluster2, eps2/minpts2, cluster2_method, grouping_mode,
+#           cluster_group_scope
+#
+# RETURNS
+#   the same df with `cluster` and/or `cluster2` integer columns appended.
+#   ID 0 ALWAYS means "noise / unassigned" — every consumer must exclude 0
+#   before counting, or noise becomes a phantom cluster.
+# =============================================================================
 apply_clustering_pipeline <- function(df, input) {
   if (!nrow(df)) return(df)
 
