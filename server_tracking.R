@@ -3391,7 +3391,9 @@ tracking_server <- function(input, output, session) {
     # Light pre-decimation for TRAILS only
     max_pts_tid  <- suppressWarnings(as.integer(isolate(input$trk_max_pts_tid)))
     if (!is.finite(max_pts_tid) || max_pts_tid < 50) max_pts_tid <- 400
-    dwin_tr_dec  <- decimate_per_tid(dwin, max_pts = max_pts_tid, tcol = tcol_play)
+    # Carry the per-point colour columns so trails can be coloured by the active mode.
+    dwin_tr_dec  <- decimate_per_tid(dwin, max_pts = max_pts_tid, tcol = tcol_play,
+                                     extra_cols = c("col_dark", "col_speed"))
     dwin_tr_dec  <- dwin_tr_dec[order(dwin_tr_dec$tid, dwin_tr_dec$t), ]
     
     # Split full-res for markers, and decimated for trails
@@ -3565,6 +3567,12 @@ tracking_server <- function(input, output, session) {
             tb_tr <- sp_tr[[tids[i]]]
             tr_entry <- list(x = tb_tr$x[wtr], y = tb_tr$y[wtr])
             if (use3d && "z" %in% names(tb_tr)) tr_entry$z <- tb_tr$z[wtr]
+            # Per-point colour mode: colour the whole trail by its LEADING (most recent)
+            # point. plotly 2D lines take a single colour per trace — per-vertex line
+            # colour is not supported — but a trail only spans trail_len, so its leading
+            # value is "the value right now" and the trail recolours as playback advances.
+            if (!is.null(pcol) && pcol %in% names(tb_tr))
+              tr_entry$col <- as.character(tb_tr[[pcol]][wtr[length(wtr)]])
             trails_per_tid[[i]] <- tr_entry
             tx <- c(tx, tb_tr$x[wtr], NA_real_)
             ty <- c(ty, tb_tr$y[wtr], NA_real_)
@@ -3644,11 +3652,23 @@ tracking_server <- function(input, output, session) {
     tcol <- if (isTRUE(is_simul())) "tim0" else "tim"
     dt_show <- pre$step_dt
     if (!is.finite(dt_show) || dt_show <= 0) dt_show <- pre$bin_width
+    # Live frame + marker count (moved off the plot title: updating a title needs a
+    # relayout, which re-solves scaleanchor and rescales the FOV every frame).
+    k_now <- suppressWarnings(as.integer(tick()))
+    cur   <- if (is.finite(k_now) && k_now >= 1L && k_now <= length(pre$frames))
+               pre$frames[[k_now]] else NULL
     htmltools::div(
       style = "color:#555;margin-top:6px;margin-bottom:6px;",
       htmltools::tags$b("Time basis: "), tcol, htmltools::HTML("&nbsp;&middot;&nbsp;"),
       htmltools::tags$b("Frames: "), length(pre$frames), htmltools::HTML("&nbsp;&middot;&nbsp;"),
-      htmltools::tags$b("Frame dt ~ "), fmt_num(dt_show), " ms"
+      htmltools::tags$b("Frame dt ~ "), fmt_num(dt_show), " ms",
+      # Own line + nowrap so changing digit counts can't reflow the sidebar mid-playback.
+      if (!is.null(cur)) htmltools::div(
+        style = "white-space:nowrap;",
+        htmltools::tags$b("Frame: "), k_now, " / ", length(pre$frames),
+        htmltools::HTML("&nbsp;&middot;&nbsp;"),
+        htmltools::tags$b("Markers: "), length(cur$markers_x)
+      )
     )
   })
   
@@ -4160,7 +4180,9 @@ tracking_server <- function(input, output, session) {
       )
     } else {
       lay <- list(
-        title = list(text = "t = frame 1", font = list(color = fg_col)),
+        # No frame text in the title: updating it would need a relayout, which re-solves
+        # scaleanchor and jitters the FOV. The live frame readout lives in trk_frame_meta.
+        title = list(text = "", font = list(color = fg_col)),
         paper_bgcolor = bg_col, plot_bgcolor = bg_col,
         font = list(color = fg_col),
         xaxis = c(
@@ -4275,30 +4297,31 @@ tracking_server <- function(input, output, session) {
       tpt <- if (!is.null(fr$trails_per_tid)) fr$trails_per_tid else list()
       n   <- tm$n_tid
       xs  <- vector("list", n); ys <- vector("list", n); zs <- vector("list", n)
+      # Per-point colour mode: recolour each trail LINE from its leading point, so the
+      # trails carry the same colour meaning the markers would (blue→red speed, or the
+      # dark-cycle gradient) and no dots are needed on top.
+      per_pt <- isTRUE(pre$color_by_dark)
+      lc <- if (per_pt) vector("list", n) else NULL
       for (i in seq_len(n)) {
         td      <- if (i <= length(tpt)) tpt[[i]] else NULL
         xs[[i]] <- if (!is.null(td) && length(td$x)) td$x else NA_real_
         ys[[i]] <- if (!is.null(td) && length(td$y)) td$y else NA_real_
         if (is3d) zs[[i]] <- if (!is.null(td) && length(td$z)) td$z else NA_real_
+        if (per_pt) {
+          # Empty trail -> transparent (its x/y are NA so nothing is drawn anyway).
+          lc[[i]] <- if (!is.null(td) && !is.null(td$col) && nzchar(td$col)) td$col else "rgba(0,0,0,0)"
+        }
       }
       restyle_data <- list(x = xs, y = ys)
       if (is3d) restyle_data$z <- zs
+      if (per_pt) restyle_data$`line.color` <- lc
       plotlyProxyInvoke(proxy, "restyle", restyle_data,
         seq(tm$trail_start, tm$trail_start + n - 1L))
-      # Markers normally stay empty while trails are shown (lines replace dots). But in
-      # dark-cycle colour mode the per-localization colour lives on the MARKERS, so keep
-      # them visible (colored dots overlaid on the trails) or the toggle would do nothing.
-      if (isTRUE(pre$color_by_dark) && length(fr$markers_x)) {
-        mk_data <- list(x = list(fr$markers_x), y = list(fr$markers_y),
-                        `marker.size` = if (is.finite(pt_size)) pt_size else 6,
-                        `marker.color` = list(as.character(fr$marker_cols)))
-        if (is3d) mk_data$z <- list(fr$markers_z %||% numeric(0))
-        plotlyProxyInvoke(proxy, "restyle", mk_data, tm$markers_idx)
-      } else {
-        empty_mk <- list(x = list(NA_real_), y = list(NA_real_))
-        if (is3d) empty_mk$z <- list(NA_real_)
-        plotlyProxyInvoke(proxy, "restyle", empty_mk, tm$markers_idx)
-      }
+      # Markers stay empty while trails are shown — the trails themselves now carry the
+      # per-point colour, so overlaying dots would just double-draw the same information.
+      empty_mk <- list(x = list(NA_real_), y = list(NA_real_))
+      if (is3d) empty_mk$z <- list(NA_real_)
+      plotlyProxyInvoke(proxy, "restyle", empty_mk, tm$markers_idx)
     } else {
       # ----- Markers (no trails active) -----
       if (length(fr$markers_x)) {
@@ -4318,21 +4341,17 @@ tracking_server <- function(input, output, session) {
       }
     }
 
-    # ----- Title (only when NOT playing) -----
-    # During playback we RESTYLE ONLY and never relayout. Any relayout \u2014 even a title-only
-    # one \u2014 makes plotly re-solve the scaleanchor aspect constraint, which jitters the FOV
-    # (the sequential loop skips relayout for exactly this reason; see
-    # run_sequential_loop_plain). The layout's uirevision keeps the view stable across the
-    # restyles AND preserves a zoom/pan the user makes mid-playback, so no per-frame range
-    # pinning is needed or wanted. We refresh the frame/marker title only when paused
-    # (single frame / slider scrub), where one relayout is harmless.
-    playing_now <- isTRUE(loop$gplaying) || isTRUE(loop$playing)
-    if (!playing_now) {
-      n_pts <- length(fr$markers_x)
-      plotlyProxyInvoke(
-        proxy, "relayout",
-        list(title = list(text = sprintf("frame %d \u00B7 markers: %d", k, n_pts))))
-    }
+    # ----- NO RELAYOUT HERE, EVER -----
+    # draw_frame is RESTYLE-ONLY in every path. Any relayout \u2014 even a title-only one \u2014
+    # makes plotly re-solve the scaleanchor aspect constraint and visibly rescales the
+    # FOV (the sequential loop skips relayout for the same reason; see
+    # run_sequential_loop_plain). Gating it on "not playing" was not enough: draw_frame
+    # is also driven by the slider observer and by stale slider echoes that arrive after
+    # playback ends (slider_guard is reset to 0 there), so the flags can read "paused"
+    # while frames are still advancing \u2014 which produced a per-frame FOV jitter after
+    # stop-then-replay. The frame/marker readout now lives in trk_frame_meta (driven by
+    # tick()), which costs the plot nothing. uirevision keeps the view \u2014 and any user
+    # zoom \u2014 stable across the restyles.
 
     # ----- Slider sync (throttled to every 5 frames during playback) -----
     if (!is.null(isolate(input$trk_frame_idx))) {
@@ -9479,13 +9498,18 @@ tracking_server <- function(input, output, session) {
   
   observeEvent(input$trk_frame_idx, {
     req(!is.na(layout_trigger()))
-    if (isTRUE(is_playing())) return(invisible(NULL))
+    # Consume programmatic echoes FIRST, before the is_playing() gate. draw_frame bumps
+    # slider_guard for every updateSliderInput it pushes; if the is_playing() gate ran
+    # first those credits were never spent during playback, so the counter accumulated
+    # and was then wiped by slider_guard(0L) at stop/end — after which late-arriving
+    # echoes from the last frames sailed through and re-drove draw_frame.
     guard <- isolate(slider_guard())
     if (guard > 0L) {
       slider_guard(guard - 1L)
       return(invisible(NULL))
     }
-    
+    if (isTRUE(is_playing())) return(invisible(NULL))
+
     if (is_seq()) {
       # unchanged: sequential seeks by time within the current TID
       sd <- seq_data(); req(is.list(sd), length(sd$tids) > 0)
@@ -9550,8 +9574,12 @@ tracking_server <- function(input, output, session) {
             draw_frame(1L, force = TRUE)
 
             # If per-TID trail traces exist, update their line colors too
-            # (trails are set at renderPlotly time; conf coloring needs a proxy push)
-            if (identical(tm$trails_mode, "per_tid") && tm$n_tid > 0) {
+            # (trails are set at renderPlotly time; conf coloring needs a proxy push).
+            # Skipped in per-point colour modes (dark cycles / speed): there draw_frame
+            # above already coloured each trail from its leading point, and pushing the
+            # per-TID colours here would clobber it back to one colour per track.
+            if (identical(tm$trails_mode, "per_tid") && tm$n_tid > 0 &&
+                !isTRUE(pre$color_by_dark)) {
               line_cols <- vector("list", tm$n_tid)
               for (i in seq_len(tm$n_tid)) {
                 tid_i <- if (i <= length(pre$tids)) pre$tids[i] else ""
