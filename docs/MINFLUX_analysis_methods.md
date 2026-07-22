@@ -1,6 +1,6 @@
 # MINFLUX Analysis — Methods, Mathematics & Appropriateness
 
-*Reference document for the analysis and simulation modules of Mini-MINFLUXR.*
+*Reference document for the analysis and simulation modules of MINFLUXR.*
 Last reviewed: 2026-07 · Compiled from the source code and from verified primary literature (see [Bibliography](#bibliography)).
 
 This document has **two layers**, both organised around the app's three method families —
@@ -165,7 +165,19 @@ so a trend is a hypothesis for controls, not a measurement.
 
 ## I-B. Tracking (SPT) analysis
 
-### I-B.0 Cycle time & time-signature (the foundation for everything Δt-aware)
+### I-B.0 Cycle time & Time-Signature Analysis (the foundation for everything Δt-aware)
+The **Time Signature Analysis (TSA)** tab is a faithful R port of **Béla Vogler's MINFLUX Time-Signature
+Analysis (MFX-TSA)** — §2 of his `the_road_to_minflux_msd` tutorial (Vogler et al. 2025, *Commun. Biol.*;
+reference implementation *Toolbox_for_MINFLUX_SPT / MinSpt*). The correspondence is direct:
+- **cycle time / hardware parameters** — MinSpt `initialize_tsa` + `estimate_time_signal_parameter`
+  (EOD/SW overhead, pattern vertices, dwell) ↔ our `trk_cycle_time` + the EOD/SW regression and the
+  hardware pattern (hexagon 6 / square 4 / triangle 3 vertices).
+- **integrated vs dark cycles + per-track progression** — `print_cycle_stats` /
+  `plot_cycle_progression_for_ID` ↔ our Integrated/Dark distribution and per-track cycle-progression plot.
+- **adaptive gap removal** — `suggest_split_thresholds` (TOT-based `med_th = floor(median+std+1)`, capped
+  by `high_th = maxOffTime/cycle`) + `remove_time_gaps` (`min_len = 50`) ↔ our adaptive gap-split.
+- **linearized cycle-index timeline** — `prepare_for_msd` ↔ our cumulative cycle-index binning.
+
 MINFLUX has no fixed clock; the base **cycle time t_c** is inferred (`trk_cycle_time`), in priority order:
 (1) hardware model `t_c = N_iter · t_dwell` if enabled; (2) manual override; (3) **data-driven cluster
 cycle** — cluster the inter-localization Δt values and take the smallest robust cluster centre (the modal
@@ -271,8 +283,21 @@ first-order subtraction** (**Rmax²_true = Rmax²_meas − d·σ_loc²·(1 − 1
 *average* noise inflation of the extreme point. The residual **extreme-value selection bias** (the max is
 picked partly because its noise was positive) has no closed form and is left in place, so Rmax stays
 mildly conservative on short tracks (validated in silico: an immobile track's Rmax shrinks substantially
-but not to zero). Low Rg/Rmax + small extent ⇒ confined — but see the simulator round-trip caveat (free
-diffusion over a short track can mimic the same extent).
+but not to zero).
+
+**Confinement call — N-matched free-diffusion null (2026-07, corrected direction).** The raw ratio is
+track-length-dependent, so a single fixed threshold is unreliable. `.free_walk_ratio_dist()` Monte-Carlos
+free Gaussian walks of the SAME localization count (the ratio is scale-free, so D/Δt drop out) on an
+N-grid, and each track is classified against that null: **confined = ratio above the free 95th pct**,
+**directed/escape = below the 5th pct**, else free-like. **Direction correction:** diffusion simulations
+show a bounded (reflected-boundary) walk has a *higher* Rg/Rmax than free (≈0.60 vs 0.53) — it fills its
+domain while free diffusion wanders to extreme excursions. The old fixed thresholds *"confined <0.35 /
+free >0.45"* were therefore both mis-calibrated (below every regime, ~0.53–0.61) and pointed the wrong
+way; they are removed in favour of the null. Validated in silico: free tracks classify ~5% confined (=
+the null false-positive rate by construction), confined tracks are ~3× enriched, directed tracks are not
+called confined. Residuals (both conservative): the Rmax extreme-value bias above; and a genuinely
+confined but very slow molecule can be missed if it barely explores. Corroborate with the τ-based MSD
+confinement index / plateau.
 
 ### I-B.7 Directionality / turn-angle autocorrelation — [Part II §2.6]
 `dir_bundle`. **Turn angle** between consecutive displacement vectors θ = acos( (Δr_i·Δr_{i+1}) /
@@ -288,7 +313,7 @@ are dropped (unreliable direction, possible cross-molecule merge). The autocorre
 the x-axis is real time (cycle lag × t_cycle) and unevenly-spaced points are not misrepresented as
 evenly spaced. Step-index fallback only when t_cycle is unknown.
 
-### I-B.8 Speed & transport (path speed, drift velocity, local α) — [Part II — Mini-MINFLUXR original]
+### I-B.8 Speed & transport (path speed, drift velocity, local α) — [Part II — MINFLUXR original]
 `trk_export_summary`. Three complementary per-track curves:
 - **Path speed:** `dr/dt` per step (µm/s), lightly median-smoothed. Cannot distinguish diffusion from
   transport (diffusion inflates instantaneous speed).
@@ -450,15 +475,19 @@ ways that matter for every downstream estimator:
   unweighted without EFO or with <8 anchor tracks. σ_loc co-estimation is inherently less critical for
   MINFLUX (σ is already ~nm), so CVE serves mainly as an MSD-free precision/plausibility check.
 
-### 2.3 JDD — jump-distance / Rayleigh-mixture — 🟡 AMBER
-- **Implemented as:** jump-distance distribution with an N-component Rayleigh mixture; user σ_loc and
-  Δt-normalization controls.
+### 2.3 JDD — jump-distance / Rayleigh-mixture — 🟢 GREEN (with our handling)
+- **Implemented as:** jump-distance distribution with an N-component Rayleigh mixture; σ_loc bias
+  correction, √Δt-normalization (default on), and an **integrated-steps-only** mode.
 - **Source:** Schütz, Schindler & Schmidt 1997; benchmarking in Weimann et al. 2013.
 - **MINFLUX caveat:** small σ_loc reduces error-broadening of the Rayleigh peaks (an advantage), but
   jumps must be pooled at a **fixed real Δt**; mixing steps of different cycle counts pollutes the
-  distribution, and short tracks give few jumps per state → unstable multi-component fits.
-- **Our handling:** exposes Δt-normalization / step-mode controls — **confirm these pool by true Δt
-  (integrated steps), not raw step index** (see §5 action items).
+  distribution.
+- **Our handling (2026-07):** two rigorous options — (1) **√Δt-normalise** each jump (default on) so
+  mixed cycle counts pool correctly for free diffusion; or (2) **Integrated steps only** (`round(Δt/t_c)
+  ==1`), which keeps a single true Δt so *no* pooling assumption is needed at all — valid regardless of
+  the motion model. The "short track → few jumps" concern is weak for MINFLUX (100× more locs/track than
+  camera SPT). Residual: the √Δt mode still assumes free diffusion; prefer integrated-only in doubt, and
+  keep the component count low (each Rayleigh component still assumes free Brownian).
 
 ### 2.4 HMM diffusive-state segmentation — 🟡 AMBER
 - **Implemented as:** per-track Gaussian-emission HMM over displacement steps, N states, with
@@ -475,21 +504,21 @@ ways that matter for every downstream estimator:
   transition prior (emission-dominated, so state assignments are robust); a fully continuous-time decode
   (A^Δt propagation) is the remaining refinement. Rating lifts toward 🟢 for the rate outputs.
 
-### 2.5 Confinement analysis — 🟢 GREEN (spatial) / 🟡 (short-track & Rmax bias)
-- **Implemented as:** a **per-track spatial shape ratio Rg/Rmax** (radius of gyration vs. maximum
-  excursion), with an optional σ_loc² subtraction from Rg. *(NB: this is a static spatial descriptor, not
-  Simson's temporal sliding-window confinement index — the two share the confinement-detection goal but
-  differ in construction; the app also exposes a τ-based MSD confinement index separately.)*
+### 2.5 Confinement analysis — 🟢 GREEN (with the N-matched null)
+- **Implemented as:** a **per-track spatial shape ratio Rg/Rmax** classified against an **N-matched
+  free-diffusion null**, with σ_loc² subtraction from both Rg and Rmax. *(A static spatial descriptor, not
+  Simson's temporal sliding-window index; the app also exposes a τ-based MSD confinement index separately.)*
 - **Source:** confinement-detection SPT lineage — Simson, Sheets & Jacobson 1995; Saxton, Kusumi.
 - **MINFLUX fit:** being purely spatial it is **Δt-independent** (irregular sampling does not bias it), and
   nm precision resolves domains far below the camera-SMLM ~20–30 nm floor — a genuine strength.
-- **Caveats (honest):** (a) a low Rg/Rmax **conflates true confinement with short observation time or slow
-  diffusion** — a briefly-watched free molecule also looks compact (the simulator round-trip caveat).
-  (b) **Rmax is an extreme value.** A first-order σ_loc² subtraction is now applied to Rmax² as well as
-  Rg² (removing the *average* noise inflation), but the **extreme-value selection bias** — the max is
-  chosen partly because its noise was positive — has no closed form and remains, so Rmax stays mildly
-  conservative on short/noisy tracks and confinement can still be slightly over-called. Corroborate with
-  the τ-based MSD confinement index / plateau before concluding confinement.
+- **Fixed a real defect (2026-07):** the old fixed thresholds ("confined <0.35 / free >0.45") were both
+  mis-calibrated and **inverted** — diffusion simulation shows confined motion gives a *higher* Rg/Rmax
+  than free (≈0.60 vs 0.53). Replaced by the N-matched null (confined = above free 95th pct at that N;
+  directed/escape = below the 5th), which also removes the track-length confound. See I-B.6 for the
+  validation.
+- **Residual caveats (both conservative):** the Rmax extreme-value selection bias (no closed form); and a
+  genuinely confined but very slow molecule can be missed if it barely explores. Corroborate with the
+  τ-based MSD confinement index / plateau.
 
 ### 2.6 Directionality / turn-angle autocorrelation — 🟢 GREEN
 - **Implemented as:** turn-angle distribution + directional autocorrelation vs. the isotropic-Brownian null.
@@ -520,13 +549,13 @@ ways that matter for every downstream estimator:
 | Method | Source | Textbook | With our adaptation |
 |---|---|---|---|
 | MSD optimal-fit | Michalet 2010/2012; Vogler 2025 | 🟡 | 🟢 cycle-based path / 🟡 step-index |
-| CVE | Vestergaard 2014 | 🔴 | 🟡 (integrated-pair restriction) |
-| JDD | Schütz 1997; Weimann 2013 | 🟡 | 🟡 (verify Δt pooling) |
-| HMM / vbSPT | Das 2009; Persson 2013 | 🟡 | 🟡 (discrete-time transitions) |
-| Confinement | Simson 1995 | 🟢 | 🟢 (time-weight window) |
-| Turn-angle | Burov 2013 | 🟢 | 🟢 |
+| CVE | Vestergaard 2014 | 🔴 | 🟡 (integrated-pair restriction + EFO weighting) |
+| JDD | Schütz 1997; Weimann 2013 | 🟡 | 🟢 (√Δt norm + integrated-only mode) |
+| HMM / vbSPT | Das 2009; Persson 2013 | 🟡 | 🟢 rates (continuous-time generator) |
+| Confinement | Simson 1995 | 🟢 | 🟢 (N-matched free-diffusion null) |
+| Turn-angle | Burov 2013 | 🟢 | 🟢 (elapsed-time autocorrelation) |
 | Anomalous α | Metzler 2014; Kepten 2015 | 🔴 | 🔴 (pool + exclude short) |
-| Change-point / PELT | Killick 2012 | 🟡 | 🟡 (Δt-aware cost) |
+| Change-point / PELT | Killick 2012 | 🟡 | 🟢 (Δt-aware cost + σ_loc floor) |
 | D-map (single-lag) | see §5 citation note | 🟢 | 🟢 |
 
 ---
@@ -536,7 +565,7 @@ ways that matter for every downstream estimator:
 - **D_max ceiling / trackable-D limit** — `D_max = (L²/16)·ψ / (N_PL + ψ·t_hw)`, cited in-code to
   **Vogler et al. 2025** (*Commun. Biol.*). Consistent with the independent SimuFLUX ceiling of
   ~3 µm²/s (Marin & Ries 2025). 🟢 Correctly attributed.
-- **σ_loc noise floor / dark-cycle handling / continuity gate** — Mini-MINFLUXR-original engineering
+- **σ_loc noise floor / dark-cycle handling / continuity gate** — MINFLUXR-original engineering
   built on the data properties in §1; not a port of a specific paper.
 
 ---
@@ -699,7 +728,7 @@ footprint).
 4. Wolff JO, Scheiderer L, Engelhardt T, Engelhardt J, Matthias J, Hell SW (2023). *MINFLUX dissects the unimpeded walking of kinesin-1.* Science 379(6636):1004–1010. doi:10.1126/science.ade2650
 5. Deguchi T, Iwanski MK, Schentarra EM, et al. (2023). *Direct observation of motor protein stepping in living cells using MINFLUX.* Science 379(6636):1010–1015. doi:10.1126/science.ade2676
 6. Ostersehlt LM, Jans DC, Wittek A, et al. (2022). *DNA-PAINT MINFLUX nanoscopy.* Nature Methods 19:1072–1075. doi:10.1038/s41592-022-01577-1
-7. Vogler BTL, De Angelis G, Zhao Z, Eggeling C, Reina F (2025). *Parameter optimization for MINFLUX microscopy enabled single-particle tracking.* Communications Biology 8:1573. doi:10.1038/s42003-025-09060-1
+7. Vogler BTL, De Angelis G, Zhao Z, Eggeling C, Reina F (2025). *Parameter optimization for MINFLUX microscopy enabled single-particle tracking.* Communications Biology 8:1573. doi:10.1038/s42003-025-09060-1. Reference implementation: *Toolbox_for_MINFLUX_SPT* (MinSpt / `the_road_to_minflux_msd`) — source of the MINFLUX Time-Signature Analysis (MFX-TSA) and the cycle-based MSD/OLSF workflow ported here.
 8. Scheiderer L, Marin Z, Ries J (2025). *MINFLUX achieves molecular resolution with minimal photons.* Nature Photonics 19(3):238–247. doi:10.1038/s41566-025-01625-0
 9. Marin Z, Ries J (2025). *Evaluating MINFLUX experimental performance in silico* (SimuFLUX). Nature Communications 17:246. doi:10.1038/s41467-025-66952-w
 

@@ -7080,6 +7080,11 @@ tracking_server <- function(input, output, session) {
     df <- trk(); req(nrow(df) > 0)
     min_pts   <- max(2L, as.integer(input$trk_jdd_min_pts))
     norm_dt   <- isTRUE(input$trk_jdd_norm_dt)
+    t_c_jdd   <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    # Integrated-only: keep ONLY single-cycle steps (round(Δt/t_c)==1). All jumps are
+    # then at the same true Δt, so the fit needs no √Δt-pooling assumption at all — the
+    # rigorous MINFLUX-native mode (at the cost of dropping dark-gap-adjacent steps).
+    integ_only <- isTRUE(input$trk_jdd_integrated_only) && is.finite(t_c_jdd) && t_c_jdd > 0
     n_comp    <- max(1L, min(4L, as.integer(input$trk_jdd_n_comp)))
     min_dt    <- suppressWarnings(as.numeric(input$trk_jdd_min_dt))
     max_dt    <- suppressWarnings(as.numeric(input$trk_jdd_max_dt))
@@ -7141,6 +7146,7 @@ tracking_server <- function(input, output, session) {
             else sqrt(dx^2 + dy^2)
       dt <- diff(tb_use$tim)
       keep <- is.finite(dt) & dt > min_dt & dt <= max_dt & is.finite(r)
+      if (integ_only) keep <- keep & (round(dt / t_c_jdd) == 1L)
       if (!any(keep)) next
       if (norm_dt) {
         r    <- r / sqrt(dt)
@@ -7237,7 +7243,7 @@ tracking_server <- function(input, output, session) {
     list(mids = mids, dens = dens, sigs = sigs, ws = ws, D_vals = D_vals,
          n_comp = n_comp, norm_dt = norm_dt, n_jumps = length(jumps),
          use_z = use_z_jdd, dt0 = dt0, sigma_loc = sigma_loc, r_noise = r_noise,
-         step_mode = step_mode,
+         step_mode = step_mode, integrated_only = integ_only, t_cycle = t_c_jdd,
          min_dt_used = if (min_dt > 0) min_dt else NA_real_,
          max_dt_used = if (is.finite(max_dt)) max_dt else NA_real_)
     })  # withProgress
@@ -7392,6 +7398,24 @@ tracking_server <- function(input, output, session) {
     }
   )
 
+  # Free-diffusion null for the Rg/Rmax ratio, as a function of the number of
+  # localizations N. A confined track has a LOWER ratio than a free walk — but so
+  # does a SHORT free walk (extreme-value Rmax dominates at small N), which is why a
+  # single fixed threshold over-calls confinement on short tracks. This simulates
+  # free Gaussian walks of matching N (the ratio is scale-free, so D and Δt drop out)
+  # and returns the ratio distribution, giving an N-matched null. ndim = 2 or 3.
+  .free_walk_ratio_dist <- function(N_pos, ndim, M = 200L) {
+    if (N_pos < 3L) return(rep(NA_real_, M))
+    vapply(seq_len(M), function(i) {
+      steps <- matrix(stats::rnorm((N_pos - 1L) * ndim), N_pos - 1L, ndim)
+      cs    <- if (ndim == 1L) matrix(cumsum(steps), ncol = 1L) else apply(steps, 2, cumsum)
+      pos   <- rbind(matrix(0, 1L, ndim), cs)        # N_pos × ndim, walk starts at origin
+      d2    <- rowSums(sweep(pos, 2, colMeans(pos), "-")^2)
+      mx    <- max(d2); if (!is.finite(mx) || mx <= 0) return(NA_real_)
+      sqrt(mean(d2)) / sqrt(mx)
+    }, numeric(1))
+  }
+
   # ---- Confinement analysis ------------------------------------------------
   conf_bundle <- eventReactive(input$trk_conf_run, {
     req(isTRUE(input$trk_show_conf))
@@ -7440,8 +7464,53 @@ tracking_server <- function(input, output, session) {
     shiny::validate(shiny::need(length(rows) > 0,
       "Too few tracks — lower 'Min points per TID'."))
     res <- do.call(rbind, rows)
+
+    # N-matched free-diffusion null (TWO-TAILED, neutral). Simulations show a free
+    # random walk of N localizations has Rg/Rmax ≈ 0.53, a domain-CONFINED (reflected)
+    # walk ≈ 0.60 (HIGHER — it fills its bounded region), and directed/escape motion is
+    # ≤ free. So confinement is the UPPER tail, not the lower one. We therefore report
+    # each track relative to the free null at its own N, in BOTH directions, without
+    # asserting the (mis-calibrated) fixed 0.35/0.45 thresholds:
+    #   more_compact  = ratio > free 95th pct  → domain-confined / bounded
+    #   more_extended = ratio < free  5th pct  → directed / super-diffusive / escape
+    # Null simulated on an N grid (nearest-N lookup) to bound cost; it is noise-free.
+    naware <- isTRUE(input$trk_conf_naware)
+    if (naware && nrow(res) > 0) {
+      Ns    <- res$n_pts
+      uN    <- unique(Ns)
+      gridN <- if (length(uN) <= 40L) sort(uN)
+               else sort(unique(pmax(3L, round(seq(min(Ns), max(Ns), length.out = 40L)))))
+      withProgress(message = "Free-diffusion null…", value = 0, {
+        qs <- vapply(seq_along(gridN), function(j) {
+          incProgress(1 / length(gridN))
+          d <- .free_walk_ratio_dist(gridN[j], d_dim, M = 300L)
+          stats::quantile(d, c(0.05, 0.50, 0.95), na.rm = TRUE, names = FALSE)
+        }, numeric(3))
+      })
+      idx     <- pmax(1L, findInterval(Ns, gridN, all.inside = TRUE))
+      hi      <- pmin(idx + 1L, length(gridN))
+      nearest <- ifelse(abs(Ns - gridN[idx]) <= abs(Ns - gridN[hi]), idx, hi)
+      res$free_lb05  <- qs[1, nearest]
+      res$free_med   <- qs[2, nearest]
+      res$free_ub95  <- qs[3, nearest]
+      res$more_compact  <- res$ratio > res$free_ub95   # domain-confined / bounded
+      res$more_extended <- res$ratio < res$free_lb05   # directed / escape
+      # Deviation from the free-diffusion null (+ = confined, − = extended), scaled by
+      # the null half-width so it is an approximate z-score. Drives the plot colour and
+      # the per-track colour map. Class label for the summary breakdown.
+      halfw <- pmax(1e-6, (res$free_ub95 - res$free_lb05) / 2)
+      res$conf_dev   <- (res$ratio - res$free_med) / halfw
+      res$conf_class <- ifelse(res$more_compact, "confined",
+                        ifelse(res$more_extended, "extended", "free-like"))
+    } else {
+      res$free_lb05 <- NA_real_; res$free_med <- NA_real_; res$free_ub95 <- NA_real_
+      res$more_compact <- NA; res$more_extended <- NA
+      res$conf_dev <- NA_real_; res$conf_class <- NA_character_
+    }
+
     attr(res, "sub_noise") <- sub_noise
     attr(res, "sigma_loc") <- if (sub_noise) sig_loc else NA_real_
+    attr(res, "naware")    <- naware
     res
   })
 
@@ -7451,24 +7520,33 @@ tracking_server <- function(input, output, session) {
     bg_col <- if (dark) "#000000" else "#FFFFFF"
     fg_col <- if (dark) "#FFFFFF" else "#333333"
 
-    # colour by ratio (confined = red, free = blue)
+    # Colour by deviation from the N-matched free-diffusion null: RED = more compact
+    # than free (confined), BLUE = more extended (directed/escape), GREY = free-like.
+    # (Higher Rg/Rmax than matched free walks = confined \u2014 the physically-correct
+    # direction; the old fixed 0.35/0.45 reading was inverted.)
+    have_dev <- "conf_dev" %in% names(res) && any(is.finite(res$conf_dev))
+    cvar  <- if (have_dev) res$conf_dev else (res$ratio - stats::median(res$ratio, na.rm = TRUE))
+    clim  <- max(0.5, stats::quantile(abs(cvar), 0.95, na.rm = TRUE))
+    cls   <- if (have_dev) res$conf_class else rep("", nrow(res))
     plot_ly(res,
       x = ~Rmax_nm, y = ~Rg_nm,
-      color = ~ratio, colors = c("#C03030","#808080","#3060C0"),
-      text  = ~sprintf("TID: %s<br>R\u2098: %.1f nm<br>R\u2090: %.1f nm<br>ratio: %.3f<br>n: %d",
-                       tid, Rg_nm, Rmax_nm, ratio, n_pts),
+      marker = list(size = 6, opacity = 0.78,
+                    color = cvar, cmin = -clim, cmax = clim,
+                    colorscale = list(c(0, "#3060C0"), c(0.5, "#B8B8B8"), c(1, "#C03030")),
+                    colorbar = list(title = "confined \u2192<br>\u2190 extended", len = 0.6)),
+      text  = ~sprintf("TID: %s<br>R\u2092: %.1f nm<br>R\u2098\u2090\u02E3: %.1f nm<br>ratio: %.3f<br>n: %d<br>%s",
+                       tid, Rg_nm, Rmax_nm, ratio, n_pts, cls),
       hovertemplate = "%{text}<extra></extra>",
-      type = "scatter", mode = "markers",
-      marker = list(size = 6, opacity = 0.75)
+      type = "scatter", mode = "markers"
     ) %>% layout(
       xaxis  = list(title = "R\u2098\u2090\u02E3 (nm)", color = fg_col),
       yaxis  = list(title = "R\u2092 (nm)",              color = fg_col),
       paper_bgcolor = bg_col, plot_bgcolor = bg_col,
       font = list(color = fg_col),
       annotations = list(list(
-        text = "Confined \u2192 R\u2092/R\u2098\u2090\u02E3 \u2248 0.25  |  Free \u2192 \u2248 0.5",
-        xref = "paper", yref = "paper", x = 0.5, y = 1.05,
-        showarrow = FALSE, font = list(size = 11, color = fg_col)
+        text = "vs N-matched free null:  higher R\u2092/R\u2098\u2090\u02E3 = confined (red)  |  lower = directed/escape (blue)",
+        xref = "paper", yref = "paper", x = 0.5, y = 1.06,
+        showarrow = FALSE, font = list(size = 10.5, color = fg_col)
       )),
       uirevision = "conf"
     )
@@ -7478,26 +7556,35 @@ tracking_server <- function(input, output, session) {
     res <- conf_bundle()
     rc <- .mean_ci(res$ratio)                       # track-level median/IQR + mean 95% CI
     med_ratio <- rc$median
-    pct_conf  <- mean(res$ratio < 0.35, na.rm = TRUE) * 100
-    pct_free  <- mean(res$ratio > 0.45, na.rm = TRUE) * 100
     ci_note <- if (is.finite(rc$q1))
-      tags$span(style = "color:#555;",
-        sprintf("  |  IQR %.3f–%.3f  |  mean %.3f (95%% CI %.3f–%.3f)",
-                rc$q1, rc$q3, rc$mean, rc$lo, rc$hi))
+      tags$span(style = "color:#555;", sprintf("  |  IQR %.3f–%.3f", rc$q1, rc$q3))
     else NULL
     corr_note <- if (isTRUE(attr(res, "sub_noise")))
       tags$span(style = "color:#888;",
-        sprintf("  |  Rg σ_loc-corrected (σ_loc = %.2f nm)", attr(res, "sigma_loc")))
+        sprintf("  |  Rg & Rmax σ_loc-corrected (σ_loc = %.2f nm)", attr(res, "sigma_loc")))
     else
-      tags$span(style = "color:#888;", "  |  Rg not noise-corrected (set σ_loc to enable)")
+      tags$span(style = "color:#888;", "  |  not noise-corrected (set σ_loc to enable)")
+    # PRIMARY result: the N-matched free-diffusion classification (physically-correct
+    # direction — confined = HIGHER Rg/Rmax than matched free walks).
+    primary <- if (isTRUE(attr(res, "naware")) && any(!is.na(res$more_compact))) {
+      pct_cmp <- mean(res$more_compact,  na.rm = TRUE) * 100
+      pct_ext <- mean(res$more_extended, na.rm = TRUE) * 100
+      pct_fre <- max(0, 100 - pct_cmp - pct_ext)
+      tags$div(style = "margin-top:2px;",
+        tags$b(style = "color:#1a8a1a; font-size:1.02em;",
+          sprintf("Confined %.0f%%  ·  free-like %.0f%%  ·  directed/escape %.0f%%",
+                  pct_cmp, pct_fre, pct_ext)),
+        tags$div(style = "color:#666; margin-top:1px;",
+          "vs an N-matched free-diffusion null: confined = Rg/Rmax above the free 95th pct at that localization count; directed/escape = below the 5th. Removes the track-length confound."))
+    } else
+      tags$div(style = "color:#b26a00; margin-top:2px;",
+        "Enable the N-matched free-diffusion test for the confinement call — the raw Rg/Rmax ratio alone is track-length-dependent, not a reliable confinement measure.")
     tags$div(style = "font-size:0.88em; margin:4px 0;",
-      tags$b(sprintf("n = %d tracks", nrow(res))),
-      tags$span(sprintf(
-        "  |  median R\u2092/R\u2098\u2090\u02E3 = %.3f  |  confined (<0.35): %.0f%%  |  free (>0.45): %.0f%%",
-        med_ratio, pct_conf, pct_free
-      )),
-      ci_note,
-      corr_note
+      primary,
+      tags$div(style = "color:#888; margin-top:3px;",
+        tags$b(sprintf("n = %d tracks", nrow(res))),
+        tags$span(sprintf("  |  median R\u2092/R\u2098\u2090\u02E3 = %.3f", med_ratio)),
+        ci_note, corr_note)
     )
   })
 
@@ -7515,9 +7602,18 @@ tracking_server <- function(input, output, session) {
     }
     res <- conf_bundle()
     if (is.null(res) || nrow(res) == 0) { conf_color_map_stored(NULL); return() }
-    ramp    <- colorRamp(c("#C03030", "#808080", "#3060C0"))
-    r       <- pmax(0, pmin(1, res$ratio))
-    rgb_mat <- ramp(r)
+    # Colour by deviation from the N-matched free-diffusion null: RED = confined
+    # (higher Rg/Rmax than matched free walks), BLUE = directed/extended. Falls back
+    # to a corrected raw-ratio direction (high = confined = red) when the null is off.
+    ramp <- colorRamp(c("#3060C0", "#B8B8B8", "#C03030"))   # blue(extended)→grey→red(confined)
+    if ("conf_dev" %in% names(res) && any(is.finite(res$conf_dev))) {
+      clim <- max(0.5, stats::quantile(abs(res$conf_dev), 0.95, na.rm = TRUE))
+      t01  <- pmax(0, pmin(1, (res$conf_dev + clim) / (2 * clim)))
+    } else {
+      t01  <- pmax(0, pmin(1, res$ratio))                  # high ratio → red (confined)
+    }
+    t01[!is.finite(t01)] <- 0.5
+    rgb_mat  <- ramp(t01)
     hex_cols <- rgb(rgb_mat[, 1], rgb_mat[, 2], rgb_mat[, 3], maxColorValue = 255)
     conf_color_map_stored(setNames(hex_cols, as.character(res$tid)))
   })

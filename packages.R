@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## packages.R  —  unified package install + load for Mini-MINFLUXR combined app
+## packages.R  —  unified package install + load for MINFLUXR combined app
 ## ─────────────────────────────────────────────────────────────────────────────
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
@@ -51,7 +51,7 @@ install_if_missing <- function(pkgs) {
   missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
   if (!length(missing)) return(invisible(TRUE))
 
-  message("\n[Mini-MINFLUXR] Installing missing packages: ",
+  message("\n[MINFLUXR] Installing missing packages: ",
           paste(missing, collapse = ", "), "\n")
 
   is_mac <- identical(Sys.info()[["sysname"]], "Darwin")
@@ -66,7 +66,7 @@ install_if_missing <- function(pkgs) {
 
     # macOS fallback: try a pre-built binary when source compilation fails
     if (!installed && is_mac) {
-      message("[Mini-MINFLUXR] Source install of '", pkg,
+      message("[MINFLUXR] Source install of '", pkg,
               "' failed — retrying with binary build (macOS)...")
       installed <- tryCatch({
         install.packages(pkg, dependencies = TRUE, type = "binary", quiet = FALSE)
@@ -76,16 +76,16 @@ install_if_missing <- function(pkgs) {
     }
 
     if (!installed) {
-      warning("[Mini-MINFLUXR] Could not install '", pkg,
+      warning("[MINFLUXR] Could not install '", pkg,
               "'. Features that depend on it may be unavailable.", call. = FALSE)
       failed <- c(failed, pkg)
     } else {
-      message("[Mini-MINFLUXR] '", pkg, "' ready.")
+      message("[MINFLUXR] '", pkg, "' ready.")
     }
   }
 
   if (length(failed)) {
-    message("\n[Mini-MINFLUXR] WARNING — the following packages could not be",
+    message("\n[MINFLUXR] WARNING — the following packages could not be",
             " installed and some features will be disabled:\n  ",
             paste(failed, collapse = ", "),
             "\nOn macOS, make sure Xcode Command Line Tools are installed",
@@ -102,7 +102,7 @@ pkgs_to_load <- setdiff(pkgs_all, pkgs_install_only)
 suppressPackageStartupMessages({
   for (pkg in pkgs_to_load) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
-      warning("[Mini-MINFLUXR] Skipping library('", pkg,
+      warning("[MINFLUXR] Skipping library('", pkg,
               "') — package not available.", call. = FALSE)
       next
     }
@@ -122,6 +122,6 @@ MIN_LOCS_FOR_SPREAD_DEFAULT <- 5L
 # a working C++ toolchain / OpenMP support).
 TIDS_PER_CHUNK_DEFAULT <- 100L
 CHUNK_FORMAT <- if (requireNamespace("qs", quietly = TRUE)) "qs" else {
-  message("[Mini-MINFLUXR] 'qs' unavailable — using 'fst' for chunk storage.")
+  message("[MINFLUXR] 'qs' unavailable — using 'fst' for chunk storage.")
   "fst"
 }

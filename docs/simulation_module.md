@@ -1,6 +1,6 @@
 # MINFLUX Diffusion-Simulation Module — Design
 
-*Design spec for a ground-truth diffusion simulator in the Mini-MINFLUXR simulator tab.*
+*Design spec for a ground-truth diffusion simulator in the MINFLUXR simulator tab.*
 Status: design (2026-07) · Companion to [MINFLUX_analysis_methods.md](MINFLUX_analysis_methods.md).
 
 ## 1. Purpose — close the validation loop
