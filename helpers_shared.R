@@ -51,6 +51,13 @@
 # Used constantly to give Shiny inputs a default before they have rendered.
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+# σ with a real subscript, e.g. sigloc() -> σ_loc, sigloc("loc-wECO") -> σ_loc-wECO.
+# Returns an HTML object, so it renders as a subscript anywhere that accepts tags
+# (helpText, tags$*, labels, actionButton). Plain character strings are ESCAPED by
+# Shiny, which is why the symbol must be passed as its own argument rather than
+# embedded in a string: helpText("use ", sigloc(), " for the floor").
+sigloc <- function(sub = "loc") htmltools::HTML(sprintf("&sigma;<sub>%s</sub>", sub))
+
 # Lower-case file extension of a path/filename ("Sample.NPY" -> "npy").
 # Used to dispatch an upload to the right reader.
 get_ext <- function(filename) {

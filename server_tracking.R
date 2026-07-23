@@ -340,7 +340,7 @@ tracking_server <- function(input, output, session) {
   #   sig_pt_med .... per-track median σ_loc    D_cve ..... noise-corrected D
   #   degenerate .... TRUE if σ² came out <= 0 (drift dominates -> unresolvable)
   #   frac_integ, cont_raw, cont_filt ... data-quality scores
-  #   pertrack_sigma .... per-track table (tid, sigma, n_integ, efo_med)
+  #   pertrack_sigma .... per-track table (tid, sigma, n_integ, phot_med)
   #   prec_ok, efo_slope, n_implaus, n_suspect, ...
   #
   # WHEN IT FAILS: strong directed motion makes consecutive steps POSITIVELY
@@ -436,15 +436,25 @@ tracking_server <- function(input, output, session) {
     pv <- c(prod_x[pair_pt], prod_y[pair_pt]); tv <- c(tid_pt, tid_pt)
     if (has_z) { pv <- c(pv, prod_z[pair_pt]); tv <- c(tv, tid_pt) }
     okpv <- is.finite(pv); pv <- pv[okpv]; tv <- tv[okpv]
+    # ECO = photon counts (correct for σ ∝ 1/√N); EFO = emission frequency (fallback).
+    phot_col <- if ("eco" %in% names(df) && any(is.finite(df$eco) & df$eco > 0)) "eco"
+                else if ("efo" %in% names(df) && any(is.finite(df$efo) & df$efo > 0)) "efo"
+                else NA_character_
     pertrack_sigma <- if (length(pv)) {
       s2_by  <- tapply(pv, tv, function(v) -mean(v))
       n_by   <- tapply(integ_post, df$tid, sum)[names(s2_by)]
-      efo_by <- if ("efo" %in% names(df)) {
-                  kl <- post & is.finite(df$efo)
-                  tapply(df$efo[kl], df$tid[kl], stats::median)[names(s2_by)]
-                } else stats::setNames(rep(NA_real_, length(s2_by)), names(s2_by))
+      # Photon predictor for the precision model. σ_loc ≈ L_TCP/(2√N) depends on the
+      # photon COUNT N, so ECO (effective counts) is the physically correct variable.
+      # EFO is a FREQUENCY (emission rate); it only tracks N when the dwell time is
+      # constant, which MINFLUX tracking violates (dwell varies, especially around dark
+      # cycles), so it is a fallback only. Using ECO also gives a testable prediction:
+      # the log-log slope should be ≈ -0.5.
+      phot_by <- if (!is.na(phot_col)) {
+                   kl <- post & is.finite(df[[phot_col]]) & df[[phot_col]] > 0
+                   tapply(df[[phot_col]][kl], df$tid[kl], stats::median)[names(s2_by)]
+                 } else stats::setNames(rep(NA_real_, length(s2_by)), names(s2_by))
       data.frame(tid = names(s2_by), sigma = sqrt(pmax(0, as.numeric(s2_by))),
-                 n_integ = as.integer(n_by), efo_med = as.numeric(efo_by),
+                 n_integ = as.integer(n_by), phot_med = as.numeric(phot_by),
                  degenerate = as.numeric(s2_by) <= 0, stringsAsFactors = FALSE)
     } else NULL
     if (!is.null(pertrack_sigma))
@@ -457,10 +467,10 @@ tracking_server <- function(input, output, session) {
                     as.numeric(diff(stats::quantile(sig_pt_ok, c(.25, .75)))) else NA_real_
     sig_pt_cv  <- if (is.finite(sig_pt_med) && sig_pt_med > 0 && length(sig_pt_ok) >= 5L)
                     stats::sd(sig_pt_ok) / mean(sig_pt_ok) else NA_real_
-    # Precision should improve with photons: negative σ–EFO correlation validates it.
+    # Precision should improve with photons: negative σ–photon correlation validates it.
     sig_efo_rho <- if (!is.null(pertrack_sigma) &&
-                       sum(is.finite(pertrack_sigma$sigma) & is.finite(pertrack_sigma$efo_med)) >= 8L)
-      suppressWarnings(stats::cor(pertrack_sigma$sigma, pertrack_sigma$efo_med,
+                       sum(is.finite(pertrack_sigma$sigma) & is.finite(pertrack_sigma$phot_med)) >= 8L)
+      suppressWarnings(stats::cor(pertrack_sigma$sigma, pertrack_sigma$phot_med,
                                   method = "spearman", use = "complete.obs")) else NA_real_
     # 95% CI on the per-track-median σ_loc (bootstrap over tracks).
     sig_ci <- if (length(sig_pt_ok) >= 5L) .boot_ci(sig_pt_ok, stats::median, B = 1000L) else c(lo = NA_real_, hi = NA_real_)
@@ -491,30 +501,53 @@ tracking_server <- function(input, output, session) {
     } else NA_integer_
     n_tracks_pt <- if (!is.null(pertrack_sigma)) nrow(pertrack_sigma) else NA_integer_
 
-    # ── Precision-weighted CVE from the photon channel (EFO) ────────────────────
-    # MINFLUX reports a photon-rate proxy (EFO) per localization; precision scales
-    # with photons (σ_loc ∝ EFO^p, p≈−0.5 in the shot-noise limit). We fit that
-    # relationship from the per-track CVE σ vs per-track median EFO, assign each
+    # ── Precision-weighted CVE from the photon channel (ECO counts) ─────────────
+    # Precision scales with the photon COUNT (σ_loc ≈ L/(2√N), so σ ∝ N^p with
+    # p = −0.5 in the shot-noise limit) — hence ECO, not EFO (a rate, which only
+    # tracks N at constant dwell). We fit that relationship from the per-track CVE
+    # σ vs per-track median photon count (see phot_col above), assign each
     # localization a σ, and use inverse-variance weights so bright, well-localized
     # steps count more than dim/noisy ones in the pooled σ_loc and D. This is the
-    # honest way to exploit MINFLUX's quality metrics instead of a hard EFO cut.
-    # Falls back to unweighted when EFO is absent or too few tracks anchor the fit.
+    # honest way to exploit MINFLUX's quality metrics instead of a hard photon cut.
+    # Falls back to unweighted (with a stated reason) when the photon column is absent,
+    # too few tracks anchor the fit, or the weighting drives σ² non-positive.
     prec_ok <- FALSE; efo_slope <- NA_real_; sigma_w <- NA_real_
     D_cve_w <- NA_real_; n_prec_tracks <- 0L
-    have_efo <- "efo" %in% names(df) && any(is.finite(df$efo) & df$efo > 0)
-    if (have_efo && !is.null(pertrack_sigma) && nrow(pertrack_sigma) >= 8L) {
+    slope_raw <- NA_real_; slope_clamped <- FALSE; prec_reason <- NA_character_
+    have_efo <- !is.na(phot_col)
+    if (!have_efo) {
+      prec_reason <- "this dataset has no ECO/EFO column"
+    } else if (is.null(pertrack_sigma) || nrow(pertrack_sigma) < 8L) {
+      prec_reason <- sprintf("only %d per-track σ values (need ≥8) — lower 'min integrated steps'",
+                             if (is.null(pertrack_sigma)) 0L else nrow(pertrack_sigma))
+    } else {
       fitd <- pertrack_sigma[!pertrack_sigma$degenerate &
-                             is.finite(pertrack_sigma$sigma)   & pertrack_sigma$sigma   > 0 &
-                             is.finite(pertrack_sigma$efo_med) & pertrack_sigma$efo_med > 0, , drop = FALSE]
+                             is.finite(pertrack_sigma$sigma)    & pertrack_sigma$sigma    > 0 &
+                             is.finite(pertrack_sigma$phot_med) & pertrack_sigma$phot_med > 0, , drop = FALSE]
       n_prec_tracks <- nrow(fitd)
-      if (n_prec_tracks >= 8L) {
-        cf <- tryCatch(stats::coef(stats::lm(log(sigma) ~ log(efo_med), data = fitd)),
+      if (n_prec_tracks < 8L) {
+        prec_reason <- sprintf("only %d anchor tracks with a resolvable σ (need ≥8)", n_prec_tracks)
+      } else {
+        cf <- tryCatch(stats::coef(stats::lm(log(sigma) ~ log(phot_med), data = fitd)),
                        error = function(e) c(NA_real_, NA_real_))
-        efo_a <- cf[[1]]; efo_slope <- cf[[2]]
+        slope_raw <- cf[[2]]
+        # PHYSICAL GUARD. Shot noise gives σ ∝ N^-0.5. An empirical slope far from that
+        # is a confounded regression — brightness also tracks how well a molecule was
+        # followed — not a photon law. Trusting it produces extreme per-localization σ
+        # (ECO^-2.2 spans ~800x on real data), so a handful of bright localizations
+        # dominate the weights and can flip the weighted covariance positive, which
+        # silently disables the whole precision weighting. Clamp to theory instead.
+        efo_slope <- slope_raw
+        if (!is.finite(efo_slope) || efo_slope > -0.1 || efo_slope < -1.2) {
+          efo_slope <- -0.5; slope_clamped <- TRUE
+        }
+        # Least-squares intercept AT the (possibly clamped) slope — reusing the free-fit
+        # intercept with a clamped slope would shift every σ prediction.
+        efo_a <- suppressWarnings(mean(log(fitd$sigma) - efo_slope * log(fitd$phot_med)))
         if (is.finite(efo_a) && is.finite(efo_slope)) {
           med_sig <- stats::median(fitd$sigma)
-          sl <- exp(efo_a + efo_slope * log(df$efo))         # per-localization σ (nm)
-          sl[!is.finite(sl)] <- med_sig                      # missing EFO → median σ
+          sl <- exp(efo_a + efo_slope * log(df[[phot_col]]))  # per-localization σ (nm)
+          sl[!is.finite(sl)] <- med_sig                       # missing photons → median σ
           sl <- pmin(pmax(sl, 0.2 * med_sig), 5 * med_sig)   # clamp extreme weights
           n_all  <- nrow(df)
           sl_im1 <- c(NA_real_, sl[-n_all])                  # σ of loc starting step i
@@ -538,8 +571,10 @@ tracking_server <- function(input, output, session) {
             D_cve_w <- if (is.finite(msq_w) && is.finite(dt_int) && dt_int > 0)
                          msq_w / (2 * dt_int) + cov1_w / dt_int else NA_real_
             prec_ok <- cov1_w < 0    # only meaningful when σ² = −cov > 0
-          }
-        }
+            if (!prec_ok)
+              prec_reason <- "photon weighting drove σ² non-positive (directed motion dominates the weighted pairs)"
+          } else prec_reason <- "no usable weighted pairs"
+        } else prec_reason <- "the σ–photon fit was unusable"
       }
     }
 
@@ -554,7 +589,9 @@ tracking_server <- function(input, output, session) {
          n_implaus = n_implaus, frac_implaus = frac_implaus,
          n_suspect = n_suspect, n_tracks_pt = n_tracks_pt,
          prec_ok = prec_ok, sigma_w = sigma_w, D_cve_w = D_cve_w,
-         efo_slope = efo_slope, n_prec_tracks = n_prec_tracks)
+         efo_slope = efo_slope, n_prec_tracks = n_prec_tracks,
+         phot_col = phot_col,   # which photon column drove the precision model
+         slope_raw = slope_raw, slope_clamped = slope_clamped, prec_reason = prec_reason)
   })
 
   # Feed the CVE σ_loc into the app-wide value: prefer the per-track median (robust
@@ -577,7 +614,7 @@ tracking_server <- function(input, output, session) {
     b <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
     if (is.null(b))
       return(htmltools::div(style = "color:#888; font-size:0.9em;",
-        "Press ", htmltools::tags$b("Estimate σ_loc & quality"), " to calibrate from the data (no MSD needed)."))
+        "Press ", htmltools::tags$b("Estimate ", sigloc(), " & quality"), " to calibrate from the data (no MSD needed)."))
     # Verdict on the ANALYZED integrated fraction (SAME metric as TSA / cycle-time
     # status, so all quality verdicts agree). The tolerance-weighted continuity is
     # reported alongside (it drives the continuity GATE). "Raw" = the TRUE frozen
@@ -604,30 +641,41 @@ tracking_server <- function(input, output, session) {
     }
     sigma_line <- if (isTRUE(b$degenerate) && !is.finite(b$sig_pt_med))
       htmltools::span(style = "color:#c03030;",
-        "σ_loc: not resolvable — consecutive steps are positively correlated (drift/directed motion dominates). ",
-        "Enter σ_loc manually or use a less directed subset.")
+        sigloc(), ": not resolvable — consecutive steps are positively correlated ",
+        "(drift/directed motion dominates). Enter ", sigloc(), " manually or use a less directed subset.")
     else if (is.finite(b$sig_pt_med))
       htmltools::span(
-        htmltools::tags$b(sprintf("σ_loc = %.2f nm", b$sig_pt_med)),
+        htmltools::tags$b(sigloc(), sprintf(" = %.2f nm", b$sig_pt_med)),
         if (is.finite(b$sig_pt_lo)) sprintf(" (95%% CI %.2f–%.2f)", b$sig_pt_lo, b$sig_pt_hi) else "",
         sprintf(" · per-track median, n=%d; IQR %.2f nm; CV %.0f%%; pooled %.2f nm",
                 b$n_pt, b$sig_pt_iqr %||% NA_real_, 100 * (b$sig_pt_cv %||% NA_real_), b$sigma),
         if (is.finite(b$sig_efo_rho))
           htmltools::span(style = "color:#888;",
-            sprintf("  ·  σ–EFO ρ = %.2f%s", b$sig_efo_rho,
+            sprintf("  ·  σ–%s ρ = %.2f%s", toupper(b$phot_col %||% "photon"), b$sig_efo_rho,
                     if (b$sig_efo_rho < -0.2) " ✓ precision improves with photons" else "")) else NULL)
     else
-      htmltools::span(htmltools::tags$b(sprintf("σ_loc = %.2f nm", b$sigma)),
+      htmltools::span(htmltools::tags$b(sigloc(), sprintf(" = %.2f nm", b$sigma)),
         sprintf("  (CVE pooled, %s consecutive integrated pairs)", format(b$n_pairs, big.mark = ",")))
     prec_line <- if (isTRUE(input$trk_cve_precision_weight) && isTRUE(b$prec_ok) && is.finite(b$sigma_w)) {
+      # Weighted value carries the photon column in its subscript, e.g. σ_loc-wECO.
+      wsub <- sprintf("loc-w%s", toupper(b$phot_col %||% "PHOT"))
       htmltools::span(style = "color:#2a6; font-size:0.92em;", htmltools::br(),
-        htmltools::tags$b(sprintf("σ_loc = %.2f nm (photon-weighted)", b$sigma_w)),
-        sprintf(" — EFO-inverse-variance weighted, n=%d anchor tracks; σ ∝ EFO^%.2f%s. This is the app-wide value.",
-                b$n_prec_tracks, b$efo_slope,
-                if (is.finite(b$efo_slope) && b$efo_slope < 0) " (precision improves with photons ✓)" else ""))
+        htmltools::tags$b(sigloc(wsub), sprintf(" = %.2f nm", b$sigma_w)),
+        sprintf(" — %s-inverse-variance weighted, n=%d anchor tracks; σ ∝ %s^%.2f. This is the app-wide value.",
+                toupper(b$phot_col %||% "photon"), b$n_prec_tracks,
+                toupper(b$phot_col %||% "photon"), b$efo_slope),
+        if (isTRUE(b$slope_clamped))
+          htmltools::span(style = "color:#B8860B;", htmltools::br(),
+            sprintf("⚠ The measured slope was %.2f, outside the physical range, so it was clamped to the shot-noise value −0.50. A measured slope far from −0.50 means photon count is not the only thing setting σ (brightness also tracks how well a molecule was followed), so treat the weighted value as indicative — it is sensitive to this slope.",
+                    b$slope_raw))
+        else if (identical(b$phot_col, "eco") && is.finite(b$efo_slope) &&
+                 abs(b$efo_slope + 0.5) <= 0.15)
+          htmltools::span(style = "color:#2a6;", " ✓ matches the shot-noise prediction σ ∝ N^−0.5")
+        else NULL)
     } else if (isTRUE(input$trk_cve_precision_weight)) {
       htmltools::span(style = "color:#888; font-size:0.92em;", htmltools::br(),
-        "Photon (EFO) weighting unavailable — no EFO column, too few anchor tracks (need ≥8), or unresolvable; using the unweighted σ_loc above.")
+        sprintf("Photon weighting unavailable — %s. Using the unweighted ",
+                b$prec_reason %||% "reason unknown"), sigloc(), " above.")
     } else NULL
     htmltools::div(style = "font-size:0.92em; margin:4px 0;",
       sigma_line, prec_line, htmltools::br(),
@@ -655,11 +703,12 @@ tracking_server <- function(input, output, session) {
             sprintf("%s implausible jumps (%.2f%% of steps, |Δr|>5× expected for their gap)",
                     format(b$n_implaus, big.mark = ","), 100 * b$frac_implaus) else "—",
           if (is.finite(b$n_suspect))
-            sprintf("  ·  %d/%d suspicious tracks (degenerate/outlier σ_loc)", b$n_suspect, b$n_tracks_pt) else "",
+            htmltools::span(sprintf("  ·  %d/%d suspicious tracks (degenerate/outlier ",
+                                    b$n_suspect, b$n_tracks_pt), sigloc(), ")") else "",
           if (bad) "  — inspect at high density / long dark gaps (possible mis-links)." else " — within expectation.")
       } else NULL,
       if (isTRUE(b$degenerate)) NULL else htmltools::div(style = "color:#2a6; font-size:0.9em; margin-top:3px;",
-        "→ σ_loc is now the app-wide noise floor for the D-map, JDD, confinement, HMM, directionality and speed. ",
+        "→ ", sigloc(), " is now the app-wide noise floor for the D-map, JDD, confinement, HMM, directionality and speed. ",
         "Cycle time drives gap-splitting, the quality gate and the D-map.")
     )
   })
@@ -670,9 +719,9 @@ tracking_server <- function(input, output, session) {
     b  <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
     ps <- if (!is.null(b)) b$pertrack_sigma else NULL
     shiny::validate(shiny::need(!is.null(ps) && nrow(ps) >= 5,
-      "Run the calibration on data with enough long, integrated tracks to see the per-track σ_loc spread."))
+      "Run the calibration on data with enough long, integrated tracks to see the per-track σ spread."))
     s  <- ps$sigma[is.finite(ps$sigma) & !ps$degenerate]
-    shiny::validate(shiny::need(length(s) >= 5, "Too few resolvable per-track σ_loc values."))
+    shiny::validate(shiny::need(length(s) >= 5, "Too few resolvable per-track σ values."))
     dark <- isTRUE(isolate(input$trk_dark_mode))
     bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
     med <- stats::median(s)
@@ -680,9 +729,9 @@ tracking_server <- function(input, output, session) {
       add_histogram(x = s, nbinsx = min(40L, max(10L, round(length(s)/4))),
                     marker = list(color = "rgba(120,160,220,0.7)",
                                   line = list(color = "rgba(80,120,180,0.9)", width = 0.5)),
-                    name = "per-track σ_loc") %>%
+                    name = "per-track σ<sub>loc</sub>") %>%
       layout(
-        xaxis = list(title = "per-track σ_loc (nm)", color = fg, zeroline = FALSE),
+        xaxis = list(title = "per-track σ<sub>loc</sub> (nm)", color = fg, zeroline = FALSE),
         yaxis = list(title = "tracks", color = fg),
         shapes = list(list(type = "line", x0 = med, x1 = med, y0 = 0, y1 = 1, yref = "paper",
                            line = list(color = "#c03030", width = 2, dash = "dash"))),
@@ -3139,6 +3188,40 @@ tracking_server <- function(input, output, session) {
     lapply(seq_along(pal), function(k) list((k - 1) / (length(pal) - 1), pal[k]))
   }
 
+  # Colorbar-only trace. Per-point colours are baked as hex strings (needed by the
+  # restyle-driven playback path), and hex arrays carry no colourbar — so we append one
+  # invisible 2-point trace whose sole job is to render the scale. Added LAST so it can
+  # never shift trail_start / markers_idx in trace_map.
+  # ax/ay/az anchor the trace on REAL coordinates: plotly (scattergl especially) drops a
+  # trace whose points are all NA, and a dropped trace draws no colourbar. The markers
+  # are made invisible with opacity 0 + size 0 instead.
+  add_colorbar_trace <- function(fig, mode, fg_col, vmax = NA_real_, use3d = FALSE,
+                                 ax = 0, ay = 0, az = 0) {
+    if (!mode %in% c("dark", "speed")) return(fig)
+    if (!is.finite(ax) || !is.finite(ay)) { ax <- 0; ay <- 0 }
+    if (!is.finite(az)) az <- 0
+    if (identical(mode, "dark")) {
+      cs <- dark_cycle_colorscale(); cmin <- 0; cmax <- DARK_NMAX
+      cb <- list(title = list(text = "dark<br>cycles", font = list(color = fg_col)),
+                 tickmode = "array", tickvals = 0:DARK_NMAX,
+                 ticktext = c(as.character(0:(DARK_NMAX - 1L)), paste0(DARK_NMAX, "+")),
+                 tickfont = list(color = fg_col), len = 0.5, thickness = 14)
+    } else {
+      if (!is.finite(vmax) || vmax <= 0) return(fig)
+      cs <- speed_colorscale(); cmin <- 0; cmax <- vmax
+      cb <- list(title = list(text = "drift speed<br>(µm/s)", font = list(color = fg_col)),
+                 tickfont = list(color = fg_col), len = 0.5, thickness = 14)
+    }
+    args <- list(x = c(ax, ax), y = c(ay, ay),
+                 type = if (use3d) "scatter3d" else "scattergl", mode = "markers",
+                 marker = list(size = 0, opacity = 0, color = c(cmin, cmax),
+                               colorscale = cs, cmin = cmin, cmax = cmax,
+                               showscale = TRUE, colorbar = cb),
+                 hoverinfo = "skip", showlegend = FALSE, name = "scale")
+    if (use3d) args$z <- c(az, az)
+    do.call(add_trace, c(list(fig), args))
+  }
+
   # ── trk() — THE analysis-ready dataset ──────────────────────────────────────
   # GOAL: the single hand-off point between the filter pipeline and everything
   # that analyses or draws the data. Almost every bundle below starts with
@@ -3793,6 +3876,16 @@ tracking_server <- function(input, output, session) {
           if (use3d) tr_args$z <- pts$z
           fig <- do.call(add_trace, c(list(fig), tr_args))
         }
+        # Connect mode draws one trace per TID with hex colours, so it gets no automatic
+        # colourbar — append the scale explicitly.
+        if (color_by_dark) {
+          a1 <- sp_all[[all_tids[1]]]
+          fig <- add_colorbar_trace(fig, cmode_st, fg_col,
+                                    vmax = suppressWarnings(as.numeric(pre$speed_max)),
+                                    use3d = use3d,
+                                    ax = a1$x[1], ay = a1$y[1],
+                                    az = if (use3d && "z" %in% names(a1)) a1$z[1] else 0)
+        }
       } else {
         # Single fast scattergl trace with per-point colors + hover text
         tr_type <- if (use3d) "scatter3d" else "scattergl"
@@ -4081,6 +4174,27 @@ tracking_server <- function(input, output, session) {
         markers_idx = markers_idx,
         static_idx  = if (show_faint) n_heat else NA_integer_
       ))
+
+      # Colour scale for playback. Added AFTER trace_map is set so the extra trace can
+      # never disturb trail_start / markers_idx (draw_frame restyles by index).
+      # fg_col is local to the static branch (which returns above), so derive it here.
+      cmode_pb <- isolate(input$trk_color_mode %||% "tid")
+      if (cmode_pb %in% c("dark", "speed")) {
+        fg_pb <- if (isTRUE(isolate(input$trk_dark_mode))) "#FFFFFF" else "#63666A"
+        # Anchor on a real localization (frame 1, else the first track) — an all-NA
+        # trace is dropped by plotly and would draw no colourbar.
+        a1x <- f1$markers_x[1]; a1y <- f1$markers_y[1]
+        a1z <- if (use3d) (f1$markers_z %||% numeric(0))[1] else 0
+        if (!length(a1x) || !is.finite(a1x %||% NA_real_)) {
+          fb  <- if (length(tids)) sp[[tids[1]]] else NULL
+          a1x <- if (!is.null(fb)) fb$x[1] else 0
+          a1y <- if (!is.null(fb)) fb$y[1] else 0
+          a1z <- if (!is.null(fb) && use3d && "z" %in% names(fb)) fb$z[1] else 0
+        }
+        fig <- add_colorbar_trace(fig, cmode_pb, fg_pb,
+                                  vmax = suppressWarnings(as.numeric(pre$speed_max)),
+                                  use3d = use3d, ax = a1x, ay = a1y, az = a1z)
+      }
     }
     
     # Bounding box for axis locking.  After Filter & Rechunk, use the stored
@@ -6188,9 +6302,11 @@ tracking_server <- function(input, output, session) {
   output$trk_sigma_loc_status <- renderUI({
     eff <- trk_sigma_loc_eff()
     txt <- if (is.finite(eff))
-             sprintf("Effective σ_loc = %.2f nm (%s). Used as the noise floor everywhere.",
-                     eff, trk_sigma_loc_src())
-           else paste0("σ_loc not set — estimate it in Analysis → Data Quality & Calibration ",
+             htmltools::tagList("Effective ", sigloc(),
+               sprintf(" = %.2f nm (%s). Used as the noise floor everywhere.",
+                       eff, trk_sigma_loc_src()))
+           else htmltools::tagList(sigloc(),
+                       " not set — estimate it in Analysis → Data Quality & Calibration ",
                        "(no MSD needed), or enter it manually. Noise-floor corrections stay ",
                        "inactive until then.")
     htmltools::div(style = "font-size:0.8em; color:#666; margin-top:-4px;", txt)
@@ -6243,7 +6359,9 @@ tracking_server <- function(input, output, session) {
                   else sprintf("  |  confinement L = %.0f nm%s  ·  plateau = %.3g µm²  ·  τ_c = %.3g ms",
                                fr$L_conf,
                                if (is.finite(sig_eff) && is.finite(fr$L_conf) && fr$L_conf < 2 * sig_eff)
-                                 sprintf(" ⚠ below precision (2·σ_loc=%.0f nm — unresolved)", 2 * sig_eff) else "",
+                                 # extra[] flows through sprintf into an escaped string, so no
+                                 # HTML here — use plain 2σ notation instead of an underscore.
+                                 sprintf(" ⚠ below precision (2σ = %.0f nm — unresolved)", 2 * sig_eff) else "",
                                fr$plateau_um2, fr$tau_c_ms),
       directed  = {
         vnoise <- if (is.finite(sig_eff) && is.finite(ub$t_cycle) && ub$t_cycle > 0)
@@ -6262,8 +6380,11 @@ tracking_server <- function(input, output, session) {
     D_lbl <- if (identical(model, "linear")) "eDIFF (ensemble)" else "D (local, ensemble)"
     htmltools::div(style = "font-size:0.87em; color:#444; margin:6px 0;",
       htmltools::tags$b("MSD: "),
-      sprintf("%s = %.4g%s  |  tDIFF (per-track mean, n=%d) = %.4g µm²/s%s  |  σ_loc = %.2f nm  |  %s  |  ergodicity = %.2f%s",
-              D_lbl, fr$D / 1e3, eD_ci, n_tD, tDIFF, tD_ci, fr$sigma_loc, method_lbl, ergo, extra),
+      sprintf("%s = %.4g%s  |  tDIFF (per-track mean, n=%d) = %.4g µm²/s%s  |  ",
+              D_lbl, fr$D / 1e3, eD_ci, n_tD, tDIFF, tD_ci),
+      sigloc(),
+      sprintf(" = %.2f nm  |  %s  |  ergodicity = %.2f%s",
+              fr$sigma_loc, method_lbl, ergo, extra),
       htmltools::br(),
       htmltools::tags$span(style = "color:#888; font-size:0.9em;",
         sprintf("n = %d tracks%s  |  %s  |  cycle = %.4g ms  |  τ axis = %s",
@@ -7252,10 +7373,10 @@ tracking_server <- function(input, output, session) {
       tags$span(style = "color:#555;", sprintf("  |  IQR %.3f–%.3f", rc$q1, rc$q3))
     else NULL
     corr_note <- if (isTRUE(attr(res, "sub_noise")))
-      tags$span(style = "color:#888;",
-        sprintf("  |  Rg & Rmax σ_loc-corrected (σ_loc = %.2f nm)", attr(res, "sigma_loc")))
+      tags$span(style = "color:#888;", "  |  Rg & Rmax ", sigloc(), "-corrected (", sigloc(),
+        sprintf(" = %.2f nm)", attr(res, "sigma_loc")))
     else
-      tags$span(style = "color:#888;", "  |  not noise-corrected (set σ_loc to enable)")
+      tags$span(style = "color:#888;", "  |  not noise-corrected (set ", sigloc(), " to enable)")
     # PRIMARY result: the N-matched free-diffusion classification (physically-correct
     # direction — confined = HIGHER Rg/Rmax than matched free walks).
     primary <- if (isTRUE(attr(res, "naware")) && any(!is.na(res$more_compact))) {
@@ -7556,11 +7677,13 @@ tracking_server <- function(input, output, session) {
     else NULL
     noise_note <- if (is.finite(bd$frac_below_noise %||% NA_real_))
       tags$span(style = "color:#b26a00;", tags$br(),
-        sprintf("⚠ %.0f%% of steps are below the localization-noise floor (2·σ_loc = %.1f nm) — their directions are noise-dominated and inflate the backward (180°) peak / lag-1 anti-correlation.",
-                100 * bd$frac_below_noise, bd$r_noise))
+        sprintf("⚠ %.0f%% of steps are below the localization-noise floor (2·", 100 * bd$frac_below_noise),
+        sigloc(),
+        sprintf(" = %.1f nm) — their directions are noise-dominated and inflate the backward (180°) peak / lag-1 anti-correlation.",
+                bd$r_noise))
     else
       tags$span(style = "color:#888;", tags$br(),
-        "Set σ_loc (run the unified MSD, or enter it in Acquisition Parameters) to see how much of the turn-angle signal is localization noise.")
+        "Set ", sigloc(), " (run the unified MSD, or enter it in Acquisition Parameters) to see how much of the turn-angle signal is localization noise.")
     tags$div(style = "font-size:0.88em; margin:4px 0;",
       tags$b(sprintf("n = %d turn angles", length(bd$angles))),
       tags$span(sprintf(
@@ -7845,6 +7968,15 @@ tracking_server <- function(input, output, session) {
       immobile_frac <- if (n_int > 0) sum(interior & v <= max(vfloor, 0), na.rm = TRUE) / n_int else NA_real_
       onset_ms <- NA_real_; onset_frac <- NA_real_; peak_frac <- NA_real_
       export_v <- NA_real_; export_dur <- NA_real_
+      # Per-event corroboration (artifact vs signal). A GENUINE directed excursion is
+      # made of INTEGRATED localizations with normal photon counts — the molecule is
+      # present and tracked throughout. A tracker SEARCH after losing the molecule has
+      # the same gross signature (fast, outward, track ends) but its localizations are
+      # dark-cycle-dominated and photon-starved. These fields come from dark cycles and
+      # photons, NOT from drift velocity, so they do not restate what defined the event.
+      ev_integ <- NA_real_; ev_eco_ratio <- NA_real_; ev_cfr <- NA_real_
+      ev_nloc  <- NA_integer_; ev_at_end <- NA; ev_support <- NA_character_
+      t0_abs <- suppressWarnings(min(d$tim, na.rm = TRUE))
       if (has_exp) {
         first    <- which(seg_ok)[1]
         onset_ms <- dv$t_ms[starts[first]]
@@ -7856,6 +7988,44 @@ tracking_server <- function(input, output, session) {
         peak_frac <- if (is.finite(t_span) && t_span > 0) (dv$t_ms[peak_idx] - tmin) / t_span else NA_real_
         export_v   <- stats::median(v[keep])
         export_dur <- if (n_int > 0) sum(r$lengths[seg_ok]) / n_int * t_span else NA_real_
+
+        # Corroborate the STRONGEST event (the one export_v / export_pos_frac report):
+        # find the run containing the peak window, widen by W/2 to cover the
+        # localizations the windows were actually built from, then score that span.
+        wrun <- which(seg_ok)
+        prun <- wrun[which(peak_idx >= starts[wrun] & peak_idx <= ends[wrun])[1]]
+        if (!is.na(prun)) {
+          ev_lo <- dv$t_ms[starts[prun]] - drift_win / 2
+          ev_hi <- dv$t_ms[ends[prun]]   + drift_win / 2
+          rel   <- d$tim - t0_abs
+          insid <- is.finite(rel) & rel >= ev_lo & rel <= ev_hi
+          ev_nloc <- sum(insid)
+          if (ev_nloc > 0) {
+            if ("n_dark" %in% names(d))
+              ev_integ <- mean(d$n_dark[insid] == 0L, na.rm = TRUE)
+            if ("eco" %in% names(d)) {
+              e_ev <- stats::median(d$eco[insid], na.rm = TRUE)
+              e_tr <- stats::median(d$eco,        na.rm = TRUE)   # track's own baseline
+              if (is.finite(e_ev) && is.finite(e_tr) && e_tr > 0) ev_eco_ratio <- e_ev / e_tr
+            }
+            if ("cfr" %in% names(d)) ev_cfr <- stats::median(d$cfr[insid], na.rm = TRUE)
+          }
+          ev_at_end <- isTRUE((tmax - dv$t_ms[ends[prun]]) <= drift_win)
+          ev_support <-
+            if (is.finite(ev_integ) && ev_integ < 0.5) "dark-dominated"
+            else if (is.finite(ev_eco_ratio) && ev_eco_ratio < 0.6) "low-photon"
+            else if (is.finite(ev_integ) && ev_integ >= 0.5) "supported"
+            else "unscored"
+        }
+      }
+      # Track-level TAIL quality: integrated fraction over the final W of the track.
+      # Directly answers "is the outward tail the molecule, or the tracker hunting?"
+      tail_integ <- NA_real_
+      if ("n_dark" %in% names(d) && is.finite(t0_abs)) {
+        rel <- d$tim - t0_abs
+        rmx <- suppressWarnings(max(rel, na.rm = TRUE))
+        tl  <- is.finite(rel) & rel >= (rmx - drift_win)
+        if (any(tl)) tail_integ <- mean(d$n_dark[tl] == 0L, na.rm = TRUE)
       }
       data.frame(
         tid = t_i, n_loc = nrow(d), track_dur_ms = t_span,
@@ -7867,6 +8037,14 @@ tracking_server <- function(input, output, session) {
         export_onset_ms = onset_ms, export_onset_frac = onset_frac,
         export_pos_frac = peak_frac,
         export_v = export_v, export_dur_ms = export_dur,
+        # --- corroboration for the strongest event (independent of drift velocity) ---
+        event_support     = ev_support,      # supported | dark-dominated | low-photon
+        event_integ_frac  = ev_integ,        # 1 = every loc in the event was integrated
+        event_eco_ratio   = ev_eco_ratio,    # event photons / this track's own median
+        event_cfr_med     = ev_cfr,
+        event_n_loc       = ev_nloc,
+        event_at_track_end = ev_at_end,
+        tail_integ_frac   = tail_integ,      # integrated fraction in the track's final W
         stringsAsFactors = FALSE
       )
     }))
@@ -7879,8 +8057,8 @@ tracking_server <- function(input, output, session) {
     req(isTRUE(input$trk_show_speed), speed_ran())
     s <- tryCatch(trk_export_summary(), error = function(e) NULL)
     req(!is.null(s), nrow(s) > 0)
-    # Rank tracks by export strength so the picker doubles as a "top exporters"
-    # follow-up list: exporters first, then by peak drift velocity (descending).
+    # Rank by segment strength so the picker doubles as a follow-up list:
+    # flagged tracks first, then by peak drift velocity (descending).
     s <- s[order(-as.integer(s$has_export %in% TRUE), -s$v_drift_peak), , drop = FALSE]
     labs <- sprintf("%s%s  (peak %.2g µm/s)",
                     ifelse(s$has_export %in% TRUE, "★ ", "  "),
@@ -7888,7 +8066,7 @@ tracking_server <- function(input, output, session) {
     choices <- stats::setNames(s$tid, labs)
     sel <- if (!is.null(input$trk_speed_tid) && input$trk_speed_tid %in% s$tid)
              input$trk_speed_tid else s$tid[1]
-    selectInput("trk_speed_tid", "Track (TID) — ★ = flagged exporter, ranked by peak drift",
+    selectInput("trk_speed_tid", "Track (TID) — ★ = candidate directed segment, ranked by peak drift",
                 choices = choices, selected = sel)
   })
 
@@ -7935,7 +8113,7 @@ tracking_server <- function(input, output, session) {
                   name = "path speed (median)")
     }
 
-    # Rolling drift (transport) velocity — the export-detecting curve
+    # Rolling drift (transport) velocity — the segment-detecting curve
     if (show_drift && !is.null(dv) && nrow(dv) >= 2) {
       fig <- fig %>%
         add_trace(x = dv$t_ms, y = dv$v_drift_med, type = "scattergl", mode = "lines",
@@ -8004,14 +8182,29 @@ tracking_server <- function(input, output, session) {
     med_onset <- if (nrow(exp_rows)) stats::median(exp_rows$export_pos_frac, na.rm = TRUE) else NA_real_
     med_expv  <- if (nrow(exp_rows)) stats::median(exp_rows$export_v, na.rm = TRUE) else NA_real_
     n_multi   <- if (nrow(exp_rows)) sum(exp_rows$n_events >= 2, na.rm = TRUE) else 0
+    # Corroboration breakdown: how many candidate events are actually supported by
+    # evidence independent of the drift threshold that found them.
+    sup  <- if (nrow(exp_rows)) sum(exp_rows$event_support %in% "supported")      else 0L
+    dkd  <- if (nrow(exp_rows)) sum(exp_rows$event_support %in% "dark-dominated") else 0L
+    lowp <- if (nrow(exp_rows)) sum(exp_rows$event_support %in% "low-photon")     else 0L
+    med_ti <- stats::median(s$tail_integ_frac, na.rm = TRUE)
     htmltools::div(style = "font-size:0.9em; line-height:1.5;",
       htmltools::HTML(sprintf(
-        "<b>%d</b> tracks analysed &middot; <b style='color:#1B9E5A;'>%d (%.0f%%)</b> flagged as exporters%s<br>%s%smedian peak drift = <b>%.3g µm/s</b>",
+        "<b>%d</b> tracks analysed &middot; <b>%d (%.0f%%)</b> with a candidate directed segment%s<br>%s%smedian peak drift = <b>%.3g µm/s</b>",
         n, ne, if (n > 0) 100 * ne / n else 0,
         if (n_multi > 0) sprintf(" &middot; <b>%d</b> with multiple episodes (hop/multi-step)", n_multi) else "",
-        if (is.finite(med_expv))  sprintf("median export velocity = <b>%.3g µm/s</b> &middot; ", med_expv) else "",
-        if (is.finite(med_onset)) sprintf("median export at <b>%.0f%%</b> of track length &middot; ", 100 * med_onset) else "",
-        med_peak)))
+        if (is.finite(med_expv))  sprintf("median segment velocity = <b>%.3g µm/s</b> &middot; ", med_expv) else "",
+        if (is.finite(med_onset)) sprintf("median segment at <b>%.0f%%</b> of track length &middot; ", 100 * med_onset) else "",
+        med_peak)),
+      if (ne > 0) htmltools::HTML(sprintf(
+        "<div style='margin-top:6px;'>Corroboration of those candidates (from dark cycles &amp; photons, <i>not</i> from drift velocity): <b style='color:#1B9E5A;'>%d supported</b> &middot; <b style='color:#C0392B;'>%d dark-dominated</b> &middot; <b style='color:#B8860B;'>%d low-photon</b>.</div>",
+        sup, dkd, lowp)),
+      if (is.finite(med_ti)) htmltools::HTML(sprintf(
+        "<div style='margin-top:4px; color:#555;'>Median integrated fraction in the final window of a track (tail quality) = <b>%.2f</b>. Low values mean track ends are dominated by the tracker searching rather than by localizations of a present molecule.</div>",
+        med_ti)),
+      htmltools::HTML(
+        "<div style='margin-top:6px; color:#B8860B; font-size:0.95em;'>&#9888; Segments are found by a drift-velocity threshold, so their velocity is <b>not independent evidence</b> that they are directed — do not use it to argue that fast tracks are fast. A tracker searching after losing a molecule mimics a real excursion (fast, outward, track ends); the corroboration fields above, and a matched negative control, are what separate the two.</div>")
+    )
   })
 
   # Distribution of a per-track metric (the "histogram of speeds" across tracks)
@@ -8022,30 +8215,34 @@ tracking_server <- function(input, output, session) {
     bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
     metric <- input$trk_export_hist_metric %||% "v_drift_peak"
     lab <- switch(metric,
-      v_drift_peak  = "peak drift velocity (µm/s)",
-      export_v      = "export-segment velocity (µm/s)",
-      directed_frac = "fraction of track time directed",
-      immobile_frac = "fraction of track time immobile/confined",
-      n_events      = "number of transport episodes per track",
-      alpha_max     = "max local α",
+      v_drift_peak     = "peak drift velocity (µm/s)",
+      export_v         = "segment velocity (µm/s)",
+      directed_frac    = "fraction of track time directed",
+      immobile_frac    = "fraction of track time immobile/confined",
+      n_events         = "number of transport episodes per track",
+      alpha_max        = "max local α",
+      event_integ_frac = "integrated fraction within the event (1 = all integrated)",
+      event_eco_ratio  = "event photons / track median photons",
+      tail_integ_frac  = "integrated fraction in the track's final window",
       "value")
-    # export_v exists only for exporters; other metrics span all tracks
+    # Event-scoped metrics exist only for flagged tracks; the rest span all tracks.
+    event_only <- c("export_v", "event_integ_frac", "event_eco_ratio")
     vals_all <- s[[metric]]
     exp_mask <- s$has_export %in% TRUE
     fig <- plot_ly()
-    if (metric %in% c("v_drift_peak", "directed_frac", "immobile_frac", "n_events", "alpha_max")) {
-      # non-exporters vs exporters stacked so the split is visible
+    if (!(metric %in% event_only)) {
+      # unflagged vs flagged stacked so the split is visible
       ve <- vals_all[exp_mask];  vn <- vals_all[!exp_mask]
       ve <- ve[is.finite(ve)];   vn <- vn[is.finite(vn)]
-      if (length(vn)) fig <- fig %>% add_histogram(x = vn, name = "non-exporter",
+      if (length(vn)) fig <- fig %>% add_histogram(x = vn, name = "unflagged",
         marker = list(color = "rgba(150,150,150,0.55)"), nbinsx = 30)
-      if (length(ve)) fig <- fig %>% add_histogram(x = ve, name = "exporter",
+      if (length(ve)) fig <- fig %>% add_histogram(x = ve, name = "flagged",
         marker = list(color = "rgba(27,158,90,0.75)"), nbinsx = 30)
       fig <- fig %>% layout(barmode = "stack")
     } else {
       v <- vals_all[exp_mask]; v <- v[is.finite(v)]
-      shiny::validate(shiny::need(length(v) > 0, "No exporter tracks yet — loosen the threshold / min-run."))
-      fig <- fig %>% add_histogram(x = v, name = "exporters",
+      shiny::validate(shiny::need(length(v) > 0, "No flagged tracks yet — loosen the threshold / min-run."))
+      fig <- fig %>% add_histogram(x = v, name = "flagged",
         marker = list(color = "rgba(27,158,90,0.75)"), nbinsx = 30)
     }
     fig %>% layout(
@@ -8065,15 +8262,16 @@ tracking_server <- function(input, output, session) {
     dark <- isTRUE(isolate(input$trk_dark_mode))
     bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
     v <- s$export_pos_frac[s$has_export %in% TRUE]; v <- v[is.finite(v)]
-    shiny::validate(shiny::need(length(v) > 0, "No exporter tracks yet — loosen the threshold / min-run."))
+    shiny::validate(shiny::need(length(v) > 0, "No flagged tracks yet — loosen the threshold / min-run."))
     plot_ly(x = v, type = "histogram", nbinsx = 20,
             marker = list(color = "rgba(123,79,190,0.75)")) %>%
       layout(
-        xaxis = list(title = "export position (0 = start … 1 = end of track)",
+        xaxis = list(title = "segment position (0 = start … 1 = end of track)",
                      range = c(0, 1), color = fg),
-        yaxis = list(title = "exporter tracks", color = fg),
+        yaxis = list(title = "flagged tracks", color = fg),
         paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
-        title = list(text = sprintf("Export location (n=%d) — pile-up near 1 = exports at track ends", length(v)),
+        # Neutral wording: a late pile-up is equally "molecule left" and "tracker lost it".
+        title = list(text = sprintf("Segment location (n=%d) — pile-up near 1 is ambiguous: check corroboration", length(v)),
                      font = list(color = fg, size = 12)),
         uirevision = "onsethist")
   })
