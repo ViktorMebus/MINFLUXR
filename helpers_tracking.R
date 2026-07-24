@@ -103,6 +103,167 @@ prep_tracking <- function(df, normalize_per_tid = TRUE) {
 }
 
 
+# ── sim_free_geom_rnet() ──────────────────────────────────────────────────────
+# GOAL: the GEOMETRY-AWARE free-diffusion null for the displacement test (Step 2), for
+# ANY of the simulator geometries. Simulate FREE Brownian diffusion on the chosen shape
+# and return each track's NET start→end displacement in the 2D image projection — so
+# "how far a molecule gets" is judged against free diffusion ON THAT GEOMETRY, not an
+# infinite plane. Closed surfaces (sphere/rod/ellipsoid) cap displacement at ~their size;
+# an unbounded plane (membrane/free) does not, so those reproduce the infinite-plane null.
+#
+# PHYSICS: tangent Brownian step on the surface then project back to it (the same operators
+# as the Diffusion Simulator), vectorised across all M tracks (one matrix op per cycle).
+# 2D image projection drops z (the long axis lies in-plane, the usual mounting).
+#
+# PROJECTION MATCHING (match_projection = TRUE): a measured 2D D from a curved surface is
+# the PROJECTED D, which is < the true surface D (the azimuthal component is foreshortened;
+# e.g. exactly 3/4 for a cylinder). So we EMPIRICALLY calibrate that factor for the chosen
+# geometry — one short single-step pass — and drive the null at D_surf = D_meas / factor,
+# so both nulls agree at short T and the closed-surface band diverges only where finite
+# size + curvature bite. Set FALSE to feed D straight through.
+#
+# dur_ms  : track durations (ms) to match (resample from real data)
+# D_nm2ms : measured per-axis diffusion coefficient (nm²/ms)
+# geom    : "sphere" | "rod" | "ellipsoid" | "membrane" | "free"
+# params  : list(R, r, Lcyl, a, b, c, mtilt) — only the relevant ones are read
+# returns : numeric vector (length M) of net displacements R_net (nm), + attr "D_surf"
+sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
+                               cyc_ms = 0.5, proj2d = TRUE, match_projection = TRUE,
+                               mode = c("surface", "volume")) {
+  mode <- match.arg(mode)
+  `%|NA|%` <- function(a, b) if (!is.null(a) && is.finite(a)) a else b
+  M <- length(dur_ms)
+  if (M == 0L || !is.finite(D_nm2ms) || D_nm2ms <= 0) return(numeric(0))
+  n_cyc <- pmax(2L, as.integer(round(dur_ms / cyc_ms))); nmax <- max(n_cyc)
+
+  R    <- params$R    %|NA|% 500;  rr   <- params$r %|NA|% 400;  Lcyl <- params$Lcyl %|NA|% 2000
+  abc  <- if (identical(geom, "sphere")) c(R, R, R)
+          else c(params$a %|NA|% 500, params$b %|NA|% 500, params$c %|NA|% 900)   # ellipsoid
+  mtilt <- (params$mtilt %|NA|% 0) * pi / 180
+  is_rod <- identical(geom, "rod"); is_ell <- geom %in% c("sphere", "ellipsoid")
+  is_flat <- geom %in% c("free", "membrane")
+
+  # Tilted-plane basis for the membrane (flat sheet inclined by mtilt); free = untilted 3D.
+  n_hat <- c(sin(mtilt), 0, cos(mtilt)); e1 <- c(cos(mtilt), 0, -sin(mtilt)); e2 <- c(0, 1, 0)
+
+  # ── vectorised geometry operators (P is M×3) ──────────────────────────────────
+  dotrows <- function(A, B) rowSums(A * B)
+  geo_normal <- function(P) {
+    if (is_ell) { N <- sweep(P, 2, abc^2, "/"); N / sqrt(dotrows(N, N)) }
+    else {                                                     # rod: body vs hemispherical caps
+      a <- P[, 1]; body <- a >= 0 & a <= Lcyl
+      N <- matrix(0, nrow(P), 3); N[body, 2:3] <- P[body, 2:3]
+      cl <- a < 0; cr <- a > Lcyl
+      if (any(cl)) { N[cl, ] <- P[cl, , drop = FALSE] }
+      if (any(cr)) { N[cr, ] <- P[cr, , drop = FALSE]; N[cr, 1] <- P[cr, 1] - Lcyl }
+      m <- sqrt(dotrows(N, N)); m[m == 0] <- 1; N / m
+    }
+  }
+  geo_project <- function(P) {
+    if (is_ell) { U <- sweep(P, 2, abc, "/"); sweep(U / sqrt(dotrows(U, U)), 2, abc, "*") }
+    else {
+      a <- P[, 1]; body <- a >= 0 & a <= Lcyl; Q <- P
+      rho <- sqrt(P[, 2]^2 + P[, 3]^2); rho[rho == 0] <- 1e-9
+      Q[body, 2] <- P[body, 2] * rr / rho[body]; Q[body, 3] <- P[body, 3] * rr / rho[body]
+      for (side in list(c(m = 0), c(m = Lcyl))) {
+        cx <- side[["m"]]; msk <- if (cx == 0) a < 0 else a > Lcyl
+        if (any(msk)) { d <- P[msk, , drop = FALSE]; d[, 1] <- d[, 1] - cx
+          dd <- sqrt(dotrows(d, d)); dd[dd == 0] <- 1e-9; d <- d * rr / dd
+          d[, 1] <- d[, 1] + cx; Q[msk, ] <- d }
+      }
+      Q
+    }
+  }
+  geo_rand <- function(m) {                                    # uniform ON the boundary
+    if (is_ell) geo_project(sweep(matrix(rnorm(3 * m), m, 3), 2, abc, "*"))
+    else { s <- runif(m, 0, Lcyl); phi <- runif(m, 0, 2 * pi); cbind(s, rr * cos(phi), rr * sin(phi)) }
+  }
+  # Reflect a point back INSIDE the shape (used for interior/volume diffusion).
+  geo_reflect <- function(P) {
+    if (is_ell) {
+      U <- sweep(P, 2, abc, "/"); nu <- sqrt(dotrows(U, U))
+      f <- ifelse(nu > 1, (2 - nu) / nu, 1); f[!is.finite(f)] <- 1; f <- pmax(f, 0)
+      sweep(U * f, 2, abc, "*")
+    } else {
+      a <- P[, 1]; Q <- P; body <- a >= 0 & a <= Lcyl
+      rho <- sqrt(P[, 2]^2 + P[, 3]^2)
+      fb <- ifelse(rho > rr, (2 * rr - rho) / rho, 1); fb[!is.finite(fb)] <- 1; fb <- pmax(fb, 0)
+      Q[body, 2] <- P[body, 2] * fb[body]; Q[body, 3] <- P[body, 3] * fb[body]
+      for (cx in c(0, Lcyl)) {
+        msk <- if (cx == 0) a < 0 else a > Lcyl
+        if (any(msk)) {
+          d <- P[msk, , drop = FALSE]; d[, 1] <- d[, 1] - cx
+          dd <- sqrt(dotrows(d, d))
+          f2 <- ifelse(dd > rr, (2 * rr - dd) / dd, 1); f2[!is.finite(f2)] <- 1; f2 <- pmax(f2, 0)
+          d <- d * f2; d[, 1] <- d[, 1] + cx; Q[msk, ] <- d
+        }
+      }
+      Q
+    }
+  }
+  geo_rand_in <- function(m) {                                 # uniform WITHIN the volume
+    if (is_ell) {
+      d <- matrix(rnorm(3 * m), m, 3); d <- d / sqrt(dotrows(d, d))
+      sweep(d * runif(m)^(1 / 3), 2, abc, "*")
+    } else {                                                   # rod: rejection sample the capsule
+      out <- matrix(NA_real_, m, 3); need <- seq_len(m)
+      while (length(need)) {
+        k <- length(need)
+        p <- cbind(runif(k, -rr, Lcyl + rr), runif(k, -rr, rr), runif(k, -rr, rr))
+        a <- p[, 1]
+        ins <- ifelse(a >= 0 & a <= Lcyl, p[, 2]^2 + p[, 3]^2 <= rr^2,
+               ifelse(a < 0, dotrows(p, p) <= rr^2,
+                      (p[, 1] - Lcyl)^2 + p[, 2]^2 + p[, 3]^2 <= rr^2))
+        if (any(ins)) { out[need[ins], ] <- p[ins, , drop = FALSE]; need <- need[!ins] }
+      }
+      out
+    }
+  }
+  is_vol <- identical(mode, "volume") && !is_flat
+  # One free step for all M points at step SD `sd`, returning the new M×3 positions.
+  # surface → tangent step then re-project onto the boundary;
+  # volume  → isotropic 3D step then reflect back inside.
+  one_step <- function(P, sd) {
+    G <- matrix(rnorm(nrow(P) * 3, 0, sd), nrow(P), 3)
+    if (is_flat) {
+      if (identical(geom, "free")) P + G
+      else P + outer(G[, 1], e1) + outer(G[, 2], e2)          # membrane: 2 DOF in the tilted plane
+    } else if (is_vol) geo_reflect(P + G)
+    else { N <- geo_normal(P); geo_project(P + (G - N * dotrows(G, N))) }  # tangent step + reproject
+  }
+  # Observed axes: 2 when the data is a 2D image projection (drop z), 3 when tracked in 3D.
+  nobs   <- if (proj2d) 2L else 3L
+  to_obs <- function(P) P[, seq_len(nobs), drop = FALSE]
+
+  # ── projection-factor calibration → surface D that reproduces the MEASURED per-axis D ──
+  # f is the per-axis MSD ratio of the observed motion to the input surface motion. For a
+  # 2D projection of a cylinder f = 3/4; for a curved surface tracked in 3D f = 2/3 (2 DOF
+  # spread over 3 axes). Dividing by nobs makes it the per-axis factor in either case.
+  D_surf <- D_nm2ms
+  if (match_projection && !identical(geom, "free")) {
+    ncal <- 4000L; sdc <- sqrt(2 * D_nm2ms * cyc_ms)
+    P0 <- if (is_flat) matrix(0, ncal, 3) else if (is_vol) geo_rand_in(ncal) else geo_rand(ncal)
+    d2 <- to_obs(one_step(P0, sdc)) - to_obs(P0)
+    f2 <- mean(rowSums(d2^2)) / (nobs * sdc^2)
+    if (is.finite(f2) && f2 > 0.05) D_surf <- D_nm2ms / f2
+  }
+  sd <- sqrt(2 * D_surf * cyc_ms)
+
+  # ── main pass ─────────────────────────────────────────────────────────────────
+  P  <- if (is_flat) matrix(0, M, 3) else if (is_vol) geo_rand_in(M) else geo_rand(M)
+  S2 <- to_obs(P); E2 <- S2
+  for (i in 2:nmax) {
+    alive <- i <= n_cyc
+    Pn <- one_step(P, sd); P[alive, ] <- Pn[alive, ]
+    ended <- i == n_cyc
+    if (any(ended)) E2[ended, ] <- to_obs(P)[ended, ]
+  }
+  out <- sqrt(rowSums((E2 - S2)^2))
+  attr(out, "D_surf") <- D_surf
+  out
+}
+
+
 # ── nearest_idx() ────────────────────────────────────────────────────────────
 # GOAL: given a SORTED vector of times `tt`, return the index of the entry
 # closest to the query time `t`. Used to map a playback scrub position onto an

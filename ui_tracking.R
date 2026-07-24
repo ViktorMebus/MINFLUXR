@@ -3,23 +3,9 @@
 ## All input/output IDs prefixed with trk_ to avoid collisions with SMLM IDs.
 ## ─────────────────────────────────────────────────────────────────────────────
 
-# Collapsible per-method infobox: what the method is, where it is from, how it is
-# adapted for MINFLUX (irregular Δt / short tracks / nm precision), and the honest
-# caveat. `rating` is a 🟢/🟡/🟠 chip (well-suited / strained-but-adapted / exploratory).
-.method_box <- function(rating, source, adaptation, caveat) {
-  chip <- switch(rating,
-    green  = tags$span("🟢 well-adapted",  style = "color:#1a8a1a;"),
-    amber  = tags$span("🟡 adapted, with caveats", style = "color:#b26a00;"),
-    orange = tags$span("🟠 exploratory for MINFLUX", style = "color:#e67e22;"),
-    tags$span(rating))
-  tags$details(style = "margin:4px 0 10px; font-size:0.82em;",
-    tags$summary(style = "cursor:pointer; color:#2c3e50; font-weight:600;",
-                 "ℹ Method & MINFLUX adaptation  ", chip),
-    tags$div(style = "padding:6px 4px 2px 10px; color:#555; line-height:1.5; border-left:3px solid #cfe0ee;",
-      tags$p(style = "margin:2px 0;", tags$b("Origin: "), source),
-      tags$p(style = "margin:2px 0;", tags$b("MINFLUX adaptation: "), adaptation),
-      tags$p(style = "margin:2px 0; color:#7a5c00;", tags$b("Caveat: "), caveat)))
-}
+# NOTE: .method_box() (the collapsible "Method & MINFLUX adaptation" infobox used
+# throughout this file) now lives in helpers_shared.R, so the SMLM tab can use the
+# identical widget — helpers_shared.R is sourced before both ui_*.R files.
 
 tracking_ui <- fluidPage(
   tags$head(tags$style(HTML("
@@ -593,20 +579,14 @@ tracking_ui <- fluidPage(
             "One CVE ", sigloc(), " per long track; the spread shows whether a single global value is ",
             "safe. The first few localizations carry MINFLUX lock-on transient and are skipped. ",
             "The app-wide ", sigloc(), " uses the per-track median (robust); pooled is shown for cross-check."),
-          checkboxInput("trk_cve_precision_weight",
-                        HTML("Weight &sigma;<sub>loc</sub> / D by photon count (ECO)"), value = TRUE),
           helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
-            "Uses the per-localization photon ", tags$b("count (ECO)"), ": fits ", sigloc(), " ∝ ECO^p ",
-            "from the per-track CVE and inverse-variance-weights the pooled ", sigloc(), " and D, so ",
-            "bright, well-localized steps count more than dim/noisy ones. ECO is the correct ",
-            "variable because ", sigloc(), " ≈ L/(2√N) depends on the photon COUNT; EFO is a ",
-            tags$b("frequency"), " and only tracks N at constant dwell time, so it is used only ",
-            "as a fallback when ECO is absent. Shot noise predicts p = −0.5; a measured p far ",
-            "from that is a confounded fit (brightness also tracks how well a molecule was ",
-            "followed), so it is clamped to −0.5 and flagged. ",
-            tags$b("The weighted value is slope-sensitive"), " — treat it as indicative and ",
-            "quote the unweighted ", sigloc(), " for publication. When on and resolvable it becomes the ",
-            "app-wide ", sigloc(), "; otherwise it falls back to unweighted and says why.")
+            tags$b("Photon weighting was removed."), " An earlier version fitted ", sigloc(),
+            " ∝ photons^p and inverse-variance-weighted ", sigloc(), " and D by it. On MINFLUX ",
+            tags$b("tracking"), " data that is invalid: a fast molecule leaves the beam pattern ",
+            "sooner and so collects ", tags$b("fewer"), " photons, which makes the photon channel a ",
+            tags$b("mobility"), " proxy rather than a brightness one — weighting by it up-weights ",
+            "slow molecules and biases D downward. The σ–photon slope and the mobility ",
+            "correlation are still reported below as diagnostics, but nothing is weighted by them.")
         ),
         column(8,
           uiOutput("trk_cve_status"),
@@ -1238,6 +1218,123 @@ tracking_ui <- fluidPage(
               "Filter by track length before interpreting the ratio distribution."
             ),
             uiOutput("trk_conf_summary")
+          )
+        )
+      ),
+
+      tags$hr(),
+
+      # ── Displacement vs Diffusion (Step 1 → Step 2 geometry-aware null) ───────
+      fluidRow(
+        column(4,
+          h4("Displacement vs Diffusion"),
+          .method_box("orange",
+            "MINFLUXR original: relates each track's NET start→end displacement to the free-diffusion expectation √(4·D·T) at the ensemble D (CVE).",
+            HTML("For 2D Brownian motion ⟨R<sub>net</sub>²⟩ = 4·D·T and R<sub>net</sub> is Rayleigh-distributed (scale √(2DT)), so each track is judged against that spread, not a point. Measured in x,y (the 2D image projection). Endpoint &sigma;<sub>loc</sub> noise is subtracted. Path length is shown but never used to classify (it scales with sampling rate, like path speed)."),
+            "This is the INFINITE-PLANE null — it does not account for finite/curved geometry, which caps a FREE molecule's displacement too. So 'sub-diffusive' = confined OR geometrically constrained; Step 2 (free diffusion on a chosen geometry) separates them. Per-track D is too noisy, so the ENSEMBLE D is used — run Data Quality & Calibration first."),
+          checkboxInput("trk_show_disp", "Enable displacement vs diffusion", FALSE),
+          conditionalPanel(
+            condition = "input.trk_show_disp == true",
+            numericInput("trk_disp_min_pts", "Min points per TID", value = 10, min = 3, step = 1),
+            radioButtons("trk_disp_dims", "Displacement dimensions",
+              choices = c("Auto (3D if z present)" = "auto", "2D (x, y)" = "2d", "3D (x, y, z)" = "3d"),
+              selected = "auto", inline = TRUE),
+            helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+              "3D uses a Maxwell (√6DT) free null; 2D uses Rayleigh (√4DT). Even with 2D tracking the ",
+              "underlying structure is 3D, so the Step-2 geometry null is simulated in 3D and projected ",
+              "to the image plane — pick 2D here and a curved geometry below to test that."),
+            selectInput("trk_disp_dsrc", "Diffusion coefficient D (sets the null)",
+              choices = c("CVE — short-lag, noise-corrected (recommended)" = "cve",
+                          "MSD fit (current MSD model)" = "msd",
+                          "Manual value" = "manual"),
+              selected = "cve"),
+            conditionalPanel("input.trk_disp_dsrc == 'manual'",
+              numericInput("trk_disp_dman", "D (µm²/s)", value = 0.1, min = 0, step = 0.01)),
+            helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+              "The null is √(2·d·D·T), so ", tags$b("D sets the verdict"), " — a larger D raises the ",
+              "band and flags more tracks sub-diffusive. It must be the ", tags$b("short-time"),
+              " mobility. ", tags$b("CVE"), " is recommended: short-lag, noise-corrected and model-free, ",
+              "so it is measured before confinement bends the MSD. ", tags$b("MSD fit"),
+              " is fitted over the lag window — if the population is confined the MSD has already bent ",
+              "inside that window, so this D is deflated and the test ", tags$b("under-calls"),
+              " confinement. ", tags$b("Manual"), " is for a known/literature value or sensitivity testing. ",
+              "The R", tags$sub("net"), " noise-subtraction uses the app-wide ", sigloc(), "."),
+            actionButton("trk_disp_run", "Run displacement", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$hr(style = "margin:8px 0;"),
+            checkboxInput("trk_disp_geom",
+                          HTML("<b>Step 2:</b> compare to free diffusion on a geometry"), FALSE),
+            conditionalPanel(
+              condition = "input.trk_disp_geom == true",
+              selectInput("trk_disp_geom_type", "Geometry",
+                choices = c("Sphere" = "sphere",
+                            "Rod / spherocylinder" = "rod",
+                            "Ellipsoid" = "ellipsoid",
+                            "Membrane plane" = "membrane",
+                            "Free (no boundaries)" = "free"),
+                selected = "rod"),
+              conditionalPanel("input.trk_disp_geom_type == 'sphere'",
+                numericInput("trk_disp_R", "Sphere radius (nm)", value = 500, min = 50, step = 50)),
+              conditionalPanel("input.trk_disp_geom_type == 'rod'",
+                fluidRow(
+                  column(6, numericInput("trk_disp_r", "Radius (nm)", value = 400, min = 50, step = 25)),
+                  column(6, numericInput("trk_disp_L", "Cyl. length (nm)", value = 2000, min = 100, step = 100)))),
+              conditionalPanel("input.trk_disp_geom_type == 'ellipsoid'",
+                fluidRow(
+                  column(4, numericInput("trk_disp_a", "a (nm)", value = 500, min = 50, step = 50)),
+                  column(4, numericInput("trk_disp_b", "b (nm)", value = 500, min = 50, step = 50)),
+                  column(4, numericInput("trk_disp_c", "c (nm)", value = 900, min = 50, step = 50)))),
+              conditionalPanel("input.trk_disp_geom_type == 'membrane'",
+                numericInput("trk_disp_mtilt", "Tilt angle (°)", value = 0, min = 0, max = 89, step = 5)),
+              conditionalPanel(
+                "input.trk_disp_geom_type == 'sphere' || input.trk_disp_geom_type == 'rod' || input.trk_disp_geom_type == 'ellipsoid'",
+                radioButtons("trk_disp_geom_mode", "Molecule moves",
+                  choices = c("On the surface (boundary-bound)" = "surface",
+                              "Inside the volume (interior)"    = "volume"),
+                  selected = "surface"),
+                helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+                  tags$b("Surface"), " = confined to the boundary itself (2 degrees of freedom on a ",
+                  "curved sheet — e.g. a molecule in a membrane or on a bead/particle surface). ",
+                  tags$b("Interior"), " = free 3D motion anywhere inside, reflecting off the boundary ",
+                  "(e.g. a molecule inside a vesicle, droplet or cell body). They give different ",
+                  "nulls: a surface constrains motion to a curved 2D sheet and foreshortens under ",
+                  "projection, while an interior only caps displacement at the enclosure size.")),
+              helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+                "Adds the ", tags$b(style = "color:#1B9E5A;", "green band"), ": free diffusion on the ",
+                "chosen 2D-projected geometry at your D (same shapes and physics as the Diffusion ",
+                "Simulator), matched to your track durations. Points are re-classified against it — ",
+                "tracks below green are ", tags$b("truly confined"), " beyond geometry; between green and ",
+                "grey is ", tags$b("geometrically constrained but free"), ". Closed surfaces (sphere / rod / ",
+                "ellipsoid) impose a size limit; membrane / free are unbounded and match the plane. ",
+                "Cycle time comes from Acquisition Parameters.")
+            ),
+            tags$br(),
+            downloadButton("trk_dl_disp_csv", "Download displacement table (CSV)"),
+            helpText(style = "font-size:0.8em; color:#666; margin-top:4px;",
+              "CSV has one row per track (R", tags$sub("net"), ", R", tags$sub("max"),
+              ", path length, duration, ρ, class) plus the ensemble D and ", sigloc(),
+              " — also the exact input for the Step 2 geometry test.")
+          )
+        ),
+        column(8,
+          conditionalPanel(
+            condition = "input.trk_show_disp == true",
+            plotlyOutput("trk_disp_plot", height = "380px"),
+            tags$div(class = "well well-sm", style = "font-size:0.84em; margin-top:6px;",
+              tags$b("How to read this plot:"), tags$br(),
+              "Each dot is one track: X = duration, Y = how far it got from start to end ",
+              "(R", tags$sub("net"), "). The grey band is where FREE diffusion at the measured D ",
+              "lands 90% of the time (5–95%), and the dashed line its median. ",
+              tags$b(style = "color:#2c7fb8;", "Blue = below the band"), " (sub-diffusive: confined ",
+              "or geometrically constrained), ", tags$b(style = "color:#9e9e9e;", "grey = within"),
+              " (free-consistent), ", tags$b(style = "color:#e31a1c;", "red = above"),
+              " (super-diffusive: directed). A free population puts ~5% in each tail — a large ",
+              "blue or red excess is the signal. ",
+              tags$b("The blue call is not final:"), " free diffusion on a curved/finite surface is itself ",
+              "capped by geometry, so Step 2 is needed to tell real confinement from curvature. ",
+              "With Step 2 on, points are re-classified against the ", tags$b(style = "color:#1B9E5A;", "green"),
+              " (free-on-geometry) band instead."),
+            uiOutput("trk_disp_summary")
           )
         )
       ),

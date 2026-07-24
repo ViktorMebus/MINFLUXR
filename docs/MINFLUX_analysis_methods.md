@@ -1,7 +1,12 @@
 # MINFLUX Analysis — Methods, Mathematics & Appropriateness
 
 *Reference document for the analysis and simulation modules of MINFLUXR.*
-Last reviewed: 2026-07 · Compiled from the source code and from verified primary literature (see [Bibliography](#bibliography)).
+Last reviewed: 2026-07-24 · Compiled from the source code and from verified primary literature (see [Bibliography](#bibliography)).
+
+> **In-app counterpart.** Every analysis panel in the Tracking tab and the SMLM **Analysis** tab carries a
+> collapsible *"ℹ Method & MINFLUX adaptation"* box (`.method_box()` in `helpers_shared.R`) with the
+> Origin / MINFLUX adaptation / Caveat triple and a 🟢/🟡/🟠 chip. Those boxes are the user-facing summary
+> of §I-A and §6 here — **keep the two in sync when either changes.**
 
 This document has **two layers**, both organised around the app's three method families —
 **SMLM (imaging)**, **Tracking (SPT)**, and **Simulation**:
@@ -59,6 +64,14 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
 - **Output:** the distribution of the k-th NN distance; median/quartiles per group. On de-blinked medians
   this approximates inter-molecule spacing; on raw localizations it is dominated by the intra-molecule
   blink/label footprint.
+- **Cross-channel co-localization curve:** the two-colour panel additionally plots the **empirical
+  cumulative distribution** of the cross-NN distances — the fraction of channel-A molecules with a
+  channel-B partner within distance d. This is an **object-based** co-localization measure (Lachmanovich
+  et al. 2003; Dunn et al. 2011) rather than a pixel-intensity coefficient, which is the correct family
+  for MINFLUX: there is no intensity image, only coordinates.
+- **Caveat (no null):** cross-NN has **no null model built in** — every A point has a nearest B point, so
+  the curve is never zero and a small median distance can arise from density alone. Significance must
+  come from L₁₂/g₁₂ with their CSR envelopes (§I-A.4).
 
 ### I-A.2 Density-based clustering (DBSCAN / HDBSCAN / OPTICS) — [Part II §6.1]
 - **Primary clustering** (`cluster`): `dbscan::dbscan(pts, eps, minPts)` on raw localizations → labels
@@ -120,6 +133,11 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
     /(nsim+1) plus the null mean/SD — a significance test against spatial independence (p≈0.5 for
     independent channels, p→0 for co-localized). A Costes-style label-randomization null.
   - The UI points users to **g₁₂(r)** for a bandwidth-free, scale-resolved alternative.
+- **Caveat (the Costes null is optimistic):** the randomization scatters Ch2 **uniformly** in the window,
+  so the test is against *complete spatial randomness*, not against "Ch2 has this cell's structure but is
+  placed independently of Ch1". In a structured cell almost any two non-uniform channels beat a uniform
+  null, so p→0 largely reports **"both channels are non-uniform"**, not that the two proteins interact.
+  Read it as a floor test, not as evidence of association.
 
 ### I-A.6 Radius of gyration & gyration-tensor anisotropy — [Part II §6.3]
 - **Rg:** `Rg² = mean(‖p − p̄‖²)` per cluster (second moment about the centroid).
@@ -136,8 +154,37 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
   σ̂² = RMSD², so **−2logL = n·log(2πσ̂²) + n**; **AIC = −2logL + 2k**, **AICc = AIC + 2k(k+1)/(n−k−1)**,
   **BIC = −2logL + k·log n**, with k = (geometric DOF + 1). AICc is the default (penalises complex shapes
   hard at small n); it → ∞ when n ≤ k+1 (too few points), which correctly refuses to over-fit tiny clusters.
+- **Input units:** fits run on **de-blinked trace centroids**, not raw localizations — otherwise the many
+  localizations of one long trace dominate the residual sum and the fit describes the brightest molecule
+  rather than the structure. The 2D view is a PCA projection onto PC1×PC2 (Pearson 1901).
 - **Why exploratory:** the shape is imposed by the dictionary and "best" is a model-selection outcome, not
   proof of biology; with few blink-inflated points several shapes are statistically indistinguishable.
+- **Photon (`eco`) weighting — implemented, `viewer_weight_eco`, default on.** The unweighted fit assumes
+  **iid isotropic Gaussian** residuals with a single σ̂, but MINFLUX precision scales as 1/photons. A
+  trace centroid averages that trace's localizations, so its variance goes as 1/Σ`eco` — meaning the
+  trace's **total photon count is exactly its inverse-variance weight**. The five `mle_fit_*` optimisers
+  already accepted a `w` argument (`sum(w·(L−r)²)`); the viewer now supplies it, and the reported RMSD
+  becomes the weighted √(Σw·d²/Σw).
+  **Effect on the criteria:** with per-point variance σ²/wᵢ the log-likelihood gains a −Σlog(wᵢ) term that
+  is *identical for every shape*, so it cancels in all AIC/AICc/BIC **differences** — model ranking stays
+  valid. Only the absolute values shift, so **never compare criterion values across weighting modes**.
+  **`n_eff` (Kish effective sample size, `(Σw)²/Σw²`) is reported in the viewer header** because
+  weighting is not free: it trades bias for variance.
+  ⚠ **Filter double events before weighting — `eco` is dual-signed.** A high `eco` means better
+  precision, *but it is equally the signature of two fluorophores blinking in the same spot*, which is
+  implausible for a single dye. Inverse-variance weighting hands the most influence to the brightest
+  traces, i.e. **on unfiltered data it preferentially amplifies double-emitter artefacts** — the
+  weighting is only sound downstream of the `eco`/`cfr` metadata filters that remove implausibly bright
+  events. This is a real limit on the method, not a caveat about the implementation: the same statistic
+  that makes a trace informative also makes it suspect.
+  ⚠ *Measured on the collaborator test file (unfiltered):* per-trace photon budgets span **50 → 13 174 (263×)**,
+  and on the largest structure weighting moved the fitted sphere radius from **359 nm to 149 nm** while
+  `n_eff` fell from 170 to 83. On a **filtered** dataset the two fits agree closely (user-observed),
+  which is the expected behaviour and supports the reading above: most of that 2.4× swing was
+  double-event contamination being up-weighted, not a genuine precision correction. Practical rule —
+  **a large weighted-vs-unweighted difference is a data-quality alarm, not a better answer.** Quote the
+  weighting mode and `n_eff` with any shape parameter; treat AICc differences of a few units as
+  indistinguishable either way.
 
 ### I-A.8 Ground-truth position/count estimator — [Part II §6.6, 🟠 EXPLORATORY]
 `estimate_gt_from_labeling(df, preset, eff)` — a **labelling-model inverse** (`helpers_smlm.R`):
@@ -162,6 +209,53 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
 Bespoke descriptive diagnostics (detection-rate vs time, crowding vs timing, NN distance vs cluster size).
 **Correlational, not causal** — detection timing and crowding co-vary with photobleaching/blinking/labelling,
 so a trend is a hypothesis for controls, not a measurement.
+
+Each trace is counted **once**, at its median `tim`, so a long trace with many localizations cannot
+dominate the early bins; the clustered-vs-background split is taken **within the same file**, so
+acquisition length, laser power and sample differences cancel in the comparison. Normalized modes scale
+each population to its own total, separating a difference in *shape* (timing) from one in *amount*
+(abundance). Beyond the generic "correlational" caveat, three specific pitfalls:
+
+- **The KS gap is a distance, not a p-value — and cannot become one.** The code reports only
+  `max|F_clustered(t) − F_background(t)|` (no `ks.test`), which is correct: the two samples are **not
+  independent**. They come from the same acquisition, from molecules competing for the same detection
+  budget, so the KS null distribution does not hold and any p-value computed from it would be
+  anti-conservative. Read the gap as an effect size only.
+- **Crowding-vs-timing has a built-in positive trend — now corrected by a permutation null.** Denser
+  clusters have **more members**, and the median of a larger sample drawn from a decaying detection-rate
+  distribution lands **later** purely by sampling, before any crowding mechanism. **Implemented null
+  (`crowd_null`, default on):** detection times are shuffled among the traces **within each file**, while
+  cluster membership, size and geometry stay fixed — so every point keeps its exact x coordinate and its
+  exact n, and only the time↔geometry association is destroyed. Each structure therefore gets its own
+  2.5–97.5% null interval (wide for small clusters, narrow for large ones), drawn as a shaded band.
+  *Why a permutation and not the simulator:* the permutation keeps the real sizes, the real geometry and
+  the real detection-time distribution of that acquisition and is assumption-free, whereas a simulator
+  null would impose a bleaching/detection model that is itself calibrated from data of this kind — partly
+  circular, and strictly more assumptions for a weaker answer.
+  **Global test:** Spearman ρ between `nn_median` and `time_shift`, observed vs its permutation
+  distribution (two-sided p = (1 + #{|ρ_b| ≥ |ρ_obs|})/(B+1), default B = 200). Rank-based, so it tests
+  the **trend** and is unaffected by a constant clustered-vs-background offset — which the band alone is
+  *not*: a global offset pushes every point off the band without any crowding dependence.
+  *Validated on the collaborator test file* (472 traces, 20 qualifying structures): null-band coverage 0.052
+  against a nominal 0.05, null ρ centred on 0, and band width vs cluster size ρ = −0.92 (small clusters
+  correctly get wide intervals). Observed on that file: ρ = −0.23, p ≈ 0.40 — **no significant
+  crowding–timing trend**.
+  *What it still cannot do:* rule out a third variable driving both axes (labelling density, structure
+  identity). That needs a control experiment, not a null.
+- **NN-vs-size is censored by the clustering algorithm.** Under DBSCAN every within-cluster NN distance is
+  bounded above by the link radius `eps2` (default 200 nm), so the y-axis is **right-censored**: a curve
+  that flattens at large cluster size may be hitting the ceiling rather than showing constant spacing.
+  HDBSCAN/OPTICS impose no such bound — re-run under those before reading a slope. Convex-hull size is
+  additionally upward-biased by single outlying members.
+
+### I-A.10 Traces per cluster (blinking-event count) — [Part II §6.1a, 🟡 AMBER]
+Counts **distinct TIDs** per primary or median cluster. Counting traces rather than localizations already
+collapses the many localizations MINFLUX collects within one trace, so the number is a *blinking-event*
+count. It is **not stoichiometry**: one fluorophore re-enters the on-state repeatedly and is re-assigned a
+new TID each time, and a multivalent antibody carries several dyes — so the count over-estimates molecules
+by an unknown, dye- and buffer-dependent factor. The Annibale et al. (2011) blink-correction that would
+divide this out requires a **dark-time distribution that is not calibrated in this app**. Valid as a
+relative comparison between conditions acquired identically; never as an absolute subunit count.
 
 ## I-B. Tracking (SPT) analysis
 
@@ -659,6 +753,15 @@ footprint).
   community standard. MINFLUX's fine precision *helps*. The only caveat is §6.0 (feed de-blinked
   medians, tune eps to the label footprint).
 
+### 6.1a Traces per cluster — 🟡 AMBER
+- **Source:** cluster-occupancy counting in the SMLM molecular-counting lineage — Annibale et al. 2011
+  (blinking artefacts in PALM); Sengupta et al. 2011 (PC-PALM).
+- **Fit:** counting *traces* rather than localizations is the right unit for MINFLUX and removes the
+  within-trace over-count for free.
+- **Caveat:** it remains a **blinking-event count, not stoichiometry** — see §I-A.10. The Annibale
+  correction is not applicable here because no dark-time distribution is calibrated. Relative comparisons
+  between identically-acquired conditions only.
+
 ### 6.2 Ripley's L(r), bivariate L₁₂(r), pair cross-correlation g₁₂(r) — 🟢 GREEN (method) / 🟡 (labelling)
 - **Source:** Ripley 1977; Besag 1977 (L-transform); Lotwick & Silverman 1982 and Dixon 2002
   (bivariate/cross statistics); Sengupta et al. 2011 (PC-PALM) and Veatch et al. 2012 (correlation
@@ -672,10 +775,111 @@ footprint).
   in the band and cancels; significance is read as the observed curve leaving the 2.5–97.5% band rather
   than departing from the (biased) flat zero. This supersedes an explicit translation/isotropic
   correction for interpretation (a `# TODO` for the analytic correction remains).
+- **✅ No inter-channel registration error — a genuine MINFLUX advantage.** Unlike camera-based two-colour
+  SMLM, the DCR (ratiometric) two-colour mode excites both fluorophores with the **same laser** and
+  localizes them through the **same beam path in the same iterative sequence**, so both channels are
+  reported in one common coordinate frame. There is no chromatic offset and no affine channel
+  registration to calibrate — the usual dominant error term of two-colour co-localization simply does not
+  exist here, and L₁₂/g₁₂ are trustworthy right down to the localization precision. *(Exception: the
+  multiplex-by-files and multiplex-by-time-window modes overlay **separate acquisitions or separate time
+  windows**, so sample/stage drift between rounds can offset them — that is drift, not chromatic
+  registration, and it applies only to those modes, not to the DCR split.)*
+- **⚠ The real two-colour error is DCR mis-assignment (crosstalk), not offset.** The channel split is a
+  threshold on a **continuous DCR distribution whose two populations overlap**, so a fraction of
+  molecules is assigned to the wrong channel. This does not shift distances — it moves *points between
+  the two sets*, which **manufactures short-range cross-channel pairs**: a molecule wrongly labelled
+  channel B sits, by construction, right next to its true channel-A neighbours. Crosstalk therefore
+  biases L₁₂ and g₁₂ **upward at short r — toward apparent co-localization**, exactly where a real
+  interaction would show. Asymmetric labelling density between the two channels also skews the
+  estimators. Finally, co-localization at nm scale is **proximity, not interaction**.
+- **Now quantified (`auto_detect_dcr_split`).** The GMM auto-split returns, alongside the threshold s:
+  - **d′ = |μ₂−μ₁| / √((σ₁²+σ₂²)/2)** — standardised separation of the two modes. Verdicts used in-UI:
+    **d′ ≥ 3 clean, ≥ 2 workable, < 2 poor** (channels overlap heavily).
+  - **Expected mis-assignment rate** `π₁·P(X₁>s) + π₂·P(X₂≤s)`, and the more directly usable
+    **per-group contamination** — what fraction of everything *called* group k actually came from the
+    other dye: `contam₁ = π₂P(X₂≤s) / [π₁P(X₁≤s) + π₂P(X₂≤s)]`, symmetrically for group 2.
+  - **Ambiguous fraction** — traces whose best GMM posterior is < 0.95, i.e. the ones that would switch
+    channel under a small threshold change. These are the natural candidates for a strict gate.
+
+  **Read any cross-channel result against these numbers:** a co-localized fraction of the same order as
+  the contamination is not evidence of interaction.
+
+  *Validation (synthetic, known truth):* the predicted mis-assignment rate matches the empirical one
+  **exactly when the split is good** (d′ = 3.9 → predicted 2.56% vs actual 2.53%; d′ = 8 → 0% vs 0%),
+  but drifts ~3 pp when it is not (d′ ≈ 1 → predicted 27.7% vs actual 30.7%). The crosstalk estimate is
+  itself least reliable exactly where it matters most, so **"poor" should be read as "do not use", not
+  as "use with this correction"**. Contamination is correctly asymmetric under unequal populations
+  (80/20 mix → minority group 4.1% contaminated vs 1.3% for the majority).
+- **Scope of d′: it grades a split, it does not detect one.** The GMM is a sound estimator of the split
+  and is the right tool here — the point is only that requesting G = 2 always yields two components,
+  because a single-dye DCR distribution is **skewed** and a two-Gaussian mixture fits skewed unimodal
+  data better than one Gaussian. On a **confirmed single-colour file** (collaborator, no DCR pooling applied)
+  the routine still returned a *"workable"* split at d′ = 2.65. **A BIC G=1 vs G=2 comparison does not
+  help and was deliberately not added as a gate:** it also favoured two components on that file
+  (ΔBIC = +16.9) and on a synthetic skewed-unimodal gamma control (+21.1), while *missing* a genuine
+  two-colour pair at d′ = 1 (ΔBIC = −9.6) — it detects skewness, not bimodality. So: use d′ and the
+  crosstalk numbers to judge **how good** a two-colour split is, once the experiment already establishes
+  that there are two dyes.
+- **✅ Per-molecule split confidence (`dcr_split_confidence`).** The aggregate crosstalk numbers cannot
+  say *which* molecules are uncertain, and those are exactly the ones that manufacture false short-range
+  cross-channel pairs. For each trace the fitted mixture gives the posterior of its assigned component,
+  `post_k(v) = π_k·N(v|μ_k,σ_k) / Σ_j π_j·N(v|μ_j,σ_j)` — 1.0 unambiguous, 0.5 sitting exactly on the
+  split — plus a log-odds form and an `on_edge` flag (posterior < 0.95). Shown in the 2-colour panel as
+  posterior-vs-DCR with the edge band highlighted, and exportable per trace.
+  *Validated against known truth (synthetic, d′ = 4.1):* the posterior is **calibrated** — traces at
+  posterior 0.5–0.7 were 55% correct, 0.7–0.9 → 79%, 0.9–0.99 → 95.5%, ≥0.99 → 99.9%, each within a few
+  points of nominal (slightly over-confident in the middle bins, as expected when the mixture parameters
+  are estimated rather than known). Practically: **dropping the edge traces cut the mis-assignment rate
+  from 2.43% to 0.40% while keeping 90.7% of the data** — a ~6× reduction in crosstalk for ~9% data loss,
+  which is what makes a strict gate worth offering.
+  *Implementation note:* the confidence uses **unrounded** mixture parameters (`gmm$params`); the
+  top-level `mean/sd/pi` fields are rounded for display, and using those made the per-trace edge count
+  disagree with `ambiguous_frac` and cost ~0.03% of assignments.
+- **✅ Pool DCR at upload — the most effective mitigation, where it is available.** `dcr_pooled`
+  (`helpers_shared.R`) is the photon-weighted DCR across the whole iteration sequence, `Σ(dcr·eco)/Σeco`,
+  rather than the final-iteration value. Averaging over the sequence with photon weighting **sharpens the
+  two modes substantially**, so the split quality — and therefore the crosstalk floor on every
+  cross-channel statistic — improves at source. This beats any downstream statistical correction: the
+  split is the error, so fix the split.
+  ⚠ **Only .npy and .json uploads can be pooled** — pooling happens in `read_minflux_npy_as_df()` /
+  `read_minflux_json_as_df()` via their `pool_dcr` argument. A **.csv is a pyMINFLUX export of the final
+  iteration**, already through that pipeline, so there is nothing left to pool and the UI must not nag
+  about it. The in-app hint is therefore conditional: it points at the `dcr_pooled` column when one
+  exists and is unused, and otherwise explains the format restriction.
+  The split-quality numbers are only comparable between runs that used the **same** DCR column.
+  *Quantified on a simulation of the mechanism* (noisy per-iteration DCR, photon-weighted pooling vs
+  final-iteration value): pooling took **d′ from 1.56 → 3.59** and expected crosstalk from
+  **17.9% → 3.6%** — moving the split from "poor" to "clean" and cutting mis-assignment ~5×. That is a
+  simulation of the averaging effect rather than a measurement on real two-colour data, but it is
+  consistent with the improvement reported in practice.
+- **g₁₂ vs L₁₂ on MINFLUX data.** g₁₂ is the more informative of the two here because it is scale-local:
+  a short-r blinking/labelling artefact stays confined to the first few bins, whereas in the cumulative
+  L₁₂ it contaminates every larger r. The price is noise — each annulus holds few pairs, so short-r bins
+  are unstable and an apparent first-bin peak is often binning, not biology.
+
+### 6.2a Cross-channel NN & object-based co-localization curve — 🟢 GREEN (method)
+- **Source:** bivariate nearest-neighbour distances (Clark & Evans 1954; Dixon 2002) with an
+  **object-based** co-localization read-out (Lachmanovich et al. 2003; Dunn et al. 2011).
+- **Fit:** object-based co-localization is the right family for MINFLUX — there are no pixels and no
+  intensity image, only coordinates, and nm precision makes the distance axis physically meaningful down
+  to the label size. This is strictly better founded than an intensity-correlation coefficient here.
+- **Caveat:** no null model (§I-A.1) — every A point has a nearest B point, so judge against L₁₂/g₁₂
+  envelopes. DCR crosstalk applies exactly as in §6.2, and hits cross-NN hardest of all the two-colour
+  tools: a mis-assigned molecule contributes a near-zero nearest-neighbour distance, which is precisely
+  the first bin of the histogram and the steep part of the co-localization curve.
 
 ### 6.3 Radius of gyration / gyration-tensor anisotropy — 🟢 GREEN
 - **Source:** standard second-moment cluster size; anisotropy eigenvalue coefficients Rudnick & Gaspari
   1986; linear/planar/spherical coefficients Westin et al. 1997/2002.
+- **Our handling:** computed on **per-TID median positions**, one point per trace. This matters — on raw
+  localizations each molecule is weighted by how long it was tracked, so a single bright fluorophore
+  contributing thousands of localizations pulls Rg toward itself and shrinks it. De-blinking first makes
+  Rg a property of the *structure*, not of the acquisition.
+- **Caveat:** Rg is inflated by the **label footprint** (a multivalent antibody scatters dyes ~10–40 nm
+  from the epitope), so structures near that scale are systematically over-sized; **no footprint
+  deconvolution is applied**. Rg is also biased low at small member counts (the centroid is estimated
+  from the same points), and it is a single number — a filament and a disc of equal extent share an Rg,
+  which is what the anisotropy coefficients are for.
 
 ### 6.4 KDE density map + Pearson co-localization — 🟡 AMBER
 - **Source:** kernel density estimation (Silverman 1986); Pearson correlation of two density surfaces as
@@ -685,13 +889,25 @@ footprint).
   the single-bandwidth r is accompanied by a **Costes-style spatial-randomization p-value** (§I-A.5) that
   tests it against spatial independence. For a bandwidth-free, scale-resolved alternative the UI points
   to the pair cross-correlation g₁₂(r) (§6.2). Still treat the raw r as a *relative* measure.
+- **Deeper caveat — the "image" is manufactured.** MINFLUX has no pixels, so the density surface the
+  Pearson r is computed on does not exist until the bandwidth creates it: the bandwidth is a free
+  parameter, not a property of the microscope. Only compare r values computed at the **same bandwidth on
+  similarly dense data**; prefer the sweep to any single number.
+- **The Costes p-value is optimistic** (§I-A.5): it randomizes Ch2 *uniformly*, so it tests against
+  complete spatial randomness. In a structured cell almost any two non-uniform channels beat that null,
+  so p→0 mostly reports "both channels are non-uniform", not that the proteins associate.
 
 ### 6.5 Cluster shape fitting (viewer) — 🟠 EXPLORATORY
 - **Method (standard):** orthogonal-distance MLE + AICc/BIC model selection (Akaike 1974; Schwarz 1978;
   Hurvich & Tsai 1989).
 - **Why exploratory:** the shape dictionary (sphere/ellipsoid/helix/ring/arc) is imposed by this tool and
   the "best" shape is a model-selection outcome, not proof of biological geometry; with few,
-  blinking-inflated points several shapes are statistically indistinguishable.
+  blinking-inflated points several shapes are statistically indistinguishable. **The true shape may not
+  be in the dictionary at all — the ranking will still name a winner.**
+- **Caveat (residual model):** the information criteria assume iid isotropic-Gaussian residuals, but
+  MINFLUX precision varies with photon count, so points are not equally precise (§I-A.7). The likelihood
+  is approximate; AICc differences of a few units are not meaningful. RMSD always favours the most
+  flexible model — prefer AICc.
 
 ### 6.6 Ground-truth position/count estimate & structure size — 🟠 EXPLORATORY
 - Labelling-model inverse developed in this tool, validated *in silico* against the simulator. Contour
@@ -704,18 +920,31 @@ footprint).
   labelling, so a trend is a hypothesis for controls, not a measurement. The detection-rate decay used
   to calibrate the simulator is characterised empirically from in-house acquisitions (memory
   `reference_minflux_detection_rate`), not from a publication.
+- **Three specific pitfalls beyond "correlational"** (detail and rationale in §I-A.9):
+  1. **The KS gap is an effect size, not a test.** The clustered and background samples are not
+     independent (same acquisition, same detection budget), so the KS null does not hold. The code
+     correctly reports only the gap — do not convert it to a p-value.
+  2. **Crowding-vs-timing has a positive trend built in — now handled** (§I-A.9). A within-file
+     label-permutation null gives each structure its own 95% interval and a Spearman trend test, so the
+     slope is read against the no-crowding expectation rather than against zero. The band alone still
+     reflects offset + trend; the ρ test isolates the trend.
+  3. **NN-vs-size is right-censored under DBSCAN** at the link radius `eps2` (default 200 nm), so a
+     flattening curve may be the ceiling rather than constant spacing. Re-run under HDBSCAN/OPTICS, which
+     impose no such bound, before interpreting a slope.
 
 ### SMLM summary
 
 | Tool | Source | Rating |
 |---|---|---|
 | NN / DBSCAN / HDBSCAN / OPTICS | Clark & Evans 1954; Ester 1996; Ankerst 1999; Campello 2013 | 🟢 (feed de-blinked) |
-| Ripley L / L₁₂ / PCF g₁₂ | Ripley 1977; Besag 1977; Lotwick & Silverman 1982; Dixon 2002; Sengupta 2011; Veatch 2012 | 🟢 / 🟡 labelling |
+| Traces per cluster | Annibale 2011; Sengupta 2011 | 🟡 blinking (not stoichiometry) |
+| Ripley L / L₁₂ / PCF g₁₂ | Ripley 1977; Besag 1977; Lotwick & Silverman 1982; Dixon 2002; Sengupta 2011; Veatch 2012 | 🟢 / 🟡 labelling + registration |
+| Cross-channel NN & co-loc curve | Clark & Evans 1954; Dixon 2002; Lachmanovich 2003; Dunn 2011 | 🟢 (no null of its own) |
 | Radius of gyration / anisotropy | Rudnick & Gaspari 1986; Westin 1997/2002 | 🟢 |
-| KDE + Pearson co-loc | Silverman 1986; Dunn 2011 | 🟡 bandwidth |
-| Shape fitting | Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989 | 🟠 exploratory |
+| KDE + Pearson co-loc | Silverman 1986; Dunn 2011; Costes 2004 | 🟡 bandwidth |
+| Shape fitting | Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989; Pearson 1901 | 🟠 exploratory |
 | GT estimate & structure size | this tool (in-silico validated); Prim 1957 | 🟠 exploratory |
-| Detection-time / crowding / NN-vs-size | this tool | 🟠 exploratory |
+| Detection-time / crowding / NN-vs-size | this tool; Cleveland 1979; Barber 1996 | 🟠 exploratory |
 
 ---
 
@@ -778,6 +1007,11 @@ footprint).
 51. Rudnick J, Gaspari G (1986). *The asphericity of random walks.* J. Phys. A: Math. Gen. 19:L191–L193. doi:10.1088/0305-4470/19/4/004
 52. Westin CF, Peled S, Gudbjartsson H, Kikinis R, Jolesz FA (1997). *Geometrical diffusion measures for MRI from tensor basis analysis.* ISMRM 1997. (planar/linear/spherical anisotropy coefficients; see also Westin et al. 2002, Med. Image Anal. 6:93–108.)
 53. Prim RC (1957). *Shortest connection networks and some generalizations* (minimum spanning tree). Bell Syst. Tech. J. 36(6):1389–1401. doi:10.1002/j.1538-7305.1957.tb01515.x
+54. Costes SV, Daelemans D, Cho EH, Dobbin Z, Pavlakis G, Lockett S (2004). *Automatic and quantitative measurement of protein-protein colocalization in live cells.* Biophys. J. 86(6):3993–4003. doi:10.1529/biophysj.103.038422 *(the randomization-based significance test behind the KDE panel's p-value)*
+55. Lachmanovich E, Shvartsman DE, Malka Y, Botvin C, Henis YI, Weiss AM (2003). *Co-localization analysis of complex formation among membrane proteins by computerized fluorescence microscopy: application to immunofluorescence co-patching studies.* J. Microsc. 212(Pt 2):122–131. doi:10.1046/j.1365-2818.2003.01239.x *(object-based, distance-threshold co-localization — the family the cross-NN ECDF curve belongs to)*
+56. Cleveland WS (1979). *Robust locally weighted regression and smoothing scatterplots* (loess). J. Am. Stat. Assoc. 74(368):829–836. doi:10.1080/01621459.1979.10481038
+57. Barber CB, Dobkin DP, Huhdanpaa H (1996). *The quickhull algorithm for convex hulls.* ACM Trans. Math. Softw. 22(4):469–483. doi:10.1145/235815.235821 *(Qhull, via `geometry::convhulln` — the convex-hull cluster-size option)*
+58. Pearson K (1901). *On lines and planes of closest fit to systems of points in space* (PCA). Philosophical Magazine 2(11):559–572. doi:10.1080/14786440109462720
 
 **Reviews**
 22. Saxton MJ, Jacobson K (1997). *Single-Particle Tracking: Applications to Membrane Dynamics.* Annu. Rev. Biophys. Biomol. Struct. 26:373–399. doi:10.1146/annurev.biophys.26.1.373
@@ -822,8 +1056,41 @@ corrected (was Ostersehlt 2022 → Vestergaard 2014 / Vogler 2025).
    MSD already do this; the others should be checked.
 4. **Short-track honesty for α.** Single-track anomalous-α is unreliable at MINFLUX track lengths
    (Kepten 2015). Prefer pooled/ensemble α with CIs and short-track exclusion; consider a UI caveat.
+5. **✅ DONE — DCR crosstalk quantified** (superseded an earlier, mistaken "registration error" item —
+   ratiometric MINFLUX has no inter-channel offset, see §6.2). `auto_detect_dcr_split` now returns d′,
+   the expected mis-assignment rate, per-group contamination and the ambiguous-trace fraction, reported
+   with a clean/workable/poor verdict and a format-aware hint about pooled DCR. Per-molecule confidence
+   (`dcr_split_confidence`) identifies which individual traces sit on the edge of the split, with a plot
+   and a per-trace export. **Follow-up not implemented — the strict gate:** actually *excluding*
+   edge traces and re-running the cross-channel tools, so a co-localization signal can be shown to
+   survive removal of the ambiguous band. The case for it is now quantified (edge-drop took
+   mis-assignment 2.43% → 0.40% for 9% data loss), but it would change channel assignment, so it was
+   left as an explicit choice rather than done silently.
+9. **Split confidence is not exposed in the Display-tab colouring.** `dcr_split_confidence` is currently
+   surfaced only in the 2-colour panel (plot + CSV). Colouring localizations by split confidence would
+   make edge molecules visible in situ, but the point builders (`build_pts_2d` / 3D) use explicit
+   column whitelists in six `summarise()` blocks, so it needs a deliberate pass rather than a patch.
+6. **✅ DONE — crowding-vs-timing null.** Implemented as a within-file label permutation with a per-structure
+   95% band and a Spearman trend test (§I-A.9), rather than the simulator null originally proposed: the
+   permutation is exact and assumption-free, while a simulator null would import a bleaching model
+   calibrated from this same kind of data. Validated on the collaborator file (coverage 0.052 vs nominal 0.05).
+7. **✅ DONE — photon-weighted shape fitting.** `viewer_weight_eco` supplies w = Σ`eco` per trace to the
+   `mle_fit_*` optimisers, with weighted RMSD and `n_eff` reported (§6.5). **Follow-up:** the resulting
+   sensitivity (radius 359 → 149 nm on one test structure) suggests the viewer should report a
+   **parameter uncertainty**, e.g. a bootstrap over traces, before any shape parameter is quoted as a
+   measurement. Currently a single point estimate is shown with no error bar.
+8. **Weighting is only as good as `eco`.** The photon weight assumes `eco` is proportional to collected
+   photons and comparable across traces within an acquisition. That holds within one sequence/power
+   setting; it is **not** safe across files acquired at different laser powers, so photon-weighted fits
+   should not be pooled across such files without checking the `eco` distributions.
 
 ---
 
 *Compiled with two literature-research passes; every citation's title/venue/year was verified via
 search (DOIs cross-checked where shown). Items that could not be double-confirmed are flagged in §5.*
+
+*Addendum 2026-07-24 — per-panel method boxes added to the SMLM Analysis tab.* This pass added §6.1a,
+§6.2a, §I-A.10, the pitfall lists in §I-A.9 / §6.7, and action items 5–7. **Refs 54–58 (Costes 2004,
+Lachmanovich 2003, Cleveland 1979, Barber/Dobkin/Huhdanpaa 1996, Pearson 1901) were added from standing
+knowledge and have NOT been through the search-verification pass** that refs 1–53 received — they are
+long-established, widely-cited works, but re-confirm the DOIs before quoting them in a manuscript.

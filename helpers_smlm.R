@@ -160,7 +160,25 @@ assign_two_color_group <- function(df, input) {
 # Helper: auto-detect 2-color DCR split via 2-component GMM (mclust)
 # Returns a list with $success, $split, $mean1, $mean2, $sd1, $sd2, $n_traces
 # On failure returns $success = FALSE and $reason string.
-auto_detect_dcr_split <- function(dcr_meds) {
+# GOAL: split traces into two colour channels on their DCR (detection channel
+# ratio) by fitting a 2-component Gaussian mixture, AND quantify how reliable that
+# split is.
+#
+# WHY THE UNCERTAINTY MATTERS (and why it is not symmetric with a registration
+# error): ratiometric MINFLUX has no inter-channel offset — both dyes are excited
+# by the same laser through the same beam path, so the two channels share one
+# coordinate frame. The residual two-colour error is therefore NOT a shift, it is
+# MIS-ASSIGNMENT: the DCR distributions of the two dyes overlap, so a fraction of
+# traces lands on the wrong side of the threshold. A mis-assigned molecule sits by
+# construction right next to its true neighbours, so crosstalk pushes every
+# cross-channel statistic (NN, L12, g12) UP at short r — toward FALSE
+# co-localization, exactly where a real interaction would appear. Quantifying it is
+# what lets a user judge whether a co-localization result is real.
+#
+# `col_used` records whether the caller passed raw `dcr` or pooled `dcr_pooled`;
+# pooling DCR across the iteration sequence (weighted by photons) usually sharpens
+# the two modes considerably, so the split quality is only interpretable alongside it.
+auto_detect_dcr_split <- function(dcr_meds, col_used = NA_character_) {
   x <- dcr_meds[is.finite(dcr_meds)]
   if (length(x) < 10)
     return(list(success = FALSE, reason = paste0("Not enough traces (", length(x), "; need \u2265 10)")))
@@ -216,6 +234,48 @@ auto_detect_dcr_split <- function(dcr_meds) {
     error = function(e) (mu1 + mu2) / 2
   )
 
+  # ── Mis-assignment quantification at the chosen threshold ──────────────────
+  # Component 1 sits below the split, component 2 above, so at threshold s:
+  #   traces from comp 1 wrongly called "group 2" = pi1 * P(X1 > s)
+  #   traces from comp 2 wrongly called "group 1" = pi2 * P(X2 <= s)
+  # err_rate is the total expected wrong-channel fraction; contam1/contam2 are the
+  # more useful per-channel numbers — what proportion of everything you CALL
+  # group k actually came from the other dye. Those are the values that propagate
+  # into a cross-channel co-localization claim.
+  p1_up   <- pi1 * stats::pnorm(split_val, mu1, sd1, lower.tail = FALSE)  # comp1 -> grp2
+  p2_dn   <- pi2 * stats::pnorm(split_val, mu2, sd2, lower.tail = TRUE)   # comp2 -> grp1
+  p1_dn   <- pi1 * stats::pnorm(split_val, mu1, sd1, lower.tail = TRUE)   # comp1 -> grp1 (correct)
+  p2_up   <- pi2 * stats::pnorm(split_val, mu2, sd2, lower.tail = FALSE)  # comp2 -> grp2 (correct)
+  err_rate <- p1_up + p2_dn
+  contam1  <- if ((p1_dn + p2_dn) > 0) p2_dn / (p1_dn + p2_dn) else NA_real_
+  contam2  <- if ((p2_up + p1_up) > 0) p1_up / (p2_up + p1_up) else NA_real_
+
+  # Standardised separation of the two modes. Rule of thumb: d' >= 3 is a clean
+  # split, ~2 is workable, < 1.5 means the "two colours" heavily overlap and any
+  # short-range cross-channel signal is suspect.
+  #
+  # ⚠ d' MEASURES SEPARATION, NOT WHETHER THE DATA IS TWO-COLOUR AT ALL. Asking for
+  # G = 2 always returns two components: a single-dye DCR distribution is skewed, and
+  # a 2-component Gaussian mixture fits a skewed unimodal distribution better than one
+  # Gaussian. Measured here: on a confirmed SINGLE-colour file this routine still
+  # returned a "workable" split (d' = 2.65, 3.6% apparent crosstalk), and a BIC
+  # comparison of G=1 vs G=2 does NOT fix it — it also preferred two components on
+  # that file (dBIC +16.9) and on a synthetic skewed-unimodal control (+21.1), while
+  # missing a genuine two-colour pair at d' = 1 (-9.6). BIC is picking up skewness,
+  # not bimodality, so it is deliberately NOT used as a gate here. The only valid
+  # basis for splitting is the EXPERIMENTAL DESIGN plus a look at the DCR histogram.
+  dprime <- abs(mu2 - mu1) / sqrt((sd1^2 + sd2^2) / 2)
+
+  # Per-trace posterior of the assigned component. Traces whose best posterior is
+  # below `post_cut` are genuinely ambiguous — they are the ones that would move if
+  # the threshold shifted slightly, and the natural candidates for a strict gate.
+  post_cut <- 0.95
+  d1 <- pi1 * stats::dnorm(x, mu1, sd1)
+  d2 <- pi2 * stats::dnorm(x, mu2, sd2)
+  tot <- d1 + d2
+  post_max <- ifelse(tot > 0, pmax(d1, d2) / tot, NA_real_)
+  ambiguous_frac <- mean(post_max < post_cut, na.rm = TRUE)
+
   list(
     success  = TRUE,
     split    = round(split_val, 4),
@@ -223,8 +283,82 @@ auto_detect_dcr_split <- function(dcr_meds) {
     mean2    = round(mu2, 3),
     sd1      = round(sd1, 3),
     sd2      = round(sd2, 3),
-    n_traces = length(x)
+    pi1      = round(pi1, 3),
+    pi2      = round(pi2, 3),
+    n_traces = length(x),
+    col_used = col_used,
+    # Unrounded parameters for arithmetic. The fields above are rounded for display;
+    # using them to recompute posteriors made the per-trace edge count disagree with
+    # ambiguous_frac (rounding sd to 3 dp is ~1% relative error at DCR sd ≈ 0.05).
+    params = list(mu1 = mu1, mu2 = mu2, sd1 = sd1, sd2 = sd2,
+                  pi1 = pi1, pi2 = pi2, split = split_val),
+    # split-quality block
+    err_rate       = round(err_rate, 4),
+    contam1        = round(contam1, 4),
+    contam2        = round(contam2, 4),
+    dprime         = round(dprime, 2),
+    ambiguous_frac = round(ambiguous_frac, 4),
+    post_cut       = post_cut,
+    quality = if (!is.finite(dprime)) "unknown"
+              else if (dprime >= 3) "clean"
+              else if (dprime >= 2) "workable"
+              else "poor"
   )
+}
+
+# GOAL: per-molecule confidence in its colour-channel assignment.
+#
+# The GMM split gives one threshold for the whole dataset, but molecules are not
+# equally certain: one sitting far out in a mode is safely assigned, one sitting in
+# the overlap region could go either way. This turns the fitted mixture into a
+# per-trace number so the ambiguous molecules can be identified individually rather
+# than only counted in aggregate.
+#
+#   post_k(v) = pi_k * N(v | mu_k, sd_k) / sum_j pi_j * N(v | mu_j, sd_j)
+#
+# Returns, per input DCR value:
+#   group     1 or 2 — the component with the higher posterior (matches the split
+#             threshold by construction, since the threshold IS the crossing point)
+#   post      posterior of the assigned component, in [0.5, 1]. 0.5 = the molecule
+#             sits exactly on the split and is a coin flip; ~1 = unambiguous.
+#   edge      TRUE when post < post_cut, i.e. the molecule is in the overlap band
+#             and would switch channel under a small shift of the threshold.
+#   log_odds  log(post_assigned / post_other) — the same information on an additive
+#             scale, which is easier to threshold consistently across datasets.
+#
+# `gmm` is the list returned by auto_detect_dcr_split().
+dcr_split_confidence <- function(v, gmm, post_cut = NULL) {
+  n <- length(v)
+  na_out <- list(group = rep(NA_integer_, n), post = rep(NA_real_, n),
+                 edge = rep(NA, n), log_odds = rep(NA_real_, n))
+  if (is.null(gmm) || !isTRUE(gmm$success)) return(na_out)
+  if (is.null(post_cut)) post_cut <- gmm$post_cut %||% 0.95
+
+  # Prefer the unrounded parameters; fall back to the display fields for any older
+  # stored result that predates them.
+  pr <- gmm$params %||% list(mu1 = gmm$mean1, mu2 = gmm$mean2, sd1 = gmm$sd1,
+                             sd2 = gmm$sd2, pi1 = gmm$pi1, pi2 = gmm$pi2,
+                             split = gmm$split)
+  v  <- as.numeric(v)
+  d1 <- pr$pi1 * stats::dnorm(v, pr$mu1, pr$sd1)
+  d2 <- pr$pi2 * stats::dnorm(v, pr$mu2, pr$sd2)
+  tot <- d1 + d2
+
+  # Underflow guard: far out in the tails both densities can be exactly 0, which
+  # would give 0/0. Fall back to the side of the threshold there — the assignment
+  # is certain, it is only the arithmetic that degenerates.
+  bad <- !is.finite(tot) | tot <= 0
+  p1  <- ifelse(bad, ifelse(v <= pr$split, 1, 0), d1 / tot)
+  p2  <- 1 - p1
+
+  grp  <- ifelse(p1 >= p2, 1L, 2L)
+  post <- pmax(p1, p2)
+  lo   <- log(pmax(post, .Machine$double.xmin)) - log(pmax(1 - post, .Machine$double.xmin))
+  grp[!is.finite(v)]  <- NA_integer_
+  post[!is.finite(v)] <- NA_real_
+  lo[!is.finite(v)]   <- NA_real_
+
+  list(group = grp, post = post, edge = post < post_cut, log_odds = lo)
 }
 
 # Helper: parse TC label like "A-1" or "B_2" into integer group IDs

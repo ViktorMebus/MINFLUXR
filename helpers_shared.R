@@ -58,6 +58,29 @@
 # embedded in a string: helpText("use ", sigloc(), " for the floor").
 sigloc <- function(sub = "loc") htmltools::HTML(sprintf("&sigma;<sub>%s</sub>", sub))
 
+# Collapsible per-method infobox: what the method is, where it is from, how it is
+# adapted for MINFLUX (irregular Δt / short tracks / nm precision / blinking), and
+# the honest caveat. `rating` is a 🟢/🟡/🟠 chip:
+#   green  = standard method, well-suited to MINFLUX as used here
+#   amber  = standard method, but a MINFLUX property strains an assumption
+#   orange = bespoke to this tool, no published MINFLUX equivalent (exploratory)
+# Lives here (not in a ui_*.R) because helpers_shared.R is sourced first, so both
+# ui_smlm.R and ui_tracking.R can call it at source time.
+.method_box <- function(rating, source, adaptation, caveat) {
+  chip <- switch(rating,
+    green  = tags$span("🟢 well-adapted",  style = "color:#1a8a1a;"),
+    amber  = tags$span("🟡 adapted, with caveats", style = "color:#b26a00;"),
+    orange = tags$span("🟠 exploratory for MINFLUX", style = "color:#e67e22;"),
+    tags$span(rating))
+  tags$details(style = "margin:4px 0 10px; font-size:0.82em;",
+    tags$summary(style = "cursor:pointer; color:#2c3e50; font-weight:600;",
+                 "ℹ Method & MINFLUX adaptation  ", chip),
+    tags$div(style = "padding:6px 4px 2px 10px; color:#555; line-height:1.5; border-left:3px solid #cfe0ee;",
+      tags$p(style = "margin:2px 0;", tags$b("Origin: "), source),
+      tags$p(style = "margin:2px 0;", tags$b("MINFLUX adaptation: "), adaptation),
+      tags$p(style = "margin:2px 0; color:#7a5c00;", tags$b("Caveat: "), caveat)))
+}
+
 # Lower-case file extension of a path/filename ("Sample.NPY" -> "npy").
 # Used to dispatch an upload to the right reader.
 get_ext <- function(filename) {

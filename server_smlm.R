@@ -742,7 +742,32 @@ smlm_server <- function(input, output, session) {
       sd_z_range       = sd_filt$z,
       sd_min_locs      = input$sd_min_locs,
       make_positive    = input$make_positive,
-      
+
+      # ── Rogue-trace removal — THIS CHANGES THE DATA ────────────────────────
+      # Dropped traces are removed before grouping, clustering, fits and surfaces,
+      # so omitting these from the saved file meant reloading a settings file
+      # silently reverted rogue removal to OFF and changed what was analysed.
+      remove_rogues = isTRUE(input$remove_rogues),
+      rogue_rule    = input$rogue_rule,
+      rogue_factor  = input$rogue_factor,
+
+      # ── Histogram + spread-panel display state ─────────────────────────────
+      # apply_filters() already restores hist_variable/hist_bins/sd_* , but they
+      # were never written out, so every load reset them to the data defaults.
+      show_metadata_hist      = isTRUE(input$show_metadata_hist),
+      hist_variable           = input$hist_variable,
+      hist_bins               = input$hist_bins,
+      hist_show_raw           = isTRUE(input$hist_show_raw),
+      view_SD                 = isTRUE(input$view_SD),
+      sd_bins                 = input$sd_bins,
+      sd_overlay_all          = isTRUE(input$sd_overlay_all),
+      sd_show_mean_sd         = isTRUE(input$sd_show_mean_sd),
+      sd_show_overall_mean_sd = isTRUE(input$sd_show_overall_mean_sd),
+      sd_use_q95              = isTRUE(input$sd_use_q95),
+      target_sd_x             = input$target_sd_x,
+      target_sd_y             = input$target_sd_y,
+      target_sd_z             = input$target_sd_z,
+
       enable_clustering   = input$enable_clustering,
       eps                 = input$eps,
       minpts              = input$minpts,
@@ -959,7 +984,9 @@ smlm_server <- function(input, output, session) {
     
     # checkboxes
     cb_ids <- c(
-      "color_by_fluo",
+      # master toggle first, so the restored 2-color parameters take effect
+      "enable_two_color",
+      "color_by_fluo", "use_pooled_dcr",
       "draw_nn_two_color", "show_nn_labels_two_color",
       "enable_two_color_cluster1", "show_tc1_alpha", "exclude_unclustered_tc1",
       "enable_two_color_cluster2", "show_tc2_alpha",
@@ -979,6 +1006,8 @@ smlm_server <- function(input, output, session) {
     
     # NN
     if (!is.null(getv("nn_k_two_color"))) updateNumericInput(session, "nn_k_two_color", value = as.integer(getv("nn_k_two_color")))
+    if (!is.null(getv("tc_label_font_size"))) updateNumericInput(session, "tc_label_font_size", value = as.numeric(getv("tc_label_font_size")))
+    if (!is.null(getv("tc_label_offset")))    updateNumericInput(session, "tc_label_offset", value = as.numeric(getv("tc_label_offset")))
     rng <- getv("distance_range_two_color")
     if (!is.null(rng) && length(rng) == 2) updateSliderInput(session, "distance_range_two_color", value = as.numeric(rng))
     if (!is.null(getv("two_color_scope"))) updateSelectInput(session, "two_color_scope", selected = as.character(getv("two_color_scope")))
@@ -1062,6 +1091,17 @@ smlm_server <- function(input, output, session) {
     if (!is.null(vals$sd_x_range)) shinyWidgets::updateNumericRangeInput(session, "sd_x_range", value = rng(vals$sd_x_range))
     if (!is.null(vals$sd_y_range)) shinyWidgets::updateNumericRangeInput(session, "sd_y_range", value = rng(vals$sd_y_range))
     if (!is.null(vals$sd_z_range)) shinyWidgets::updateNumericRangeInput(session, "sd_z_range", value = rng(vals$sd_z_range))
+
+    # ── Rogue removal + panel display state ───────────────────────────────────
+    # Only restore when the key is actually present, so an OLD settings file (saved
+    # before these were persisted) leaves the current UI alone instead of silently
+    # switching rogue removal off.
+    if (!is.null(vals$remove_rogues)) updateCheckboxInput(session, "remove_rogues", value = isTRUE(vals$remove_rogues))
+    if (!is.null(vals$rogue_rule))    updateRadioButtons(session, "rogue_rule", selected = as.character(vals$rogue_rule))
+    if (!is.null(vals$rogue_factor))  updateNumericInput(session, "rogue_factor", value = as.numeric(vals$rogue_factor))
+    if (!is.null(vals$show_metadata_hist)) updateCheckboxInput(session, "show_metadata_hist", value = isTRUE(vals$show_metadata_hist))
+    if (!is.null(vals$hist_show_raw))      updateCheckboxInput(session, "hist_show_raw", value = isTRUE(vals$hist_show_raw))
+    if (!is.null(vals$sd_use_q95))         updateCheckboxInput(session, "sd_use_q95", value = isTRUE(vals$sd_use_q95))
   }
   apply_overlay  <- function(vals) { apply_overlay_settings(vals, session) }
   apply_heatmap  <- function(vals) {
@@ -1096,13 +1136,16 @@ smlm_server <- function(input, output, session) {
     
     # checkboxes
     cb_ids <- c(
+      # master toggle first, so the restored parameters actually take effect
+      "enable_cluster2", "show_cluster2_knn",
       "show_cluster2_shape", "show_cluster2_isosurface", "cluster2_iso_selected_only",
       "show_cluster2_shape_2D", "show_cluster2_metrics",
       "show_cluster2_pca_axes",
       "show_cluster2_labels", "show_cluster2_plane_angle", "show_cluster2_plane_distance",
       "show_bending_radius", "fit_weighted",
       "show_fit_distances", "show_fit_tube",
-      "show_cluster2_nn_lines"
+      "show_cluster2_nn_lines",
+      "compute_rmsd_metrics", "membrane_protein_options", "show_c2_nn_labels"
     )
     for (id in cb_ids) {
       if (!is.null(s[[id]])) updateCheckboxInput(session, id, value = isTRUE(s[[id]]))
@@ -1131,8 +1174,14 @@ smlm_server <- function(input, output, session) {
     # color
     if (!is.null(getv("fit_color_2d"))) colourpicker::updateColourInput(session, "fit_color_2d", value = as.character(getv("fit_color_2d")))
     
+    # fit/metric options added after this block was last updated
+    if (!is.null(getv("arc_span_deg")))      updateSliderInput(session, "arc_span_deg", value = as.numeric(getv("arc_span_deg")))
+    if (!is.null(getv("max_dist_lines_nm"))) updateNumericInput(session, "max_dist_lines_nm", value = as.numeric(getv("max_dist_lines_nm")))
+
     # NN controls
     if (!is.null(getv("nn_k_cluster2"))) updateNumericInput(session, "nn_k_cluster2", value = as.integer(getv("nn_k_cluster2")))
+    if (!is.null(getv("c2_label_font_size"))) updateNumericInput(session, "c2_label_font_size", value = as.numeric(getv("c2_label_font_size")))
+    if (!is.null(getv("c2_label_offset")))    updateNumericInput(session, "c2_label_offset", value = as.numeric(getv("c2_label_offset")))
     rng <- getv("distance_range_cluster2")
     if (!is.null(rng) && length(rng) == 2) {
       updateSliderInput(session, "distance_range_cluster2", value = as.numeric(rng))
@@ -1393,6 +1442,11 @@ smlm_server <- function(input, output, session) {
     },
     content = function(file) {
       s <- list(
+        # Master toggle — without it, loading a Median Cluster settings file left
+        # clustering switched OFF and none of the restored parameters took effect.
+        enable_cluster2 = isTRUE(input$enable_cluster2),
+        show_cluster2_knn = isTRUE(input$show_cluster2_knn),
+
         cluster2_method = input$cluster2_method %||% "dbscan",
         cluster2_xi = input$cluster2_xi,
         cluster2_prefilter = isTRUE(input$cluster2_prefilter),
@@ -1438,9 +1492,19 @@ smlm_server <- function(input, output, session) {
         show_fit_distances = isTRUE(input$show_fit_distances),
 
         fit_opacity = input$fit_opacity,
-        
+
+        # Fit/metric options that were added after this save list was last updated
+        compute_rmsd_metrics     = isTRUE(input$compute_rmsd_metrics),
+        membrane_protein_options = isTRUE(input$membrane_protein_options),
+        arc_span_deg             = input$arc_span_deg,
+        max_dist_lines_nm        = input$max_dist_lines_nm,
+
         show_cluster2_nn_lines = isTRUE(input$show_cluster2_nn_lines),
         nn_k_cluster2 = input$nn_k_cluster2,
+        # NN label styling
+        show_c2_nn_labels  = isTRUE(input$show_c2_nn_labels),
+        c2_label_font_size = input$c2_label_font_size,
+        c2_label_offset    = input$c2_label_offset,
         distance_range_cluster2 = unname(input$distance_range_cluster2) # avoid jsonlite named-vector warning
       )
       
@@ -1496,15 +1560,21 @@ smlm_server <- function(input, output, session) {
     },
     content = function(file) {
       s <- list(
+        # Master toggle — as with cluster2, without it the restored 2-color
+        # parameters had no effect because 2-color stayed switched off.
+        enable_two_color = isTRUE(input$enable_two_color),
         color_by_fluo = isTRUE(input$color_by_fluo),
+        use_pooled_dcr = isTRUE(input$use_pooled_dcr),
         dcr_group1 = unname(input$dcr_group1),
         dcr_group2 = unname(input$dcr_group2),
         color_group1 = input$color_group1,
         color_group2 = input$color_group2,
-        
+
         draw_nn_two_color = isTRUE(input$draw_nn_two_color),
         nn_k_two_color = input$nn_k_two_color,
         show_nn_labels_two_color = isTRUE(input$show_nn_labels_two_color),
+        tc_label_font_size = input$tc_label_font_size,
+        tc_label_offset    = input$tc_label_offset,
         distance_range_two_color = unname(input$distance_range_two_color),
         two_color_scope = input$two_color_scope,
         
@@ -2264,7 +2334,7 @@ smlm_server <- function(input, output, session) {
       dplyr::summarise(dcr_med = stats::median(.data[[.col]], na.rm = TRUE), .groups = "drop") %>%
       dplyr::pull(dcr_med)
 
-    res <- auto_detect_dcr_split(dcr_meds)
+    res <- auto_detect_dcr_split(dcr_meds, col_used = .col)
     dcr_gmm_result(res)
 
     if (!isTRUE(res$success)) {
@@ -2277,22 +2347,149 @@ smlm_server <- function(input, output, session) {
     shinyWidgets::updateNumericRangeInput(session, "dcr_group2", value = c(split + 1e-4, 1))
     showNotification(
       paste0("Split set at DCR = ", split,
-             "  |  Group 1 mean: ", res$mean1, " (SD ", res$sd1, ")",
-             "  |  Group 2 mean: ", res$mean2, " (SD ", res$sd2, ")"),
-      type = "message", duration = 8
+             "  |  G1 ", res$mean1, " (SD ", res$sd1, ")",
+             "  |  G2 ", res$mean2, " (SD ", res$sd2, ")",
+             "  |  d' = ", res$dprime, " (", res$quality, "), ",
+             sprintf("%.1f%% expected crosstalk", 100 * res$err_rate),
+             if (!identical(.col, "dcr_pooled"))
+               "  |  using RAW dcr — try pooled DCR for a cleaner split" else ""),
+      type = if (identical(res$quality, "poor")) "warning" else "message", duration = 9
     )
   })
 
-  output$dcr_gmm_info <- renderText({
+  # Per-trace split confidence: which individual molecules sit on the edge of the
+  # DCR split. The GMM summary only gives an aggregate ambiguous %, which cannot
+  # tell you WHICH molecules are uncertain — and those are exactly the ones that
+  # manufacture false short-range cross-channel pairs.
+  dcr_conf_tbl <- reactive({
+    gmm <- dcr_gmm_result()
+    if (is.null(gmm) || !isTRUE(gmm$success)) return(NULL)
+    df <- tryCatch(filtered_df(), error = function(e) NULL)
+    if (is.null(df) || !"tid" %in% names(df)) return(NULL)
+    .col <- if (identical(gmm$col_used, "dcr_pooled") && "dcr_pooled" %in% names(df))
+      "dcr_pooled" else if ("dcr" %in% names(df)) "dcr" else NULL
+    if (is.null(.col)) return(NULL)
+
+    med <- df %>%
+      dplyr::group_by(tid) %>%
+      dplyr::summarise(dcr_med = stats::median(.data[[.col]], na.rm = TRUE),
+                       n_locs  = dplyr::n(), .groups = "drop") %>%
+      dplyr::filter(is.finite(dcr_med))
+    if (!nrow(med)) return(NULL)
+
+    cf <- dcr_split_confidence(med$dcr_med, gmm)
+    med$group      <- cf$group
+    med$posterior  <- round(cf$post, 4)
+    med$log_odds   <- round(cf$log_odds, 3)
+    med$on_edge    <- cf$edge
+    med$dcr_column <- .col
+    med[order(med$posterior), , drop = FALSE]   # least certain first
+  })
+
+  output$dcr_conf_plot <- renderPlotly({
+    tb  <- dcr_conf_tbl()
+    gmm <- dcr_gmm_result()
+    shiny::validate(shiny::need(!is.null(tb) && nrow(tb) > 0,
+      "Run 'Auto-detect split (GMM)' to score each trace's assignment confidence."))
+    cols <- ifelse(tb$on_edge, "#e67e22", ifelse(tb$group == 1L, "#1f77b4", "#d62728"))
+    plotly::plot_ly(
+      x = tb$dcr_med, y = tb$posterior, type = "scatter", mode = "markers",
+      marker = list(color = cols, size = 6, opacity = 0.75,
+                    line = list(color = "white", width = 0.4)),
+      text = paste0("tid ", tb$tid, "<br>DCR ", round(tb$dcr_med, 4),
+                    "<br>group ", tb$group, "<br>posterior ", round(tb$posterior, 3),
+                    ifelse(tb$on_edge, "<br><b>on edge</b>", "")),
+      hoverinfo = "text") %>%
+      plotly::layout(
+        title = list(text = sprintf(
+          "Per-trace split confidence — %d of %d traces on the edge (posterior < %.2f), orange",
+          sum(tb$on_edge, na.rm = TRUE), nrow(tb), gmm$post_cut), font = list(size = 12)),
+        margin = list(t = 46),
+        xaxis = list(title = paste0("Trace median ", gmm$col_used)),
+        yaxis = list(title = "Posterior of assigned group", range = c(0.45, 1.02)),
+        shapes = list(
+          list(type = "line", x0 = gmm$split, x1 = gmm$split, y0 = 0.45, y1 = 1.02,
+               line = list(color = "#666666", width = 1.5, dash = "dash")),
+          list(type = "line", x0 = min(tb$dcr_med), x1 = max(tb$dcr_med),
+               y0 = gmm$post_cut, y1 = gmm$post_cut,
+               line = list(color = "#e67e22", width = 1, dash = "dot"))),
+        showlegend = FALSE)
+  })
+
+  output$download_dcr_conf <- downloadHandler(
+    filename = function() paste0("dcr_split_confidence_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      tb <- dcr_conf_tbl()
+      shiny::validate(shiny::need(!is.null(tb) && nrow(tb) > 0, "Run the GMM auto-detect first."))
+      write.csv(tb, file, row.names = FALSE)
+    }
+  )
+
+  # Split summary + an explicit split-QUALITY verdict. The crosstalk numbers are
+  # what a cross-channel co-localization result has to be read against, so they are
+  # shown next to the split rather than buried: an apparent co-localization signal
+  # at short r is only meaningful if it is large compared with the contamination.
+  output$dcr_gmm_info <- renderUI({
     res <- dcr_gmm_result()
-    if (is.null(res)) return("")
-    if (!isTRUE(res$success)) return(paste("GMM failed:", res$reason))
-    paste0(
-      "Split: ", res$split,
-      " | G1 mean: ", res$mean1, " (SD ", res$sd1, ")",
-      " | G2 mean: ", res$mean2, " (SD ", res$sd2, ")",
-      " | n = ", res$n_traces, " traces"
-    )
+    if (is.null(res)) return(NULL)
+    if (!isTRUE(res$success))
+      return(tags$div(style = "font-size:0.85em; color:#c0392b;",
+                      paste("GMM failed:", res$reason)))
+
+    col_lbl  <- if (identical(res$col_used, "dcr_pooled")) "pooled DCR" else "raw DCR"
+    pooled   <- identical(res$col_used, "dcr_pooled")
+    has_pooled_col <- {
+      d <- tryCatch(filtered_df(), error = function(e) NULL)
+      !is.null(d) && "dcr_pooled" %in% names(d)
+    }
+    qcol <- switch(res$quality, clean = "#1a8a1a", workable = "#b26a00", "#c0392b")
+    qtxt <- switch(res$quality,
+      clean    = "clean split",
+      workable = "workable split",
+      poor     = "POOR split — channels overlap heavily",
+      "separation unknown")
+
+    tagList(
+      tags$div(style = "font-size:0.85em; margin-top:4px;",
+        tags$b("Split: "), res$split, " on ", col_lbl,
+        tags$br(),
+        "G1 mean ", res$mean1, " (SD ", res$sd1, ", ", round(100 * res$pi1), "%)",
+        " | G2 mean ", res$mean2, " (SD ", res$sd2, ", ", round(100 * res$pi2), "%)",
+        " | n = ", res$n_traces, " traces"),
+      tags$div(style = paste0("font-size:0.85em; margin-top:3px; color:", qcol, "; font-weight:600;"),
+        "d' = ", res$dprime, " — ", qtxt),
+      tags$div(style = "font-size:0.82em; color:#555; margin-top:2px;",
+        tags$b("Expected crosstalk: "),
+        sprintf("%.1f%% of traces mis-assigned overall; group 1 is ~%.1f%% contaminated by dye 2, group 2 ~%.1f%% by dye 1. %.1f%% of traces are ambiguous (max posterior < %.2f).",
+                100 * res$err_rate, 100 * res$contam1, 100 * res$contam2,
+                100 * res$ambiguous_frac, res$post_cut)),
+      tags$div(style = "font-size:0.8em; color:#7a5c00; margin-top:3px;",
+        HTML(paste0(
+          "Crosstalk pushes cross-channel NN / L₁₂ / g₁₂ <b>up at short r</b>, toward false ",
+          "co-localization. Treat a co-localization signal as real only if it is large ",
+          "compared with these numbers.",
+          # Only suggest pooling where pooling is actually possible: it happens in the
+          # .npy/.json readers. A .csv is a pyMINFLUX export of the final iteration and
+          # has already been through their pipeline, so there is nothing to pool here.
+          if (!pooled && has_pooled_col)
+            paste0(" <b>This file has a pooled DCR column you are not using</b> — tick ",
+                   "<i>Use pooled DCR</i> and re-run; pooled DCR usually separates the dyes better.")
+          else if (!pooled)
+            paste0(" Splitting on raw DCR. If this came from <b>.npy/.json</b>, re-uploading with ",
+                   "<i>Pool DCR</i> enabled (photon-weighted across the iteration sequence) usually ",
+                   "sharpens the split; a <b>.csv</b> is already a pyMINFLUX final-iteration export, ",
+                   "so there is nothing further to pool.")
+          else ""))),
+      # Keep this proportionate: the GMM is a reasonable estimator and the split is
+      # what the data allows. The point is only that split QUALITY is not evidence of
+      # two dyes existing — the experiment design is.
+      tags$div(style = "margin-top:5px; padding:5px 8px; border-left:3px solid #b26a00; background:rgba(178,106,0,0.06); font-size:0.8em; color:#7f8c8d; line-height:1.45;",
+        HTML(paste0(
+          "<b>d' measures separation, not whether two dyes exist.</b> Asking for two components ",
+          "always returns two — a single-dye DCR distribution is skewed, and two Gaussians fit ",
+          "skewed data better than one (a confirmed single-colour file here still scored ",
+          "d' = 2.65). So use these numbers to judge <i>how good</i> a two-colour split is, once ",
+          "you already know from the experiment that there are two dyes."))))
   })
 
   # ------ HISTOGRAM for filters
@@ -7232,7 +7429,8 @@ smlm_server <- function(input, output, session) {
   #   time_shift = median(member tim_med) - median(unclustered background tim_med),
   #                computed per file (positive = structure detected later)
   # Tests whether denser (more crowded) structures are detected later.
-  crowd_results <- reactiveVal(NULL)
+  crowd_results    <- reactiveVal(NULL)
+  crowd_null_stats <- reactiveVal(NULL)   # list(rho_obs, p, B, outside) from the permutation null
 
   observeEvent(input$run_crowd, {
     store <- smlm_file_store()
@@ -7249,19 +7447,45 @@ smlm_server <- function(input, output, session) {
     use_3d <- isTRUE(input$crowd_use_3d)
     cols   <- if (use_3d) c("x", "y", "z") else c("x", "y")
 
-    rows <- list()
+    # ── no-crowding null (label permutation) ──────────────────────────────────
+    # The panel's y-axis has a trend built in even with NO crowding effect: denser
+    # clusters hold more traces, and the MEDIAN of a larger sample drawn from a
+    # decaying detection-rate distribution lands later purely by sampling. To make
+    # the plot readable we need the "zero crowding" expectation drawn on it.
+    #
+    # WHY A PERMUTATION AND NOT THE SIMULATOR: shuffling the detection times among
+    # the traces of a file keeps the real cluster membership, the real sizes, the
+    # real geometry (so every point's x stays exactly where it is) and the real
+    # detection-time distribution of that acquisition — it destroys ONLY the
+    # association being tested. A simulator null would instead require assuming a
+    # bleaching/detection model, which is itself calibrated from data of this kind;
+    # that would make the test partly circular. The permutation is exact,
+    # assumption-free and cheaper.
+    do_null <- isTRUE(input$crowd_null)
+    B       <- if (do_null) max(49L, min(2000L, as.integer(input$crowd_nsim %||% 200L))) else 0L
+
+    rows      <- list()
+    null_rows <- list()   # one B-length vector of null time_shifts per cluster row
+    # Why-it-found-nothing counters. An empty result has several distinct causes and
+    # the old generic message named only one of them, so a stale filter or a missing
+    # background was indistinguishable from "no structures".
+    diag <- c(no_tim = 0L, filtered_out = 0L, no_c2 = 0L, no_z = 0L,
+              no_clusters = 0L, no_background = 0L, too_small = 0L)
     withProgress(message = "Computing crowding vs detection-time shift...", value = 0, {
       n_files <- length(store)
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]
         incProgress(1 / n_files, detail = fname)
         df <- store[[fname]]
-        if (!is.data.frame(df) || !nrow(df) || !"tim" %in% names(df)) next
+        if (!is.data.frame(df) || !nrow(df) || !"tim" %in% names(df)) { diag["no_tim"] <- diag["no_tim"] + 1L; next }
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df)) next
+        if (is.null(df) || !nrow(df)) { diag["filtered_out"] <- diag["filtered_out"] + 1L; next }
         df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df) || !"Median cluster" %in% names(df)) next
-        if (use_3d && !"z" %in% names(df)) next
+        # NOTE: the column is `cluster2`. "Median cluster" is only ever the *display*
+        # name (hover labels); testing for it here skipped every file unconditionally,
+        # so this panel could never return a result.
+        if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { diag["no_c2"] <- diag["no_c2"] + 1L; next }
+        if (use_3d && !"z" %in% names(df)) { diag["no_z"] <- diag["no_z"] + 1L; next }
 
         per_tid <- df %>%
           dplyr::group_by(tid) %>%
@@ -7276,13 +7500,20 @@ smlm_server <- function(input, output, session) {
           dplyr::filter(is.finite(tim_med))
         if (!nrow(per_tid)) next
 
-        bg_med <- stats::median(per_tid$tim_med[per_tid$cl2 == 0L], na.rm = TRUE)
-        if (!is.finite(bg_med)) next     # need an unclustered background to reference
+        cids <- unique(per_tid$cl2[per_tid$cl2 > 0L])
+        if (!length(cids)) { diag["no_clusters"] <- diag["no_clusters"] + 1L; next }
 
-        for (cid in unique(per_tid$cl2[per_tid$cl2 > 0L])) {
-          sub <- per_tid[per_tid$cl2 == cid, , drop = FALSE]
+        bg_med <- stats::median(per_tid$tim_med[per_tid$cl2 == 0L], na.rm = TRUE)
+        if (!is.finite(bg_med)) {        # need an unclustered background to reference
+          diag["no_background"] <- diag["no_background"] + 1L; next
+        }
+
+        keep_idx <- list()   # row indices of each qualifying cluster, for the permutation
+        for (cid in cids) {
+          which_c <- which(per_tid$cl2 == cid)
+          sub <- per_tid[which_c, , drop = FALSE]
           n   <- nrow(sub)
-          if (n < min_n) next
+          if (n < min_n) { diag["too_small"] <- diag["too_small"] + 1L; next }
           pts <- as.matrix(sub[, cols, drop = FALSE])
           pts <- pts[stats::complete.cases(pts), , drop = FALSE]
           if (nrow(pts) < 2L) next
@@ -7297,34 +7528,119 @@ smlm_server <- function(input, output, session) {
             time_shift = stats::median(sub$tim_med) - bg_med,
             stringsAsFactors = FALSE
           )
+          keep_idx[[length(keep_idx) + 1L]] <- which_c
+        }
+
+        # Permute detection times WITHIN this file; geometry and membership untouched.
+        if (do_null && length(keep_idx)) {
+          tv     <- per_tid$tim_med
+          is_bg  <- per_tid$cl2 == 0L
+          nullm  <- matrix(NA_real_, nrow = length(keep_idx), ncol = B)
+          for (b in seq_len(B)) {
+            tv_b   <- tv[sample.int(length(tv))]          # shuffle times across all traces
+            bg_b   <- stats::median(tv_b[is_bg], na.rm = TRUE)
+            nullm[, b] <- vapply(keep_idx,
+                                 function(ix) stats::median(tv_b[ix], na.rm = TRUE) - bg_b,
+                                 numeric(1))
+          }
+          for (r in seq_len(nrow(nullm))) null_rows[[length(null_rows) + 1L]] <- nullm[r, ]
         }
       }
     })
 
     res <- if (length(rows)) do.call(rbind, rows) else NULL
     if (is.null(res) || !nrow(res)) {
+      why <- c(
+        if (diag["no_tim"])        sprintf("%d file(s) have no `tim` column", diag["no_tim"]),
+        if (diag["filtered_out"])  sprintf("%d file(s) left empty by the Display-tab metadata filters", diag["filtered_out"]),
+        if (diag["no_c2"])         sprintf("%d file(s) produced no cluster2 column (is Median Clustering enabled?)", diag["no_c2"]),
+        if (diag["no_z"])          sprintf("%d file(s) have no z (uncheck 'Use 3-D coordinates')", diag["no_z"]),
+        if (diag["no_clusters"])   sprintf("%d file(s) yielded no Median Cluster structures at all", diag["no_clusters"]),
+        if (diag["no_background"]) sprintf("%d file(s) had no UNCLUSTERED traces to use as the time reference", diag["no_background"]),
+        if (diag["too_small"])     sprintf("%d structure(s) had fewer than %d traces", diag["too_small"], min_n))
       showNotification(
-        sprintf("No Median Cluster structures with >= %d traces and an unclustered background found.", min_n),
-        type = "warning")
-      crowd_results(NULL); return()
+        HTML(paste0("<b>No structures to plot.</b><br>",
+                    if (length(why)) paste(why, collapse = "<br>") else
+                      "No qualifying Median Cluster structures found.")),
+        type = "warning", duration = 12)
+      crowd_results(NULL); crowd_null_stats(NULL); return()
     }
+    # ── attach the null band + the global trend test ──────────────────────────
+    crowd_null_stats(NULL)
+    if (do_null && length(null_rows) == nrow(res)) {
+      NM <- do.call(rbind, null_rows)                     # clusters x B
+      qs <- t(apply(NM, 1, stats::quantile, probs = c(0.025, 0.5, 0.975), na.rm = TRUE))
+      res$null_lo  <- qs[, 1]; res$null_med <- qs[, 2]; res$null_hi <- qs[, 3]
+
+      # Global test on the TREND, not the offset: Spearman rho between crowding and
+      # time shift, observed vs its permutation distribution. Rank-based, so it is
+      # unaffected by a constant clustered-vs-background offset and by the skew of
+      # the shift distribution — it asks only "does the shift depend on crowding?".
+      rho_of <- function(y) suppressWarnings(
+        stats::cor(res$nn_median, y, method = "spearman", use = "complete.obs"))
+      rho_obs  <- rho_of(res$time_shift)
+      rho_null <- apply(NM, 2, rho_of)
+      rho_null <- rho_null[is.finite(rho_null)]
+      p_two <- if (is.finite(rho_obs) && length(rho_null))
+        (1 + sum(abs(rho_null) >= abs(rho_obs))) / (length(rho_null) + 1) else NA_real_
+      outside <- mean(res$time_shift < res$null_lo | res$time_shift > res$null_hi, na.rm = TRUE)
+      crowd_null_stats(list(rho_obs = rho_obs, p = p_two, B = length(rho_null),
+                            outside = outside))
+    } else {
+      res$null_lo <- NA_real_; res$null_med <- NA_real_; res$null_hi <- NA_real_
+    }
+
     crowd_results(res)
+    ns <- crowd_null_stats()
     showNotification(
-      sprintf("Crowding vs detection-time shift: %d structures across %d file(s).",
-              nrow(res), length(unique(res$dataset))),
-      type = "message", duration = 4)
+      sprintf("Crowding vs detection-time shift: %d structures across %d file(s).%s",
+              nrow(res), length(unique(res$dataset)),
+              if (!is.null(ns) && is.finite(ns$p))
+                sprintf(" Trend vs no-crowding null: rho = %.3f, p = %.3f (%d permutations).",
+                        ns$rho_obs, ns$p, ns$B) else ""),
+      type = "message", duration = 6)
   })
 
   output$crowd_plot <- renderPlotly({
     res <- crowd_results()
     shiny::validate(shiny::need(!is.null(res) && nrow(res) > 0,
                                 "Press 'Run' to compute crowding vs detection-time shift."))
+    n_all <- nrow(res)
     res <- apply_dataset_groups(res)
     shiny::validate(shiny::need(nrow(res) > 0, "No files assigned to groups (group mode)."))
+    # Group mode can drop files; the stored rho/p were computed over the full run,
+    # so only quote them when every structure is still on screen.
+    stats_match <- nrow(res) == n_all
     fig <- plotly::plot_ly()
     datasets <- unique(res$dataset)
     n_ds     <- length(datasets)
     pal <- series_palette(datasets)
+
+    # ── no-crowding null band (drawn first, so points sit on top) ─────────────
+    # Each cluster has its own null interval (its size is fixed), so the band is
+    # per-cluster quantiles ordered along x and lightly smoothed for readability.
+    if ("null_lo" %in% names(res) && any(is.finite(res$null_lo))) {
+      nb  <- res[is.finite(res$null_lo) & is.finite(res$nn_median), , drop = FALSE]
+      nb  <- nb[order(nb$nn_median), , drop = FALSE]
+      smooth_band <- function(y) {
+        if (nrow(nb) < 8) return(y)
+        tr <- tryCatch(stats::loess(y ~ nb$nn_median, span = 0.9, degree = 1), error = function(e) NULL)
+        if (is.null(tr)) return(y)
+        p <- stats::predict(tr); ifelse(is.finite(p), p, y)
+      }
+      lo <- smooth_band(nb$null_lo); hi <- smooth_band(nb$null_hi); md <- smooth_band(nb$null_med)
+      fig <- fig %>%
+        plotly::add_lines(x = nb$nn_median, y = hi, name = "No-crowding null (95%)",
+                          line = list(color = "rgba(120,120,120,0)", width = 0),
+                          hoverinfo = "skip", showlegend = FALSE) %>%
+        plotly::add_lines(x = nb$nn_median, y = lo, name = "No-crowding null (95%)",
+                          fill = "tonexty", fillcolor = "rgba(120,120,120,0.18)",
+                          line = list(color = "rgba(120,120,120,0)", width = 0),
+                          hoverinfo = "skip") %>%
+        plotly::add_lines(x = nb$nn_median, y = md, name = "Null median",
+                          line = list(color = "#777777", width = 1.5, dash = "dot"),
+                          hoverinfo = "skip")
+    }
 
     for (ds in datasets) {
       sub <- res[res$dataset == ds, , drop = FALSE]
@@ -7358,8 +7674,22 @@ smlm_server <- function(input, output, session) {
       fig <- add_crowd_loess(fig, res, "#D7301F", "Trend (loess)")
     }
 
+    # Verdict line: the permutation test on the TREND (rho), plus how many points
+    # left their own null interval. Stated explicitly so the slope is never read
+    # against zero — the null band, not zero, is the correct reference here.
+    ns  <- crowd_null_stats()
+    ttl <- if (!is.null(ns) && is.finite(ns$p) && stats_match) {
+      list(text = sprintf(
+        "Crowding vs detection-time shift  |  trend vs no-crowding null: Spearman rho = %.3f, p = %.3f (%d permutations)  |  %.0f%% of structures outside their null band (5%% expected)",
+        ns$rho_obs, ns$p, ns$B, 100 * ns$outside), font = list(size = 12))
+    } else if (!is.null(ns) && is.finite(ns$p)) {
+      list(text = "Crowding vs detection-time shift  |  null band shown per structure; trend test not shown (group filter changed the set)",
+           font = list(size = 12))
+    } else NULL
+
     fig %>% plotly::layout(
-      margin = list(l = 70),
+      title  = ttl,
+      margin = list(l = 70, t = if (is.null(ttl)) 40 else 60),
       xaxis  = list(title = "Median NN distance among members (nm)  -  smaller = more crowded"),
       yaxis  = list(title = "Detection-time shift (tim)",
                     zeroline = TRUE, zerolinecolor = "#888888", zerolinewidth = 1),
@@ -7400,17 +7730,24 @@ smlm_server <- function(input, output, session) {
     use_primary <- isTRUE(input$enable_clustering)
 
     rows <- list()
+    # Same why-it-found-nothing counters as the crowding panel: an empty result has
+    # several distinct causes and the old message named only the size threshold.
+    diag <- c(empty = 0L, filtered_out = 0L, no_c2 = 0L, no_z = 0L,
+              no_clusters = 0L, too_small = 0L, degenerate = 0L)
     withProgress(message = "Computing within-cluster NN vs size...", value = 0, {
       nf <- length(store)
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
         df <- store[[fname]]
-        if (!is.data.frame(df) || !nrow(df)) next
+        if (!is.data.frame(df) || !nrow(df)) { diag["empty"] <- diag["empty"] + 1L; next }
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df)) next
+        if (is.null(df) || !nrow(df)) { diag["filtered_out"] <- diag["filtered_out"] + 1L; next }
         df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df) || !"Median Cluster" %in% names(df)) next
-        if (use_3d && !"z" %in% names(df)) next
+        # NOTE: the column is `cluster2`. "Median Cluster" is only the DISPLAY name;
+        # testing for it here skipped every file, so this panel could never return a
+        # result. (Same defect as the crowding panel, which used "Median cluster".)
+        if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { diag["no_c2"] <- diag["no_c2"] + 1L; next }
+        if (use_3d && !"z" %in% names(df)) { diag["no_z"] <- diag["no_z"] + 1L; next }
 
         id_col <- if (use_primary && "cluster" %in% names(df) &&
                       any(!is.na(df$cluster) & df$cluster > 0L)) "cluster" else "tid"
@@ -7422,15 +7759,15 @@ smlm_server <- function(input, output, session) {
             y = stats::median(y, na.rm = TRUE),
             z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
             .groups = "drop")
-        if (!nrow(cent)) next
+        if (!nrow(cent)) { diag["no_clusters"] <- diag["no_clusters"] + 1L; next }
 
         for (cid in unique(cent$cluster2)) {
           sub <- cent[cent$cluster2 == cid, , drop = FALSE]
           n   <- nrow(sub)
-          if (n < min_n) next
+          if (n < min_n) { diag["too_small"] <- diag["too_small"] + 1L; next }
           pts <- as.matrix(sub[, cols, drop = FALSE])
           pts <- pts[stats::complete.cases(pts), , drop = FALSE]
-          if (nrow(pts) < 2L) next
+          if (nrow(pts) < 2L) { diag["degenerate"] <- diag["degenerate"] + 1L; next }
           # mean distance to the k nearest members (k clamped to cluster size - 1),
           # per member, then median over members. k = 1 -> nearest-neighbour spacing.
           k_eff <- min(kk, nrow(pts) - 1L)
@@ -7452,7 +7789,19 @@ smlm_server <- function(input, output, session) {
 
     res <- if (length(rows)) do.call(rbind, rows) else NULL
     if (is.null(res) || !nrow(res)) {
-      showNotification(sprintf("No Median Cluster structures with >= %d members found.", min_n), type = "warning")
+      why <- c(
+        if (diag["empty"])        sprintf("%d file(s) were empty", diag["empty"]),
+        if (diag["filtered_out"]) sprintf("%d file(s) left empty by the Display-tab metadata filters", diag["filtered_out"]),
+        if (diag["no_c2"])        sprintf("%d file(s) produced no cluster2 column (is Median Clustering enabled?)", diag["no_c2"]),
+        if (diag["no_z"])         sprintf("%d file(s) have no z (uncheck 'Use 3-D coordinates')", diag["no_z"]),
+        if (diag["no_clusters"])  sprintf("%d file(s) yielded no Median Cluster structures at all", diag["no_clusters"]),
+        if (diag["too_small"])    sprintf("%d structure(s) had fewer than %d members", diag["too_small"], min_n),
+        if (diag["degenerate"])   sprintf("%d structure(s) had fewer than 2 usable coordinates", diag["degenerate"]))
+      showNotification(
+        HTML(paste0("<b>No structures to plot.</b><br>",
+                    if (length(why)) paste(why, collapse = "<br>") else
+                      "No qualifying Median Cluster structures found.")),
+        type = "warning", duration = 12)
       size_nn_results(NULL); return()
     }
     size_nn_results(res)
@@ -7614,17 +7963,29 @@ smlm_server <- function(input, output, session) {
     id  <- ids[idx]
     df  <- s$df
     sub <- df[!is.na(df$cluster2) & df$cluster2 == id, , drop = FALSE]
+    # Per-trace photon budget (eco summed over the trace's localizations). MINFLUX
+    # localization variance scales as 1/photons, and the centroid of a trace
+    # averages its localizations, so the centroid's variance goes as 1/sum(eco) —
+    # i.e. the inverse-variance weight for that centroid IS its total photon count.
     cent <- sub %>% dplyr::group_by(tid) %>%
       dplyr::summarise(
         x = stats::median(x, na.rm = TRUE),
         y = stats::median(y, na.rm = TRUE),
         z = if ("z" %in% names(sub)) stats::median(z, na.rm = TRUE) else 0,
+        w_eco = if ("eco" %in% names(sub)) sum(eco, na.rm = TRUE) else NA_real_,
         .groups = "drop")
+    w <- cent$w_eco
+    if (!length(w) || all(!is.finite(w)) || sum(w, na.rm = TRUE) <= 0) {
+      w <- NULL                                   # no usable eco -> unweighted
+    } else {
+      w[!is.finite(w) | w <= 0] <- stats::median(w[is.finite(w) & w > 0])
+    }
     zc    <- if ("z" %in% names(sub)) sub$z else rep(0, nrow(sub))
     cloud <- cbind(x = sub$x, y = sub$y, z = zc)
     cloud <- cloud[stats::complete.cases(cloud), , drop = FALSE]
     list(idx = idx, n = n, id = id, sub = sub,
          mat = as.matrix(cent[, c("x", "y", "z")]),
+         w_eco = w,
          cloud = cloud)
   })
 
@@ -7645,13 +8006,28 @@ smlm_server <- function(input, output, session) {
               mle_center_lambda = input$mle_center_lambda %||% 0.1)),
       error = function(e) list())
 
-    fitS <- tryCatch(do.call(mle_fit_sphere,    c(list(X = X, w = NULL), cargs)), error = function(e) NULL)
-    fitE <- tryCatch(do.call(mle_fit_ellipsoid, c(list(X = X, w = NULL), cargs)), error = function(e) NULL)
-    fitH <- tryCatch(do.call(mle_fit_helix,     c(list(X = X, w = NULL, turns_hint = turns), cargs)), error = function(e) NULL)
-    fitR <- tryCatch(do.call(mle_fit_ring,      c(list(X = X, w = NULL), cargs)), error = function(e) NULL)
-    fitA <- tryCatch(do.call(mle_fit_arc,       c(list(X = X, w = NULL), cargs)), error = function(e) NULL)
+    # Inverse-variance (photon) weighting. The default iid-isotropic assumption is
+    # wrong in detail for MINFLUX: precision varies with photon count, so a
+    # 50-photon trace should not pull the surface as hard as a 5000-photon one.
+    # w_i = total eco of trace i (see viewer_current). n_eff is Kish's effective
+    # sample size — it exposes the cost of weighting, i.e. whether a couple of very
+    # bright traces are now carrying the fit.
+    W <- if (isTRUE(input$viewer_weight_eco)) cur$w_eco else NULL
+    n_eff <- if (!is.null(W)) sum(W)^2 / sum(W^2) else nrow(X)
 
-    rmsd_of <- function(d) { d <- d[is.finite(d)]; if (length(d)) sqrt(mean(d^2)) else NA_real_ }
+    fitS <- tryCatch(do.call(mle_fit_sphere,    c(list(X = X, w = W), cargs)), error = function(e) NULL)
+    fitE <- tryCatch(do.call(mle_fit_ellipsoid, c(list(X = X, w = W), cargs)), error = function(e) NULL)
+    fitH <- tryCatch(do.call(mle_fit_helix,     c(list(X = X, w = W, turns_hint = turns), cargs)), error = function(e) NULL)
+    fitR <- tryCatch(do.call(mle_fit_ring,      c(list(X = X, w = W), cargs)), error = function(e) NULL)
+    fitA <- tryCatch(do.call(mle_fit_arc,       c(list(X = X, w = W), cargs)), error = function(e) NULL)
+
+    # Weighted RMSD: sqrt(sum(w*d^2)/sum(w)). With W = NULL this is the plain RMSD.
+    rmsd_of <- function(d) {
+      ok <- is.finite(d)
+      if (!any(ok)) return(NA_real_)
+      ww <- if (is.null(W)) rep(1, length(d)) else W
+      sqrt(sum(ww[ok] * d[ok]^2) / sum(ww[ok]))
+    }
     rS <- if (!is.null(fitS)) rmsd_of(as.numeric(mle_project_sphere(X, fitS$center, fitS$radius)$dist)) else NA_real_
     rE <- if (!is.null(fitE)) rmsd_of(as.numeric(mle_project_ellipsoid(X, fitE$center, fitE$axes, fitE$R)$dist)) else NA_real_
     rR <- if (!is.null(fitR)) rmsd_of(as.numeric(mle_project_ring(X, fitR$center, fitR$normal, fitR$radius)$dist)) else NA_real_
@@ -7666,10 +8042,14 @@ smlm_server <- function(input, output, session) {
     }
     rmsd <- c(sphere = rS, ellipsoid = rE, helix = rH, ring = rR, arc = rA)
 
-    # ── model selection: AIC / AICc / BIC under iid isotropic Gaussian residuals ──
+    # ── model selection: AIC / AICc / BIC under isotropic Gaussian residuals ─────
     # sigma^2_hat = RMSD^2, so -2logL = n*log(2*pi*sigma2) + n. k = geometric DOF + 1
     # (the variance). AICc adds the small-sample correction and -> Inf when a model
     # has too few points to estimate (n <= k+1), which refuses over-parameterised fits.
+    # When photon-weighted, point i has variance sigma^2/w_i and -2logL gains a
+    # -sum(log w_i) term — identical for every shape (same weights), so it cancels in
+    # every AIC/AICc/BIC *difference*. The criteria stay comparable across shapes;
+    # only their absolute values shift, so never compare them across weighting modes.
     n   <- nrow(X)
     pk  <- c(sphere = 4, ellipsoid = 9, helix = 8, ring = 6, arc = 8)  # geometric DOF
     shp <- names(rmsd)
@@ -7687,6 +8067,7 @@ smlm_server <- function(input, output, session) {
     rownames(M) <- shp
 
     list(rmsd = rmsd, M = M, n = n,
+         weighted = !is.null(W), n_eff = n_eff,
          fits = list(sphere = fitS, ellipsoid = fitE, helix = fitH, ring = fitR, arc = fitA))
   })
 
@@ -7755,9 +8136,13 @@ smlm_server <- function(input, output, session) {
     best <- if (!is.null(vf)) vf$best else NA_character_
     rb   <- if (!is.null(vf) && !is.na(best)) as.numeric(vf$rmsd[[best]]) else NA_real_
     crit <- toupper(if (!is.null(vf)) vf$criterion else "aicc")
-    sprintf("Cluster %d / %d   |   id %d   |   %d traces%s",
+    wtxt <- if (!is.null(vf) && isTRUE(vf$weighted))
+      sprintf("   |   photon-weighted (n_eff %.1f of %d)", vf$n_eff, vf$n) else ""
+    sprintf("Cluster %d / %d   |   id %d   |   %d traces%s%s",
             cur$idx, cur$n, cur$id, nrow(cur$mat),
-            if (is.finite(rb)) sprintf("   |   best MLE fit (%s): %s (RMSD %.1f nm)", crit, best, rb) else "")
+            if (is.finite(rb)) sprintf("   |   best MLE fit (%s): %s (%sRMSD %.1f nm)", crit, best,
+                                       if (!is.null(vf) && isTRUE(vf$weighted)) "weighted " else "", rb) else "",
+            wtxt)
   })
 
   output$viewer_rmsd_table <- renderTable({
