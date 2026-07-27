@@ -91,31 +91,62 @@ sim_server <- function(input, output, session) {
                         list(shapes = sb$shapes, annotations = sb$annotations))
   }
 
-  # Front-loaded detection times: the rate decays from a peak toward a constant
-  # floor, so most trace IDs are detected early and the rate flattens later.
-  # Inverse-CDF sampling of n times on [0, T] from density
-  #   f(t) = floor_frac + (1 - floor_frac) · exp(-t / tau).
-  sim_sample_detection_times <- function(n, T_sec, tau_sec, floor_frac) {
+  # ── Detection-rate SHAPE models ─────────────────────────────────────────────
+  # The instantaneous structure detection rate is  struct_rate · g(t),  where
+  # g(t) ∈ [0, 1] is a normalized SHAPE and struct_rate is the CHARACTERISTIC
+  # (reference) rate — the peak for a decaying run, the plateau for a rising or
+  # constant one. Three shapes cover the profiles seen in real MINFLUX runs:
+  #
+  #   "decay"    g(t) = level + (1-level)·e^{-t/τ}     starts at 1, → level
+  #              Blinking dyes: bright early, bleach toward a floor. `level` =
+  #              late/peak ratio (0 = decays to zero, 1 = no decay).
+  #   "constant" g(t) = 1                              flat (variation is Poisson)
+  #   "rise"     g(t) = 1 − (1-level)·e^{-t/τ}         starts at `level`, → 1
+  #              Activation-limited: almost no detection early, then rises to a
+  #              cap. `level` = initial/plateau ratio (0 = starts from zero).
+  #
+  # `t` and `tau` must share units (both seconds, or both minutes). level clamped
+  # to [0,1]. The decay case is identical to the old hard-coded formula, so
+  # existing calibrations are unchanged.
+  acq_shape <- function(t, model, tau, level) {
+    tau <- max(1e-6, tau); lv <- max(0, min(1, level))
+    e   <- exp(-t / tau)
+    switch(model %||% "decay",
+      constant = rep(1, length(t)),
+      rise     = 1 - (1 - lv) * e,
+      lv + (1 - lv) * e)                 # decay (default)
+  }
+  # Closed-form ∫₀ᵀ g(t) dt  (T, tau in the SAME units). Used for expected counts.
+  acq_shape_integral <- function(T, model, tau, level) {
+    tau <- max(1e-6, tau); lv <- max(0, min(1, level))
+    ee  <- tau * (1 - exp(-T / tau))     # ∫₀ᵀ e^{-t/τ} dt
+    switch(model %||% "decay",
+      constant = T,
+      rise     = T - (1 - lv) * ee,
+      lv * T + (1 - lv) * ee)            # decay (default)
+  }
+
+  # Sample n detection times on [0, T] from the (front- or back-loaded) rate
+  # shape, by inverse-CDF sampling of the density g(t). model/level select the
+  # profile (see acq_shape); tau_sec is the rate-change time constant.
+  sim_sample_detection_times <- function(n, T_sec, tau_sec, floor_frac,
+                                         model = "decay") {
     if (n <= 0) return(numeric(0))
     if (!is.finite(T_sec) || T_sec <= 0) return(rep(0, n))
     ng   <- 2000L
     tg   <- seq(0, T_sec, length.out = ng)
-    dens <- pmax(1e-9,
-                 floor_frac + (1 - floor_frac) * exp(-tg / max(1e-6, tau_sec)))
+    dens <- pmax(1e-9, acq_shape(tg, model, tau_sec, floor_frac))
     cdf  <- cumsum(dens); cdf <- cdf / cdf[ng]
     approx(cdf, tg, runif(n), rule = 2, ties = "ordered")$y
   }
 
   # Expected number of structure detections over [0, T] for an ABSOLUTE rate
-  # r(t) = struct_rate · (floor + (1-floor)·e^{-t/τ})  [traces/min]:
-  #   N_T = struct_rate · ( floor·T + (1-floor)·τ·(1 - e^{-T/τ}) )   (T, τ in min)
-  # The early (exp) term is fixed, so the per-elapsed-time count is independent
-  # of the total duration — only the floor·T term keeps growing with T.
-  acq_expected_count <- function(struct_rate, T_sec, decay_min, floor_frac) {
-    T_min   <- T_sec / 60
-    tau_min <- max(1e-6, decay_min)
-    struct_rate * (floor_frac * T_min +
-                   (1 - floor_frac) * tau_min * (1 - exp(-T_min / tau_min)))
+  # r(t) = struct_rate · g(t)  [traces/min]:  N_T = struct_rate · ∫₀ᵀ g dt.
+  # (T, τ in min.) For decay this is the old floor·T + (1-floor)·τ·(1-e^{-T/τ}).
+  acq_expected_count <- function(struct_rate, T_sec, decay_min, floor_frac,
+                                 model = "decay") {
+    T_min <- T_sec / 60
+    struct_rate * acq_shape_integral(T_min, model, max(1e-6, decay_min), floor_frac)
   }
 
   # Acquisition timeline from a fixed fluorophore pool + live acquisition
@@ -126,7 +157,7 @@ sim_server <- function(input, output, session) {
   # display).  Returns the same shape of list the acquisition plot/summary use.
   compute_acq_timeline <- function(pool_mol, n_mol_total, struct_rate, T_sec,
                                    blinks, decay_min, floor_frac, bg_rate,
-                                   resolve_q, crowd_m = NULL) {
+                                   resolve_q, crowd_m = NULL, model = "decay") {
     n_pool <- length(pool_mol)
     if (n_pool == 0 || !is.finite(T_sec) || T_sec <= 0 || struct_rate <= 0)
       return(NULL)
@@ -153,9 +184,11 @@ sim_server <- function(input, output, session) {
     ng     <- 240L
     tg_min <- seq(0, T_min, length.out = ng)
     tg_sec <- tg_min * 60
-    # Cumulative fluorophore-detection attempts from the absolute rate.
-    cum_R <- rate_min * (floor_frac * tg_min +
-               (1 - floor_frac) * tau_min * (1 - exp(-tg_min / tau_min)))
+    # Cumulative fluorophore-detection attempts from the absolute rate:
+    # ∫₀ᵗ g(s) ds for the chosen shape (decay / constant / rise).
+    cum_R <- rate_min * vapply(tg_min,
+               function(tt) acq_shape_integral(tt, model, tau_min, floor_frac),
+               numeric(1))
     # Photobleaching consumes the photon budget GRADUALLY (fluorophores bleach at
     # different times), so the total saturates smoothly toward struct_cap and the
     # structure rate tapers off — no hard cliff when the budget is reached.
@@ -178,10 +211,9 @@ sim_server <- function(input, output, session) {
     n_mol_det  <- cum_unique[ng]
     denom      <- max(1, n_mol_resolvable)
 
-    # Instantaneous detection rate (traces/HOUR): structure (decaying with τ and
-    # tapering as the dyes bleach) + constant background floor.
-    rate_struct <- struct_rate *
-                   (floor_frac + (1 - floor_frac) * exp(-tg_min / tau_min)) * bleach
+    # Instantaneous detection rate (traces/HOUR): structure (the chosen shape g(t)
+    # × the photobleaching taper) + constant background floor.
+    rate_struct <- struct_rate * acq_shape(tg_min, model, tau_min, floor_frac) * bleach
     rate_v <- rate_struct + bg_rate
     n_bg   <- max(0L, min(200000L, as.integer(round(bg_min * T_min))))
 
@@ -253,6 +285,29 @@ sim_server <- function(input, output, session) {
     # simulated change look flat.  Cap at the run length.
     tau_min <- min(tau_min, T_sec / 60)
 
+    # ── Choose the detection-rate MODEL that best fits the profile ─────────────
+    # All three are the same family  A + B·e^{-t/τ}:  decay B>0 (high→low),
+    # rise B<0 (low→high), constant B≈0. Compare the exponential fit's residual
+    # to a flat line; if it barely helps, or the endpoints hardly differ, call it
+    # constant. Otherwise the SIGN of (early − late) picks decay vs rise, and the
+    # level/reference are set so struct_rate is the peak (decay) or plateau (rise).
+    okv       <- is.finite(rate_v)
+    rt        <- rate_t[okv]; rv <- rate_v[okv]
+    rss_const <- sum((rv - mean(rv))^2)
+    pred_exp  <- Rf + (R0 - Rf) * exp(-rt / (tau_min * 60))
+    rss_exp   <- sum((rv - pred_exp)^2)
+    rel_chg   <- abs(R0 - Rf) / max(1e-9, R_mean)
+    # Only fall back to "constant" when the exponential barely helps (< 5% lower
+    # residual than a flat line) AND the endpoints differ by < 10% of the mean.
+    # (Loosened from 0.9 / 0.15 so a shallow but real decay is not called flat.)
+    if (rss_exp >= 0.95 * rss_const || rel_chg < 0.10) {
+      det_model <- "constant"; level_frac <- 1;                       ref_rate <- R_mean
+    } else if (R0 >= Rf) {
+      det_model <- "decay";    level_frac <- max(0, min(1, Rf / max(1e-9, R0))); ref_rate <- R0
+    } else {
+      det_model <- "rise";     level_frac <- max(0, min(1, R0 / max(1e-9, Rf))); ref_rate <- Rf
+    }
+
     fov_x <- diff(range(df$x, na.rm = TRUE))
     fov_y <- diff(range(df$y, na.rm = TRUE))
     fov_z <- if ("z" %in% names(df)) diff(range(df$z, na.rm = TRUE)) else 0
@@ -301,6 +356,7 @@ sim_server <- function(input, output, session) {
 
     list(n_traces = n_tr, duration_hr = T_sec / 3600,
          rate_peak = R0, rate_mean = R_mean, rate_floor = Rf,
+         det_model = det_model, level_frac = level_frac, ref_rate = ref_rate,
          tau_min = tau_min, struct_frac = struct_frac,
          fov_x = fov_x, fov_y = fov_y, fov_z = fov_z,
          rate_t = rate_t, rate_v = rate_v,
@@ -1234,10 +1290,11 @@ sim_server <- function(input, output, session) {
       acq_T_sec <- max(1, (hrs * 60 + mins) * 60)
       blinks    <- max(1, as.numeric(input$sim_acq_blinks %||% 5))   # detections/fluorophore
       dec_min   <- max(0.1, as.numeric(input$sim_acq_decay_min  %||% 15))
-      flr_frac  <- max(0, min(4, as.numeric(input$sim_acq_floor_frac %||% 0.25)))
+      flr_frac  <- max(0, min(1, as.numeric(input$sim_acq_floor_frac %||% 0.25)))
+      det_model <- input$sim_acq_det_model %||% "decay"
       n_req     <- as.integer(round(                                # absolute-rate count
                      acq_expected_count(struct_rate / 60, acq_T_sec,  # per hour → per min
-                                        dec_min, flr_frac)))
+                                        dec_min, flr_frac, det_model)))
       if (n_pool > 0 && n_req > 0) {
         k_i        <- 1L + rpois(n_pool, max(0, blinks - 1))         # per-fluorophore budget
         struct_cap <- sum(k_i)
@@ -1397,12 +1454,13 @@ sim_server <- function(input, output, session) {
       all_tids   <- unique(locs$tid)
       n_real     <- nrow(fluoro)
       decay_min  <- max(0.1, as.numeric(input$sim_acq_decay_min  %||% 15))
-      floor_frac <- max(0, min(4, as.numeric(input$sim_acq_floor_frac %||% 0.25)))
+      floor_frac <- max(0, min(1, as.numeric(input$sim_acq_floor_frac %||% 0.25)))
+      det_model  <- input$sim_acq_det_model %||% "decay"
       tid_times  <- setNames(rep(NA_real_, length(all_tids)), all_tids)
       real_ids   <- intersect(as.character(seq_len(n_real)), all_tids)
       if (length(real_ids) > 0)
         tid_times[real_ids] <- sim_sample_detection_times(
-          length(real_ids), acq_T_sec, decay_min * 60, floor_frac)
+          length(real_ids), acq_T_sec, decay_min * 60, floor_frac, det_model)
       bg_ids <- setdiff(all_tids, real_ids)
       if (length(bg_ids) > 0)
         tid_times[bg_ids] <- runif(length(bg_ids), 0, acq_T_sec)
@@ -1473,10 +1531,11 @@ sim_server <- function(input, output, session) {
       T_sec       = max(1, (hrs * 60 + mins) * 60),
       blinks      = max(1, as.numeric(input$sim_acq_blinks %||% 5)),
       decay_min   = max(0.1, as.numeric(input$sim_acq_decay_min %||% 15)),
-      floor_frac  = max(0, min(4, as.numeric(input$sim_acq_floor_frac %||% 0.25))),
+      floor_frac  = max(0, min(1, as.numeric(input$sim_acq_floor_frac %||% 0.25))),
       bg_rate     = max(0, as.numeric(input$sim_bg_rate %||% 5)),
       resolve_q   = as.numeric(input$sim_acq_resolve_q %||% 0.9),
-      crowd_m     = crowd_m)
+      crowd_m     = crowd_m,
+      model       = input$sim_acq_det_model %||% "decay")
   })
 
   # ── Calibrate from a real MINFLUX run ────────────────────────────────────────
@@ -1486,21 +1545,31 @@ sim_server <- function(input, output, session) {
   sim_real_rv <- reactiveVal(NULL)
 
   # Split the measured total rate into structure + constant background given the
-  # fraction of traces that are on-structure, and push struct_rate / bg_rate /
-  # late-rate ratio.  Background is the constant offset; the structure is the
-  # time-varying part on top — its rate can FALL (bleaching, ratio < 1) or RISE
-  # (buffer activating, ratio > 1) toward its late value.  Background is capped
-  # at the minimum of the run so the early/late structure rate stays positive.
+  # fraction of traces that are on-structure, and push the fitted MODEL plus its
+  # struct_rate / bg_rate / level. Background is the constant offset; the
+  # structure is the time-varying part on top, whose shape (decay / constant /
+  # rise) analyze_real_run already chose. struct_rate is set to the structure's
+  # CHARACTERISTIC rate (peak for decay, plateau for rise), and level to the
+  # matching [0,1] ratio, so the simulated curve reproduces the measured profile.
   apply_real_rates <- function(a, frac) {
     frac  <- max(0, min(1, frac))
-    bg    <- min((1 - frac) * a$rate_mean,
-                 0.9 * min(a$rate_peak, a$rate_floor))      # ≤ the run minimum
-    bg    <- max(0, bg)
-    s0    <- max(0.1, a$rate_peak - bg)                     # initial structure rate
-    ratio <- max(0, min(4, (a$rate_floor - bg) / s0))       # late / early
-    updateNumericInput(session, "sim_struct_rate", value = round(s0))
+    model <- a$det_model %||% "decay"
+    # Background: constant offset, capped below the run minimum so the structure
+    # component stays positive at both ends.
+    bg <- max(0, min((1 - frac) * a$rate_mean, 0.9 * min(a$rate_peak, a$rate_floor)))
+    s_early <- max(0.1, a$rate_peak  - bg)      # structure rate near the start
+    s_late  <- max(0,   a$rate_floor - bg)      # structure rate near the end
+    if (model == "constant") {
+      struct_rate <- max(0.1, a$rate_mean - bg); level <- 1
+    } else if (model == "rise") {               # plateau = late, starts low
+      struct_rate <- max(0.1, s_late);  level <- max(0, min(1, s_early / struct_rate))
+    } else {                                    # decay: peak = early, → floor
+      struct_rate <- max(0.1, s_early); level <- max(0, min(1, s_late / struct_rate))
+    }
+    updateRadioButtons(session, "sim_acq_det_model", selected = model)
+    updateNumericInput(session, "sim_struct_rate", value = round(struct_rate))
     updateNumericInput(session, "sim_bg_rate",     value = round(bg))
-    updateSliderInput (session, "sim_acq_floor_frac", value = round(ratio, 2))
+    updateSliderInput (session, "sim_acq_floor_frac", value = round(level, 2))
   }
 
   observeEvent(input$sim_real_file, {

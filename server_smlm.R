@@ -1234,7 +1234,9 @@ smlm_server <- function(input, output, session) {
   # INPUT : uploaded_df()   OUTPUT: same columns, fewer rows
   # ==========================================================================
   metadata_filtered_df <- reactive({
-    df <- uploaded_df()
+    # Drop Fiducial-scan-flagged traces first (only when the exclusion is on;
+    # reversible — see qc_exclude_from). Active file = input$active_file.
+    df <- qc_exclude_from(uploaded_df(), input$active_file)
 
     # Apply range filter ONLY if user range differs from the dataset's full range
     rng_filter <- function(dat, nm, rng_val, full_rng) {
@@ -3355,7 +3357,7 @@ smlm_server <- function(input, output, session) {
     tot_lo     <- sum(s$n_gt_lo);  tot_hi <- sum(s$n_gt_hi)
     any_crowd  <- any(s$crowded)
     any_mm     <- any(s$stoich_mismatch)
-    lvl_lbl    <- if (identical(m$level, "primary")) "primary clusters (de-blinked)" else "raw trace IDs"
+    lvl_lbl    <- if (identical(m$level, "primary")) "de-blinked molecules" else "raw trace IDs"
 
     rows <- lapply(seq_len(nrow(s)), function(i) {
       r <- s[i, ]
@@ -6879,7 +6881,7 @@ smlm_server <- function(input, output, session) {
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]
         incProgress(1 / n_files, detail = fname)
-        df <- store[[fname]]
+        df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
 
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
@@ -7048,9 +7050,9 @@ smlm_server <- function(input, output, session) {
     )
     unit_lbl <- switch(input$nn_batch_unit %||% "tid",
       tid           = "TID centroid",
-      pcid          = "Primary cluster centroid",
+      pcid          = "De-blinked molecule centroid",
       cluster2_tid  = "TID-within-Median-Cluster",
-      cluster2_pcid = "Primary cluster centroid-within-Median-Cluster",
+      cluster2_pcid = "De-blinked molecule centroid within Median Cluster",
       input$nn_batch_unit %||% "tid"
     )
     fig %>% plotly::layout(
@@ -7129,35 +7131,41 @@ smlm_server <- function(input, output, session) {
       showNotification("No files loaded.", type = "warning"); return()
     }
 
-    unit   <- input$tid_count_unit %||% "cluster2"
-    cl_col <- if (unit == "pcid") "cluster" else "cluster2"
+    # The GROUPING is ALWAYS the median cluster (cluster2). The UNIT counted
+    # inside each median cluster is either raw trace IDs ("tid") or primary
+    # de-blinked molecules ("pcid" — needs de-blinking enabled).
+    unit      <- input$tid_count_unit %||% "tid"
+    count_col <- if (unit == "pcid") "cluster" else "tid"
 
-    store <- smlm_file_store()
-    if (!length(store)) {
-      showNotification("No files loaded.", type = "warning"); return()
-    }
     if (isTRUE(input$tid_count_by_channel)) {
       cs <- mplex_split_active()
       if (length(cs)) store <- cs
     }
 
     all_counts <- list()
-    withProgress(message = "Counting TIDs per cluster...", value = 0, {
+    withProgress(message = "Counting units per median cluster...", value = 0, {
       n_files <- length(store)
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]
         incProgress(1 / n_files, detail = fname)
-        df <- store[[fname]]
+        df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) next
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) next
         df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) next
-        if (!cl_col %in% names(df) || all(is.na(df[[cl_col]]) | df[[cl_col]] == 0L)) next
-        cnt <- df %>%
-          dplyr::filter(!is.na(.data[[cl_col]]) & .data[[cl_col]] > 0L) %>%
-          dplyr::group_by(.data[[cl_col]]) %>%
-          dplyr::summarise(n_tids = dplyr::n_distinct(tid), .groups = "drop") %>%
+        # Need median clusters (cluster2) to group by.
+        if (!"cluster2" %in% names(df) || all(is.na(df$cluster2) | df$cluster2 == 0L)) next
+        # Counting de-blinked molecules needs the de-blink (primary `cluster`) column present.
+        if (count_col == "cluster" &&
+            (!"cluster" %in% names(df) || all(is.na(df$cluster) | df$cluster == 0L))) next
+        sub <- df %>% dplyr::filter(!is.na(cluster2) & cluster2 > 0L)
+        # When counting primary clusters, ignore primary-noise points (cluster 0).
+        if (count_col == "cluster") sub <- sub %>% dplyr::filter(!is.na(cluster) & cluster > 0L)
+        if (!nrow(sub)) next
+        cnt <- sub %>%
+          dplyr::group_by(cluster2) %>%
+          dplyr::summarise(n_tids = dplyr::n_distinct(.data[[count_col]]), .groups = "drop") %>%
           dplyr::mutate(dataset = fname)
         all_counts[[fname]] <- cnt
       }
@@ -7165,18 +7173,19 @@ smlm_server <- function(input, output, session) {
     counts <- do.call(rbind, Filter(Negate(is.null), all_counts))
 
     if (is.null(counts) || !nrow(counts)) {
-      hint <- if (cl_col == "cluster")
-        "Enable Primary Clustering and press Plot for each file."
+      hint <- if (count_col == "cluster")
+        "Enable BOTH Primary and Median Clustering in the Display tab, then press Plot for each file."
       else
-        "Enable Median Clustering and press Plot for each file."
-      showNotification(paste0("No clusters found. ", hint), type = "warning")
+        "Enable Median Clustering in the Display tab, then press Plot for each file."
+      showNotification(paste0("No median clusters found. ", hint), type = "warning")
       tid_count_results(NULL)
       return()
     }
     tid_count_results(counts)
+    unit_lbl <- if (count_col == "cluster") "de-blinked molecules" else "trace IDs"
     showNotification(
-      sprintf("Counted TIDs in %d clusters across %d file(s) (median = %g).",
-              nrow(counts), length(unique(counts$dataset)),
+      sprintf("Counted %s in %d median clusters across %d file(s) (median = %g).",
+              unit_lbl, nrow(counts), length(unique(counts$dataset)),
               stats::median(counts$n_tids)),
       type = "message", duration = 4)
   })
@@ -7190,8 +7199,9 @@ smlm_server <- function(input, output, session) {
 
     bins      <- max(5L, as.integer(input$tid_count_bins %||% 30L))
     density   <- identical(input$tid_count_yaxis %||% "count", "density")
-    unit      <- input$tid_count_unit %||% "cluster2"
-    lbl       <- if (unit == "pcid") "Primary point DBSCAN Cluster" else "Median Cluster"
+    unit      <- input$tid_count_unit %||% "tid"
+    # Grouping is always the median cluster; the unit is what we counted inside it.
+    unit_lbl  <- if (unit == "pcid") "De-blinked molecules" else "Trace IDs"
     aggregate <- isTRUE(input$tid_count_aggregate)
 
     med_n   <- stats::median(counts$n_tids)
@@ -7268,8 +7278,8 @@ smlm_server <- function(input, output, session) {
         barmode = "overlay",
         shapes = ov_shapes,
         annotations = ov_annot,
-        xaxis = list(title = paste0("TIDs per ", lbl)),
-        yaxis = list(title = if (density) "Density" else "Number of clusters"),
+        xaxis = list(title = paste0(unit_lbl, " per Median Cluster")),
+        yaxis = list(title = if (density) "Density" else "Number of median clusters"),
         legend = list(orientation = "h", y = -0.18, groupclick = "togglegroup"),
         paper_bgcolor = "white",
         plot_bgcolor  = "white"
@@ -7309,7 +7319,7 @@ smlm_server <- function(input, output, session) {
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]
         incProgress(1 / n_files, detail = fname)
-        df <- store[[fname]]
+        df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) next
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df) || !"tim" %in% names(df)) next
@@ -7423,9 +7433,584 @@ smlm_server <- function(input, output, session) {
     }
   )
 
+  # ==========================================================================
+  # Trace-ID detection over time — unique traces vs acquisition time
+  # ==========================================================================
+  # GOAL: show how many UNIQUE TRACE IDs are detected as a function of
+  # acquisition time. A trace ID is one continuous detection of a blinking
+  # fluorophore, so this is the detection-event RATE over the run — a direct QC
+  # of whether imaging stayed stable (a declining rate flags photobleaching,
+  # exhausted blinking, drift, or label/sample depletion).
+  #
+  # DIFFERS from the Median-Cluster detection plot above: no clustering is
+  # required (works on raw traces), and it draws ONE SERIES PER FILE — or per
+  # group in group mode — rather than a clustered/unclustered split.
+  #
+  # Each trace is counted ONCE, at its median tim, so a long trace with many
+  # localizations does not dominate the early bins. Per-localization metadata
+  # filters apply (via apply_meta_filters_batch); the trace-length filter is
+  # deliberately NOT applied, because short blinking events are real detections.
+  #
+  # Each dataset has its OWN tim timeline, so each series is drawn only across
+  # its own acquisition window (see the plot): the line STOPS where that
+  # dataset's tim ends, rather than dropping to a misleading zero.
+  #
+  # RESULT stored: data.frame(tid, tim_med, dataset) — one row per trace.
+  tid_time_results <- reactiveVal(NULL)
+
+  observeEvent(input$run_tid_time, {
+    store <- smlm_file_store()
+    if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
+    # Active-file-only unless "all files" is ticked.
+    if (!isTRUE(input$tid_time_all_files)) {
+      af <- input$active_file
+      if (!is.null(af) && af %in% names(store)) store <- store[af]
+    }
+
+    # Trace-ID length prefilter (localizations per trace), the SAME range applied
+    # to every dataset. len_max = 0 means "no upper limit". Read once here.
+    len_min <- max(1L, suppressWarnings(as.integer(input$tid_time_len_min %||% 1L)))
+    len_max <- suppressWarnings(as.integer(input$tid_time_len_max %||% 0L))
+    if (is.na(len_min)) len_min <- 1L
+    if (is.na(len_max)) len_max <- 0L
+
+    all_tid <- list()
+    withProgress(message = "Computing trace detection over time...", value = 0, {
+      n_files <- length(store)
+      for (i in seq_along(store)) {
+        fname <- names(store)[[i]]
+        incProgress(1 / n_files, detail = fname)
+        df <- qc_exclude_from(store[[fname]], fname)
+        if (!is.data.frame(df) || !nrow(df)) next
+        # Row-level metadata filters only (efo/cfr/dcr/...); NOT spread/length.
+        df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+        if (is.null(df) || !nrow(df) || !all(c("tid", "tim") %in% names(df))) next
+        # Trace-length prefilter: keep only trace IDs whose localization count is
+        # in [len_min, len_max]. Counts are per-file (a tid is within one file).
+        tl <- table(df$tid)
+        keep_tids <- names(tl)[tl >= len_min & (len_max <= 0L | tl <= len_max)]
+        df <- df[df$tid %in% keep_tids, , drop = FALSE]
+        if (!nrow(df)) next
+        # One row per trace, placed at its median acquisition time.
+        per_tid <- df %>%
+          dplyr::group_by(tid) %>%
+          dplyr::summarise(tim_med = stats::median(tim, na.rm = TRUE), .groups = "drop") %>%
+          dplyr::filter(is.finite(tim_med)) %>%
+          dplyr::mutate(dataset = fname)
+        if (nrow(per_tid)) all_tid[[fname]] <- per_tid
+      }
+    })
+    res <- do.call(rbind, Filter(Negate(is.null), all_tid))
+    if (is.null(res) || !nrow(res)) {
+      showNotification("No traces with a tim column found. Check the metadata filters.",
+                       type = "warning")
+      tid_time_results(NULL); return()
+    }
+    tid_time_results(res)
+    showNotification(
+      sprintf("Trace detection over time: %d traces across %d file(s).",
+              nrow(res), length(unique(res$dataset))),
+      type = "message", duration = 4)
+  })
+
+  output$tid_time_plot <- renderPlotly({
+    res <- tid_time_results()
+    shiny::validate(shiny::need(!is.null(res) && nrow(res) > 0,
+                                "Press 'Run' to compute trace detection over time."))
+    # Relabel file -> group when in group mode (drops unassigned files).
+    res <- apply_dataset_groups(res)
+    shiny::validate(shiny::need(nrow(res) > 0, "No files assigned to groups (group mode)."))
+
+    bins <- max(5L, as.integer(input$tid_time_bins %||% 40L))
+    mode <- input$tid_time_yaxis %||% "count"
+
+    # Shared time axis (union of all datasets) so files/groups line up on x.
+    rng <- range(res$tim_med, na.rm = TRUE)
+    if (!all(is.finite(rng)) || diff(rng) <= 0) rng <- c(rng[1], rng[1] + 1)
+    breaks  <- seq(rng[1], rng[2], length.out = bins + 1L)
+    ctr     <- (breaks[-1] + breaks[-(bins + 1L)]) / 2
+    res$bin <- pmin(pmax(findInterval(res$tim_med, breaks, rightmost.closed = TRUE), 1L), bins)
+
+    # Per-series y-values honouring the selected mode. `active` marks the bins
+    # that fall inside THIS dataset's own tim window; bins outside it are set to
+    # NA so the line STOPS at the dataset's end instead of dropping to zero
+    # (zero would wrongly read as "detected nothing" rather than "acquisition
+    # over"). A genuine empty bin WITHIN the window stays 0 — a real dip.
+    yvals <- function(cnt, active) {
+      tot <- sum(cnt); sc <- if (tot > 0) tot else 1
+      y <- switch(mode,
+        cumulative      = cumsum(cnt),
+        norm            = cnt / sc,
+        norm_cumulative = cumsum(cnt) / sc,
+                          cnt)
+      y[!active] <- NA_real_
+      yt <- switch(mode,
+        cumulative      = "Cumulative unique traces",
+        norm            = "Detection fraction per bin",
+        norm_cumulative = "Cumulative detection fraction",
+                          "Unique traces per bin")
+      list(y = y, yt = yt)
+    }
+
+    series <- unique(res$dataset)
+    pal    <- series_palette(series)
+    fig    <- plotly::plot_ly()
+    ytitle <- "Unique traces per bin"
+    for (s in series) {
+      tm  <- res$tim_med[res$dataset == s]
+      cnt <- tabulate(res$bin[res$dataset == s], nbins = bins)
+      # Bins spanned by this dataset's own [min, max] tim.
+      b_lo   <- pmin(pmax(findInterval(min(tm), breaks, rightmost.closed = TRUE), 1L), bins)
+      b_hi   <- pmin(pmax(findInterval(max(tm), breaks, rightmost.closed = TRUE), 1L), bins)
+      active <- seq_len(bins) >= b_lo & seq_len(bins) <= b_hi
+      yy  <- yvals(cnt, active); ytitle <- yy$yt
+      fig <- fig %>% plotly::add_trace(
+        x = ctr, y = yy$y, type = "scatter", mode = "lines+markers",
+        line = list(color = pal[s], width = 2), marker = list(color = pal[s], size = 5),
+        connectgaps = FALSE, name = s)
+    }
+    fig %>% plotly::layout(
+      xaxis  = list(title = "Acquisition time (tim)"),
+      yaxis  = list(title = ytitle),
+      legend = list(orientation = "h")
+    )
+  })
+
+  output$download_tid_time <- downloadHandler(
+    filename = function()
+      paste0("trace_detection_over_time_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      res <- tid_time_results()
+      shiny::validate(shiny::need(!is.null(res) && nrow(res) > 0, "No results."))
+      write.csv(res, file, row.names = FALSE)
+    }
+  )
+
+  # ==========================================================================
+  # QC 1 — Localization precision cloud (within-trace scatter about the centroid)
+  # ==========================================================================
+  # GOAL: the direct measure of localization PRECISION. Pool every localization
+  # minus its OWN trace centroid, recentre at (0,0), and look at the scatter.
+  # Its RMS radius is σ_loc — the resolution. The SHAPE flags problems: elongation
+  # = drift within a trace or an anisotropic PSF; heavy tails = mislinks / double
+  # events; skew = a systematic bias. Uses raw uploaded data (before metadata
+  # filters), so it reports the precision as acquired.
+  prec_cloud_results <- reactiveVal(NULL)
+  observeEvent(input$run_prec_cloud, {
+    store <- smlm_file_store()
+    if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
+    # Precision is ALWAYS assessed on the single ACTIVE dataset — never pooled across
+    # files (an aggregate σ would blur per-acquisition precision). Restrict to it here.
+    af <- input$active_file
+    if (is.null(af) || !af %in% names(store)) af <- names(store)[[1]]
+    store <- store[af]
+    min_loc <- max(3L, as.integer(input$prec_cloud_min_loc %||% 5L))
+    use_z   <- isTRUE(input$prec_cloud_use_z)
+    dxall <- dyall <- dzall <- numeric(0)          # pooled residuals (length-weighted)
+    sxt <- syt <- szt <- numeric(0)                # per-TRACE SDs (one vote each, robust)
+    per_file <- list()
+    pooled   <- list()                             # per-loc residuals (dx/dy/dz) for the plot
+    withProgress(message = "Computing precision cloud...", value = 0, {
+      nf <- length(store)
+      for (i in seq_along(store)) {
+        fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
+        # Assess precision on the SAME localizations the Display tab plots: apply the
+        # metadata / trace-length / trace-spread filters (and any fiducial exclusion),
+        # so the cloud reflects the post-filter data rather than the raw acquisition.
+        df <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), input),
+                       error = function(e) store[[fname]])
+        if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) next
+        hasz <- use_z && "z" %in% names(df) && any(is.finite(df$z))
+        dd <- df %>%
+          dplyr::group_by(tid) %>%
+          dplyr::mutate(nloc = dplyr::n()) %>%
+          dplyr::filter(nloc >= min_loc) %>%
+          dplyr::mutate(dx = x - stats::median(x, na.rm = TRUE),
+                        dy = y - stats::median(y, na.rm = TRUE),
+                        dz = if (hasz) z - stats::median(z, na.rm = TRUE) else NA_real_) %>%
+          dplyr::ungroup()
+        if (!nrow(dd)) next
+        pooled[[fname]] <- data.frame(dx = dd$dx, dy = dd$dy,
+                                      dz = if (hasz) dd$dz else NA_real_)
+        dxall <- c(dxall, dd$dx); dyall <- c(dyall, dd$dy)
+        if (hasz) dzall <- c(dzall, dd$dz[is.finite(dd$dz)])
+        # One robust σ per trace (each trace counts once, so a 2000-loc fiducial
+        # doesn't dominate the precision estimate the way the pooled cloud does).
+        pts <- dd %>% dplyr::group_by(tid) %>%
+          dplyr::summarise(sdx = stats::sd(dx, na.rm = TRUE),
+                           sdy = stats::sd(dy, na.rm = TRUE),
+                           sdz = if (hasz) stats::sd(dz, na.rm = TRUE) else NA_real_,
+                           .groups = "drop")
+        sxt <- c(sxt, pts$sdx); syt <- c(syt, pts$sdy)
+        if (hasz) szt <- c(szt, pts$sdz[is.finite(pts$sdz)])
+        per_file[[fname]] <- data.frame(
+          dataset  = fname,
+          sigma_x  = stats::sd(dd$dx, na.rm = TRUE),
+          sigma_y  = stats::sd(dd$dy, na.rm = TRUE),
+          sigma_z  = if (hasz) stats::sd(dd$dz, na.rm = TRUE) else NA_real_,
+          n_traces = dplyr::n_distinct(dd$tid), n_locs = nrow(dd),
+          stringsAsFactors = FALSE)
+      }
+    })
+    if (!length(dxall)) {
+      showNotification("No traces with enough localizations (lower 'Min localizations / trace').",
+                       type = "warning"); prec_cloud_results(NULL); return()
+    }
+    mom <- function(v, p) { v <- v[is.finite(v)]; m <- mean(v); s <- stats::sd(v)
+                            if (s <= 0) NA_real_ else mean((v - m)^p) / s^p }
+    sx <- stats::sd(dxall, na.rm = TRUE); sy <- stats::sd(dyall, na.rm = TRUE)
+    sz <- if (length(dzall)) stats::sd(dzall, na.rm = TRUE) else NA_real_
+    sx_med <- stats::median(sxt, na.rm = TRUE); sy_med <- stats::median(syt, na.rm = TRUE)
+    sz_med <- if (length(szt)) stats::median(szt, na.rm = TRUE) else NA_real_
+    # subsample rows for the plot (dx/dy/dz/is_fid kept aligned); σ computed from all
+    P <- do.call(rbind, pooled)
+    keep <- if (nrow(P) > 40000L) sort(sample.int(nrow(P), 40000L)) else seq_len(nrow(P))
+    Pp <- P[keep, , drop = FALSE]
+    prec_cloud_results(list(
+      dx = Pp$dx, dy = Pp$dy, dz = Pp$dz,
+      sigma_x = sx, sigma_y = sy, sigma_z = sz,
+      sigma_x_med = sx_med, sigma_y_med = sy_med, sigma_z_med = sz_med,
+      sigma_xy   = sqrt((sx^2 + sy^2) / 2),
+      # robust, one-vote-per-trace precision (immune to fiducials / long traces)
+      sigma_xy_med = sqrt((sx_med^2 + sy_med^2) / 2),
+      anisotropy = max(sx, sy) / max(1e-9, min(sx, sy)),
+      skew_x = mom(dxall, 3), skew_y = mom(dyall, 3),
+      kurt_x = mom(dxall, 4), kurt_y = mom(dyall, 4),
+      n_locs = length(dxall), n_traces = length(sxt), has_z = length(dzall) > 0,
+      per_file = do.call(rbind, per_file)))
+    showNotification(sprintf("Precision cloud: %s localizations; σ_xy = %.2f nm.",
+                             format(length(dxall), big.mark = ","), sqrt((sx^2 + sy^2) / 2)),
+                     type = "message", duration = 4)
+  })
+
+  output$prec_cloud_plot <- renderPlotly({
+    r <- prec_cloud_results()
+    shiny::validate(shiny::need(!is.null(r), "Press 'Run' to compute the precision cloud."))
+
+    # Each axis pair gets its own SQUARE panel: density heatmap + 1σ/2σ ellipses, a
+    # faint zero crosshair through (0,0), no background grid, and a FIXED ±L nm frame.
+    # The panels are built manually on explicit independent axes (x/y, x2/y2, x3/y3)
+    # rather than plotly::subplot() — subplot does not reliably re-map per-panel
+    # scaleanchor, which cross-linked the zoom across panels. Here each y_i is scale-
+    # anchored to its own x_i, so aspect is equal (1 nm x == 1 nm y) AND zooming one
+    # panel leaves the others untouched. Ellipse semi-axes are the per-axis robust σ.
+    c_1s <- "#c03030"; c_2s <- "#2c7fb8"   # 1σ = red, 2σ = blue
+    L <- 30                                # fixed half-range (nm), all axes
+    has_z <- isTRUE(r$has_z) && any(is.finite(r$dz))
+    panels <- if (has_z) list(
+      list(a = r$dx, b = r$dy, sa = r$sigma_x_med, sb = r$sigma_y_med, la = "Δx (nm)", lb = "Δy (nm)"),
+      list(a = r$dx, b = r$dz, sa = r$sigma_x_med, sb = r$sigma_z_med, la = "Δx (nm)", lb = "Δz (nm)"),
+      list(a = r$dy, b = r$dz, sa = r$sigma_y_med, sb = r$sigma_z_med, la = "Δy (nm)", lb = "Δz (nm)")
+    ) else list(
+      list(a = r$dx, b = r$dy, sa = r$sigma_x_med, sb = r$sigma_y_med,
+           la = "Δx from trace centroid (nm)", lb = "Δy from trace centroid (nm)"))
+    np  <- length(panels)
+    gap <- if (np > 1) 0.06 else 0          # horizontal gap between panels (paper frac)
+    w   <- (1 - gap * (np - 1)) / np        # each panel's width (paper frac)
+
+    fig <- plotly::plot_ly()
+    shapes <- list(); axis_args <- list()
+    for (i in seq_len(np)) {
+      P <- panels[[i]]
+      xid <- if (i == 1) "x" else paste0("x", i)
+      yid <- if (i == 1) "y" else paste0("y", i)
+      keep <- is.finite(P$a) & is.finite(P$b)
+      fig <- fig %>% plotly::add_histogram2dcontour(x = P$a[keep], y = P$b[keep],
+        xaxis = xid, yaxis = yid, colorscale = "Hot", reversescale = TRUE, showscale = FALSE,
+        nbinsx = 60, nbinsy = 60, ncontours = 14, hoverinfo = "skip", showlegend = FALSE)
+      sa <- max(1e-6, P$sa); sb <- max(1e-6, P$sb)
+      ell <- function(ra, rb, colr) list(type = "circle", xref = xid, yref = yid,
+        x0 = -ra, x1 = ra, y0 = -rb, y1 = rb, line = list(color = colr, width = 2, dash = "dot"))
+      axl <- function(x0, x1, y0, y1) list(type = "line", xref = xid, yref = yid,
+        x0 = x0, x1 = x1, y0 = y0, y1 = y1, line = list(color = "rgba(0,0,0,0.4)", width = 1))
+      shapes <- c(shapes, list(ell(sa, sb, c_1s), ell(2 * sa, 2 * sb, c_2s),
+                               axl(0, 0, -L, L), axl(-L, L, 0, 0)))
+      dom <- c((i - 1) * (w + gap), (i - 1) * (w + gap) + w)
+      axis_args[[if (i == 1) "xaxis" else paste0("xaxis", i)]] <- list(
+        title = P$la, range = c(-L, L), zeroline = FALSE, showgrid = FALSE,
+        domain = dom, anchor = yid)
+      # Constrain ONLY the anchored (y) axis: keep its −L..L range and shrink its
+      # domain to make the panel square. All panels share the same x-domain width, so
+      # they end up as identical squares (constraining both axes fights itself).
+      axis_args[[if (i == 1) "yaxis" else paste0("yaxis", i)]] <- list(
+        title = P$lb, range = c(-L, L), zeroline = FALSE, showgrid = FALSE,
+        domain = c(0, 1), anchor = xid, scaleanchor = xid, scaleratio = 1, constrain = "domain")
+    }
+    # 1σ / 2σ legend swatches (once): zero-length invisible segments on panel 1.
+    fig <- fig %>%
+      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "1σ",
+        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_1s, width = 2, dash = "dot")) %>%
+      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "2σ",
+        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_2s, width = 2, dash = "dot"))
+    p <- do.call(plotly::layout, c(list(fig, shapes = shapes,
+      legend = list(orientation = "h"), margin = list(t = 10, b = 40)), axis_args))
+    # Autoscale-to-data interacts with scaleanchor to blow the ranges up (±100) and
+    # desync the panel sizes. Make double-click / reset return to the fixed ±L frame
+    # instead, and drop the autoscale button so the only "fit" action is that reset —
+    # the panels then stay identical squares. Box-zoom (per panel) still works.
+    plotly::config(p, doubleClick = "reset", displaylogo = FALSE,
+                   modeBarButtonsToRemove = list("autoScale2d"))
+  })
+
+  output$prec_cloud_stats <- renderUI({
+    r <- prec_cloud_results(); if (is.null(r)) return(NULL)
+    warn <- character(0)
+    if (is.finite(r$anisotropy) && r$anisotropy > 1.3)
+      warn <- c(warn, sprintf("anisotropy %.2f (elongated — drift within traces or an anisotropic PSF)", r$anisotropy))
+    if (is.finite(r$kurt_x) && max(r$kurt_x, r$kurt_y, na.rm = TRUE) > 5)
+      warn <- c(warn, "heavy tails (kurtosis ≫ 3 — possible mislinks / double events)")
+    # If the length-weighted pooled σ is much larger than the per-trace median, a
+    # few long/wide traces (fiducials!) dominate — flag it and point at the scan.
+    if (is.finite(r$sigma_xy_med) && r$sigma_xy > 1.5 * r$sigma_xy_med)
+      warn <- c(warn, sprintf("pooled σ (%.1f) ≫ per-trace σ (%.1f): a few long/wide traces dominate — run the Fiducial scan", r$sigma_xy, r$sigma_xy_med))
+    htmltools::div(style = "font-size:0.9em; margin-top:4px;",
+      htmltools::tags$b(sprintf("σ_xy = %.2f nm (median per trace, robust)", r$sigma_xy_med)),
+      if (r$has_z && is.finite(r$sigma_z_med)) sprintf(" · σ_z %.2f nm", r$sigma_z_med) else "",
+      sprintf("  |  pooled σ_xy %.2f (σ_x %.2f · σ_y %.2f · anisotropy %.2f)  |  skew x/y %.2f/%.2f  ·  kurtosis x/y %.1f/%.1f  |  %s locs, %s traces",
+              r$sigma_xy, r$sigma_x, r$sigma_y, r$anisotropy, r$skew_x, r$skew_y,
+              r$kurt_x, r$kurt_y, format(r$n_locs, big.mark = ","),
+              format(r$n_traces, big.mark = ",")),
+      if (length(warn)) htmltools::div(style = "color:#b26a00; margin-top:2px;",
+        "⚠ ", paste(warn, collapse = "; "), ".") else
+        htmltools::div(style = "color:#2a6; margin-top:2px;", "Cloud is compact and near-isotropic."))
+  })
+
+  output$download_prec_cloud <- downloadHandler(
+    filename = function() paste0("precision_cloud_perfile_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      r <- prec_cloud_results(); shiny::validate(shiny::need(!is.null(r), "No results."))
+      write.csv(r$per_file, file, row.names = FALSE)
+    })
+
+  # ==========================================================================
+  # QC 3 — Fiducial / bright-contaminant flagging (report only)
+  # ==========================================================================
+  # GOAL: flag traces that behave like gold fiducials / bright aggregates rather
+  # than single blinking molecules. Learned from a labelled pair of real datasets
+  # (one with a fiducial section, one clean), fiducials separate on TWO robust
+  # signatures, NOT on spread (spread does not distinguish them):
+  #   • BRIGHT   — efo is an extreme upper outlier. A gold bead reflects ~100× a
+  #                fluorophore (efo ~1e7 vs ~1e5), so log10(efo) sits many robust
+  #                MADs above the bulk. This is the single strongest signal.
+  #   • PERSISTENT + RECURRENT — the bead is re-localized far more than a blinking
+  #                dye (long trace) AND many such traces pile up at the SAME spot
+  #                (fiducials recur in one place; real labels are spread out).
+  # Scores are per-file and ROBUST (median + k·MAD on log; MAD tolerates up to ~50%
+  # contamination, so a heavy fiducial section does not hide itself). On the clean
+  # control file this flags 0 traces; on the fiducial file it flags a coherent,
+  # spatially-clustered set. REPORT ONLY unless "Exclude flagged" is ticked.
+  fiducial_results <- reactiveVal(NULL)
+  observeEvent(input$run_fiducial, {
+    store <- smlm_file_store()
+    if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
+    if (!isTRUE(input$fid_all_files)) {
+      af <- input$active_file; if (!is.null(af) && af %in% names(store)) store <- store[af]
+    }
+    k_efo     <- max(2, input$fid_efo_z    %||% 4)      # brightness outlier (robust z)
+    k_len     <- max(2, input$fid_len_z    %||% 4)      # length outlier (robust z)
+    recur_r   <- max(1, input$fid_recur_r  %||% 100)    # recurrence radius (nm)
+    recur_min <- max(1, input$fid_recur_min %||% 4)     # min co-located traces
+    # Robust z of log10(v): (log10 v − median) / MAD. 0 when MAD collapses (too few
+    # / identical values) so a tiny or degenerate file flags nothing.
+    rzlog <- function(v) {
+      x <- log10(pmax(as.numeric(v), 1e-9))
+      m <- stats::median(x, na.rm = TRUE); s <- stats::mad(x, na.rm = TRUE)
+      if (!is.finite(s) || s <= 0) rep(0, length(x)) else (x - m) / s
+    }
+    # For each trace centroid, count OTHER centroids within radius R (spatial
+    # recurrence). Grid-bucketed so it stays O(n) on thousands of traces.
+    recurrence <- function(cx, cy, R) {
+      n <- length(cx); if (n < 2) return(integer(n))
+      ox <- floor(cx / R); oy <- floor(cy / R)
+      idx <- split(seq_len(n), paste(ox, oy)); cnt <- integer(n)
+      for (i in seq_len(n)) {
+        nb <- integer(0)
+        for (a in -1:1) for (b in -1:1) {
+          k <- paste(ox[i] + a, oy[i] + b); j <- idx[[k]]
+          if (!is.null(j)) nb <- c(nb, j)
+        }
+        d <- sqrt((cx[nb] - cx[i])^2 + (cy[nb] - cy[i])^2)
+        cnt[i] <- sum(d <= R) - 1L
+      }
+      cnt
+    }
+    rows <- list()
+    withProgress(message = "Scanning for fiducials / contaminants...", value = 0, {
+      nf <- length(store)
+      for (i in seq_along(store)) {
+        fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
+        # A single odd file must not abort the whole scan — skip it and continue.
+        rows[[fname]] <- tryCatch({
+          df <- store[[fname]]
+          if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df)))
+            stop("no coords")
+          hasz  <- "z" %in% names(df) && any(is.finite(df$z))
+          has_e <- "efo" %in% names(df); has_c <- "cfr" %in% names(df); has_t <- "tim" %in% names(df)
+          feat <- df %>%
+            dplyr::group_by(tid) %>%
+            dplyr::summarise(
+              n_loc    = dplyr::n(),
+              duration = if (has_t) max(tim, na.rm = TRUE) - min(tim, na.rm = TRUE) else NA_real_,
+              efo_med  = if (has_e) stats::median(efo, na.rm = TRUE) else NA_real_,
+              cfr_med  = if (has_c) stats::median(cfr, na.rm = TRUE) else NA_real_,
+              cx       = stats::median(x, na.rm = TRUE),
+              cy       = stats::median(y, na.rm = TRUE),
+              spread   = sqrt(mean((x - stats::median(x, na.rm = TRUE))^2 +
+                                   (y - stats::median(y, na.rm = TRUE))^2 +
+                                   (if (hasz) (z - stats::median(z, na.rm = TRUE))^2 else 0), na.rm = TRUE)),
+              .groups  = "drop") %>%
+            dplyr::mutate(dataset = fname)
+          if (!nrow(feat)) stop("no traces")
+          # Robust outlier scores + spatial recurrence (all per file).
+          feat$z_efo <- if (has_e) rzlog(feat$efo_med) else rep(NA_real_, nrow(feat))
+          feat$z_len <- rzlog(feat$n_loc)
+          feat$recur <- recurrence(feat$cx, feat$cy, recur_r)
+          bright     <- has_e & is.finite(feat$z_efo) & feat$z_efo >= k_efo
+          persistent <- feat$z_len >= k_len
+          recurrent  <- feat$recur >= recur_min
+          # BRIGHT alone (gold reflection is unmistakable); OR a long trace that
+          # also piles up spatially; OR an extreme-length trace even if isolated.
+          feat$flagged <- bright | (persistent & recurrent) | (feat$z_len >= k_len + 1.5)
+          feat
+        }, error = function(e) NULL)
+      }
+    })
+    rows <- Filter(Negate(is.null), rows)
+    res <- if (length(rows)) do.call(rbind, rows) else NULL
+    if (is.null(res) || !nrow(res)) {
+      # Not an error — just nothing to look at. Store an empty (0-row) result so
+      # the outputs show a calm "nothing found" state rather than a red message.
+      fiducial_results(res %||% data.frame())
+      showNotification("Scan complete — no traces to assess in the selected files.",
+                       type = "message", duration = 5); return()
+    }
+    fiducial_results(res)
+    nfl <- sum(res$flagged)
+    showNotification(
+      if (nfl == 0)
+        sprintf("Scan complete — no fiducial/contaminant candidates found in %d trace(s) across %d file(s).",
+                nrow(res), length(unique(res$dataset)))
+      else
+        sprintf("Flagged %d of %d traces (%.1f%%) as fiducial/contaminant candidates across %d file(s).",
+                nfl, nrow(res), 100 * mean(res$flagged), length(unique(res$dataset))),
+      type = "message", duration = 5)
+  })
+
+  output$fiducial_plot <- renderPlotly({
+    res <- fiducial_results()
+    # Calm empty state (no red validate) before a run or when nothing was found.
+    if (is.null(res) || !nrow(res) || !"flagged" %in% names(res))
+      # Declare the trace type (scatter/markers) so plotly does not print a
+      # "No trace type specified" console warning for this empty placeholder.
+      return(plotly::plot_ly(type = "scatter", mode = "markers") %>% plotly::layout(
+        xaxis = list(visible = FALSE), yaxis = list(visible = FALSE),
+        annotations = list(list(text = "Press 'Run' to scan for fiducials / contaminants.",
+                                showarrow = FALSE, font = list(color = "#888", size = 13)))))
+    # The two discriminating axes: brightness (efo, log — gold reflects ~100×) and
+    # persistence (localizations per trace, log). Flagged traces sit in the bright
+    # and/or long extremes. Falls back to spread on the x-axis when efo is absent.
+    has_e <- "efo_med" %in% names(res) && any(is.finite(res$efo_med))
+    xv <- if (has_e) pmax(res$efo_med, 1) else res$spread
+    xl <- if (has_e) "Trace median EFO (log)" else "Trace spread (nm)"
+    ok <- !res$flagged
+    ht <- function(m) paste0("TID ", res$tid[m], "<br>", res$dataset[m],
+      "<br>", res$n_loc[m], " locs · spread ", round(res$spread[m], 1), " nm",
+      if (has_e) paste0("<br>efo ", format(round(res$efo_med[m]), big.mark = ","),
+                        " (z ", round(res$z_efo[m], 1), ")") else "",
+      "<br>len z ", round(res$z_len[m], 1),
+      if ("recur" %in% names(res)) paste0(" · ", res$recur[m], " neighbours") else "")
+    # Add each layer ONLY when it has points — an add_markers() with empty x/y is
+    # what makes plotly warn "No trace type / no positional attributes specified".
+    p <- plotly::plot_ly()
+    if (any(ok))
+      p <- p %>% plotly::add_markers(x = xv[ok], y = res$n_loc[ok], name = "traces",
+        marker = list(color = "rgba(120,120,120,0.5)", size = 5,
+                      line = list(color = "white", width = 0.3)),
+        text = ht(ok), hoverinfo = "text")
+    if (any(!ok))
+      p <- p %>% plotly::add_markers(x = xv[!ok], y = res$n_loc[!ok], name = "flagged",
+        marker = list(color = "#d62728", size = 8, symbol = "x"),
+        text = ht(!ok), hoverinfo = "text")
+    # If nothing was flagged, say so on the plot (the points are still shown).
+    anns <- if (!any(!ok)) list(list(text = "No fiducials / contaminants detected",
+      xref = "paper", yref = "paper", x = 0.5, y = 1, showarrow = FALSE,
+      font = list(color = "#2a6", size = 13))) else NULL
+    p %>% plotly::layout(
+      xaxis = list(title = xl, type = if (has_e) "log" else "linear"),
+      yaxis = list(title = "Localizations per trace", type = "log"),
+      legend = list(orientation = "h"), annotations = anns)
+  })
+
+  output$fiducial_table <- renderTable({
+    res <- fiducial_results()
+    if (is.null(res) || !nrow(res) || !"flagged" %in% names(res)) return(NULL)
+    f <- res[isTRUE(res$flagged) | res$flagged %in% TRUE, , drop = FALSE]
+    if (!nrow(f)) return(data.frame(Message = "No traces flagged with the current thresholds."))
+    f <- f[order(-f$z_efo, -f$n_loc), , drop = FALSE]
+    utils::head(data.frame(
+      dataset = f$dataset, tid = f$tid, n_loc = f$n_loc,
+      efo_med = round(f$efo_med, 0), z_efo = round(f$z_efo, 1),
+      z_len = round(f$z_len, 1), neighbours = f$recur,
+      spread_nm = round(f$spread, 1), cfr_med = round(f$cfr_med, 3),
+      check.names = FALSE), 200L)
+  }, striped = TRUE, spacing = "xs", width = "100%")
+
+  output$download_fiducial <- downloadHandler(
+    filename = function() paste0("fiducial_scan_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content = function(file) {
+      res <- fiducial_results(); shiny::validate(shiny::need(!is.null(res), "No results."))
+      write.csv(res, file, row.names = FALSE)
+    })
+
+  # Optional exclusion: when "Exclude flagged traces" is on, drop the traces the
+  # Fiducial scan flagged (for that file) from a data frame before it is analysed.
+  # NON-DESTRUCTIVE and reversible — the loaded data is untouched; unticking the box
+  # (or re-running the scan) restores everything. tid excludes are matched PER FILE
+  # (tids are only unique within a file), so `fname` must be the file the df is from.
+  # Applied both in the active-file pipeline and in every batch analysis.
+  qc_exclude_from <- function(df, fname) {
+    if (!isTRUE(input$fid_exclude) || is.null(df) || !nrow(df) || !"tid" %in% names(df))
+      return(df)
+    fr <- tryCatch(fiducial_results(), error = function(e) NULL)
+    if (is.null(fr) || !all(c("flagged","tid","dataset") %in% names(fr))) return(df)
+    ex <- fr$tid[fr$flagged %in% TRUE & fr$dataset == fname]
+    if (length(ex)) df[!(df$tid %in% ex), , drop = FALSE] else df
+  }
+
+  # ── Shared within-cluster NN statistics ─────────────────────────────────────
+  # SINGLE SOURCE OF TRUTH for "how close are the members of a median cluster",
+  # used by BOTH the Crowding panel and the Within-cluster-NN-vs-size panel so the
+  # two report the SAME number. Both panels build their member centroids on the
+  # same unit (de-blinked molecule when de-blinking is on, else trace ID; see
+  # smlm_nn_unit below) and pass the member coordinates here.
+  #
+  # For each member, mean distance to its k nearest members (k clamped to n-1;
+  # k=1 => nearest-neighbour spacing), then the MEDIAN over members with a robust
+  # spread (MAD and the inter-quartile range) as the ± error.
+  # pts = numeric matrix of member coordinates (one row per member).
+  member_nn_stats <- function(pts, k = 1L) {
+    n <- nrow(pts)
+    if (is.null(n) || n < 2L) return(NULL)
+    k_eff <- min(max(1L, as.integer(k)), n - 1L)
+    nn <- tryCatch(dbscan::kNN(pts, k = k_eff)$dist, error = function(e) NULL)
+    if (is.null(nn)) return(NULL)
+    spacing <- if (k_eff == 1L) as.numeric(nn) else rowMeans(nn, na.rm = TRUE)
+    qs <- as.numeric(stats::quantile(spacing, c(0.25, 0.75), na.rm = TRUE))
+    list(median = stats::median(spacing, na.rm = TRUE),
+         mad    = stats::mad(spacing, na.rm = TRUE),
+         q1 = qs[1], q3 = qs[2], k_used = k_eff, n = n)
+  }
+  # Which unit the within-cluster NN is measured between: de-blinked molecules
+  # (primary `cluster`) when de-blinking is enabled and present, else trace IDs.
+  smlm_nn_unit <- function(df) {
+    if (isTRUE(input$enable_clustering) && "cluster" %in% names(df) &&
+        any(!is.na(df$cluster) & df$cluster > 0L)) "cluster" else "tid"
+  }
+
   ## ── Median Cluster (cluster2) Crowding vs Detection-Time Shift ─────────────────────────────
-  # One row per Cluster2 structure (built from its member TID centroids):
-  #   nn_median  = median nearest-neighbour distance among members (smaller = denser)
+  # One row per Cluster2 structure (built from its member centroids — de-blinked
+  # molecules when de-blinking is on, else trace IDs):
+  #   nn_median  = median k-NN distance among members (smaller = denser) ± MAD
   #   time_shift = median(member tim_med) - median(unclustered background tim_med),
   #                computed per file (positive = structure detected later)
   # Tests whether denser (more crowded) structures are detected later.
@@ -7444,6 +8029,7 @@ smlm_server <- function(input, output, session) {
     }
 
     min_n  <- max(3L, as.integer(input$crowd_min_members %||% 4L))
+    kk     <- max(1L, as.integer(input$crowd_k %||% 1L))
     use_3d <- isTRUE(input$crowd_use_3d)
     cols   <- if (use_3d) c("x", "y", "z") else c("x", "y")
 
@@ -7476,7 +8062,7 @@ smlm_server <- function(input, output, session) {
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]
         incProgress(1 / n_files, detail = fname)
-        df <- store[[fname]]
+        df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df) || !"tim" %in% names(df)) { diag["no_tim"] <- diag["no_tim"] + 1L; next }
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) { diag["filtered_out"] <- diag["filtered_out"] + 1L; next }
@@ -7487,8 +8073,14 @@ smlm_server <- function(input, output, session) {
         if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { diag["no_c2"] <- diag["no_c2"] + 1L; next }
         if (use_3d && !"z" %in% names(df)) { diag["no_z"] <- diag["no_z"] + 1L; next }
 
-        per_tid <- df %>%
-          dplyr::group_by(tid) %>%
+        # Members = de-blinked molecules (when de-blinking is on) or trace IDs —
+        # the SAME unit the Within-cluster-NN panel uses, so the two agree. When
+        # using molecules, primary noise (cluster 0) is dropped; each molecule's
+        # detection time is the median tim of its traces.
+        id_col <- smlm_nn_unit(df)
+        base   <- if (id_col == "cluster") dplyr::filter(df, !is.na(cluster) & cluster > 0L) else df
+        per_tid <- base %>%
+          dplyr::group_by(.data[[id_col]]) %>%
           dplyr::summarise(
             tim_med = stats::median(tim, na.rm = TRUE),
             x = stats::median(x, na.rm = TRUE),
@@ -7517,14 +8109,16 @@ smlm_server <- function(input, output, session) {
           pts <- as.matrix(sub[, cols, drop = FALSE])
           pts <- pts[stats::complete.cases(pts), , drop = FALSE]
           if (nrow(pts) < 2L) next
-          nnd <- tryCatch(dbscan::kNN(pts, k = 1)$dist, error = function(e) NULL)
-          if (is.null(nnd)) next
+          st <- member_nn_stats(pts, k = kk)
+          if (is.null(st)) next
 
           rows[[length(rows) + 1L]] <- data.frame(
             dataset    = fname,
             cluster2   = cid,
             n_tids     = n,
-            nn_median  = stats::median(nnd),
+            nn_median  = st$median,
+            nn_mad     = st$mad,
+            unit       = if (id_col == "cluster") "molecule" else "tid",
             time_shift = stats::median(sub$tim_med) - bg_med,
             stringsAsFactors = FALSE
           )
@@ -7644,13 +8238,19 @@ smlm_server <- function(input, output, session) {
 
     for (ds in datasets) {
       sub <- res[res$dataset == ds, , drop = FALSE]
+      ex  <- if ("nn_mad" %in% names(sub)) list(type = "data", array = sub$nn_mad,
+                                                color = pal[ds], thickness = 1, width = 0,
+                                                opacity = 0.4) else NULL
       fig <- fig %>% plotly::add_markers(
         x = sub$nn_median, y = sub$time_shift,
         name = if (n_ds > 1) ds else "Structures",
+        error_x = ex,   # ± MAD of the within-cluster NN spacing
         marker = list(color = pal[ds], size = 7, opacity = 0.7,
                       line = list(color = "white", width = 0.5)),
         text = paste0("Median cluster ", sub$cluster2, "<br>n = ", sub$n_tids,
-                      "<br>NN median = ", round(sub$nn_median, 1), " nm",
+                      " ", if ("unit" %in% names(sub)) sub$unit else "",
+                      "<br>NN median = ", round(sub$nn_median, 1), " ± ",
+                      round(if ("nn_mad" %in% names(sub)) sub$nn_mad else 0, 1), " nm",
                       "<br>time shift = ", round(sub$time_shift, 2)),
         hoverinfo = "text"
       )
@@ -7738,7 +8338,7 @@ smlm_server <- function(input, output, session) {
       nf <- length(store)
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
-        df <- store[[fname]]
+        df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) { diag["empty"] <- diag["empty"] + 1L; next }
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) { diag["filtered_out"] <- diag["filtered_out"] + 1L; next }
@@ -7749,10 +8349,10 @@ smlm_server <- function(input, output, session) {
         if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { diag["no_c2"] <- diag["no_c2"] + 1L; next }
         if (use_3d && !"z" %in% names(df)) { diag["no_z"] <- diag["no_z"] + 1L; next }
 
-        id_col <- if (use_primary && "cluster" %in% names(df) &&
-                      any(!is.na(df$cluster) & df$cluster > 0L)) "cluster" else "tid"
+        id_col <- smlm_nn_unit(df)   # shared unit rule: molecule if de-blinking on, else tid
         cent <- df %>%
           dplyr::filter(!is.na(cluster2) & cluster2 > 0L) %>%
+          { if (id_col == "cluster") dplyr::filter(., !is.na(cluster) & cluster > 0L) else . } %>%
           dplyr::group_by(cluster2, .data[[id_col]]) %>%
           dplyr::summarise(
             x = stats::median(x, na.rm = TRUE),
@@ -7768,20 +8368,19 @@ smlm_server <- function(input, output, session) {
           pts <- as.matrix(sub[, cols, drop = FALSE])
           pts <- pts[stats::complete.cases(pts), , drop = FALSE]
           if (nrow(pts) < 2L) { diag["degenerate"] <- diag["degenerate"] + 1L; next }
-          # mean distance to the k nearest members (k clamped to cluster size - 1),
-          # per member, then median over members. k = 1 -> nearest-neighbour spacing.
-          k_eff <- min(kk, nrow(pts) - 1L)
-          nn <- tryCatch(dbscan::kNN(pts, k = k_eff)$dist, error = function(e) NULL)
-          if (is.null(nn)) next
-          spacing <- if (k_eff == 1L) as.numeric(nn) else rowMeans(nn, na.rm = TRUE)
+          # Shared k-NN spacing (median over members ± MAD) — identical definition
+          # to the Crowding panel, so the two report the same within-cluster NN.
+          st <- member_nn_stats(pts, k = kk)
+          if (is.null(st)) next
           # convex-hull size: area (2D) / volume (3D); NA if degenerate
           hull <- tryCatch(geometry::convhulln(pts, options = "FA")$vol, error = function(e) NA_real_)
           rows[[length(rows) + 1L]] <- data.frame(
             dataset   = fname, cluster2 = cid, size = n,
-            nn_median = stats::median(spacing),
+            nn_median = st$median,
+            nn_mad    = st$mad,
             hull_size = if (is.finite(hull) && hull > 0) hull else NA_real_,
             dim       = length(cols),
-            unit      = if (id_col == "cluster") "primary_cluster" else "tid",
+            unit      = if (id_col == "cluster") "molecule" else "tid",
             stringsAsFactors = FALSE)
         }
       }
@@ -7818,7 +8417,7 @@ smlm_server <- function(input, output, session) {
                                 "Press 'Run' to compute within-cluster NN vs size."))
     res <- apply_dataset_groups(res)
     shiny::validate(shiny::need(nrow(res) > 0, "No files assigned to groups (group mode)."))
-    unit_lbl <- if (all(res$unit == "primary_cluster")) "primary clusters" else "trace IDs"
+    unit_lbl <- if (all(res$unit == "primary_cluster")) "de-blinked molecules" else "trace IDs"
     xmode    <- input$size_nn_xmode %||% "count"
 
     if (identical(xmode, "hull")) {
@@ -7847,11 +8446,16 @@ smlm_server <- function(input, output, session) {
 
     for (ds in datasets) {
       sub <- res[res$dataset == ds, , drop = FALSE]
+      ey  <- if ("nn_mad" %in% names(sub)) list(type = "data", array = sub$nn_mad,
+                                                color = pal[ds], thickness = 1, width = 0,
+                                                opacity = 0.4) else NULL
       fig <- fig %>% plotly::add_markers(x = sub$xv, y = sub$nn_median,
         name = if (n_ds > 1) ds else "Structures",
+        error_y = ey,   # ± MAD of the within-cluster NN spacing
         marker = list(color = pal[ds], size = 7, opacity = 0.7, line = list(color = "white", width = 0.5)),
         text = paste0("Median cluster ", sub$cluster2, "<br>", xname, " ", signif(sub$xv, 4),
-                      "<br>median NN ", round(sub$nn_median, 1), " nm<br>", sub$dataset),
+                      "<br>median NN ", round(sub$nn_median, 1), " ± ",
+                      round(if ("nn_mad" %in% names(sub)) sub$nn_mad else 0, 1), " nm<br>", sub$dataset),
         hoverinfo = "text")
     }
 
@@ -8253,7 +8857,13 @@ smlm_server <- function(input, output, session) {
     if (!length(store)) {
       showNotification("No files loaded.", type = "warning"); return()
     }
-    col   <- input$rog_cluster_col %||% "cluster"
+    # mode drives BOTH what we group by and what a "point" is:
+    #   "cluster2"  structure size — group by median cluster, one point per
+    #               de-blinked MOLECULE when de-blinking is on, else one point per
+    #               trace ID. (The auto fallback is the whole point of this mode.)
+    #   "cluster"   label footprint — group by de-blinked molecule, one point per trace.
+    mode        <- input$rog_cluster_col %||% "cluster2"
+    cluster_col <- if (mode == "cluster") "cluster" else "cluster2"
     store <- smlm_file_store()
     if (!length(store)) {
       showNotification("No files loaded.", type = "warning"); return()
@@ -8269,13 +8879,19 @@ smlm_server <- function(input, output, session) {
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]
         incProgress(1 / n_files, detail = fname)
-        df <- store[[fname]]
+        df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) next
         df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) next
         df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df) || !col %in% names(df)) next
-        r <- tryCatch(compute_cluster_rog(df, cluster_col = col), error = function(e) NULL)
+        if (is.null(df) || !nrow(df) || !cluster_col %in% names(df)) next
+        # Only the plain structure-size mode collapses to one point per de-blinked
+        # molecule (when de-blinking is on); the other two use raw traces as points.
+        member_col <- if (mode == "cluster2" && isTRUE(input$enable_clustering) &&
+                          "cluster" %in% names(df) && any(df$cluster > 0, na.rm = TRUE))
+                        "cluster" else "tid"
+        r <- tryCatch(compute_cluster_rog(df, cluster_col = cluster_col, member_col = member_col),
+                      error = function(e) NULL)
         if (is.null(r) || !nrow(r)) next
         r$dataset <- fname
         all_res[[fname]] <- r
@@ -8284,8 +8900,8 @@ smlm_server <- function(input, output, session) {
     res <- do.call(rbind, Filter(Negate(is.null), all_res))
 
     if (is.null(res) || !nrow(res)) {
-      hint <- if (col == "cluster")
-        "Enable Primary Clustering and press Plot for each file."
+      hint <- if (cluster_col == "cluster")
+        "Enable de-blinking and press Plot for each file."
       else
         "Enable Median Clustering and press Plot for each file."
       showNotification(paste0("No RoG computed. ", hint), type = "warning")
@@ -8369,7 +8985,8 @@ smlm_server <- function(input, output, session) {
     fig <- fig %>%
       plotly::layout(
         barmode = "overlay",
-        xaxis = list(title = "Radius of Gyration (nm)"),
+        xaxis = list(title = if (identical(input$rog_cluster_col %||% "cluster2", "cluster"))
+                               "Label footprint Rg (nm)" else "Median-cluster Rg — structure size (nm)"),
         yaxis = list(title = if (density_mode) "Density" else "Count"),
         shapes = shapes,
         annotations = list(

@@ -4967,42 +4967,67 @@ analyze_cluster2_morphology <- function(df, backbone_pts = NULL,
 
 ## ── Radius of Gyration ───────────────────────────────────────────────────────
 # Returns a data.frame with one row per cluster: cluster_id, n_traces, rog (nm)
-compute_cluster_rog <- function(df, cluster_col = "cluster") {
-  if (!cluster_col %in% names(df)) return(data.frame())
-  if (!"tid" %in% names(df))      return(data.frame())
+# ── compute_cluster_rog() ─────────────────────────────────────────────────────
+# GOAL: radius of gyration  Rg = sqrt(<|p - centroid|^2>)  per cluster — the RMS
+# size of a point cloud about its centre.
+#
+# TWO PARAMETERS, TWO QUESTIONS:
+#   cluster_col = what a "cluster" IS (the grouping):
+#       "cluster2" -> a median cluster -> Rg measures STRUCTURE SIZE.
+#       "cluster"  -> one de-blinked molecule -> Rg measures that molecule's own
+#                     blink/label FOOTPRINT (spread of its repeat detections).
+#   member_col  = the UNIT reduced to one point before measuring spread:
+#       "tid"      -> raw traces (one median point per trace).
+#       "cluster"  -> de-blinked molecules (one median point per molecule). Use
+#                     this for structure size when de-blinking is ON, so a
+#                     multivalent label's several traces count as ONE molecule
+#                     rather than inflating Rg with several nearby points.
+#
+# MINFLUX adaptation: points are MEDIAN member positions, never raw localizations.
+# A median of N localizations has SD ~ sigma_loc/sqrt(N), so localization noise is
+# already suppressed and Rg reflects real geometry, not measurement scatter. (What
+# remains is the label footprint — real between-trace spread — which is exactly the
+# thing the "cluster" grouping is meant to report and the "cluster2" grouping is
+# meant to look past by de-blinking to one point per molecule.)
+#
+# Requires >= 2 members per cluster (Rg is undefined for one point). Noise ids (0)
+# are dropped for both the grouping and, when members are a cluster level, the
+# member. Returns data.frame(cluster_id, n_units, rog).  nm throughout.
+compute_cluster_rog <- function(df, cluster_col = "cluster2", member_col = "tid") {
+  if (!all(c(cluster_col, member_col) %in% names(df))) return(data.frame())
   if (!all(c("x", "y") %in% names(df))) return(data.frame())
-
   use_z <- "z" %in% names(df)
 
-  tid_cents <- df %>%
-    dplyr::group_by(tid, .data[[cluster_col]]) %>%
+  # 1) one median point per MEMBER, carrying its cluster id.
+  mem <- df %>%
+    dplyr::group_by(.data[[member_col]]) %>%
     dplyr::summarise(
-      tx = median(x, na.rm = TRUE),
-      ty = median(y, na.rm = TRUE),
-      tz = if (use_z) median(z, na.rm = TRUE) else 0,
+      mx = median(x, na.rm = TRUE),
+      my = median(y, na.rm = TRUE),
+      mz = if (use_z) median(z, na.rm = TRUE) else 0,
+      cl = dplyr::first(.data[[cluster_col]]),
       .groups = "drop"
     )
+  # Drop noise: a member id of 0 (only meaningful when members are a cluster
+  # level), and any point whose cluster id is 0 / NA.
+  if (member_col != "tid")
+    mem <- mem[is.finite(mem[[member_col]]) & mem[[member_col]] != 0L, , drop = FALSE]
+  mem <- mem[is.finite(mem$cl) & mem$cl != 0L, , drop = FALSE]
+  if (!nrow(mem)) return(data.frame())
 
-  cl_cents <- tid_cents %>%
-    dplyr::group_by(.data[[cluster_col]]) %>%
-    dplyr::summarise(
-      cx = mean(tx, na.rm = TRUE),
-      cy = mean(ty, na.rm = TRUE),
-      cz = mean(tz, na.rm = TRUE),
-      n_traces = dplyr::n(),
-      .groups = "drop"
-    )
-
-  joined <- dplyr::left_join(tid_cents, cl_cents, by = cluster_col) %>%
-    dplyr::mutate(
-      r2 = (tx - cx)^2 + (ty - cy)^2 + (tz - cz)^2
-    ) %>%
-    dplyr::group_by(.data[[cluster_col]], n_traces) %>%
+  # 2) per cluster: centroid = mean of member points; Rg = RMS distance to it.
+  cents <- mem %>%
+    dplyr::group_by(cl) %>%
+    dplyr::summarise(cx = mean(mx), cy = mean(my), cz = mean(mz),
+                     n_units = dplyr::n(), .groups = "drop")
+  out <- dplyr::left_join(mem, cents, by = "cl") %>%
+    dplyr::mutate(r2 = (mx - cx)^2 + (my - cy)^2 + (mz - cz)^2) %>%
+    dplyr::group_by(cl, n_units) %>%
     dplyr::summarise(rog = sqrt(mean(r2, na.rm = TRUE)), .groups = "drop") %>%
-    dplyr::filter(n_traces >= 2L, is.finite(rog)) %>%
-    dplyr::rename(cluster_id = dplyr::all_of(cluster_col))
+    dplyr::filter(n_units >= 2L, is.finite(rog)) %>%
+    dplyr::rename(cluster_id = cl)
 
-  as.data.frame(joined)
+  as.data.frame(out)
 }
 
 ## ── Ripley's L(r) ────────────────────────────────────────────────────────────
