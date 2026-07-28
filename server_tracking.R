@@ -829,9 +829,15 @@ tracking_server <- function(input, output, session) {
                    choices  = c("2D" = "2d", "3D" = "3d"),
                    selected = isolate(input$trk_view_mode %||% "2d"),
                    inline   = TRUE),
-      numericInput("trk_z_stretch", "Z display scale",
+      numericInput("trk_z_stretch", "Z correction factor (×)",
                    value = isolate(input$trk_z_stretch %||% 1.0),
-                   min = 0.2, max = 10, step = 0.1)
+                   min = 0.2, max = 10, step = 0.05),
+      helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+        "Multiplies every z by this factor and ", tags$b("rescales all z-dependent results"),
+        " — the 3D view, the XZ/YZ side views, and z-aware metrics. Use it to correct the ",
+        "axial squash/stretch from a refractive-index mismatch between the objective ",
+        "immersion and the sample mounting medium (which changes with growth media). ",
+        "1.0 = no correction.")
     )
   })
 
@@ -843,13 +849,39 @@ tracking_server <- function(input, output, session) {
     if (identical(input$trk_view_mode %||% "2d", loop$rendered_view %||% "2d")) return()
     fire_layout("view_mode_2d3d")
   }, ignoreInit = TRUE)
-  # Z stretch: debounce so rapid typing / arrow-key changes don't hammer fire_layout
+
+  # 2D viewing plane (XY / XZ / YZ) — only meaningful for z-bearing data in 2D mode.
+  # Mirrors the SMLM Display tab: XZ/YZ remap the plotted axes so a side view of the
+  # z-structure is possible without switching to full 3D. Hidden in 3D mode and when
+  # the dataset is planar (no finite, non-constant z).
+  output$trk_view_plane_ui <- renderUI({
+    req(identical(input$trk_view_mode %||% "2d", "2d"))
+    # Only offer side views when z is genuinely present AND varies (a z column that
+    # is all-zero or constant has no side structure to show — matches "Z different
+    # from 0"). Uses the same trk() the 2D/3D toggle already depends on.
+    df  <- tryCatch(trk(), error = function(e) NULL)
+    zz  <- if (!is.null(df) && "z" %in% names(df)) df$z[is.finite(df$z)] else numeric(0)
+    req(length(zz) > 0, diff(range(zz)) > 1e-6)
+    radioButtons("trk_view_plane", "Viewing plane",
+                 choices  = c("XY", "XZ", "YZ"),
+                 selected = isolate(input$trk_view_plane %||% "XY"),
+                 inline   = TRUE)
+  })
+  # A plane change is a coordinate remap baked in frames_store, so it needs a rebuild —
+  # same creation-fire guard as the 2D/3D toggle (compare to the plane last rendered).
+  observeEvent(input$trk_view_plane, {
+    if (identical(input$trk_view_plane %||% "XY", loop$rendered_plane %||% "XY")) return()
+    fire_layout("view_plane")
+  }, ignoreInit = TRUE)
+  # Z correction factor: debounce so rapid typing / arrow-key changes don't hammer
+  # fire_layout. fire_layout bumps data_ver, which re-runs the analysis pipeline (so
+  # z-aware metrics pick up the new factor) and plot_trigger (so the view rebuilds).
   trk_z_stretch_d <- debounce(reactive({ input$trk_z_stretch }), 500)
   observeEvent(trk_z_stretch_d(), {
     val <- trk_z_stretch_d()
     req(is.numeric(val), is.finite(val), val >= 0.1)
     if (isTRUE(all.equal(val, loop$rendered_zs %||% 1.0))) return()  # unchanged since last render → skip creation fire
-    fire_layout("z_stretch")
+    fire_layout("z_correction")
   }, ignoreInit = TRUE)
 
   # ---- Big-file detection & chunking/compression on upload ---------------------
@@ -1051,7 +1083,7 @@ tracking_server <- function(input, output, session) {
   }, ignoreInit = TRUE)
   
   # ---- Load CSV/fast formats OR a pre-split chunk ----
-  trk_raw_df <- reactive({
+  trk_raw_loaded <- reactive({
     req(input$trk_file)
     required <- c("tid","x","y","tim")
     
@@ -1126,6 +1158,27 @@ tracking_server <- function(input, output, session) {
     # tim is always in seconds  -  convert to milliseconds
     df$tim <- df$tim * 1000
 
+    df
+  })
+
+  # ── Physical Z correction factor (applied at the pipeline ROOT) ──────────────
+  # A refractive-index / mounting-media mismatch scales the apparent axial (z)
+  # coordinate by a constant. Applying it in a thin layer directly over the chunk
+  # loader means EVERY downstream reactive — track cleaning, gap-splitting, the CVE
+  # σ_loc estimator, trk(), and the 2D/3D/side-view display — reads corrected z from
+  # this single point, so the correction reaches all z-dependent parameters at once.
+  #
+  # Kept SEPARATE from trk_raw_loaded() so changing the factor re-runs only this
+  # cheap rescale, never the expensive chunk reload. The z dependency is intentionally
+  # NOT isolated: it must invalidate the whole filter pipeline so the cached stages
+  # (which trk() reads via isolate()) recompute with the new z rather than serving a
+  # stale cached value. z is not a filter/histogram variable, so rescaling it here has
+  # no effect on the metadata panels or the raw-stats ranges.
+  trk_raw_df <- reactive({
+    df <- trk_raw_loaded()
+    zf <- suppressWarnings(as.numeric(input$trk_z_stretch %||% 1.0))
+    if (is.finite(zf) && zf > 0 && zf != 1.0 && "z" %in% names(df) && any(is.finite(df$z)))
+      df$z <- df$z * zf
     df
   })
 
@@ -3323,6 +3376,8 @@ tracking_server <- function(input, output, session) {
     ndk[is.na(ndk)] <- 0L                                 # first loc of each TID → integrated
     df$n_dark   <- ndk
     df$col_dark <- dark_cycle_cols(ndk)
+    # (Z is already corrected at the pipeline root in trk_raw_df() by the physical
+    # Z factor, so it flows in here through the filter chain — not re-applied.)
     df
   }, ignoreNULL = TRUE)
 
@@ -3399,6 +3454,25 @@ tracking_server <- function(input, output, session) {
       df$col_speed <- speed_cols(df$v_drift, speed_max)
     }
 
+    # ── 2D viewing plane (XY / XZ / YZ) ────────────────────────────────────────
+    # Bake the plane choice in as a COORDINATE REMAP, so the whole 2D pipeline
+    # (full-tracks + playback frames + axes) plots the chosen plane without any
+    # per-branch z handling — the same trick the SMLM Display tab uses. Only in 2D
+    # mode and only when z is real; 3D mode always keeps native XY(Z). Placed AFTER
+    # the drift-speed pass so v_drift stays a true in-plane physical speed.
+    plane <- if (!isTRUE(isolate(use_3d()))) (isolate(input$trk_view_plane) %||% "XY") else "XY"
+    # Fall back to XY unless z is present AND actually varies (defensive: mirrors the
+    # plane-selector gate, so a stale XZ/YZ selection on planar data can't flat-line it).
+    z_fin <- if ("z" %in% names(df)) df$z[is.finite(df$z)] else numeric(0)
+    if (plane %in% c("XZ", "YZ") && !(length(z_fin) > 0 && diff(range(z_fin)) > 1e-6)) plane <- "XY"
+    remap_plane <- function(d) {
+      if (is.null(d) || !("z" %in% names(d))) return(d)
+      if (plane == "XZ")      d$y <- d$z              # X horizontal, Z vertical
+      else if (plane == "YZ") { d$x <- d$y; d$y <- d$z }  # Y horizontal, Z vertical
+      d
+    }
+    df <- remap_plane(df)
+
     # Optional faint background of ALL raw (pre-filter) tracks — shown in BOTH full
     # and playback modes so you can see what the filters removed. Derived from the
     # POST-SPLIT raw object (trk_gap_split): when splitting is on the faint tracks
@@ -3411,6 +3485,7 @@ tracking_server <- function(input, output, session) {
       rdf <- tryCatch(isolate(trk_gap_split()), error = function(e) NULL)
       if (!is.null(rdf) && nrow(rdf) && all(c("tid","tim","x","y") %in% names(rdf))) {
         rd <- decimate_per_tid(rdf, max_pts = mpb, tcol = "tim")
+        rd <- remap_plane(rd)   # keep the faint raw tracks in the same plane as the data
         split(rd, rd$tid)
       } else NULL
     } else NULL
@@ -3435,13 +3510,8 @@ tracking_server <- function(input, output, session) {
                                                      "col_speed", "v_drift"))
         setProgress(0.5, detail = sprintf("%s tracks", format(length(unique(df_static$tid)), big.mark = ",")))
         sp_static <- split(df_static, df_static$tid)
-        if (use3d_f) {
-          zs <- suppressWarnings(as.numeric(isolate(input$trk_z_stretch %||% 1.0)))
-          if (is.finite(zs) && zs >= 0.1 && zs != 1.0) {
-            zscale <- function(spl) lapply(spl, function(tb) { if ("z" %in% names(tb)) tb$z <- tb$z * zs; tb })
-            sp_static <- zscale(sp_static); if (!is.null(sp_raw)) sp_raw <- zscale(sp_raw)
-          }
-        }
+        # (Z is already corrected in trk() by the physical Z factor — no display-only
+        # stretch here, otherwise it would be applied twice.)
         tids_all     <- names(sp_static)
         base_col_map <- if (!is.null(attr(df, "col_map"))) attr(df, "col_map") else tid_color_map(tids_all)
         cluster_cm   <- isolate(cluster_color_map_stored())
@@ -3473,6 +3543,7 @@ tracking_server <- function(input, output, session) {
         sp_raw     = sp_raw,       # optional faint background of ALL raw tracks
         trail_len  = 0, trail_nmax = 1L, bin_width = NA_real_,
         using_bins = FALSE, step_dt = NA_real_, has_3d = use3d_f,
+        plane      = plane,        # 2D viewing plane the coordinates were remapped to
         speed_max  = speed_max     # drift-speed colour-scale limit (NA unless speed mode)
       ))
     }
@@ -3524,19 +3595,8 @@ tracking_server <- function(input, output, session) {
     df_static    <- decimate_per_tid(df, max_pts = max_pts_tid, tcol = "tim")
     sp_static    <- split(df_static, df_static$tid)
 
-    # Z display scale (3D only) — applied to display data only; analysis reactives
-    # (MSD, JDD, confinement) read from trk() which is unaffected.
-    if (use3d) {
-      z_stretch <- suppressWarnings(as.numeric(isolate(input$trk_z_stretch %||% 1.0)))
-      if (!is.finite(z_stretch) || z_stretch < 0.1) z_stretch <- 1.0
-      if (z_stretch != 1.0) {
-        scale_z <- function(tb) { if ("z" %in% names(tb)) tb$z <- tb$z * z_stretch; tb }
-        sp_full   <- lapply(sp_full,   scale_z)
-        sp_tr     <- lapply(sp_tr,     scale_z)
-        sp_static <- lapply(sp_static, scale_z)
-        if (!is.null(sp_raw)) sp_raw <- lapply(sp_raw, scale_z)
-      }
-    }
+    # (Z is already corrected in trk() by the physical Z factor, so the per-TID
+    # spatial lists inherit it — no separate display stretch is applied here.)
 
     # Colors: start with random per-TID colors, then overlay confinement or cluster map.
     # Priority: cluster > confinement > base random.
@@ -3754,6 +3814,7 @@ tracking_server <- function(input, output, session) {
       using_bins  = TRUE,
       step_dt     = if (length(edges) >= 2) (edges[2] - edges[1]) else NA_real_,
       has_3d      = use3d,     # TRUE when z column is present and 3D mode is active
+      plane       = plane,     # 2D viewing plane the coordinates were remapped to
       color_by_dark = color_by_dark,  # per-point colour mode: markers carry it (overlaid even in trails mode)
       speed_max   = speed_max         # robust upper limit for the drift-speed colour scale
     )
@@ -3820,6 +3881,17 @@ tracking_server <- function(input, output, session) {
     sp    <- pre$sp
     use3d <- isTRUE(pre$has_3d)
 
+    # 2D viewing plane the frames were built in (XY / XZ / YZ). The coordinates are
+    # already remapped in frames_store, so here we only derive axis labels and decide
+    # whether the XY-physical overlays (dwell heatmap, background image) still apply.
+    plane     <- pre$plane %||% "XY"
+    loop$rendered_plane <- plane
+    plane_lab <- switch(plane,
+      XZ = list(x = "X (nm)", y = "Z (nm)"),
+      YZ = list(x = "Y (nm)", y = "Z (nm)"),
+      list(x = "X (nm)", y = "Y (nm)"))
+    plane_xy  <- identical(plane, "XY")
+
     fig <- plot_ly(source = "track")
 
     # Faint background of ALL raw tracks (pre$sp_raw, when the Display toggle is on).
@@ -3843,7 +3915,9 @@ tracking_server <- function(input, output, session) {
     # toggle works in both. heatmap_store() is computed from trk() on plot_trigger
     # (not playback-specific), so it has data in either mode. Added as a background
     # layer (before the tracks) so paths draw on top.
-    hm_data <- if (!use3d && isTRUE(isolate(input$trk_show_heatmap)))
+    # The dwell-time heatmap is computed in real XY space, so it is only meaningful in
+    # the XY plane — suppress it (like the background image) in the XZ/YZ side views.
+    hm_data <- if (!use3d && plane_xy && isTRUE(isolate(input$trk_show_heatmap)))
                  tryCatch(isolate(heatmap_store()), error = function(e) NULL) else NULL
     draw_heatmap <- function(fig) {
       if (is.null(hm_data)) return(fig)
@@ -3998,7 +4072,7 @@ tracking_server <- function(input, output, session) {
       axis_base <- list(showgrid = !hide_grid, zeroline = !hide_grid,
                         showticklabels = !hide_grid,
                         gridcolor = grid_col, color = fg_col)
-      ovl <- tryCatch(isolate(trk_image_overlay()), error = function(e) NULL)
+      ovl <- if (plane_xy) tryCatch(isolate(trk_image_overlay()), error = function(e) NULL) else NULL
 
       if (use3d) {
         all_z <- unlist(lapply(sp_all, `[[`, "z"), use.names = FALSE)
@@ -4026,8 +4100,8 @@ tracking_server <- function(input, output, session) {
         trk_locked_ranges(list(x = xr, y = yr))
         fig <- fig %>% layout(
           paper_bgcolor = bg_col, plot_bgcolor = bg_col,
-          xaxis = c(list(title = if (hide_grid) "" else "X (nm)", range = xr), axis_base),
-          yaxis = c(list(title = if (hide_grid) "" else "Y (nm)", range = yr,
+          xaxis = c(list(title = if (hide_grid) "" else plane_lab$x, range = xr), axis_base),
+          yaxis = c(list(title = if (hide_grid) "" else plane_lab$y, range = yr,
                          scaleanchor = "x", scaleratio = 1), axis_base),
           images = if (!is.null(ovl)) list(ovl) else list(),
           # showlegend=TRUE forces the legend to appear even with a single track trace
@@ -4282,7 +4356,7 @@ tracking_server <- function(input, output, session) {
       }
     }
 
-    ovl       <- tryCatch(isolate(trk_image_overlay()), error = function(e) NULL)
+    ovl       <- if (plane_xy) tryCatch(isolate(trk_image_overlay()), error = function(e) NULL) else NULL
     hide_grid <- isTRUE(isolate(input$trk_hide_grid))
     dark      <- isTRUE(isolate(input$trk_dark_mode))
     bg_col    <- if (dark) "#000000" else "#FFFFFF"
@@ -4336,16 +4410,16 @@ tracking_server <- function(input, output, session) {
         paper_bgcolor = bg_col, plot_bgcolor = bg_col,
         font = list(color = fg_col),
         xaxis = c(
-          if (have_bbox) list(title = if (hide_grid) "" else "X (nm)",
+          if (have_bbox) list(title = if (hide_grid) "" else plane_lab$x,
                               range = c(xr[1]-xpad, xr[2]+xpad), autorange = FALSE)
-          else           list(title = if (hide_grid) "" else "X (nm)"),
+          else           list(title = if (hide_grid) "" else plane_lab$x),
           axis_grid
         ),
         yaxis = c(
-          if (have_bbox) list(title = if (hide_grid) "" else "Y (nm)",
+          if (have_bbox) list(title = if (hide_grid) "" else plane_lab$y,
                               range = c(yr[1]-ypad, yr[2]+ypad), autorange = FALSE,
                               scaleanchor = "x", scaleratio = 1)
-          else           list(title = if (hide_grid) "" else "Y (nm)",
+          else           list(title = if (hide_grid) "" else plane_lab$y,
                               scaleanchor = "x", scaleratio = 1),
           axis_grid
         ),
@@ -4730,19 +4804,25 @@ tracking_server <- function(input, output, session) {
     dt_hsm  <- half_sample_mode(vec)
     h_tmp   <- hist(vec, breaks = n_bins, plot = FALSE)   # for display + y-scaling only
 
-    fig <- plot_ly(x = vec, type = "histogram", nbinsx = n_bins,
-                   marker = list(color = "rgba(100,150,220,0.7)",
-                                 line  = list(color = "rgba(70,110,180,0.9)",
-                                              width = 0.5))) %>%
+    # Build the histogram via add_histogram (not inline plot_ly attrs): trace-level
+    # attributes like nbinsx set on plot_ly() are inherited by every later trace, so
+    # the two scatter reference-lines below would otherwise get nbinsx and trigger
+    # "'scatter' objects don't have these attributes: 'nbinsx'". Keeping them on the
+    # histogram trace confines them there. The reference lines are mode="lines" with
+    # no marker (a size-0 marker only produced "markers not in the mode" warnings).
+    fig <- plot_ly() %>%
+      add_histogram(x = vec, nbinsx = n_bins,
+                    marker = list(color = "rgba(100,150,220,0.7)",
+                                  line  = list(color = "rgba(70,110,180,0.9)",
+                                               width = 0.5)),
+                    showlegend = FALSE) %>%
       add_trace(x = c(dt_med, dt_med), y = c(0, max(h_tmp$counts) * 1.1),
                 type = "scatter", mode = "lines",
                 line   = list(color = "#E03020", width = 2, dash = "dash"),
-                marker = list(size = 0),
                 name = sprintf("Median %.3g ms", dt_med)) %>%
       add_trace(x = c(dt_hsm, dt_hsm), y = c(0, max(h_tmp$counts) * 1.1),
                 type = "scatter", mode = "lines",
                 line   = list(color = "#20A040", width = 2, dash = "dashdot"),
-                marker = list(size = 0),
                 name = sprintf("Typical Δt (bin-free) %.3g ms", dt_hsm)) %>%
       layout(
         xaxis  = list(title = "Δt between consecutive localizations (ms)",
@@ -5115,9 +5195,11 @@ tracking_server <- function(input, output, session) {
     log10_D_fin <- log10_D_fin[is.finite(log10_D_fin)]
     n_bins <- 40L
 
-    fig <- plot_ly(
+    # add_histogram, not inline plot_ly(type="histogram", nbinsx=): the GMM overlay
+    # scatter lines added below would otherwise inherit nbinsx from the plot_ly level
+    # and warn "'scatter' objects don't have these attributes: 'nbinsx'".
+    fig <- plot_ly() %>% add_histogram(
       x    = log10_D_fin,
-      type = "histogram",
       nbinsx = n_bins,
       marker = list(color = "rgba(100,120,210,0.55)",
                     line  = list(color = "rgba(80,100,190,0.8)", width = 0.5)),
@@ -10188,6 +10270,13 @@ tracking_server <- function(input, output, session) {
     fg    <- if (dark) "#FFFFFF" else "#63666A"
     gc    <- if (dark) "rgba(255,255,255,0.18)" else "rgba(0,0,0,0.18)"
     bg    <- if (dark) "#000000" else "#FFFFFF"
+    # Keep the 2D axis titles matching the active viewing plane so a dark-mode /
+    # grid relayout does not silently revert an XZ/YZ side view to "X/Y".
+    plane2 <- if (!is3d) (input$trk_view_plane %||% "XY") else "XY"
+    plab   <- switch(plane2,
+      XZ = list(x = "X (nm)", y = "Z (nm)"),
+      YZ = list(x = "Y (nm)", y = "Z (nm)"),
+      list(x = "X (nm)", y = "Y (nm)"))
 
     if (is3d) {
       # Recompute equal ranges so the relayout doesn't reset autorange.
@@ -10222,7 +10311,7 @@ tracking_server <- function(input, output, session) {
         )
       )
     } else {
-      ovl <- tryCatch(isolate(trk_image_overlay()), error = function(e) NULL)
+      ovl <- if (plane2 == "XY") tryCatch(isolate(trk_image_overlay()), error = function(e) NULL) else NULL
       # Include locked ranges so the xaxis/yaxis object-form relayout doesn't
       # discard range + autorange that were set by the initial layout or proxy.
       lr         <- isolate(trk_locked_ranges())
@@ -10235,12 +10324,12 @@ tracking_server <- function(input, output, session) {
           paper_bgcolor = bg, plot_bgcolor = bg,
           font = list(color = fg),
           xaxis = c(list(
-            title = if (hide) "" else "X (nm)",
+            title = if (hide) "" else plab$x,
             showgrid = !hide, zeroline = !hide, showticklabels = !hide,
             gridcolor = gc, color = fg
           ), x_range_kv),
           yaxis = c(list(
-            title = if (hide) "" else "Y (nm)",
+            title = if (hide) "" else plab$y,
             showgrid = !hide, zeroline = !hide, showticklabels = !hide,
             gridcolor = gc, color = fg,
             scaleanchor = "x", scaleratio = 1
@@ -10321,6 +10410,14 @@ tracking_server <- function(input, output, session) {
 
   # ---- Spatial crop: "Crop to view" / "Clear" --------------------------------
   observeEvent(input$trk_crop_to_view, {
+    # The spatial crop filters the real x,y. In an XZ/YZ side view the plotted
+    # vertical axis is Z, so the zoom box's "y" is a z-range — cropping on it would
+    # silently filter the wrong axis. Require the XY plane for cropping.
+    if (!identical(input$trk_view_plane %||% "XY", "XY")) {
+      showNotification("Crop to view only works in the XY plane. Switch the viewing plane to XY first.",
+                       type = "warning", duration = 6)
+      return()
+    }
     zr  <- trk_zoom_ranges()
     pct <- suppressWarnings(as.numeric(input$trk_crop_pct))
     if (is.null(zr)) {

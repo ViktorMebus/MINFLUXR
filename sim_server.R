@@ -918,6 +918,17 @@ sim_server <- function(input, output, session) {
     max(1, sigma_ex * sigma_det / sqrt(sigma_ex^2 + sigma_det^2))
   }
 
+  # Fraction of a point emitter's light that passes the pinhole — the encircled
+  # energy of the Airy pattern within the pinhole radius. v is the optical radius
+  # (v = 3.8317 at exactly 1 AU, the first Airy minimum, where ~84 % is enclosed).
+  # This drives the real confocal trade-off: closing the pinhole (AU < 1) rejects
+  # light — dimmer, noisier — but tightens the PSF and sections better; opening it
+  # (AU > 1) barely adds signal yet blurs and lets in out-of-focus haze.
+  confocal_collection_efficiency <- function(au) {
+    v <- 3.8317 * max(0, au)
+    max(0.01, min(1, 1 - besselJ(v, 0)^2 - besselJ(v, 1)^2))
+  }
+
 
   # ── Diffraction-limited image renderer ──────────────────────────────────────
   # Renders each GT molecule as a 2D Gaussian PSF on a pixel grid, sums them,
@@ -2503,13 +2514,15 @@ sim_server <- function(input, output, session) {
     sig     <- compute_confocal_sigma(640, 670, na, au)
     fwhm    <- round(sig * 2.355)
     au_nm   <- round(1.22 * 670 / na)
+    ee      <- confocal_collection_efficiency(au)
     tags$div(
       class = "alert alert-info",
       style = "padding:6px 10px; font-size:0.84em; margin-top:4px;",
-      tags$b(sprintf("\u03C3 \u2248 %.1f nm  (FWHM \u2248 %d nm)", sig, fwhm)),
+      tags$b(sprintf("\u03C3 \u2248 %.1f nm  (FWHM \u2248 %d nm)  \u00B7  signal \u2248 %.0f%%",
+                     sig, fwhm, 100 * ee)),
       tags$br(),
       tags$small(sprintf(
-        "1 AU = %d nm  \u2014  pinhole radius = %.0f nm",
+        "1 AU = %d nm  \u00B7  pinhole radius = %.0f nm  \u00B7  closing sharpens + sections but dims",
         au_nm, au * au_nm / 2))
     )
   })
@@ -2532,6 +2545,13 @@ sim_server <- function(input, output, session) {
     n_ph    <- max(1, as.numeric(input$sim_diff_photons %||% 200))
     bg_ph   <- max(0, as.numeric(input$sim_diff_bg      %||% 5))
 
+    # Pinhole physics: the collected signal is scaled by the encircled energy
+    # (closing the pinhole → dimmer, noisier via Poisson), while the out-of-focus
+    # haze grows with the pinhole AREA (~AU², opening → washed-out background).
+    ee       <- confocal_collection_efficiency(au)
+    n_ph_eff <- n_ph * ee                 # signal photons actually collected
+    bg_eff   <- bg_ph * au^2              # out-of-focus background admitted
+
     # Render from the UNIQUE fluorophore pool (one physical dye = one PSF), not
     # the over-counted MINFLUX detection list — re-detecting a molecule over the
     # acquisition does not make its confocal spot brighter.
@@ -2542,12 +2562,12 @@ sim_server <- function(input, output, session) {
     fp     <- if (!is.null(res$fluoro_pool)) res$fluoro_pool else res$fluoro
     src_x  <- if (nrow(fp) > 0) fp$x else numeric(0)
     src_y  <- if (nrow(fp) > 0) fp$y else numeric(0)
-    src_ph <- rep(n_ph, length(src_x))
+    src_ph <- rep(n_ph_eff, length(src_x))
 
     if (!is.null(res$bg_pos) && nrow(res$bg_pos) > 0) {
       src_x  <- c(src_x,  res$bg_pos$x)
       src_y  <- c(src_y,  res$bg_pos$y)
-      src_ph <- c(src_ph, rep(n_ph, nrow(res$bg_pos)))
+      src_ph <- c(src_ph, rep(n_ph_eff, nrow(res$bg_pos)))
     }
 
     # Cap at 5 000 sources total to keep rendering fast (sample uniformly)
@@ -2568,7 +2588,7 @@ sim_server <- function(input, output, session) {
                   fy <- max(1, as.numeric(input$sim_fov_y %||% 4000))
                   c(-fx / 2, fx / 2, -fy / 2, fy / 2)
                 } else NULL
-    img_data <- render_diffraction_image(src_x, src_y, psf_sig, n_ph, bg_ph,
+    img_data <- render_diffraction_image(src_x, src_y, psf_sig, n_ph_eff, bg_eff,
                                           px_nm_user = px_user,
                                           photons_vec = src_ph,
                                           extent = fov_ext)
@@ -2578,8 +2598,8 @@ sim_server <- function(input, output, session) {
     # and the minimum resolvable separation between two identical emitters.
     fwhm_nm   <- round(psf_sig * 2.355)
     title_txt <- sprintf(
-      "Confocal view  (\u03C3\u202F=\u202F%.0f nm,  opt. resolution FWHM\u202F\u2248\u202F%d nm)",
-      psf_sig, fwhm_nm)
+      "Confocal view  (\u03C3 \u2248 %.0f nm, FWHM \u2248 %d nm, signal %.0f%% @ %.2f AU)",
+      psf_sig, fwhm_nm, 100 * ee, au)
 
     # Hot Red LUT (ImageJ "Red Hot") — fixed regardless of dark mode; the
     # confocal image is always rendered on black. Low → high:
@@ -2631,6 +2651,10 @@ sim_server <- function(input, output, session) {
         type       = "heatmap",
         x          = img_data$xs, y = img_data$ys, z = img_data$img,
         colorscale = cscale,
+        # Auto-contrast the display (like ImageJ auto B&C) so it looks like a real
+        # confocal image. The pinhole still shows through the DATA — closing it
+        # collects fewer photons (grainier via Poisson) and tightens the PSF;
+        # opening it adds out-of-focus background — not through raw brightness.
         showscale  = FALSE, hoverinfo = "skip",
         name       = "Diffraction-limited"
       )

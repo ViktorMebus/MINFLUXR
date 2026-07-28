@@ -357,6 +357,7 @@ tracking_ui <- fluidPage(
           tags$details(class = "sim-group", open = NA,
           tags$summary(tags$b("Display Options")),
           uiOutput("trk_view_mode_ui"),
+          uiOutput("trk_view_plane_ui"),
           numericInput("trk_pt_size", "Marker size", value = 6, min = 1),
           radioButtons("trk_color_mode", "Color localizations by",
                        choices = c("Track ID" = "tid", "Dark cycles (integration)" = "dark",

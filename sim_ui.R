@@ -775,7 +775,7 @@ sim_ui <- fluidPage(
                   tags$hr(),
                   numericInput("sim_diff_photons",
                                "Mean photons / fluorophore",
-                               value = 80, min = 1, max = 100000, step = 50),
+                               value = 45, min = 1, max = 100000, step = 5),
                   numericInput("sim_diff_bg",
                                "Background (photons / pixel)",
                                value = 35, min = 0, max = 10000, step = 1),
