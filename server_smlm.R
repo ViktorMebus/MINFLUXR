@@ -9840,7 +9840,8 @@ smlm_server <- function(input, output, session) {
     res <- withProgress(message = "KDE co-localization...", value = 0.3,
       compute_kde_coloc(pts1[[ax[1]]], pts1[[ax[2]]],
                         pts2[[ax[1]]], pts2[[ax[2]]], bw, n_grid,
-                        bw_sweep = bw_sweep, costes_nsim = costes_n))
+                        bw_sweep = bw_sweep, costes_nsim = costes_n,
+                        null_mode = input$kde_null_mode %||% "shift"))
     if (is.null(res)) {
       showNotification("KDE computation failed.", type = "warning")
       kde_coloc_results(NULL); return()
@@ -9901,9 +9902,22 @@ smlm_server <- function(input, output, session) {
     if (is.null(r)) return(NULL)
     costes_line <- if (!is.null(r$costes_p)) {
       sig <- if (r$costes_p < 0.05) "significant co-localization" else "not significant"
-      tags$p(sprintf("Costes spatial-randomization p = %.3f  (%s; %d randomizations, null r = %.3f ± %.3f)",
-                     r$costes_p, sig, r$costes_nsim, r$costes_null_mean, r$costes_null_sd),
-             style = "font-size:13px; margin:2px 0; color:#555;")
+      tagList(
+        tags$p(sprintf("Spatial-randomization p = %.3f  (%s; %d randomizations, null r = %.3f ± %.3f)",
+                       r$costes_p, sig, r$costes_nsim, r$costes_null_mean, r$costes_null_sd),
+               style = "font-size:13px; margin:2px 0; color:#555;"),
+        tags$p(sprintf("Null: %s", r$null_label %||% "—"),
+               style = "font-size:12px; margin:0 0 2px; color:#888;"),
+        # Measured false-positive rates (simulation, see compute_kde_coloc header):
+        # signal spread over the whole window -> shift 3% / csr 3%; signal confined to
+        # one cell inside a larger window -> shift 53% / csr 93%, vs the 5% a calibrated
+        # test should give. Both nulls randomize over the bounding box, not the cell.
+        if (identical(r$null_mode, "csr")) tags$p(
+          HTML("&#9888; The uniform-CSR null tests against complete spatial randomness, so it largely reports &ldquo;both channels are non-uniform&rdquo; and rejects far too readily. Prefer the <b>random-shift</b> null."),
+          style = "font-size:12px; margin:0; color:#b26a00;")
+        else tags$p(
+          HTML("&#9888; Calibrated only when the signal fills the field. If it is confined to a small part of the view, randomizing over the bounding box makes this reject too readily — treat a low p as weak evidence and confirm with g&#8321;&#8322;(r) against its CSR envelope."),
+          style = "font-size:12px; margin:0; color:#b26a00;"))
     } else NULL
     tags$div(
       style = "margin-top:6px;",

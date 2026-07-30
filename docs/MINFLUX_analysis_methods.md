@@ -72,6 +72,11 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
 - **Caveat (no null):** cross-NN has **no null model built in** — every A point has a nearest B point, so
   the curve is never zero and a small median distance can arise from density alone. Significance must
   come from L₁₂/g₁₂ with their CSR envelopes (§I-A.4).
+- **Attribution precision (tightened 2026-07-30):** this panel was credited to **Clark & Evans 1954**
+  as though it implemented their statistic. NN distance *as a spatial statistic* does originate with them,
+  but their contribution is specifically the index **R = d̄_obs / d̄_Poisson** tested against a Poisson
+  null — and this panel deliberately computes no null (see above). The UI now says so explicitly rather
+  than implying a Clark–Evans test is being run.
 
 ### I-A.2 Density-based clustering (DBSCAN / HDBSCAN / OPTICS) — [Part II §6.1]
 - **Primary clustering** (`cluster`): `dbscan::dbscan(pts, eps, minPts)` on raw localizations → labels
@@ -96,6 +101,13 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
   box, so L(r) − r is biased downward near large r (points near the box edge lose neighbours). A
   `# TODO` remains for a translation/isotropic correction; instead this is handled by the envelope
   below.
+- **Auto r_max is capped by the SHORTEST window axis** (`min(extent)/4`), since edge bias is set by
+  whichever dimension runs out first. **Fixed 2026-07-30:** an inverted condition (`!use_3d` where
+  `use_3d` was meant) meant the **z** extent never entered the cap, so on a typical thin 3D slab
+  (5000×5000×300 nm) auto r_max came out at 1250 nm — over 4× the entire z depth — instead of 75 nm,
+  making the whole large-r tail of the 3D curve edge-artefact. The same "cap by the longest axis rather
+  than the shortest" error was present in `compute_ripley_L12` and `compute_pcf12` (`max(rng)/4`) and is
+  likewise fixed. Only the **auto** path was affected: an explicit r_max from the UI was always honoured.
 - **Monte-Carlo CSR envelope (`compute_ripley_envelope`, optional):** generates `nsim` CSR patterns of
   the *same n* in the **same frozen window** (`window_ranges`, a pre-supplied 2×d bounding box shared by
   the observed curve and the sims) and returns the pointwise 2.5–97.5% band + mean null curve. Because
@@ -128,19 +140,50 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
 - **Bandwidth-honesty add-ons:**
   - **`bw_sweep`** recomputes r over a log-spaced range of bandwidths (0.4–20% of the field span) and
     returns `data.frame(bw, pearson_r)`, plotted as r(bw) so the smoothing-dependence is explicit.
-  - **`costes_nsim`** spatially randomizes Ch2's points uniformly in the shared window `nsim` times,
-    recomputes r at the chosen bandwidth, and returns a one-sided **p-value** = (#{random r ≥ observed}+1)
-    /(nsim+1) plus the null mean/SD — a significance test against spatial independence (p≈0.5 for
-    independent channels, p→0 for co-localized). A Costes-style label-randomization null.
+  - **`costes_nsim`** randomizes Ch2 `nsim` times, recomputes r at the chosen bandwidth, and returns a
+    one-sided **p-value** = (#{random r ≥ observed}+1)/(nsim+1) plus the null mean/SD.
+  - **`null_mode` selects WHICH null** — this is what decides whether the p-value means anything:
+    - **`"shift"` (default): toroidal random shift** of Ch2 — translate it by a random offset with
+      wrap-around inside the same window. Ch2's own clustering, density and point count are preserved
+      **exactly**; only its spatial registration with Ch1 is destroyed. This isolates cross-channel
+      dependence, and is the same random-shift logic (Lotwick & Silverman 1982) already behind the
+      bivariate statistics.
+    - **`"csr"`: uniform resampling** of Ch2 — a test against *complete spatial randomness* rather than
+      against independent placement. Kept for comparison and labelled in-UI.
   - The UI points users to **g₁₂(r)** for a bandwidth-free, scale-resolved alternative.
-- **Caveat (the Costes null is optimistic):** the randomization scatters Ch2 **uniformly** in the window,
-  so the test is against *complete spatial randomness*, not against "Ch2 has this cell's structure but is
-  placed independently of Ch1". In a structured cell almost any two non-uniform channels beat a uniform
-  null, so p→0 largely reports **"both channels are non-uniform"**, not that the two proteins interact.
-  Read it as a floor test, not as evidence of association.
+- **Null changed + CALIBRATION MEASURED (2026-07-30).** The old uniform null tests against CSR, not
+  against "Ch2 has this cell's structure but is placed independently of Ch1" — the failure mode Costes
+  et al. 2004 designed *against* (their test preserves the randomized channel's autocorrelation by block
+  randomization), so the field is also no longer attributed to Costes as if it implemented their
+  algorithm. The default is now the structure-preserving random shift. **But the fix is partial, and the
+  measured numbers matter more than the argument.** Simulating independent placement 30× per scenario
+  (truth = NOT co-localized, so a calibrated test rejects at p<0.05 ~5% of the time):
+
+  | scenario | random shift | uniform CSR |
+  |---|---|---|
+  | channels clustered across the **whole window** | 3% ✅ | 3% ✅ |
+  | channels sharing **one cell** inside a larger window (realistic SMLM) | **53%** ❌ | **93%** ❌ |
+
+  So the CSR null genuinely is severely anti-conservative in the realistic case — but the random shift is
+  only *better*, not calibrated. Root cause: **both nulls randomize over the bounding box rather than over
+  the actual support** (the cell mask), so a shifted Ch2 wraps outside the cell and the null still
+  contrasts "Ch2 inside the cell" with "Ch2 partly outside it". **Mask-aware randomization is the real
+  fix and is not implemented.** Until then, read a low p here as *weak* evidence whenever the signal does
+  not fill the field, and take significance from g₁₂(r) against its CSR envelope. Power is not the
+  limitation: on a genuinely co-localized positive control the shift null fired 10/10 at median p = 0.02.
 
 ### I-A.6 Radius of gyration & gyration-tensor anisotropy — [Part II §6.3]
-- **Rg:** `Rg² = mean(‖p − p̄‖²)` per cluster (second moment about the centroid).
+- **Rg:** `Rg² = mean(‖p − p̄‖²) · n/(n−1)` per cluster (second moment about the centroid, Bessel-
+  corrected). Points are **median member positions**, never raw localizations.
+- **Small-N bias correction (added 2026-07-30).** The centroid is estimated from the same points whose
+  spread is measured, so it sits inside the cloud and **E[Rg²_obs] = Rg²·(n−1)/n** — a 29% underestimate
+  at n=2, 11% at n=5, 1% at n=50. That bias is **n-dependent**, so uncorrected it manufactures a spurious
+  "larger clusters have larger Rg" trend whenever clusters of differing member count are pooled or plotted
+  against size. The `n/(n−1)` factor (exactly a sample-variance Bessel correction) removes it; verified in
+  silico, recovering 0.98–1.00 of the true Rg for n≥5 versus 0.87–0.99 uncorrected. **Residual:** at n=2
+  the corrected mean still sits ~12% low, because Rg = √(Rg²) and E[√x] < √E[x] (Jensen) — no closed-form
+  fix, so treat 2-member clusters as indicative only. `bias_correct = FALSE` returns the raw
+  configurational Rg of the observed point set.
 - **Anisotropy:** eigenvalues λ₁≥λ₂≥λ₃ of the gyration tensor give **Westin linear / planar / spherical**
   coefficients (c_l = (λ₁−λ₂)/Σλ, c_p = 2(λ₂−λ₃)/Σλ, c_s = 3λ₃/Σλ) and the **Rudnick–Gaspari asphericity**
   — used to *infer* cluster shape (linear filament vs planar vs isotropic) without the user declaring it.
@@ -279,6 +322,46 @@ cycle** — cluster the inter-localization Δt values and take the smallest robu
 resulting t_c drives gap-splitting, the quality gate, cycle-index MSD binning and the D-map. A step's
 **cycle count** is `n_cyc = round(Δt / t_c)`; **integrated (single-cycle)** steps have n_cyc = 1.
 
+#### Measured on real data (2026-07-30) — Δt is QUANTISED, not distributed
+Checked directly against `Test data/251027-202407_GP67H-track-014.npy` (650,042 within-track steps,
+`tim` stored as float64 so this is real structure, not a storage artefact):
+
+- **Δt = k·t_c + SW, essentially exactly.** Only 4,432 distinct Δt values across 650k steps. Regressing
+  the interval clusters gives **t_c = 0.19161 ms, SW = 0.01153 ms (R² = 0.9999978)**. Testing whether
+  intervals are integer multiples: dividing by the *mode* succeeds for only **52%** of steps, while
+  `(Δt − SW)/t_c` is within 1% of an integer for **97.6%** and within 5% for **99.98%**.
+- **⚠ The modal Δt is NOT the cycle time** — it is `1·t_c + SW` (0.2027 ms here). Mistaking the mode for
+  t_c would bias every D by **−5.5%**. This is exactly why `trk_cluster_cycle` takes the cycle as the
+  **spacing between interval clusters** (`median(diff(centers))`) and SW as the leftover offset
+  (`centers[1] − cyc`) rather than using the mode. Verified end-to-end: the app's own estimator returns
+  **t_c = 0.191483, SW = 0.011165**, agreeing with the independent regression to **0.065%** on t_c.
+- **There is no meaningful jitter within a cycle.** The integrated (n_cyc = 1) population has
+  **CV = 0.0425%**, a total spread of 0.72% of one cycle, ~19 distinct values separated by 25–200 ns
+  timestamp ticks, and **46% of steps on a single identical value**. Each "peak" is a near-delta spike.
+- **Consequence for the TSA Δt histogram binning (2026-07-30).** Fixed-width bins alias against the
+  comb. At the old default of 80 bins the grid ran **1.63 bins per cycle**, so each peak landed at a
+  different offset inside its bin and the bar centres sat **5–25% of a cycle away from the true peaks**,
+  drifting systematically across the range (+25%, −23%, −19%, −14%, −10%, −5% for k = 1…6) with empty
+  bins interleaved — which is what made the plot look misaligned. Default binning is now
+  **one bar per cycle count**: edges on the classification boundaries `SW + (k ± ½)·t_c`, so each bar is
+  exactly one cycle count centred on its peak (verified: bar centres match the peaks to 0.0e+00 ms) and
+  the histogram is literally a picture of the `round((Δt − SW)/t_c)` the analysis performs. Fixed-width
+  binning remains selectable. A **log count axis** option was added (counts span ~100× from the 1-cycle
+  peak into the dark tail), plus a **rug of distinct observed Δt values** — a tick that does not sit
+  under a bar centre is an interval the current cycle time does not explain.
+- **Consequence for the TSA Δt plot: the KDE overlay was REMOVED (2026-07-30).** It had been described
+  in-UI as revealing a "bell-shaped cluster around each cycle count" — but no such bell exists. Since
+  each peak is a near-delta spike, 100% of the curve's width was kernel bandwidth rather than timing
+  jitter, and at higher smoothing settings it merged the comb into a single invented unimodal blob. The
+  `trk_dt_show_density` and `trk_dt_density_bw` controls are gone; the histogram plus the
+  **cycle-multiple markers** (`trk_dt_mark_cycles`, now a standalone option rather than gated behind the
+  density checkbox) convey the structure without fabricating a continuous density. The real distribution
+  is the **discrete** one over cycle counts (here 52.4% integrated, 21.6% 2-cycle, 8.2% 3-cycle, with a
+  2.8% tail beyond 12), shown by the cycle-classification plot.
+- **This validates the cycle-index design.** Because intervals are exact integer cycles plus a constant
+  offset, the cumulative-cycle-index binning is not an approximation to noisy timing — it recovers the
+  true elapsed time, and the √Δt / integrated-only handling elsewhere rests on solid ground.
+
 ### I-B.1 σ_loc & data-quality calibration (CVE, MSD-free) — [Part II §2.2]
 `trk_cve_bundle`. Consecutive per-axis steps share one localization's error and are anti-correlated by −σ²
 (Vestergaard 2014). With MINFLUX blur R≈0:
@@ -290,13 +373,37 @@ resulting t_c drives gap-splitting, the quality gate, cycle-index MSD binning an
 - **Per-track σ heterogeneity:** one CVE σ per track (≥ `n_min` integrated steps, skipping the first
   ~5 locs of lock-on transient); the median, IQR, CV and a **σ–EFO Spearman ρ** (precision should improve
   with photons ⇒ negative ρ validates the model) plus a bootstrap 95% CI on the median σ.
-- **Photon-quality weighting (2026-07, `input$trk_cve_precision_weight`, default on):** fit
-  `log σ ~ log EFO` across tracks (needs ≥8 anchor tracks) → per-localization σ = `exp(a)·EFO^p`
-  (clamped 0.2–5× median). Pooled σ_loc and D are then **inverse-variance-weighted** by the summed
-  displacement-noise variance of the localizations entering each product (`w_pair = 1/(σ²_{i−1}+2σ²_i+
-  σ²_{i+1})`, `w_step = 1/(σ²_{i−1}+σ²_i)`), so bright/precise steps dominate. When on and resolvable
-  (cov₁ < 0), the photon-weighted σ_w becomes the app-wide σ_loc; unweighted per-track median is kept
-  as cross-check. Heuristic weight (exact product variance is more complex) — labelled as such.
+- **Photon-quality weighting: REMOVED (was added 2026-07-19, withdrawn since).** The doc previously
+  described an inverse-variance CVE weighted by a fitted `log σ ~ log EFO` model as "default on"; that no
+  longer exists in the code and this entry is corrected. It was withdrawn because on MINFLUX **tracking**
+  data the photon channel is structurally coupled to **mobility**, not just brightness: a fast molecule
+  leaves the beam pattern sooner and so collects *fewer* photons per localization. Weighting by photons
+  therefore up-weighted slow molecules and biased D downward — the estimator was measuring the very thing
+  it was meant to correct for. The pooled σ_loc / D_cve never used the photon model and are unaffected.
+  The two diagnostics that exposed it are retained and reported:
+  - **`noise_frac` = −2·r₁** (r₁ = cov₁/⟨Δ²⟩), the share of step variance that is localization noise.
+    Small ⇒ per-track σ differences are motion, not photons.
+  - **`phot_mob_rho`** = Spearman ρ[per-track photons, per-track step variance]. Strongly negative ⇒ the
+    photon channel is a mobility proxy, which also means **any ECO/EFO filter is silently a mobility
+    filter** — surfaced as a UI warning at ρ ≤ −0.35.
+- **⚠ Placeholder z columns were being treated as 3D (fixed 2026-07-30).** 2D MINFLUX exports routinely
+  carry an all-zero `z` column, and `0` *is* finite — so the widespread presence test
+  `sum(is.finite(df$z)) > 0` returned TRUE for 2D data and the dimension-aware estimators switched to 3D,
+  pooling a **zero-variance axis** into the maths. Measured effect on 2D data with such a column: pooled
+  **σ_loc −18.4%** (a factor √(2/3)) and **D_cve −33.3%** (a factor 2/3). It would also have made the
+  now-d-correct JDD fit a Maxwell law to 2D distances, and built a 3D free-walk null for 2D confinement
+  data. There is now a single shared predicate **`.has_real_z(df, min_sd = 1)`** (>10 finite z values
+  *and* sd > 1 nm) used by the 3D toggle, CVE, MSD, JDD, confinement and displacement-vs-D. Previously
+  MSD and displacement-vs-D tested variance correctly while CVE, JDD and confinement did not — i.e. the
+  dimension decision had silently drifted between tools, which is exactly what the shared predicate
+  prevents. **Re-running CVE on such a dataset raises σ_loc by ~22% and D_cve by ~50%.**
+- **Per-axis σ: lateral vs axial (added 2026-07-30).** The pooled σ_loc above averages x, y **and z**.
+  In 3D MINFLUX the axial precision is typically worse than the lateral, so one pooled number over-states
+  σ_xy and under-states σ_z. Several consumers are purely lateral — the **D-map** is an x–y map and the
+  **HMM** never reads z — so feeding them a z-inflated floor makes them **over-subtract** noise. `sigma_xy`,
+  `sigma_z` and their ratio `sig_aniso` are therefore computed separately and reported; at
+  `sig_aniso > 1.3` the panel warns and gives the lateral value to enter manually for the 2D tools. The
+  app-wide σ_loc default is left pooled (changing it silently would move every existing result).
 - **QC flags:** *implausible jumps* where `|Δr|² > 25·E[|Δr|²]` (i.e. |Δr| > 5× the expected RMS for that
   gap, using E[|Δr|²] = 2d·D_cve·Δt + 2d·σ² so long dark gaps aren't falsely flagged); *degenerate* tracks
   with σ² ≤ 0 (drift-dominated) or σ far in the outlier tail.
@@ -342,15 +449,32 @@ per-segment log₁₀D distribution is then fit with a **BIC-selected Gaussian m
 `max_g` states).
 
 ### I-B.4 Jump-distance distribution (JDD) — [Part II §2.3]
-`jdd_bundle`. Fit the step-length histogram with an **N-component Rayleigh mixture**
-**p(r) = Σ_k w_k · (r/σ_k²)·exp(−r²/2σ_k²)** by MLE (Nelder–Mead on the NLL; weights via softmax, σ via
-log-parametrisation). MINFLUX handling:
+`jdd_bundle`. Fit the step-length histogram with an **N-component scaled-chi mixture** — the law of
+|Δr| for a d-dimensional isotropic Gaussian displacement:
+
+**p(r) = Σ_k w_k · C_d · r^(d−1)/σ_k^d · exp(−r²/2σ_k²)**,  **C_d = 1/(2^(d/2−1)·Γ(d/2))**
+
+by MLE (Nelder–Mead on the NLL; weights via softmax, σ via log-parametrisation). d = 2 gives the
+classic **Rayleigh** form (C=1, Schütz 1997); d = 3 gives **Maxwell** (C=√(2/π)), used when z is
+included. σ_k is the **per-axis** spread in both cases. MINFLUX handling:
 - **√Δt normalization ON by default** — pool `r/√Δt` so steps of different cycle counts are comparable
   (states then map to D, not raw step size).
-- **D per component:** `D = σ²/divisor` (divisor 2 in 2D / 3 in 3D).
+- **D per component:** `D = σ²/2`, **dimension-independent** — because E[r²] = d·σ² and MSD = 2·d·D·Δt,
+  the d cancels. This also makes the σ_loc term below dimensionally consistent with it.
 - **σ_loc bias correction:** subtract `2·σ_loc²/dt0` from σ² before D (localization noise adds 2σ_loc² per
   coordinate), clamped ≥0. A **noise-floor jump distance** `√(2d)·σ_loc/√dt0` marks where peaks are
   noise-dominated.
+
+> **Fixed 2026-07-30.** This previously fitted the 2D **Rayleigh** shape even when z was included, then
+> divided by 3. Because a Rayleigh MLE is a moment estimator on Σr², the *total* D happened to come out
+> right for a single noiseless population — but the fitted σ was inflated by √1.5, so the σ_loc term
+> (defined on the per-axis variance) subtracted only ⅔ of the true noise floor, and the PDF *shape* was
+> wrong. Verified in silico at realistic MINFLUX values (D = 200 nm²/ms, t_c = 0.5 ms, σ_loc = 10 nm):
+> single 3D population D biased **+32%**; a 100/900 nm²/ms two-population 3D mixture recovered as
+> **281/840** with weights 0.63/0.37. After the fix: −1.0% and **102/903** at 0.60/0.40. The 2D path is
+> bit-identical (d = 2 reproduces the old expression exactly). Note the **HMM** and **D-map** are
+> deliberately 2D-only (they never read z), so the Rayleigh emission there is correct — and since the 2D
+> projection of isotropic 3D diffusion has the same D, their D is unbiased on 3D data.
 
 ### I-B.5 Diffusive-state HMM (Baum–Welch + Viterbi) — [Part II §2.4]
 `hmm_bundle`. Per-step displacement `r` (√Δt-normalised by default) with a **Rayleigh emission**
@@ -560,18 +684,24 @@ ways that matter for every downstream estimator:
   track (`n_cyc = round(Δt/t_cycle) == 1` on both steps), i.e. we pre-segment into constant-Δt
   sub-runs — precisely the mitigation the literature prescribes. ✅ Statistically valid on MINFLUX at
   the cost of discarding dark-gap-adjacent steps.
-- **Photon-quality weighting (2026-07):** MINFLUX reports a per-localization photon proxy (EFO), and
-  precision scales with photons. We fit `σ_loc ∝ EFO^p` from the per-track CVE σ vs per-track median
-  EFO, assign each localization a σ, and **inverse-variance-weight** the pooled σ_loc and D so bright,
-  well-localized steps count more than dim/noisy ones — the honest way to exploit the quality channel
-  rather than a hard EFO cut. Weights are a heuristic (summed displacement-noise variance of the
-  displacements entering each product; the exact product variance is more complex). Falls back to
-  unweighted without EFO or with <8 anchor tracks. σ_loc co-estimation is inherently less critical for
-  MINFLUX (σ is already ~nm), so CVE serves mainly as an MSD-free precision/plausibility check.
+- **Photon-quality weighting: tried, then REMOVED** (added 2026-07-19, withdrawn; this entry corrected
+  2026-07-30 — it previously described the weighting as live). The idea was that precision scales with
+  photons, so fitting `σ_loc ∝ photons^p` and inverse-variance-weighting the pooled σ_loc and D would
+  exploit the quality channel instead of a hard EFO cut. It was withdrawn on discovering that in
+  **tracking** the photon channel is a **mobility** proxy: a fast molecule leaves the beam pattern sooner
+  and collects fewer photons, so photon-weighting up-weights slow molecules and biases D **downward**.
+  The diagnostics that revealed this (`noise_frac`, `phot_mob_rho`) are retained and reported — and the
+  same coupling means **any ECO/EFO quality filter is also a mobility filter**, which the panel now warns
+  about. σ_loc co-estimation is inherently less critical for MINFLUX (σ is already ~nm), so CVE serves
+  mainly as an MSD-free precision/plausibility check.
+- **Lateral vs axial σ (2026-07-30):** σ is pooled over x, y and z, but the axial precision is usually
+  worse; the purely lateral consumers (D-map, HMM) then over-subtract their noise floor. `sigma_xy` /
+  `sigma_z` / their ratio are now reported separately, with a warning above 1.3× (see §I-B.1).
 
-### 2.3 JDD — jump-distance / Rayleigh-mixture — 🟢 GREEN (with our handling)
-- **Implemented as:** jump-distance distribution with an N-component Rayleigh mixture; σ_loc bias
-  correction, √Δt-normalization (default on), and an **integrated-steps-only** mode.
+### 2.3 JDD — jump-distance / chi-mixture — 🟢 GREEN (with our handling)
+- **Implemented as:** jump-distance distribution with an N-component scaled-chi mixture (**Rayleigh in
+  2D, Maxwell in 3D** — see I-B.4); σ_loc bias correction, √Δt-normalization (default on), and an
+  **integrated-steps-only** mode.
 - **Source:** Schütz, Schindler & Schmidt 1997; benchmarking in Weimann et al. 2013.
 - **MINFLUX caveat:** small σ_loc reduces error-broadening of the Rayleigh peaks (an advantage), but
   jumps must be pooled at a **fixed real Δt**; mixing steps of different cycle counts pollutes the
@@ -581,7 +711,11 @@ ways that matter for every downstream estimator:
   ==1`), which keeps a single true Δt so *no* pooling assumption is needed at all — valid regardless of
   the motion model. The "short track → few jumps" concern is weak for MINFLUX (100× more locs/track than
   camera SPT). Residual: the √Δt mode still assumes free diffusion; prefer integrated-only in doubt, and
-  keep the component count low (each Rayleigh component still assumes free Brownian).
+  keep the component count low (each component still assumes free Brownian).
+- **Dimensionality fix (2026-07-30):** the fitted PDF is now the **d-correct** distance law rather than
+  Rayleigh-regardless. On 3D data the old form biased single-population D by +32% and badly distorted
+  multi-population splits (a true 100/900 mixture read as 281/840). 2D results are unchanged. See the
+  boxed note in I-B.4 for the validation numbers.
 
 ### 2.4 HMM diffusive-state segmentation — 🟡 AMBER
 - **Implemented as:** per-track Gaussian-emission HMM over displacement steps, N states, with
@@ -886,16 +1020,22 @@ footprint).
   a co-localization index (cf. Dunn et al. 2011).
 - **Caveat:** the Pearson r is strongly bandwidth-dependent (small bandwidth → r≈0 even for true
   co-localization; large → inflated). Now made explicit by the optional **r(bandwidth) sweep** plot, and
-  the single-bandwidth r is accompanied by a **Costes-style spatial-randomization p-value** (§I-A.5) that
-  tests it against spatial independence. For a bandwidth-free, scale-resolved alternative the UI points
+  the single-bandwidth r is accompanied by a **random-shift spatial-randomization p-value** (§I-A.5) that
+  tests it against independent placement. For a bandwidth-free, scale-resolved alternative the UI points
   to the pair cross-correlation g₁₂(r) (§6.2). Still treat the raw r as a *relative* measure.
 - **Deeper caveat — the "image" is manufactured.** MINFLUX has no pixels, so the density surface the
   Pearson r is computed on does not exist until the bandwidth creates it: the bandwidth is a free
   parameter, not a property of the microscope. Only compare r values computed at the **same bandwidth on
   similarly dense data**; prefer the sweep to any single number.
-- **The Costes p-value is optimistic** (§I-A.5): it randomizes Ch2 *uniformly*, so it tests against
-  complete spatial randomness. In a structured cell almost any two non-uniform channels beat that null,
-  so p→0 mostly reports "both channels are non-uniform", not that the proteins associate.
+- **The randomization null was anti-conservative — improved but NOT solved, 2026-07-30** (§I-A.5). It
+  scattered Ch2 *uniformly*, testing against complete spatial randomness rather than independent
+  placement. Measured on simulated independent channels confined to one cell inside a larger window, that
+  null falsely called co-localization **93%** of the time (calibrated = 5%). The default is now a
+  **toroidal random shift** of Ch2, which preserves Ch2's clustering and count — but it still rejected
+  **53%** in the same scenario, because both nulls randomize over the **bounding box, not the cell mask**.
+  Mask-aware randomization is the outstanding fix. Until then this p-value is only trustworthy when the
+  signal fills the field; otherwise use g₁₂(r) with its envelope. Also a **citation fix**: this is not the
+  Costes et al. 2004 block-randomization algorithm and is no longer credited as such. Rating stays 🟡.
 
 ### 6.5 Cluster shape fitting (viewer) — 🟠 EXPLORATORY
 - **Method (standard):** orthogonal-distance MLE + AICc/BIC model selection (Akaike 1974; Schwarz 1978;

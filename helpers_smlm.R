@@ -4990,10 +4990,20 @@ analyze_cluster2_morphology <- function(df, backbone_pts = NULL,
 # thing the "cluster" grouping is meant to report and the "cluster2" grouping is
 # meant to look past by de-blinking to one point per molecule.)
 #
+# SMALL-N BIAS (bias_correct): the centroid is estimated from the SAME points whose
+# spread is being measured, so it sits inside the cloud and E[Rg²_obs] = Rg²·(N−1)/N.
+# That is a 29% underestimate at N=2, 11% at N=5, 1% at N=50 — i.e. an N-DEPENDENT
+# bias, which manufactures a spurious "bigger clusters have bigger Rg" trend whenever
+# clusters of different member counts are pooled or plotted against size. Multiplying
+# the mean squared distance by N/(N−1) (Bessel, exactly as for a sample variance)
+# removes it, giving an unbiased estimate of the underlying structure's Rg. Set
+# bias_correct = FALSE for the raw configurational Rg of the observed point set.
+#
 # Requires >= 2 members per cluster (Rg is undefined for one point). Noise ids (0)
 # are dropped for both the grouping and, when members are a cluster level, the
 # member. Returns data.frame(cluster_id, n_units, rog).  nm throughout.
-compute_cluster_rog <- function(df, cluster_col = "cluster2", member_col = "tid") {
+compute_cluster_rog <- function(df, cluster_col = "cluster2", member_col = "tid",
+                                bias_correct = TRUE) {
   if (!all(c(cluster_col, member_col) %in% names(df))) return(data.frame())
   if (!all(c("x", "y") %in% names(df))) return(data.frame())
   use_z <- "z" %in% names(df)
@@ -5020,10 +5030,17 @@ compute_cluster_rog <- function(df, cluster_col = "cluster2", member_col = "tid"
     dplyr::group_by(cl) %>%
     dplyr::summarise(cx = mean(mx), cy = mean(my), cz = mean(mz),
                      n_units = dplyr::n(), .groups = "drop")
+  # Bessel factor n/(n−1) on the MEAN SQUARED distance removes the N-dependent
+  # small-N bias described in the header (no-op as n grows).
+  bc <- isTRUE(bias_correct)
   out <- dplyr::left_join(mem, cents, by = "cl") %>%
     dplyr::mutate(r2 = (mx - cx)^2 + (my - cy)^2 + (mz - cz)^2) %>%
     dplyr::group_by(cl, n_units) %>%
-    dplyr::summarise(rog = sqrt(mean(r2, na.rm = TRUE)), .groups = "drop") %>%
+    dplyr::summarise(
+      rog = sqrt(mean(r2, na.rm = TRUE) *
+                   (if (bc && dplyr::first(n_units) > 1L)
+                      dplyr::first(n_units) / (dplyr::first(n_units) - 1) else 1)),
+      .groups = "drop") %>%
     dplyr::filter(n_units >= 2L, is.finite(rog)) %>%
     dplyr::rename(cluster_id = cl)
 
@@ -5062,8 +5079,11 @@ compute_ripley_L <- function(x, y, z = NULL, r_seq = NULL, use_3d = FALSE,
   }
 
   if (is.null(r_seq)) {
+    # r_max is capped by the SHORTEST window axis (edge bias grows once r approaches
+    # half the smallest extent). In 3D the z extent is usually far smaller than x/y
+    # (thin optical section), so it MUST be included in the cap.
     r_max <- min(diff(rng[, 1]), diff(rng[, 2])) / 4
-    if (!use_3d && ncol(rng) > 2) r_max <- min(r_max, diff(rng[, 3]) / 4)
+    if (use_3d && ncol(rng) > 2) r_max <- min(r_max, diff(rng[, 3]) / 4)
     r_seq <- seq(0, r_max, length.out = 60)[-1]
   }
 
@@ -5337,7 +5357,10 @@ compute_ripley_L12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
   dmat <- as.matrix(dist(rbind(pts1, pts2)))[seq_len(n1), (n1 + 1):(n1 + n2)]
 
   if (is.null(r_seq) || length(r_seq) == 0) {
-    r_max <- max(rng) / 4
+    # Cap by the SHORTEST window axis, not the longest: edge bias is set by the
+    # dimension that runs out first (in 3D that is almost always z). Matches
+    # compute_ripley_L's cap.
+    r_max <- min(if (use_3d) rng else rng[1:2]) / 4
     r_seq <- seq(0, r_max, length.out = 60L)[-1]  # drop r=0 (trivially L12(0)-0=0)
   }
 
@@ -5379,7 +5402,8 @@ compute_pcf12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
   dmat <- as.matrix(dist(rbind(pts1, pts2)))[seq_len(n1), (n1 + 1):(n1 + n2)]
 
   if (is.null(r_seq) || !length(r_seq)) {
-    r_max <- max(rng) / 4
+    # Cap by the SHORTEST window axis (see compute_ripley_L / compute_ripley_L12).
+    r_max <- min(if (use_3d) rng else rng[1:2]) / 4
     r_seq <- seq(0, r_max, length.out = 60L)
   }
   dr <- if (length(r_seq) > 1L) mean(diff(r_seq)) else r_seq[1L]
@@ -5479,13 +5503,43 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
 ## Optional honesty add-ons:
 ##   bw_sweep    – vector of bandwidths; returns $bw_sweep = data.frame(bw,
 ##                 pearson_r) so the bandwidth-dependence of Pearson r is visible.
-##   costes_nsim – >0 spatially randomizes channel 2's points uniformly in the
-##                 shared window this many times, recomputes Pearson r at the
-##                 chosen bandwidth, and returns a one-sided p-value (fraction of
-##                 randomized r ≥ observed) plus the null mean/SD — a spatial-
-##                 independence significance test for the observed r.
+##   costes_nsim – >0 builds a randomization null for Pearson r this many times and
+##                 returns a one-sided p-value (fraction of null r ≥ observed) plus
+##                 the null mean/SD.
+##   null_mode   – WHICH null. Measured false-positive rates are in the note below;
+##                 read it before quoting any p-value from this function.
+##     "shift" (default) – TOROIDAL RANDOM SHIFT of channel 2 (Lotwick & Silverman
+##                 1982). Channel 2 is translated by a random offset with wrap-around,
+##                 so its OWN clustering, density and point count are preserved exactly
+##                 and only its spatial REGISTRATION with channel 1 is destroyed. This
+##                 is the null that isolates cross-channel dependence, and it is the
+##                 same random-shift logic already used for the bivariate statistics.
+##     "csr"     – channel 2 replaced by uniform random points, i.e. a test against
+##                 complete spatial randomness rather than against independent
+##                 placement. It is NOT the Costes et al. 2004 test (theirs preserves
+##                 the randomized channel's autocorrelation by block randomization).
+##
+## ⚠ CALIBRATION — measured, not assumed (2026-07-30). Simulated 30× per scenario,
+## independent placement (truth = NOT co-localized), so a calibrated test should
+## reject at p<0.05 about 5% of the time:
+##   • Channels clustered but spread over the WHOLE window:
+##         shift 3% · csr 3%   → both fine.
+##   • Channels sharing ONE CELL that fills a small part of the window (the realistic
+##     SMLM case), placed independently within it:
+##         shift 53% · csr 93% → BOTH anti-conservative; csr severely so.
+## So "csr" really does mostly report "both channels are non-uniform", but the
+## random-shift default is only a PARTIAL fix: wrapping Ch2 moves it outside the cell,
+## so the null still contrasts "Ch2 inside the cell" with "Ch2 partly outside it". The
+## root cause is that BOTH nulls randomize over the bounding box rather than over the
+## actual support (the cell mask). Until randomization is mask-aware, treat a low
+## p-value here as WEAK evidence whenever the signal does not fill the field, and get
+## significance from g12(r) against its CSR envelope instead. Power is not the problem:
+## on a genuinely co-localized positive control the shift null fired 10/10, median
+## p = 0.02.
 compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L,
-                              bw_sweep = NULL, costes_nsim = 0L) {
+                              bw_sweep = NULL, costes_nsim = 0L,
+                              null_mode = c("shift", "csr")) {
+  null_mode <- match.arg(null_mode)
   all_x <- c(x1, x2); all_y <- c(y1, y2)
   xlim  <- range(all_x, na.rm = TRUE); ylim <- range(all_y, na.rm = TRUE)
   if (diff(xlim) == 0 || diff(ylim) == 0) return(NULL)
@@ -5519,13 +5573,22 @@ compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L,
     }
   }
 
-  # ── Costes-style spatial randomization test ───────────────────────────────
+  # ── Spatial randomization test (see null_mode in the header) ──────────────
   costes_nsim <- as.integer(costes_nsim %||% 0L)
   if (isTRUE(costes_nsim > 0L)) {
     n2 <- length(x2)
+    wx <- diff(xlim); wy <- diff(ylim)
     null_r <- vapply(seq_len(costes_nsim), function(i) {
-      rx <- stats::runif(n2, xlim[1], xlim[2])
-      ry <- stats::runif(n2, ylim[1], ylim[2])
+      if (identical(null_mode, "shift")) {
+        # Toroidal shift: wrap channel 2 inside the SAME window. Preserves its own
+        # clustering and n exactly; only the cross-channel registration is broken.
+        sx <- stats::runif(1, 0, wx); sy <- stats::runif(1, 0, wy)
+        rx <- xlim[1] + ((x2 - xlim[1] + sx) %% wx)
+        ry <- ylim[1] + ((y2 - ylim[1] + sy) %% wy)
+      } else {
+        rx <- stats::runif(n2, xlim[1], xlim[2])
+        ry <- stats::runif(n2, ylim[1], ylim[2])
+      }
       kb <- MASS::kde2d(rx, ry, h = bandwidth, n = n_grid, lims = c(xlim, ylim))
       stats::cor(as.vector(k1$z), as.vector(kb$z))
     }, numeric(1L))
@@ -5535,6 +5598,10 @@ compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L,
     out$costes_null_mean <- mean(null_r, na.rm = TRUE)
     out$costes_null_sd   <- stats::sd(null_r, na.rm = TRUE)
     out$costes_nsim      <- costes_nsim
+    out$null_mode        <- null_mode
+    out$null_label       <- if (identical(null_mode, "shift"))
+      "random toroidal shift of Ch2 (structure-preserving; Lotwick & Silverman 1982)"
+    else "uniform CSR resampling of Ch2 (tests against complete spatial randomness)"
   }
 
   out

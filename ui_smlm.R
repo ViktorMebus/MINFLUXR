@@ -193,60 +193,7 @@ smlm_ui <- fluidPage(
       ),  # /Data Upload
       tags$hr(),
 
-      ### 1b) Multiplexed MINFLUX ===
-      tags$details(class = "sim-group",
-      tags$summary(tags$b("Multiplexed MINFLUX")),
-      helpText("Build an N-channel dataset for exchange/sequential MINFLUX: overlay several loaded files, or split one continuous acquisition by time (TIM). Each channel gets its own color and feeds the plot and the Analysis tab."),
-      checkboxInput("mplex_enable", "Enable multiplexing", value = FALSE),
-      conditionalPanel(
-        condition = "input.mplex_enable == true",
-        radioButtons("mplex_mode", "Channel source",
-                     choices = c("Overlay loaded files"          = "files",
-                                 "Split active file by time (TIM)" = "tim"),
-                     selected = "files"),
-        conditionalPanel(
-          condition = "input.mplex_mode == 'files'",
-          selectInput("mplex_files", "Files to overlay (one channel each)",
-                      choices = character(0), multiple = TRUE, width = "100%"),
-          uiOutput("mplex_files_colors_ui")
-        ),
-        conditionalPanel(
-          condition = "input.mplex_mode == 'tim'",
-          uiOutput("mplex_tim_info"),
-          radioButtons("mplex_tim_method", "Time assignment",
-                       choices = c("Contiguous breakpoints"          = "breaks",
-                                   "Explicit windows (drop washes)"   = "windows"),
-                       selected = "breaks"),
-          conditionalPanel(
-            condition = "input.mplex_tim_method == 'breaks'",
-            textInput("mplex_tim_breaks", "Breakpoints (seconds, comma-separated)",
-                      value = "", placeholder = "e.g. 600, 1200"),
-            helpText("N breakpoints create N+1 contiguous time-window channels. Up to 6 splits (7 channels).")
-          ),
-          conditionalPanel(
-            condition = "input.mplex_tim_method == 'windows'",
-            textInput("mplex_tim_windows", "Included windows (s): start-end, start-end, …",
-                      value = "", placeholder = "e.g. 0-600, 700-1300, 1400-2000"),
-            helpText("Each window = one channel. Localizations OUTSIDE all windows (wash/exchange steps) are removed. Up to 7 windows.")
-          ),
-          plotlyOutput("mplex_tim_hist", height = "200px"),
-          sliderInput("mplex_tim_bins", "Histogram bins",
-                      min = 10, max = 500, value = 60, step = 5),
-          helpText("Trace IDs over time; bar color = channel, grey = removed (wash), dashed lines = window/split edges."),
-          uiOutput("mplex_tim_colors_ui")
-        ),
-        fluidRow(
-          column(7, actionButton("mplex_build", "Build multiplex",
-                                 icon = icon("layer-group"),
-                                 class = "btn-primary btn-sm", style = "width:100%")),
-          column(5, actionButton("mplex_clear", "Clear",
-                                 class = "btn-default btn-sm", style = "width:100%"))
-        ),
-        verbatimTextOutput("mplex_summary")
-      ),
-      ),  # /Multiplexed MINFLUX
-      tags$hr(),
-
+      
       ### 2) Metadata Filtering ===
       tags$details(class = "sim-group", open = NA,
       tags$summary(tags$b("Metadata Filtering")),
@@ -460,251 +407,20 @@ smlm_ui <- fluidPage(
       ),  # /Visualization Options
       tags$hr(),
 
-      conditionalPanel(
-        condition = "input.mode3d == '2D'",
-        tags$details(class = "sim-group",
-        tags$summary(tags$b("Background image overlay")),
-        checkboxInput("show_confocal", "Show overlay settings", FALSE),
-        conditionalPanel(
-          condition = "input.show_confocal == true",
-          tags$div(id = "overlay_form", style = "border:0; padding:0; margin:0; background:none; box-shadow:none;",
-                   checkboxInput("show_bg", "Show background image", FALSE),
-                   fileInput("bg_image", "Upload image", accept = c(".png",".jpg",".jpeg",".tif",".tiff")),
-                   numericInput("px_size", "Pixel size (units/pixel)", value = 10, min = 0.0001),
-                   numericInput("img_x0", "Image origin X (data units)", value = 0),
-                   tags$div(
-                     style = "display:flex; gap:3px; margin:-4px 0 8px 0; flex-wrap:wrap;",
-                     tags$small("X:", style = "line-height:26px; color:#555; margin-right:2px;"),
-                     actionButton("nx_m1000", "−1k",  class = "btn-xs btn-default"),
-                     actionButton("nx_m100",  "−100", class = "btn-xs btn-default"),
-                     actionButton("nx_m10",   "−10",  class = "btn-xs btn-default"),
-                     actionButton("nx_p10",   "+10",       class = "btn-xs btn-default"),
-                     actionButton("nx_p100",  "+100",      class = "btn-xs btn-default"),
-                     actionButton("nx_p1000", "+1k",       class = "btn-xs btn-default")
-                   ),
-                   numericInput("img_y0", "Image origin Y (data units)", value = 0),
-                   tags$div(
-                     style = "display:flex; gap:3px; margin:-4px 0 8px 0; flex-wrap:wrap;",
-                     tags$small("Y:", style = "line-height:26px; color:#555; margin-right:2px;"),
-                     actionButton("ny_m1000", "−1k",  class = "btn-xs btn-default"),
-                     actionButton("ny_m100",  "−100", class = "btn-xs btn-default"),
-                     actionButton("ny_m10",   "−10",  class = "btn-xs btn-default"),
-                     actionButton("ny_p10",   "+10",       class = "btn-xs btn-default"),
-                     actionButton("ny_p100",  "+100",      class = "btn-xs btn-default"),
-                     actionButton("ny_p1000", "+1k",       class = "btn-xs btn-default")
-                   ),
-                   tags$div(
-                     style = "display:flex; gap:5px; margin-bottom:8px;",
-                     actionButton("auto_foci",     "Auto: foci",
-                                  icon = icon("bullseye"), class = "btn-sm btn-info"),
-                     actionButton("auto_boundary", "Auto: boundary",
-                                  icon = icon("draw-polygon"), class = "btn-sm btn-info")
-                   ),
-                   checkboxInput("show_diag", "Show detection diagnostics", FALSE),
-                   conditionalPanel(
-                     "input.show_diag",
-                     plotOutput("foci_debug_plot", height = "220px")
-                   ),
-                   tags$details(
-                     tags$summary(style = "cursor:pointer; font-size:12px; color:#555; margin:3px 0 6px 0;",
-                                  "Foci detection settings"),
-                     tags$div(style = "padding:4px 0 4px 8px; border-left:2px solid #ddd;",
-                       sliderInput("foci_n_peaks",     "Max foci to find",             min=1, max=10, value=5,    step=1),
-                       sliderInput("foci_bright_pct",  "Confocal: sensitivity (70=permissive → 99=strict)", min=70, max=99, value=90, step=1),
-                       sliderInput("foci_border_pct",  "Confocal: edge mask (%)",      min=2,  max=25, value=10,  step=1),
-                       sliderInput("foci_eps_pct",     "Confocal: min separation between foci (% of image)", min=1, max=15, value=5, step=0.5),
-                       sliderInput("foci_density_thr",    "MINFLUX: density threshold (% of peak)", min=5,  max=60,  value=20,  step=5),
-                       sliderInput("foci_density_cell",   "MINFLUX: cell size (nm)",                min=20, max=500, value=100, step=10),
-                       sliderInput("foci_density_smooth", "MINFLUX: smoothing radius (nm; 0=off)",  min=0,  max=500, value=100, step=25)
-                     )
-                   ),
-                   tags$p("Pixel size must be set first. Results are a starting point — nudge to refine.",
-                          style = "font-size:11px; color:#888; margin:0 0 6px 0;"),
-                   checkboxInput("img_invert_y", "Image origin at top-left (invert Y)", TRUE),
-                   checkboxInput("img_flip_x", "Mirror horizontally (left↔right)", FALSE),
-                   sliderInput("img_opacity", "Image opacity", min = 0, max = 1, value = 0.6, step = 0.05),
-                   selectInput("img_lut", "Colour (LUT)",
-                               choices = c("Original (as uploaded)" = "original",
-                                           "Grayscale"              = "gray",
-                                           "Green"                  = "green",
-                                           "Magenta"                = "magenta",
-                                           "Yellow"                 = "yellow",
-                                           "Cyan"                   = "cyan",
-                                           "Red"                    = "red",
-                                           "Blue"                   = "blue",
-                                           "Orange"                 = "orange",
-                                           "Custom colour…"         = "custom"),
-                               selected = "original"),
-                   conditionalPanel(
-                     condition = "input.img_lut == 'custom'",
-                     colourpicker::colourInput("img_lut_custom", "Custom colour",
-                                               value = "#00FF00")
-                   ),
-                   tags$p("Recolours the image to match a fluorophore: converts to grayscale intensity, then tints black→colour.",
-                          style = "font-size:11px; color:#888; margin:-4px 0 8px 0;"),
-                   sliderInput("img_brightness", "Image brightness (%)",
-                               min = 10, max = 300, value = 100, step = 5),
-                   sliderInput("img_contrast", "Image contrast",
-                               min = 0, max = 90, value = 0, step = 5),
-                   selectInput("img_rotation", "Rotate image", choices = c("0","90","180","270"), selected = "0"),
-                   downloadButton("download_overlay_settings", "Download Overlay Settings"),
-                   fileInput("load_overlay_settings", "Load Overlay Settings (.json)", accept = ".json"),
-                   actionButton("reset_overlay", "Reset Overlay", icon = icon("undo"))
-          )
-        ),
-        ),  # /Background image overlay
-        tags$hr(),
-        tags$details(class = "sim-group",
-        tags$summary(tags$b("Heatmap overlay")),
-        checkboxInput("show_heatmap", "Show heatmap (KDE)", FALSE),
-        conditionalPanel(
-          condition = "input.show_heatmap == true",
-          numericInput("heatmap_n", "Grid resolution (n × n)", value = 200, min = 25, max = 1000),
-          sliderInput("heatmap_opacity", "Opacity", min = 0, max = 1, value = 0.35, step = 0.05),
-          selectInput("heatmap_palette", "Palette",
-                      choices = NUMERIC_PALETTES,
-                      selected = "YlOrRd"),
-          sliderInput("heatmap_bw_factor", "Smoothing (× Scott rule)", min = 0.25, max = 4, value = 1, step = 0.05),
-          numericInput("heatmap_bw_abs", "Bandwidth (nm, overrides \u00d7 Scott rule factor)", value = NA, min = 0),
-          sliderInput("heatmap_floor", "Suppress bottom percentile", min = 0, max = 0.50, value = 0, step = 0.01),
-          checkboxInput("heatmap_use_raw", "Use raw points (instead of trace medians)", FALSE),
-          sliderInput("heatmap_clip", "Clip top percentile", min = 0.80, max = 1.00, value = 0.99, step = 0.005),
-          sliderInput("heatmap_gamma", "Gamma (power)", min = 0.2, max = 4, value = 1, step = 0.1),
-          checkboxInput("heatmap_log", "Log scale", FALSE),
-          checkboxInput("heatmap_showlegend", "Show colorbar", FALSE)
-        ),
-        ),  # /Heatmap overlay
-        tags$hr()
-      ),
-
-
-      ### 2-Color settings (shared) ===
+            ### De-blinking (raw-point DBSCAN) (shared) ===
       tags$details(class = "sim-group",
-      tags$summary(tags$b("2-color MINFLUX")),
-      checkboxInput("enable_two_color", "Enable 2-color (per-trace median)", value = FALSE),
-      helpText("Note: Numeric color modes (z/time/density) override 2-color. Use 'Default' color mode to see 2-color groups."),
+      tags$summary(tags$b("De-blinking (raw-point DBSCAN)")),
+      checkboxInput("enable_clustering", "Enable de-blinking (DBSCAN on raw points)", value = FALSE),
+      helpText("Merges a fluorophore's repeated blinks (nearby localizations / trace IDs) into one",
+               "de-blinked molecule, so downstream analyses count molecules rather than blinking events."),
       conditionalPanel(
-        condition = "input.enable_two_color == true",
-        # DCR ranges (default mode when not using fluo)
-        checkboxInput("color_by_fluo", "Override with 'fluo' groups (1/2)", value = FALSE),
-        conditionalPanel(
-          condition = "input.color_by_fluo == false",
-          shinyWidgets::numericRangeInput("dcr_group1", "DCR range: Group 1",
-                                          value = c(0, 0.369), min = 0, max = 2),
-          shinyWidgets::numericRangeInput("dcr_group2", "DCR range: Group 2",
-                                          value = c(0.3691, 1), min = 0, max = 2),
-          actionButton("auto_detect_dcr", "Auto-detect split (GMM)",
-                       icon = icon("wand-magic-sparkles"), class = "btn-sm btn-info"),
-          uiOutput("dcr_gmm_info"),
-          uiOutput("use_pooled_dcr_ui"),
-          tags$details(style = "margin:6px 0 4px; font-size:0.85em;",
-            tags$summary(style = "cursor:pointer; color:#2c3e50; font-weight:600;",
-                         "Per-trace split confidence"),
-            helpText(style = "font-size:0.95em; color:#666; margin:4px 0;",
-              "Posterior probability that each trace belongs to the group it was assigned to, ",
-              "from the fitted mixture. 1.0 = unambiguous; 0.5 = the molecule sits exactly on ",
-              "the split and is a coin flip. ", tags$b("Orange = on the edge"),
-              " (posterior below the cut) — these are the molecules that would change channel ",
-              "under a small shift of the threshold, and the ones that manufacture false ",
-              "short-range cross-channel pairs. Use the export to exclude or inspect them."),
-            plotlyOutput("dcr_conf_plot", height = "260px"),
-            downloadButton("download_dcr_conf", "Download per-trace confidence", class = "btn-sm"))
-        ),
-        
-        colourpicker::colourInput("color_group1", "Color: Group 1", value = "#1f77b4"),
-        colourpicker::colourInput("color_group2", "Color: Group 2", value = "#d62728"),
-        
-        # Scope pickers for NN/cluster
-        # Shared scope pickers for NN/cluster (works for 2D and 3D)
-        checkboxInput("draw_nn_two_color", "Draw NN lines (2-color mode)", value = FALSE),
-        conditionalPanel(
-          condition = "input.draw_nn_two_color == true",
-          numericInput("nn_k_two_color", "2-color NN: Neighbors (k)", value = 4, min = 1, step = 1),
-          checkboxInput("show_nn_labels_two_color", "Show distance labels (2-color NN)", value =  TRUE),
-          conditionalPanel(
-            condition = "input.show_nn_labels_two_color == true",
-            numericInput("tc_label_font_size", "2-color NN label font size", value = 12, min = 6, step = 1),
-            numericInput("tc_label_offset", "2-color NN label offset (nm)", value = 5, min = 0, step = 1),
-          ),
-          sliderInput(
-            "distance_range_two_color", "2-color NN Distance Range", min = 0, max = 2000, value = c(0, 100)),
-          selectInput("two_color_scope", "2-color NN scope", choices = c("Between groups" = "between",
-                                                                         "Within groups"  = "within"),
-                      selected = "between"),
-          
-          downloadButton("download_nn_cross_dcr", "Download 2-color NN table"),
-        ),
-        checkboxInput("enable_two_color_cluster1", "2-color de-blinking (raw points)", FALSE),
-        conditionalPanel(
-          condition = "input.enable_two_color_cluster1",
-          numericInput("eps_tc1", "2-color de-blinking eps (raw points, nm)", value = 14, min = 1),
-          numericInput("minpts_tc1", "2-color DBSCAN minPts (raw)", value = 6, min = 1),
-          conditionalPanel(
-            condition = "input.mode3d == '3D'",
-            checkboxInput("show_tc1_alpha", "Wrap 2-color de-blinked molecules (tc1)", value = FALSE),
-            conditionalPanel(
-              condition = "input.show_tc1_alpha == true && input.mode3d == '3D'",
-              numericInput("tc1_alpha", "Alpha (smaller = tighter)", value = 120, min = 1, step = 1),
-              sliderInput("tc1_alpha_opacity", "Alpha shape opacity", min = 0, max = 1, value = 0.15, step = 0.01),
-              numericInput("tc1_alpha_min_pts", "Min points per cluster to wrap", value = 5, min = 2, step = 1)
-            ),
-          ),
-          checkboxInput("exclude_unclustered_tc1", "Exclude unclustered (2-color cluster1)", FALSE)
-        ),
-        checkboxInput("enable_two_color_cluster2", "2-color Median Clustering (TID medians)", FALSE),
-        conditionalPanel(
-          condition = "input.enable_two_color_cluster2",
-          radioButtons("cluster2_method_tc2", "2-color Median Clustering grouping method",
-                       choices = c("DBSCAN" = "dbscan", "HDBSCAN" = "hdbscan", "OPTICS (Xi)" = "optics"),
-                       selected = "dbscan", inline = TRUE),
-          conditionalPanel(
-            condition = "input.cluster2_method_tc2 == 'dbscan'",
-            numericInput("eps_tc2", "2-color eps, trace medians (nm)", value = 150, min = 1)
-          ),
-          conditionalPanel(
-            condition = "input.cluster2_method_tc2 == 'optics'",
-            numericInput("cluster2_xi_tc2", "2-color OPTICS Xi (0-1)", value = 0.05, min = 0.001, max = 0.5, step = 0.005)
-          ),
-          numericInput("minpts_tc2", "2-color MinPts (medians)", value = 8, min = 1),
-          checkboxInput("cluster2_prefilter_tc2", "2-color density prefilter", value = FALSE),
-          conditionalPanel(
-            condition = "input.cluster2_prefilter_tc2 == true",
-            numericInput("cluster2_prefilter_r_tc2", "2-color prefilter radius (nm)", value = 150, min = 1),
-            numericInput("cluster2_prefilter_min_tc2", "2-color min neighbours", value = 3, min = 1)
-          ),
-          checkboxInput("cluster2_prune_tc2", "2-color prune sparse cluster members", value = FALSE),
-          conditionalPanel(
-            condition = "input.cluster2_prune_tc2 == true",
-            numericInput("cluster2_prune_tol_tc2", "2-color prune tolerance (x median spacing)", value = 2, min = 1.1, step = 0.1)
-          ),
-          conditionalPanel(
-            condition = "input.mode3d == '3D'",
-            checkboxInput("show_tc2_alpha", "Wrap 2-color secondary clusters (tc2)", value = FALSE),
-            conditionalPanel(
-              condition = "input.show_tc2_alpha == true && input.mode3d == '3D'",
-              numericInput("tc2_alpha", "tc2 alpha", value = 150, min = 1, step = 1),
-              sliderInput("tc2_alpha_opacity", "tc2 opacity", min = 0, max = 1, value = 0.18, step = 0.01),
-              numericInput("tc2_alpha_min_pts", "tc2 min points to wrap", value = 15, min = 4, step = 1)
-            ),
-            checkboxInput("show_tc2_isosurface", "Show isosurface for 2-color secondary clusters (tc2)", value = FALSE),
-            conditionalPanel(
-              condition = "input.show_tc2_isosurface",
-              checkboxInput("tc2_iso_selected_only", "Only selected tc2 cluster", value = TRUE),
-              textInput("tc2_iso_cluster_label", "Selected tc2 cluster (A-# or B-#)", value = "A-1"),
-              sliderInput("tc2_iso_grid_res", "Grid resolution (higher = slower)", min = 12, max = 40, value = 22, step = 1),
-              sliderInput("tc2_iso_pad", "Padding around cluster (nm)", min = 0, max = 500, value = 100, step = 10),
-              sliderInput("tc2_iso_level_q", "Surface level (quantile)", min = 0.50, max = 0.98, value = 0.85, step = 0.01),
-              sliderInput("tc2_iso_sigma", "Isosurface smoothness (sigma, nm)", min = 10, max = 500, value = 150, step = 10),
-              sliderInput("tc2_iso_opacity", "Isosurface opacity", min = 0, max = 1, value = 0.25, step = 0.01),
-              sliderInput("tc2_iso_eps", "Smoothness (epsilon)", min = 1e-6, max = 1e-2, value = 1e-4, step = 1e-6)
-            )
-          )
-        ),
-        uiOutput("two_color_settings_file_ui"),
-        downloadButton("download_two_color_settings", "Save 2-color settings"),
-        actionButton("reset_two_color_settings", "Reset 2-color settings", icon = icon("undo"))
+        condition = "input.enable_clustering == true",
+        numericInput("eps", "De-blink radius — DBSCAN epsilon (nm)", value = 10, min = 1),
+        numericInput("minpts", "Minimum Points", value = 4, min = 1),
+        checkboxInput("exclude_unclustered", "Exclude unclustered points", value = FALSE),
+        helpText("TIDs are not split: all localizations of a trace ID join the same de-blinked molecule (majority vote). Trace IDs that overlap spatially are merged into one de-blinked molecule.")
       ),
-      ),  # /2-color MINFLUX
+      ),  # /De-blinking (raw-point DBSCAN)
       tags$hr(),
 
       ### 5) Nearest Neighbor (shared) ===
@@ -740,21 +456,7 @@ smlm_ui <- fluidPage(
       ),  # /Nearest Neighbor Analysis
       tags$hr(),
 
-      ### De-blinking (raw-point DBSCAN) (shared) ===
-      tags$details(class = "sim-group",
-      tags$summary(tags$b("De-blinking (raw-point DBSCAN)")),
-      checkboxInput("enable_clustering", "Enable de-blinking (DBSCAN on raw points)", value = FALSE),
-      helpText("Merges a fluorophore's repeated blinks (nearby localizations / trace IDs) into one",
-               "de-blinked molecule, so downstream analyses count molecules rather than blinking events."),
-      conditionalPanel(
-        condition = "input.enable_clustering == true",
-        numericInput("eps", "De-blink radius — DBSCAN epsilon (nm)", value = 10, min = 1),
-        numericInput("minpts", "Minimum Points", value = 4, min = 1),
-        checkboxInput("exclude_unclustered", "Exclude unclustered points", value = FALSE),
-        helpText("TIDs are not split: all localizations of a trace ID join the same de-blinked molecule (majority vote). Trace IDs that overlap spatially are merged into one de-blinked molecule.")
-      ),
-      ),  # /De-blinking (raw-point DBSCAN)
-      tags$hr(),
+
 
       ### DBSCAN Median Clustering (Cluster2 calls) ===
       tags$details(class = "sim-group",
@@ -929,6 +631,308 @@ smlm_ui <- fluidPage(
       ),
       ),  # /Median Clustering (Cluster2)
       tags$hr(),
+
+            conditionalPanel(
+        condition = "input.mode3d == '2D'",
+        tags$details(class = "sim-group",
+        tags$summary(tags$b("Background image overlay")),
+        checkboxInput("show_confocal", "Show overlay settings", FALSE),
+        conditionalPanel(
+          condition = "input.show_confocal == true",
+          tags$div(id = "overlay_form", style = "border:0; padding:0; margin:0; background:none; box-shadow:none;",
+                   checkboxInput("show_bg", "Show background image", FALSE),
+                   fileInput("bg_image", "Upload image", accept = c(".png",".jpg",".jpeg",".tif",".tiff")),
+                   numericInput("px_size", "Pixel size (units/pixel)", value = 10, min = 0.0001),
+                   numericInput("img_x0", "Image origin X (data units)", value = 0),
+                   tags$div(
+                     style = "display:flex; gap:3px; margin:-4px 0 8px 0; flex-wrap:wrap;",
+                     tags$small("X:", style = "line-height:26px; color:#555; margin-right:2px;"),
+                     actionButton("nx_m1000", "−1k",  class = "btn-xs btn-default"),
+                     actionButton("nx_m100",  "−100", class = "btn-xs btn-default"),
+                     actionButton("nx_m10",   "−10",  class = "btn-xs btn-default"),
+                     actionButton("nx_p10",   "+10",       class = "btn-xs btn-default"),
+                     actionButton("nx_p100",  "+100",      class = "btn-xs btn-default"),
+                     actionButton("nx_p1000", "+1k",       class = "btn-xs btn-default")
+                   ),
+                   numericInput("img_y0", "Image origin Y (data units)", value = 0),
+                   tags$div(
+                     style = "display:flex; gap:3px; margin:-4px 0 8px 0; flex-wrap:wrap;",
+                     tags$small("Y:", style = "line-height:26px; color:#555; margin-right:2px;"),
+                     actionButton("ny_m1000", "−1k",  class = "btn-xs btn-default"),
+                     actionButton("ny_m100",  "−100", class = "btn-xs btn-default"),
+                     actionButton("ny_m10",   "−10",  class = "btn-xs btn-default"),
+                     actionButton("ny_p10",   "+10",       class = "btn-xs btn-default"),
+                     actionButton("ny_p100",  "+100",      class = "btn-xs btn-default"),
+                     actionButton("ny_p1000", "+1k",       class = "btn-xs btn-default")
+                   ),
+                   tags$div(
+                     style = "display:flex; gap:5px; margin-bottom:8px;",
+                     actionButton("auto_foci",     "Auto: foci",
+                                  icon = icon("bullseye"), class = "btn-sm btn-info"),
+                     actionButton("auto_boundary", "Auto: boundary",
+                                  icon = icon("draw-polygon"), class = "btn-sm btn-info")
+                   ),
+                   checkboxInput("show_diag", "Show detection diagnostics", FALSE),
+                   conditionalPanel(
+                     "input.show_diag",
+                     plotOutput("foci_debug_plot", height = "220px")
+                   ),
+                   tags$details(
+                     tags$summary(style = "cursor:pointer; font-size:12px; color:#555; margin:3px 0 6px 0;",
+                                  "Foci detection settings"),
+                     tags$div(style = "padding:4px 0 4px 8px; border-left:2px solid #ddd;",
+                       sliderInput("foci_n_peaks",     "Max foci to find",             min=1, max=10, value=5,    step=1),
+                       sliderInput("foci_bright_pct",  "Confocal: sensitivity (70=permissive → 99=strict)", min=70, max=99, value=90, step=1),
+                       sliderInput("foci_border_pct",  "Confocal: edge mask (%)",      min=2,  max=25, value=10,  step=1),
+                       sliderInput("foci_eps_pct",     "Confocal: min separation between foci (% of image)", min=1, max=15, value=5, step=0.5),
+                       sliderInput("foci_density_thr",    "MINFLUX: density threshold (% of peak)", min=5,  max=60,  value=20,  step=5),
+                       sliderInput("foci_density_cell",   "MINFLUX: cell size (nm)",                min=20, max=500, value=100, step=10),
+                       sliderInput("foci_density_smooth", "MINFLUX: smoothing radius (nm; 0=off)",  min=0,  max=500, value=100, step=25)
+                     )
+                   ),
+                   tags$p("Pixel size must be set first. Results are a starting point — nudge to refine.",
+                          style = "font-size:11px; color:#888; margin:0 0 6px 0;"),
+                   checkboxInput("img_invert_y", "Image origin at top-left (invert Y)", TRUE),
+                   checkboxInput("img_flip_x", "Mirror horizontally (left↔right)", FALSE),
+                   sliderInput("img_opacity", "Image opacity", min = 0, max = 1, value = 0.6, step = 0.05),
+                   selectInput("img_lut", "Colour (LUT)",
+                               choices = c("Original (as uploaded)" = "original",
+                                           "Grayscale"              = "gray",
+                                           "Green"                  = "green",
+                                           "Magenta"                = "magenta",
+                                           "Yellow"                 = "yellow",
+                                           "Cyan"                   = "cyan",
+                                           "Red"                    = "red",
+                                           "Blue"                   = "blue",
+                                           "Orange"                 = "orange",
+                                           "Custom colour…"         = "custom"),
+                               selected = "original"),
+                   conditionalPanel(
+                     condition = "input.img_lut == 'custom'",
+                     colourpicker::colourInput("img_lut_custom", "Custom colour",
+                                               value = "#00FF00")
+                   ),
+                   tags$p("Recolours the image to match a fluorophore: converts to grayscale intensity, then tints black→colour.",
+                          style = "font-size:11px; color:#888; margin:-4px 0 8px 0;"),
+                   sliderInput("img_brightness", "Image brightness (%)",
+                               min = 10, max = 300, value = 100, step = 5),
+                   sliderInput("img_contrast", "Image contrast",
+                               min = 0, max = 90, value = 0, step = 5),
+                   selectInput("img_rotation", "Rotate image", choices = c("0","90","180","270"), selected = "0"),
+                   downloadButton("download_overlay_settings", "Download Overlay Settings"),
+                   fileInput("load_overlay_settings", "Load Overlay Settings (.json)", accept = ".json"),
+                   actionButton("reset_overlay", "Reset Overlay", icon = icon("undo"))
+          )
+        ),
+        ),  # /Background image overlay
+        tags$hr(),
+        tags$details(class = "sim-group",
+        tags$summary(tags$b("Heatmap overlay")),
+        checkboxInput("show_heatmap", "Show heatmap (KDE)", FALSE),
+        conditionalPanel(
+          condition = "input.show_heatmap == true",
+          numericInput("heatmap_n", "Grid resolution (n × n)", value = 200, min = 25, max = 1000),
+          sliderInput("heatmap_opacity", "Opacity", min = 0, max = 1, value = 0.35, step = 0.05),
+          selectInput("heatmap_palette", "Palette",
+                      choices = NUMERIC_PALETTES,
+                      selected = "YlOrRd"),
+          sliderInput("heatmap_bw_factor", "Smoothing (× Scott rule)", min = 0.25, max = 4, value = 1, step = 0.05),
+          numericInput("heatmap_bw_abs", "Bandwidth (nm, overrides \u00d7 Scott rule factor)", value = NA, min = 0),
+          sliderInput("heatmap_floor", "Suppress bottom percentile", min = 0, max = 0.50, value = 0, step = 0.01),
+          checkboxInput("heatmap_use_raw", "Use raw points (instead of trace medians)", FALSE),
+          sliderInput("heatmap_clip", "Clip top percentile", min = 0.80, max = 1.00, value = 0.99, step = 0.005),
+          sliderInput("heatmap_gamma", "Gamma (power)", min = 0.2, max = 4, value = 1, step = 0.1),
+          checkboxInput("heatmap_log", "Log scale", FALSE),
+          checkboxInput("heatmap_showlegend", "Show colorbar", FALSE)
+        ),
+        ),  # /Heatmap overlay
+        tags$hr()
+      ),
+
+            ### 2-Color settings (shared) ===
+      tags$details(class = "sim-group",
+      tags$summary(tags$b("2-color MINFLUX")),
+      checkboxInput("enable_two_color", "Enable 2-color (per-trace median)", value = FALSE),
+      helpText("Note: Numeric color modes (z/time/density) override 2-color. Use 'Default' color mode to see 2-color groups."),
+      conditionalPanel(
+        condition = "input.enable_two_color == true",
+        # DCR ranges (default mode when not using fluo)
+        checkboxInput("color_by_fluo", "Override with 'fluo' groups (1/2)", value = FALSE),
+        conditionalPanel(
+          condition = "input.color_by_fluo == false",
+          shinyWidgets::numericRangeInput("dcr_group1", "DCR range: Group 1",
+                                          value = c(0, 0.369), min = 0, max = 2),
+          shinyWidgets::numericRangeInput("dcr_group2", "DCR range: Group 2",
+                                          value = c(0.3691, 1), min = 0, max = 2),
+          actionButton("auto_detect_dcr", "Auto-detect split (GMM)",
+                       icon = icon("wand-magic-sparkles"), class = "btn-sm btn-info"),
+          uiOutput("dcr_gmm_info"),
+          uiOutput("use_pooled_dcr_ui"),
+          tags$details(style = "margin:6px 0 4px; font-size:0.85em;",
+            tags$summary(style = "cursor:pointer; color:#2c3e50; font-weight:600;",
+                         "Per-trace split confidence"),
+            helpText(style = "font-size:0.95em; color:#666; margin:4px 0;",
+              "Posterior probability that each trace belongs to the group it was assigned to, ",
+              "from the fitted mixture. 1.0 = unambiguous; 0.5 = the molecule sits exactly on ",
+              "the split and is a coin flip. ", tags$b("Orange = on the edge"),
+              " (posterior below the cut) — these are the molecules that would change channel ",
+              "under a small shift of the threshold, and the ones that manufacture false ",
+              "short-range cross-channel pairs. Use the export to exclude or inspect them."),
+            plotlyOutput("dcr_conf_plot", height = "260px"),
+            downloadButton("download_dcr_conf", "Download per-trace confidence", class = "btn-sm"))
+        ),
+        
+        colourpicker::colourInput("color_group1", "Color: Group 1", value = "#1f77b4"),
+        colourpicker::colourInput("color_group2", "Color: Group 2", value = "#d62728"),
+        
+        # Scope pickers for NN/cluster
+        # Shared scope pickers for NN/cluster (works for 2D and 3D)
+        checkboxInput("draw_nn_two_color", "Draw NN lines (2-color mode)", value = FALSE),
+        conditionalPanel(
+          condition = "input.draw_nn_two_color == true",
+          numericInput("nn_k_two_color", "2-color NN: Neighbors (k)", value = 4, min = 1, step = 1),
+          checkboxInput("show_nn_labels_two_color", "Show distance labels (2-color NN)", value =  TRUE),
+          conditionalPanel(
+            condition = "input.show_nn_labels_two_color == true",
+            numericInput("tc_label_font_size", "2-color NN label font size", value = 12, min = 6, step = 1),
+            numericInput("tc_label_offset", "2-color NN label offset (nm)", value = 5, min = 0, step = 1),
+          ),
+          sliderInput(
+            "distance_range_two_color", "2-color NN Distance Range", min = 0, max = 2000, value = c(0, 100)),
+          selectInput("two_color_scope", "2-color NN scope", choices = c("Between groups" = "between",
+                                                                         "Within groups"  = "within"),
+                      selected = "between"),
+          
+          downloadButton("download_nn_cross_dcr", "Download 2-color NN table"),
+        ),
+        checkboxInput("enable_two_color_cluster1", "2-color de-blinking (raw points)", FALSE),
+        conditionalPanel(
+          condition = "input.enable_two_color_cluster1",
+          numericInput("eps_tc1", "2-color de-blinking eps (raw points, nm)", value = 14, min = 1),
+          numericInput("minpts_tc1", "2-color DBSCAN minPts (raw)", value = 6, min = 1),
+          conditionalPanel(
+            condition = "input.mode3d == '3D'",
+            checkboxInput("show_tc1_alpha", "Wrap 2-color de-blinked molecules (tc1)", value = FALSE),
+            conditionalPanel(
+              condition = "input.show_tc1_alpha == true && input.mode3d == '3D'",
+              numericInput("tc1_alpha", "Alpha (smaller = tighter)", value = 120, min = 1, step = 1),
+              sliderInput("tc1_alpha_opacity", "Alpha shape opacity", min = 0, max = 1, value = 0.15, step = 0.01),
+              numericInput("tc1_alpha_min_pts", "Min points per cluster to wrap", value = 5, min = 2, step = 1)
+            ),
+          ),
+          checkboxInput("exclude_unclustered_tc1", "Exclude unclustered (2-color cluster1)", FALSE)
+        ),
+        checkboxInput("enable_two_color_cluster2", "2-color Median Clustering (TID medians)", FALSE),
+        conditionalPanel(
+          condition = "input.enable_two_color_cluster2",
+          radioButtons("cluster2_method_tc2", "2-color Median Clustering grouping method",
+                       choices = c("DBSCAN" = "dbscan", "HDBSCAN" = "hdbscan", "OPTICS (Xi)" = "optics"),
+                       selected = "dbscan", inline = TRUE),
+          conditionalPanel(
+            condition = "input.cluster2_method_tc2 == 'dbscan'",
+            numericInput("eps_tc2", "2-color eps, trace medians (nm)", value = 150, min = 1)
+          ),
+          conditionalPanel(
+            condition = "input.cluster2_method_tc2 == 'optics'",
+            numericInput("cluster2_xi_tc2", "2-color OPTICS Xi (0-1)", value = 0.05, min = 0.001, max = 0.5, step = 0.005)
+          ),
+          numericInput("minpts_tc2", "2-color MinPts (medians)", value = 8, min = 1),
+          checkboxInput("cluster2_prefilter_tc2", "2-color density prefilter", value = FALSE),
+          conditionalPanel(
+            condition = "input.cluster2_prefilter_tc2 == true",
+            numericInput("cluster2_prefilter_r_tc2", "2-color prefilter radius (nm)", value = 150, min = 1),
+            numericInput("cluster2_prefilter_min_tc2", "2-color min neighbours", value = 3, min = 1)
+          ),
+          checkboxInput("cluster2_prune_tc2", "2-color prune sparse cluster members", value = FALSE),
+          conditionalPanel(
+            condition = "input.cluster2_prune_tc2 == true",
+            numericInput("cluster2_prune_tol_tc2", "2-color prune tolerance (x median spacing)", value = 2, min = 1.1, step = 0.1)
+          ),
+          conditionalPanel(
+            condition = "input.mode3d == '3D'",
+            checkboxInput("show_tc2_alpha", "Wrap 2-color secondary clusters (tc2)", value = FALSE),
+            conditionalPanel(
+              condition = "input.show_tc2_alpha == true && input.mode3d == '3D'",
+              numericInput("tc2_alpha", "tc2 alpha", value = 150, min = 1, step = 1),
+              sliderInput("tc2_alpha_opacity", "tc2 opacity", min = 0, max = 1, value = 0.18, step = 0.01),
+              numericInput("tc2_alpha_min_pts", "tc2 min points to wrap", value = 15, min = 4, step = 1)
+            ),
+            checkboxInput("show_tc2_isosurface", "Show isosurface for 2-color secondary clusters (tc2)", value = FALSE),
+            conditionalPanel(
+              condition = "input.show_tc2_isosurface",
+              checkboxInput("tc2_iso_selected_only", "Only selected tc2 cluster", value = TRUE),
+              textInput("tc2_iso_cluster_label", "Selected tc2 cluster (A-# or B-#)", value = "A-1"),
+              sliderInput("tc2_iso_grid_res", "Grid resolution (higher = slower)", min = 12, max = 40, value = 22, step = 1),
+              sliderInput("tc2_iso_pad", "Padding around cluster (nm)", min = 0, max = 500, value = 100, step = 10),
+              sliderInput("tc2_iso_level_q", "Surface level (quantile)", min = 0.50, max = 0.98, value = 0.85, step = 0.01),
+              sliderInput("tc2_iso_sigma", "Isosurface smoothness (sigma, nm)", min = 10, max = 500, value = 150, step = 10),
+              sliderInput("tc2_iso_opacity", "Isosurface opacity", min = 0, max = 1, value = 0.25, step = 0.01),
+              sliderInput("tc2_iso_eps", "Smoothness (epsilon)", min = 1e-6, max = 1e-2, value = 1e-4, step = 1e-6)
+            )
+          )
+        ),
+        uiOutput("two_color_settings_file_ui"),
+        downloadButton("download_two_color_settings", "Save 2-color settings"),
+        actionButton("reset_two_color_settings", "Reset 2-color settings", icon = icon("undo"))
+      ),
+      ),  # /2-color MINFLUX
+      tags$hr(),
+
+
+      ### 1b) Multiplexed MINFLUX ===
+      tags$details(class = "sim-group",
+      tags$summary(tags$b("Multiplexed MINFLUX")),
+      helpText("Build an N-channel dataset for exchange/sequential MINFLUX: overlay several loaded files, or split one continuous acquisition by time (TIM). Each channel gets its own color and feeds the plot and the Analysis tab."),
+      checkboxInput("mplex_enable", "Enable multiplexing", value = FALSE),
+      conditionalPanel(
+        condition = "input.mplex_enable == true",
+        radioButtons("mplex_mode", "Channel source",
+                     choices = c("Overlay loaded files"          = "files",
+                                 "Split active file by time (TIM)" = "tim"),
+                     selected = "files"),
+        conditionalPanel(
+          condition = "input.mplex_mode == 'files'",
+          selectInput("mplex_files", "Files to overlay (one channel each)",
+                      choices = character(0), multiple = TRUE, width = "100%"),
+          uiOutput("mplex_files_colors_ui")
+        ),
+        conditionalPanel(
+          condition = "input.mplex_mode == 'tim'",
+          uiOutput("mplex_tim_info"),
+          radioButtons("mplex_tim_method", "Time assignment",
+                       choices = c("Contiguous breakpoints"          = "breaks",
+                                   "Explicit windows (drop washes)"   = "windows"),
+                       selected = "breaks"),
+          conditionalPanel(
+            condition = "input.mplex_tim_method == 'breaks'",
+            textInput("mplex_tim_breaks", "Breakpoints (seconds, comma-separated)",
+                      value = "", placeholder = "e.g. 600, 1200"),
+            helpText("N breakpoints create N+1 contiguous time-window channels. Up to 6 splits (7 channels).")
+          ),
+          conditionalPanel(
+            condition = "input.mplex_tim_method == 'windows'",
+            textInput("mplex_tim_windows", "Included windows (s): start-end, start-end, …",
+                      value = "", placeholder = "e.g. 0-600, 700-1300, 1400-2000"),
+            helpText("Each window = one channel. Localizations OUTSIDE all windows (wash/exchange steps) are removed. Up to 7 windows.")
+          ),
+          plotlyOutput("mplex_tim_hist", height = "200px"),
+          sliderInput("mplex_tim_bins", "Histogram bins",
+                      min = 10, max = 500, value = 60, step = 5),
+          helpText("Trace IDs over time; bar color = channel, grey = removed (wash), dashed lines = window/split edges."),
+          uiOutput("mplex_tim_colors_ui")
+        ),
+        fluidRow(
+          column(7, actionButton("mplex_build", "Build multiplex",
+                                 icon = icon("layer-group"),
+                                 class = "btn-primary btn-sm", style = "width:100%")),
+          column(5, actionButton("mplex_clear", "Clear",
+                                 class = "btn-default btn-sm", style = "width:100%"))
+        ),
+        verbatimTextOutput("mplex_summary")
+      ),
+      ),  # /Multiplexed MINFLUX
+      tags$hr(),
+
 
       ### Estimate ground-truth positions (labeling-aware inverse) ===
       tags$details(class = "sim-group",
@@ -1237,7 +1241,7 @@ smlm_ui <- fluidPage(
         column(3,
           h4("Batch NN Distance Histogram"),
           .method_box("green",
-            HTML("Nearest-neighbour distance statistics for spatial point patterns (<b>Clark &amp; Evans 1954</b>); k-th NN via a k-d tree (<code>dbscan::kNN</code>). The distribution of the k-th NN distance is the classic first-order test of whether points sit closer together than chance."),
+            HTML("Distribution of the k-th nearest-neighbour distance, computed with a k-d tree (<code>dbscan::kNN</code>) — the classic first-order description of how tightly points sit together. Nearest-neighbour distance as a spatial statistic follows <b>Clark &amp; Evans 1954</b>; their observed-to-Poisson-expected ratio R is not computed here, as this panel reports the distance distribution itself with no null model attached (see the caveat)."),
             HTML("The choice of <b>NN unit</b> is the MINFLUX adaptation. Raw localizations are <i>not</i> molecules — one fluorophore re-appears as several traces and a multivalent label scatters dyes ~10–40&nbsp;nm around one epitope. Running NN on <b>TID centroids</b> (one point per trace) or <b>de-blinked-molecule / median-cluster centroids</b> de-blinks first, so the distribution approximates inter-<i>molecule</i> spacing. MINFLUX's nm precision means the histogram is limited by labelling geometry, not by localization error."),
             HTML("A sharp peak below ~40&nbsp;nm is usually the <b>label footprint, not biology</b> (Annibale et&nbsp;al. 2011; Sengupta et&nbsp;al. 2011). The distance-range filter trims the histogram but does not correct the bias. NN is a summary statistic with no CSR reference here — use Ripley&nbsp;L(r) with its envelope if you need significance.")),
           selectInput("nn_batch_unit", "NN unit",
@@ -1330,7 +1334,7 @@ smlm_ui <- fluidPage(
           helpText("Unit: which points the statistic runs on — one centroid per trace ID, or one per",
                    "the de-blinked molecule if de-blinking is enabled."),
           checkboxInput("ripley_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
-          helpText("All files: pool every loaded dataset into one curve; uncheck to analyse only the active file."),
+          helpText("All files: pool every loaded dataset into one curve; uncheck to analyze only the active file."),
           conditionalPanel(
             condition = "output.mplex_active == true",
             checkboxInput("ripley_by_channel", "Split by multiplex channel (with 'all files')", value = FALSE)
@@ -1613,7 +1617,7 @@ smlm_ui <- fluidPage(
           .method_box("green",
             HTML("Second moment of a point cloud about its centroid, Rg²&nbsp;=&nbsp;⟨‖p&nbsp;−&nbsp;p̄‖²⟩ — an RMS size. This tool answers <b>two</b> different questions depending on the <i>Measure</i> setting: the <b>size of your structures</b> (grouping by median cluster) or the <b>footprint of your labelling</b> (spread of one molecule's own repeat blinks). The gyration-tensor eigenvalues also give the shape descriptors used elsewhere (asphericity, <b>Rudnick &amp; Gaspari 1986</b>; linear/planar/spherical coefficients, <b>Westin et&nbsp;al. 1997/2002</b>)."),
             HTML("Points are <b>median positions</b>, never raw localizations, so localization noise is suppressed (a median of N localizations has SD ~ σ_loc/√N) and Rg reflects real geometry. For <b>structure size</b> with de-blinking on, each de-blinked molecule contributes <b>one</b> point, so a multivalent label's several traces do not inflate the size. For the <b>label footprint</b> measure, each of a molecule's traces is a point, so Rg is exactly the blink/label scatter (~linker length for a tag, ~10–40&nbsp;nm for an antibody)."),
-            HTML("Rg is biased low at small member counts (the centroid is estimated from the same points) and is a single number: a filament and a disc of the same extent share an Rg — that is what the anisotropy coefficients are for. The structure-size measure carries the label footprint as an additive floor (no footprint deconvolution is applied); compare against the label-footprint measure to gauge how much of a small structure's Rg is really labelling.")),
+            HTML("Rg is biased low at small member counts, because the centroid is estimated from the same points whose spread is measured. The bias grows as members are lost (29% at 2 members, 11% at 5, 1% at 50) and so is <b>member-count dependent</b>, which would create an artificial trend of Rg with cluster size. A Bessel <b>n/(n−1)</b> factor on the mean squared distance corrects it; at 2 members a residual underestimate remains, so treat those clusters as indicative. Rg is also a single number: a filament and a disc of the same extent share an Rg — that is what the anisotropy coefficients are for. The structure-size measure carries the label footprint as an additive floor (no footprint deconvolution is applied); compare against the label-footprint measure to gauge how much of a small structure's Rg is really labelling.")),
           helpText("Distribution of per-cluster Rg across all loaded files. Two views:",
                    "structure size (spread of members in the median cluster) or the per-molecule",
                    "labelling footprint."),
@@ -1786,9 +1790,9 @@ smlm_ui <- fluidPage(
         column(3,
           h4("2D KDE Density Map"),
           .method_box("amber",
-            HTML("2D kernel density estimation (<b>Silverman 1986</b>; <code>MASS::kde2d</code>) of each channel on a shared grid, with the auto bandwidth from Silverman's rule bw&nbsp;=&nbsp;0.9·min(sd,&nbsp;IQR/1.34)·n<sup>−1/5</sup>. The co-localization index is the <b>Pearson correlation</b> of the two density surfaces (the coordinate-data analogue of Pearson co-localization on images, cf. <b>Dunn et&nbsp;al. 2011</b>), with an optional <b>Costes-style</b> randomization test (<b>Costes et&nbsp;al. 2004</b>)."),
-            HTML("MINFLUX has no pixels, so the density surface — and therefore the 'image' the Pearson r is computed on — is <b>manufactured by the bandwidth</b>, which is a free parameter rather than a property of the microscope. Two honesty tools compensate: the <b>r-vs-bandwidth sweep</b> shows the whole family of answers instead of one, and the <b>Costes randomization</b> re-scatters channel 2 uniformly in the same window to give a p-value against spatial independence at the chosen bandwidth."),
-            HTML("<b>The Pearson r is not an absolute quantity.</b> A small bandwidth drives r toward 0 even for perfectly co-localizing molecules (the two surfaces become disjoint spikes); a large one inflates r toward 1 because both channels simply fill the cell. Only compare r values computed at the same bandwidth on similarly dense data, and prefer the sweep to any single number. The Costes p-value tests only against <i>uniform</i> randomness, so it is optimistic in a structured cell — a p&nbsp;≈&nbsp;0 mostly says 'both channels are non-uniform', not 'these two proteins interact'. For a bandwidth-free, scale-resolved answer use g₁₂(r) above.")),
+            HTML("2D kernel density estimation (<b>Silverman 1986</b>; <code>MASS::kde2d</code>) of each channel on a shared grid, with the auto bandwidth from Silverman's rule bw&nbsp;=&nbsp;0.9·min(sd,&nbsp;IQR/1.34)·n<sup>−1/5</sup>. The co-localization index is the <b>Pearson correlation</b> of the two density surfaces (the coordinate-data analogue of Pearson co-localization on images, cf. <b>Dunn et&nbsp;al. 2011</b>), with an optional randomization test for significance."),
+            HTML("MINFLUX has no pixels, so the density surface — and therefore the 'image' the Pearson r is computed on — is <b>manufactured by the bandwidth</b>, which is a free parameter rather than a property of the microscope. Two tools compensate: the <b>r-vs-bandwidth sweep</b> shows the whole family of answers instead of one, and the <b>randomization test</b> gives a p-value at the chosen bandwidth. Its default null is a <b>toroidal random shift</b> of channel 2 (<b>Lotwick &amp; Silverman 1982</b>), which preserves that channel's own clustering and point count and breaks only its registration with channel 1; a uniform-CSR null is selectable for comparison."),
+            HTML("<b>The Pearson r is not an absolute quantity.</b> A small bandwidth drives r toward 0 even for perfectly co-localizing molecules (the two surfaces become disjoint spikes); a large one inflates r toward 1 because both channels simply fill the cell. Only compare r values computed at the same bandwidth on similarly dense data, and prefer the sweep to any single number. <b>The p-value is calibrated only when the signal fills the field:</b> both nulls randomize over the bounding box rather than the region the signal occupies, so for a structure confined to a small part of the view they reject too readily — the uniform-CSR null severely so, since p&nbsp;≈&nbsp;0 then mostly reports 'both channels are non-uniform'. For a bandwidth-free, scale-resolved answer use g₁₂(r) above.")),
           helpText("Kernel density estimate for each channel on the active file's spatial grid.",
                    "Ch1 shown as red contours, Ch2 as blue contours. Pearson r of the two",
                    "density surfaces serves as a global co-localization coefficient,",
@@ -1817,9 +1821,14 @@ smlm_ui <- fluidPage(
           checkboxInput("kde_bw_sweep", "Show r vs bandwidth sweep", value = FALSE),
           helpText("Recomputes Pearson r across a range of bandwidths to expose how strongly the",
                    "single-number coefficient depends on the (arbitrary) smoothing choice."),
-          numericInput("kde_costes_nsim", "Costes randomizations (0 = off)", value = 100, min = 0, max = 500, step = 10),
-          helpText("Spatially randomizes Ch2 this many times and recomputes r, yielding a p-value",
+          numericInput("kde_costes_nsim", "Randomizations (0 = off)", value = 100, min = 0, max = 500, step = 10),
+          helpText("Randomizes Ch2 this many times and recomputes r, yielding a p-value",
                    "(fraction of random r ≥ observed). Low p = co-localization beyond chance."),
+          radioButtons("kde_null_mode", "Randomization null",
+            choices = c("Random shift of Ch2 (recommended)" = "shift",
+                        "Uniform CSR resampling of Ch2"     = "csr"),
+            selected = "shift"),
+          helpText(HTML("<b>Random shift</b> translates Ch2 with wrap-around, preserving its own clustering and point count, so only the cross-channel registration is broken (Lotwick &amp; Silverman 1982). <b>Uniform CSR</b> replaces Ch2 with uniform random points, testing against complete spatial randomness instead.<br><b>Limitation:</b> both nulls randomize over the bounding box rather than the region the signal actually occupies. When the signal fills the field the p-value is well calibrated; when it is confined to a small part of the field (a single cell in a wider view) both nulls reject far too readily, CSR much more so. In that case treat a low p as weak evidence and confirm with g₁₂(r) against its envelope.")),
           actionButton("run_kde_coloc", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_kde_coloc", "Download CSV", class = "btn-sm")
@@ -1852,7 +1861,7 @@ smlm_ui <- fluidPage(
             " are bespoke to this tool and are not validated against the literature."),
           tags$table(style = "border-collapse:collapse; line-height:1.5;",
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Nearest-neighbour")),
-                    tags$td("Clark & Evans 1954 (nearest-neighbour distance statistic)")),
+                    tags$td("k-th NN distance distribution via k-d tree; NN distance as a spatial statistic after Clark & Evans 1954 — their observed/expected R index is not computed (no null model here)")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("DBSCAN / HDBSCAN / OPTICS")),
                     tags$td("Ester, Kriegel, Sander & Xu 1996 (DBSCAN); Ankerst, Breunig, Kriegel & Sander 1999 (OPTICS); Campello, Moulavi & Sander 2013 (HDBSCAN)")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Median (de-blinked) clustering")),
@@ -1870,7 +1879,7 @@ smlm_ui <- fluidPage(
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Pair cross-correlation g₁₂(r)")),
                     tags$td("Sengupta et al. 2011 (PC-PALM); Veatch et al. 2012 (correlation functions / over-counting)")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("KDE density + Pearson co-loc")),
-                    tags$td("Kernel density estimate (Silverman 1986); Pearson coefficient as a bandwidth-dependent, relative co-localization measure (cf. Dunn et al. 2011); randomization significance test after Costes et al. 2004")),
+                    tags$td("Kernel density estimate (Silverman 1986); Pearson coefficient as a bandwidth-dependent, relative co-localization measure (cf. Dunn et al. 2011); significance by structure-preserving random-shift randomization of Ch2 (Lotwick & Silverman 1982), with a uniform-CSR null selectable for comparison")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Shape fitting (viewer)")),
                     tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
                             " — orthogonal-distance MLE with AICc/BIC model selection (Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989); the shape dictionary and biological reading are bespoke")),

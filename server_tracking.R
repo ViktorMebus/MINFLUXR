@@ -278,6 +278,21 @@ tracking_server <- function(input, output, session) {
     stats::setNames(as.numeric(sc), utid[as.integer(names(sc))])   # map codes → tids
   }
 
+  # Does the z column carry REAL axial data, or is it a placeholder?
+  # 2D MINFLUX exports routinely ship an all-zero (or constant) z column, and 0 is
+  # finite — so the obvious test `any(is.finite(df$z))` returns TRUE for 2D data and
+  # every dimension-aware estimator downstream silently switches to 3D. That pools a
+  # ZERO-VARIANCE axis into the maths: it diluted the pooled σ_loc by √(2/3) (−18%)
+  # and D_cve by 2/3 (−33%), and it would have the JDD fit a 3D Maxwell law to 2D
+  # distances. Requiring real spread is the criterion msd_unified_bundle and
+  # trk_disp_bundle already used; this makes it the single shared definition so the
+  # dimension decision cannot drift between tools again.
+  .has_real_z <- function(df, min_sd = 1) {
+    if (is.null(df) || !"z" %in% names(df)) return(FALSE)
+    zv <- df$z[is.finite(df$z)]
+    length(zv) > 10L && is.finite(stats::sd(zv)) && stats::sd(zv) > min_sd
+  }
+
   # ============================================================================
   # trk_cve_bundle() — LOCALIZATION PRECISION (σ_loc) + DATA-QUALITY CALIBRATION
   # ============================================================================
@@ -353,7 +368,9 @@ tracking_server <- function(input, output, session) {
     df <- tryCatch(trk_gap_split(), error = function(e) NULL)
     req(!is.null(df), nrow(df) > 0, all(c("x","y","tid","tim") %in% names(df)))
     t_c   <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
-    has_z <- "z" %in% names(df) && sum(is.finite(df$z)) > 0
+    # Real axial data only — a placeholder all-zero z column would dilute both σ_loc
+    # and D_cve (see .has_real_z).
+    has_z <- .has_real_z(df)
     df <- df[order(df$tid, df$tim), ]
     n  <- nrow(df)
     same <- c(FALSE, df$tid[-1] == df$tid[-n])                 # step i valid (2nd+ loc)
@@ -409,13 +426,27 @@ tracking_server <- function(input, output, session) {
     prod_x <- dx * c(dx[-1], NA_real_)
     prod_y <- dy * c(dy[-1], NA_real_)
     vals   <- c(prod_x[pair], prod_y[pair])
-    if (has_z) { prod_z <- dz * c(dz[-1], NA_real_); vals <- c(vals, prod_z[pair]) }
+    prod_z <- if (has_z) dz * c(dz[-1], NA_real_) else rep(NA_real_, n)
+    if (has_z) vals <- c(vals, prod_z[pair])
     vals <- vals[is.finite(vals)]
     shiny::validate(shiny::need(length(vals) >= 20,
       "Too few consecutive integrated steps for a CVE estimate — relax filters or check the cycle time."))
     cov1   <- mean(vals)
     sigma2 <- -cov1
     sigma  <- sqrt(max(0, sigma2))
+    # ── Per-axis-group σ: LATERAL (x,y) vs AXIAL (z) ────────────────────────────
+    # `sigma` above pools all axes into ONE number. In 3D MINFLUX the axial precision
+    # is typically WORSE than the lateral, so the pooled value over-states σ_xy and
+    # under-states σ_z. Several consumers are purely lateral (the D-map is an x–y map;
+    # JDD/MSD in 2D mode), and subtracting a z-inflated noise floor from them
+    # over-corrects. Report both so the anisotropy is visible and quantified.
+    .sig_of <- function(v) { v <- v[is.finite(v)]
+                             if (length(v) < 10L) NA_real_ else sqrt(max(0, -mean(v))) }
+    sigma_xy <- .sig_of(c(prod_x[pair], prod_y[pair]))
+    sigma_z  <- if (has_z) .sig_of(prod_z[pair]) else NA_real_
+    # Axial/lateral ratio — > ~1.3 means a single pooled σ_loc is a poor description.
+    sig_aniso <- if (is.finite(sigma_xy) && sigma_xy > 0 && is.finite(sigma_z))
+                   sigma_z / sigma_xy else NA_real_
     # Free bonus: bias-corrected D (per axis) = ⟨Δ²⟩/(2Δt) + cov1/Δt.
     sq     <- c(dx[integ_step]^2, dy[integ_step]^2); if (has_z) sq <- c(sq, dz[integ_step]^2)
     sq     <- sq[is.finite(sq)]
@@ -423,7 +454,7 @@ tracking_server <- function(input, output, session) {
     D_cve  <- if (length(sq) && is.finite(dt_int) && dt_int > 0) mean(sq)/(2*dt_int) + cov1/dt_int else NA_real_
 
     # ── How well is σ actually resolved? (drives the photon-weighting gate) ─────
-    # Normalised lag-1 correlation r1 = cov1/⟨Δ²⟩. For Brownian + noise,
+    # Normalized lag-1 correlation r1 = cov1/⟨Δ²⟩. For Brownian + noise,
     # r1 = −σ²/(2·D·Δt + 2σ²), so the NOISE FRACTION of the step variance is −2·r1.
     # r1 → −0.5 means noise dominates (σ cleanly resolved); r1 → 0 means σ is a marginal
     # residual sitting on top of motion, and any PER-TRACK or PER-BIN σ then mostly
@@ -534,6 +565,7 @@ tracking_server <- function(input, output, session) {
                                   method = "spearman", use = "complete.obs")) else NA_real_
 
     list(sigma = sigma, sigma2 = sigma2, cov1 = cov1, n_pairs = length(vals),
+         sigma_xy = sigma_xy, sigma_z = sigma_z, sig_aniso = sig_aniso,
          D_cve = D_cve, dt_int = dt_int, t_cycle = t_c, has_z = has_z,
          frac_integ = frac_integ_raw, frac_integ_filt = frac_integ_filt,
          cont_raw = cont_raw, cont_filt = cont_filt, cont_H = H_disp,
@@ -610,6 +642,24 @@ tracking_server <- function(input, output, session) {
         sprintf("  (CVE pooled, %s consecutive integrated pairs)", format(b$n_pairs, big.mark = ",")))
     # The one photon fact that changes what you should DO: if photons track mobility, any
     # ECO/EFO filter is silently a mobility filter.
+    # 3D only: lateral vs axial precision. The app-wide σ_loc pools all axes, so if the
+    # axial precision is much worse, that ONE number over-states σ_xy — and the purely
+    # lateral tools (D-map, 2D-mode JDD/MSD) then over-subtract their noise floor.
+    aniso_line <- if (isTRUE(b$has_z) && is.finite(b$sigma_xy) && is.finite(b$sigma_z))
+      htmltools::span(style = "font-size:0.92em;", htmltools::br(),
+        # sigloc() is an HTML object, so it must be a sibling tag — passing it through
+        # sprintf("%s") stringifies it and the markup then renders as literal text.
+        htmltools::span(style = "color:#888;",
+          "per-axis ", sigloc(),
+          sprintf(": lateral (x,y) %.2f nm  ·  axial (z) %.2f nm",
+                  b$sigma_xy, b$sigma_z)),
+        if (is.finite(b$sig_aniso) && b$sig_aniso > 1.3)
+          htmltools::span(style = "color:#B8860B;",
+            htmltools::HTML(sprintf(
+              "  &#9888; axial precision is %.1f× worse, so the pooled %s above over-states the <b>lateral</b> noise floor. The x&ndash;y tools (D-map, 2D JDD/MSD) will over-subtract — enter %.2f nm manually for those.",
+              b$sig_aniso, sigloc(), b$sigma_xy)))
+        else NULL)
+    else NULL
     prec_line <- if (is.finite(b$phot_mob_rho) && b$phot_mob_rho <= -0.35)
       htmltools::span(style = "color:#B8860B; font-size:0.92em;", htmltools::br(),
         htmltools::HTML(sprintf(
@@ -617,7 +667,7 @@ tracking_server <- function(input, output, session) {
           toupper(b$phot_col %||% "photon"), b$phot_mob_rho, toupper(b$phot_col %||% "photon"))))
     else NULL
     htmltools::div(style = "font-size:0.92em; margin:4px 0;",
-      sigma_line, prec_line, htmltools::br(),
+      sigma_line, aniso_line, prec_line, htmltools::br(),
       htmltools::span(htmltools::tags$b("Data quality (analyzed): "),
         htmltools::span(style = sprintf("color:%s; font-weight:bold;", q_verdict[2]), q_verdict[1]),
         frac_line),
@@ -3090,10 +3140,11 @@ tracking_server <- function(input, output, session) {
   conf_color_map_stored    <- reactiveVal(NULL)  # pre-computed tid->hex when conf coloring is on
   cluster_color_map_stored <- reactiveVal(NULL)  # pre-computed tid->hex when MSD cluster coloring is on
 
-  # TRUE when the loaded data has a usable z column (enables 3D toggle)
+  # TRUE when the loaded data has a usable z column (enables 3D toggle). Requires real
+  # axial spread, so a placeholder all-zero z column does not offer a 3D mode that
+  # would silently pool a zero-variance axis (see .has_real_z).
   has_z <- reactive({
-    df <- trk()
-    "z" %in% names(df) && sum(is.finite(df$z)) > 0
+    .has_real_z(trk())
   })
 
   # TRUE when the user has selected 3D mode and data supports it
@@ -4802,40 +4853,132 @@ tracking_server <- function(input, output, session) {
     dt_med  <- median(vec, na.rm = TRUE)
     # Bin-FREE typical Δt (half-sample mode) — independent of the bin slider.
     dt_hsm  <- half_sample_mode(vec)
-    h_tmp   <- hist(vec, breaks = n_bins, plot = FALSE)   # for display + y-scaling only
+    rng     <- range(vec)                                 # x-extent, for the cycle markers
 
-    # Build the histogram via add_histogram (not inline plot_ly attrs): trace-level
-    # attributes like nbinsx set on plot_ly() are inherited by every later trace, so
-    # the two scatter reference-lines below would otherwise get nbinsx and trigger
-    # "'scatter' objects don't have these attributes: 'nbinsx'". Keeping them on the
-    # histogram trace confines them there. The reference lines are mode="lines" with
-    # no marker (a size-0 marker only produced "markers not in the mode" warnings).
+    # The app's best cycle-time estimate anchors the bins and the cycle markers. Read
+    # reactively so both follow a cycle change.
+    t_c <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    # SW offset: peaks sit at SW + k·t_c, so the bin grid has to be shifted by it.
+    # Prefer the fitted value; fall back to (typical Δt − t_c), which is the same
+    # quantity read straight off the 1-cycle peak.
+    cc_sw <- {
+      cc <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
+      s  <- if (!is.null(cc) && is.finite(cc$sw)) cc$sw else NA_real_
+      if (!is.finite(s) && is.finite(dt_hsm) && is.finite(t_c)) max(0, dt_hsm - t_c) else s
+    }
+    if (!is.finite(cc_sw)) cc_sw <- 0
+
+    # ── Binning ───────────────────────────────────────────────────────────────
+    # Δt is not continuous: it takes values SW + k·t_c for integer k. A free-width
+    # histogram therefore aliases against that comb — at the default 80 bins the grid
+    # runs ~1.63 bins per cycle, so each peak lands at a different offset inside its
+    # bin (0.01, 0.64, 0.28, 0.91, … of a bin width) and the bars drift visibly away
+    # from the cycle markers, with empty bins interleaved.
+    # "cycle" mode instead puts the bin EDGES on the classification boundaries,
+    # SW + (k ± ½)·t_c, so every bar is exactly one cycle count, centred on its peak.
+    # The picture is then identical to the round((Δt − SW)/t_c) the analysis performs.
+    use_cycle_bins <- !identical(input$trk_dt_bin_mode %||% "cycle", "free") &&
+                      is.finite(t_c) && t_c > 0
+    if (use_cycle_bins) {
+      kv    <- round((vec - cc_sw) / t_c)
+      kv    <- kv[is.finite(kv) & kv >= 1]
+      kmax  <- max(1L, min(as.integer(max(kv)), 400L))
+      kcnt  <- tabulate(pmin(kv, kmax), nbins = kmax)
+      bar_x <- cc_sw + seq_len(kmax) * t_c      # bar centre = the peak itself
+      bar_y <- kcnt
+      bar_w <- t_c * 0.9
+      keepb <- bar_y > 0
+      bar_x <- bar_x[keepb]; bar_y <- bar_y[keepb]
+    } else {
+      h_tmp <- hist(vec, breaks = n_bins, plot = FALSE)
+      bar_x <- h_tmp$mids; bar_y <- h_tmp$counts
+      bar_w <- diff(h_tmp$breaks)[1]
+    }
+
+    # Counts span ~100× between the 1-cycle peak and the dark tail, so the tail is
+    # invisible on a linear axis; log y makes the whole decay readable.
+    log_y <- isTRUE(input$trk_dt_log_y %||% FALSE)
+    ymax  <- if (log_y) 10^(log10(max(bar_y, na.rm = TRUE)) * 1.06)
+             else max(bar_y, na.rm = TRUE) * 1.08
+    ybase <- if (log_y) 0.7 else 0        # log axes cannot start at 0
+
     fig <- plot_ly() %>%
-      add_histogram(x = vec, nbinsx = n_bins,
-                    marker = list(color = "rgba(100,150,220,0.7)",
-                                  line  = list(color = "rgba(70,110,180,0.9)",
-                                               width = 0.5)),
-                    showlegend = FALSE) %>%
-      add_trace(x = c(dt_med, dt_med), y = c(0, max(h_tmp$counts) * 1.1),
+      add_bars(x = bar_x, y = bar_y, width = bar_w,
+               marker = list(color = "rgba(100,150,220,0.7)",
+                             line  = list(color = "rgba(70,110,180,0.9)", width = 0.5)),
+               hovertemplate = if (use_cycle_bins)
+                 "Δt %{x:.4g} ms<br>%{y:,} steps<extra></extra>"
+               else "Δt %{x:.4g} ms<br>%{y:,}<extra></extra>",
+               showlegend = FALSE)
+    # Rug of the DISTINCT observed Δt values. Cheap (one tick per unique value, not per
+    # step) and it shows the quantisation directly: ticks that do not line up under a
+    # bar centre are intervals the current cycle time does not explain.
+    uv <- unique(round(vec, 6))
+    if (length(uv) <= 5000L) {
+      fig <- fig %>% add_trace(
+        x = uv, y = rep(ybase, length(uv)), type = "scatter", mode = "markers",
+        marker = list(symbol = "line-ns-open", size = 6,
+                      color = if (dark) "rgba(255,255,255,0.35)" else "rgba(0,0,0,0.30)",
+                      line = list(width = 1)),
+        hovertemplate = "observed Δt %{x:.5g} ms<extra></extra>",
+        name = "observed Δt values", showlegend = FALSE)
+    }
+    fig <- fig %>%
+      add_trace(x = c(dt_med, dt_med), y = c(ybase, ymax),
                 type = "scatter", mode = "lines",
                 line   = list(color = "#E03020", width = 2, dash = "dash"),
                 name = sprintf("Median %.3g ms", dt_med)) %>%
-      add_trace(x = c(dt_hsm, dt_hsm), y = c(0, max(h_tmp$counts) * 1.1),
+      add_trace(x = c(dt_hsm, dt_hsm), y = c(ybase, ymax),
                 type = "scatter", mode = "lines",
                 line   = list(color = "#20A040", width = 2, dash = "dashdot"),
-                name = sprintf("Typical Δt (bin-free) %.3g ms", dt_hsm)) %>%
-      layout(
-        xaxis  = list(title = "Δt between consecutive localizations (ms)",
-                      color = fg_col),
-        yaxis  = list(title = "Count", color = fg_col),
-        paper_bgcolor = bg_col, plot_bgcolor = bg_col,
-        font   = list(color = fg_col),
-        legend = list(orientation = "h", x = 0, y = 1.12,
-                      font = list(color = fg_col)),
-        bargap = 0.05,
-        uirevision = "dt_jdd"
-      )
-    fig
+                name = sprintf("Typical Δt (bin-free) %.3g ms", dt_hsm))
+
+    # ── Cycle-multiple markers ────────────────────────────────────────────────
+    # A k-cycle interval sits at Δt = SW + k·t_c, i.e. modal + (k−1)·t_c (the peaks
+    # are NOT at k·t_c — that omits the once-per-step SW overhead and lands every
+    # marker short of its bell). So anchor marker 1 on the observed modal Δt (the
+    # tallest = 1-cycle peak, = the green Typical-Δt line) and step by the SELECTED
+    # cycle time t_c. Consequence: if the selected cycle time matches the data, all
+    # markers land on the bells; if a manual/hardware override is wrong, the higher
+    # markers visibly drift off — a built-in check that the chosen cycle time is right.
+    # Layout shapes (not traces) so they stay out of the legend.
+    shp <- list(); ann <- list()
+    if (isTRUE(input$trk_dt_mark_cycles %||% TRUE) &&
+        is.finite(t_c) && t_c > 0 && is.finite(dt_hsm)) {
+      n_cap <- suppressWarnings(as.integer(input$trk_cycle_dark_max %||% 10L))
+      if (!is.finite(n_cap) || n_cap < 1L) n_cap <- 10L
+      Nmax  <- max(1L, min(n_cap, 12L, as.integer(floor((rng[2] - dt_hsm) / t_c)) + 1L))
+      grid_c <- if (dark) "rgba(200,200,200,0.35)" else "rgba(90,90,90,0.35)"
+      for (nn in seq_len(Nmax)) {
+        xc <- dt_hsm + (nn - 1L) * t_c        # SW + nn·t_c, anchored on the modal peak
+        shp[[length(shp) + 1L]] <- list(type = "line", x0 = xc, x1 = xc,
+          y0 = ybase, y1 = ymax,
+          line = list(color = grid_c, width = 1, dash = "dot"), layer = "below")
+        ann[[length(ann) + 1L]] <- list(x = xc, y = ymax, text = paste0(nn, "×"),
+          showarrow = FALSE, yanchor = "bottom",
+          font = list(size = 9, color = fg_col))
+      }
+    }
+
+    fig %>% layout(
+      xaxis  = list(title = "Δt between consecutive localizations (ms)",
+                    color = fg_col),
+      yaxis  = if (log_y)
+                 list(title = "Count (log)", color = fg_col, type = "log",
+                      range = c(log10(ybase), log10(ymax)))
+               else list(title = "Count", color = fg_col, range = c(0, ymax)),
+      paper_bgcolor = bg_col, plot_bgcolor = bg_col,
+      font   = list(color = fg_col),
+      # Vertical legend to the RIGHT of the plot (x > 1 = outside the axes) so it no
+      # longer overlaps the bars / cycle labels along the top.
+      legend = list(orientation = "v", x = 1.02, xanchor = "left",
+                    y = 1, yanchor = "top", font = list(color = fg_col)),
+      margin = list(r = 10),
+      bargap = 0.05,
+      shapes = shp,
+      annotations = ann,
+      uirevision = "dt_jdd"
+    )
   })
 
   output$trk_dt_stats_ui <- renderUI({
@@ -4850,6 +4993,14 @@ tracking_server <- function(input, output, session) {
     dt_p25  <- quantile(vec, 0.25)
     dt_p75  <- quantile(vec, 0.75)
     hw      <- trk_hw_cycle_time()
+    # Peak-based cycle time: the Δt peaks sit at k·cycle + SW, so a least-squares fit
+    # of the peak centres against the integer cycle index k gives slope = cycle time,
+    # intercept = SW. This is the "fit the 1×,2×,3×… peaks and read the cycle time off
+    # the spacing" idea, and is the same quantity Bela/Vogler recover from the EOD/SW
+    # time-signature fit. Computed here regardless of the acquisition-tab toggle so it
+    # is always visible next to the density peaks it comes from.
+    rc <- tryCatch(trk_regression_cycle(), error = function(e) NULL)
+    cc <- tryCatch(trk_cluster_cycle(),    error = function(e) NULL)
     tags$div(style = "font-size:0.84em; color:#555; margin:4px 0;",
       tags$div(
         tags$b("Typical Δt (bin-free, half-sample mode): "),
@@ -4857,11 +5008,34 @@ tracking_server <- function(input, output, session) {
         sprintf("   ·   median %.4g   ·   p10 %.4g   ·   p25 %.4g   ·   p75 %.4g   ·   n = %s",
                 dt_med, dt_p10, dt_p25, dt_p75, format(length(vec), big.mark = ","))
       ),
+      if (!is.null(rc) && is.finite(rc$cycle) && rc$cycle > 0)
+        tags$div(style = "color:#3a5a8a; margin-top:2px;",
+          tags$b("Peak-fit cycle time (Béla-style regression): "),
+          tags$span(style = "font-weight:bold;", sprintf("%.4g ms", rc$cycle)),
+          sprintf("   ·   SW offset %.3g ms   ·   R² = %.4f   ·   fit on %d cycle peaks",
+                  rc$sw, rc$r2 %||% NA_real_, rc$n),
+          if (!is.null(cc) && is.finite(cc$frac_one_cycle))
+            sprintf("   ·   %.0f%% are single (integrated) cycles", 100 * cc$frac_one_cycle) else "",
+          # The cycle time is smaller than every gap you can actually observe, which
+          # reads as a discrepancy unless the decomposition is spelled out.
+          if (is.finite(rc$cycle) && is.finite(rc$sw))
+            tags$div(style = "color:#666; font-weight:normal; margin-top:1px;",
+              sprintf("Cycle time %.4g + SW %.3g = %.4g ms between consecutive integrated localizations (the typical Δt above). The cycle time is the instrument's repeat unit, not an observable gap; it converts an interval into a cycle count.",
+                      rc$cycle, rc$sw, rc$cycle + rc$sw))
+          else NULL)
+      else if (!is.null(cc) && is.finite(cc$cycle) && cc$cycle > 0)
+        tags$div(style = "color:#3a5a8a; margin-top:2px;",
+          tags$b("Peak-spacing cycle time: "),
+          tags$span(style = "font-weight:bold;", sprintf("%.4g ms", cc$cycle)),
+          sprintf("   ·   from %d Δt peaks (need ≥2 for the regression fit)", length(cc$centers %||% numeric(0)))),
       if (is.finite(hw) && hw > 0)
         tags$div(style = "color:#888; margin-top:2px;",
           sprintf("Hardware atomic cycle = %.4g ms. If the typical Δt is ≈2× this, dark cycles dominate (the molecule is often briefly unseen between localizations).", hw)),
       tags$div(style = "color:#888; margin-top:2px; font-size:0.95em;",
-        "This estimate is independent of the histogram bin slider (which is display-only).")
+        "This estimate is independent of the histogram bin slider (which is display-only).",
+        " The peak-fit cycle time regresses the Δt density peaks (1×, 2×, 3×… the cycle) against",
+        " their cycle index — enable ", tags$em("Fit cycle time from data (EOD/SW regression)"),
+        " in Acquisition Parameters to use it everywhere.")
     )
   })
 
@@ -5619,9 +5793,9 @@ tracking_server <- function(input, output, session) {
     }
     flag_msg <- function(ratio) {
       if (!is.finite(ratio)) return("")
-      if (ratio > 0.8)  return(" ⚠ D near/above D_max — the tracking loop loses lock, so D is likely UNDER-estimated (Vogler 2025; SimuFLUX)")
-      if (ratio > 0.5)  return(" ⚠ D approaching D_max — D may be under-estimated; interpret with caution")
-      return(" ✓ D is well below D_max")
+      if (ratio > 0.8)  return(" ⚠ D near/above D<sub>max</sub> — the tracking loop loses lock, so D is likely UNDER-estimated (Vogler 2025; SimuFLUX)")
+      if (ratio > 0.5)  return(" ⚠ D approaching D<sub>max</sub> — D may be under-estimated; interpret with caution")
+      return(" ✓ D is well below D<sub>max</sub>")
     }
 
     use_ratio <- if (is.finite(ratio_vogler)) ratio_vogler else ratio_simple
@@ -5657,11 +5831,11 @@ tracking_server <- function(input, output, session) {
             if(is.finite(n_pl)) sprintf("%.1f", n_pl) else "— (no ECO column)")
         ),
         htmltools::tags$tr(style="border-top:1px solid #ddd;",
-          htmltools::tags$td(style="padding:4px 6px; color:#666;", "D_max simple (L² / 16·t_loc)"),
+          htmltools::tags$td(style="padding:4px 6px; color:#666;", htmltools::HTML("D<sub>max</sub> simple (L² / 16·t_loc)")),
           htmltools::tags$td(style="padding:4px 6px;", if(is.finite(D_max_simple)) sprintf("%.3g µm²/s", D_max_simple) else "—")
         ),
         htmltools::tags$tr(
-          htmltools::tags$td(style="padding:4px 6px; color:#666;", "D_max Vogler (EFO/N_PL)"),
+          htmltools::tags$td(style="padding:4px 6px; color:#666;", htmltools::HTML("D<sub>max</sub> Vogler (EFO/N_PL)")),
           htmltools::tags$td(style="padding:4px 6px;", if(is.finite(D_max_vogler)) sprintf("%.3g µm²/s", D_max_vogler) else "— (needs ECO & EFO)")
         ),
         htmltools::tags$tr(style="border-top:1px solid #ddd;",
@@ -5669,18 +5843,18 @@ tracking_server <- function(input, output, session) {
           htmltools::tags$td(style="padding:4px 6px;", if(is.finite(D_meas)) sprintf("%.3g µm²/s", D_meas) else "— (run MSD first)")
         ),
         if (is.finite(use_ratio)) htmltools::tags$tr(
-          htmltools::tags$td(style="padding:4px 6px; color:#666;", "D / D_max"),
+          htmltools::tags$td(style="padding:4px 6px; color:#666;", htmltools::HTML("D / D<sub>max</sub>")),
           htmltools::tags$td(
             style = sprintf("padding:4px 6px; font-weight:bold; color:%s;", flag_col(use_ratio)),
-            sprintf("%.4f%s", use_ratio, flag_msg(use_ratio))
+            htmltools::HTML(sprintf("%.4f%s", use_ratio, flag_msg(use_ratio)))
           )
         )
       ),
 
       htmltools::tags$div(
         style = "margin-top:8px; font-size:0.82em; color:#666;",
-        "D_max simple = L² / (16 · t_loc). ",
-        "D_max Vogler = (L²/16) · ψ_MFX / (N_PL + ψ_MFX · t_hw), from Vogler et al. (2025, Commun. Biol.). ",
+        htmltools::HTML("D<sub>max</sub> simple = L² / (16 · t_loc). "),
+        htmltools::HTML("D<sub>max</sub> Vogler = (L²/16) · ψ_MFX / (N_PL + ψ_MFX · t_hw), from Vogler et al. (2025, Commun. Biol.). "),
         "t_loc = ECO / EFO × 1000 (ms) — the time to collect ECO photons at rate EFO. ",
         "ECO is the photon count per localization (= N_PL directly). ",
         "Median Δt is shown as a cross-check. ",
@@ -5932,7 +6106,7 @@ tracking_server <- function(input, output, session) {
   # RETURNS a list (this is the contract every consumer relies on):
   #   lag ........... integer cycle lags 1..max_lag
   #   tau ........... TRUE mean elapsed Δt per lag bin (ms)  <- honest x-axis
-  #   tau_lin ....... lag × t_c (linearized x-axis; Vogler's convention)
+  #   tau_lin ....... lag × t_c + SW (linearized x-axis = Vogler's exact T_LIN)
   #   msd ........... ensemble MSD per lag (nm²)
   #   npairs ........ pairs contributing to each lag
   #   n_trk_lag ..... tracks contributing to each lag
@@ -5960,7 +6134,7 @@ tracking_server <- function(input, output, session) {
     df <- isolate(trk()); req(nrow(df) > 0)
     # Dimensionality: honour the user's 2D/3D selector (auto = 3D only if z varies).
     ndim_sel   <- isolate(input$trk_msd_ndim %||% "auto")
-    has_z_auto <- "z" %in% names(df) && { zv <- df$z[is.finite(df$z)]; length(zv) > 10 && sd(zv) > 1 }
+    has_z_auto <- .has_real_z(df)
     has_z <- if (identical(ndim_sel, "2")) FALSE
              else if (identical(ndim_sel, "3")) ("z" %in% names(df))
              else has_z_auto
@@ -6037,7 +6211,11 @@ tracking_server <- function(input, output, session) {
 
     min_trk <- max(2L, floor(0.10 * max(n_trk_lag)))
     keep_lag <- n_trk_lag >= min_trk
-    list(lag = seq_len(max_lag), tau = tau_real, tau_lin = seq_len(max_lag) * t_c,
+    # Linearized (Vogler/MinSpt) time axis = k·t_c + SW, matching his T_LIN exactly
+    # (simulate_cycles(k) = k·t_c + SW_OVERHEAD; get_cycle_time subtracts the SW).
+    # The +SW is a CONSTANT offset, so it does NOT change the fitted slope / D — it
+    # only shifts the curve right by SW and aligns the OLSF intercept (σ_loc) with his.
+    list(lag = seq_len(max_lag), tau = tau_real, tau_lin = seq_len(max_lag) * t_c + cc_sw,
          msd = msd_pair,
          npairs = np_lag, n_trk_lag = n_trk_lag, keep_lag = keep_lag,
          track_msd = track_msd, tk_names = tk_names,
@@ -6406,6 +6584,198 @@ tracking_server <- function(input, output, session) {
                          tickfont = list(color = "rgba(180,100,40,0.85)"),
                          titlefont = list(color = "rgba(180,100,40,0.85)"))
     do.call(plotly::layout, c(list(fig), lay))
+  })
+
+  # ── Cycle-binning diagnostic ────────────────────────────────────────────────
+  # Re-inspects whether displacements are being binned correctly by cycle. Reads
+  # the existing bundle (no recompute). Two signals per cycle-lag:
+  #
+  #   • BLUE, pairs per lag (left, log) — how much data backs each lag. Jagged at low
+  #     lag because dark gaps make some cycle-lags reachable more often than others;
+  #     then falls away, because a track of N localizations offers only ~(N−k) pairs at
+  #     lag k and short tracks stop contributing at all. Where the count collapses the
+  #     MSD goes noisy/saw-toothed — hence the "counts drop past N×" marker.
+  #
+  #   • RED, real elapsed Δt / linearized axis (right) — a rise to a PLATEAU is the
+  #     EXPECTED, benign shape, not a fault. Per step, real elapsed = dcyc·t_c + SW,
+  #     so a pair spanning k cycles in m steps takes k·t_c + m·SW, while the linearized
+  #     axis (Vogler's T_LIN) charges SW just once: k·t_c + SW. Hence
+  #
+  #         ratio(k) = (k·t_c + m·SW) / (k·t_c + SW)
+  #
+  #     which is exactly 1 at lag 1 (m = 1) and climbs to a ceiling
+  #
+  #         plateau = 1 + (m/k)·SW/t_c ,   m/k → fraction of cycles that start a step
+  #
+  #     i.e. ≤ 1 + SW/t_c, hit only if every step is integrated. Verified in silico
+  #     (t_c = 0.5, SW = 0.08, 35% dark: predicted 1.1041, observed 1.1033). So the
+  #     PLATEAU HEIGHT reads out the overhead, and its excess over 1 is the absolute-D
+  #     difference between the two axis conventions (it cancels in A-vs-B comparisons).
+  #     What would actually be wrong: a ratio that keeps climbing without flattening,
+  #     or one that saw-tooths — that is a mis-estimated t_c, not overhead.
+  trk_msd_bindiag <- reactive({
+    ub <- msd_unified_bundle(); req(!is.null(ub))
+    lag   <- ub$lag; tc <- ub$t_cycle
+    npair <- ub$npairs; ntrk <- ub$n_trk_lag
+    keep  <- ub$keep_lag & is.finite(npair) & npair > 0
+    # Compare real elapsed against the ACTUAL linearized axis (ub$tau_lin = k·t_c + SW,
+    # Vogler's T_LIN), not the bare k·t_c — that's the axis the D is fit on. The two
+    # coincide at lag 1 (both carry one SW) and diverge as real time accumulates an
+    # extra SW per step; that divergence is the real-vs-linearized D difference.
+    ratio <- ifelse(npair > 0 & is.finite(ub$tau) & is.finite(ub$tau_lin) & ub$tau_lin > 0,
+                    ub$tau / ub$tau_lin, NA_real_)
+    # Trust boundary: last kept lag whose pair count is still ≥ 20% of the peak.
+    pk <- if (any(keep)) max(npair[keep], na.rm = TRUE) else NA_real_
+    trust_lag <- if (is.finite(pk)) {
+      good <- which(keep & npair >= 0.20 * pk)
+      if (length(good)) max(lag[good]) else NA_integer_
+    } else NA_integer_
+    # Observed ceiling of the red curve: median ratio over the top decile of kept lags.
+    # Its excess over 1 is (steps per cycle)·SW/t_c — the overhead read-out.
+    kl  <- lag[keep & is.finite(ratio)]
+    plateau <- if (length(kl) >= 10L)
+      stats::median(ratio[keep & is.finite(ratio) &
+                          lag >= stats::quantile(kl, 0.90, names = FALSE)], na.rm = TRUE)
+    else NA_real_
+    # ── Is t_c right? Bound the plateau, don't test for flatness. ───────────────
+    # A tempting check is "has the ratio flattened?" — but that DOESN'T work: a wrong
+    # t_c shifts the plateau LEVEL while the curve still flattens perfectly (simulated
+    # t_c 0.46/0.54/0.60 against a true 0.50 all flatten, top-half drift < 0.05%).
+    # What a wrong t_c does move is the level, and the level is bounded. With
+    # ratio(k) = (k·t_c + m·SW)/(k·t_c + SW) and m ∈ [1, k], a CORRECT t_c must give
+    #     1  ≤  plateau  ≤  1 + SW/t_c
+    # (floor at m=1, ceiling when every step is integrated). Outside that range the
+    # cycle time itself is wrong: BELOW 1 ⇒ t_c too large, ABOVE the ceiling ⇒ too
+    # small. Recover SW from the axis itself (tau_lin[1] = 1·t_c + SW).
+    # Verified against a true t_c of 0.50 with SW 0.08 (so ceiling 1.160):
+    #   0.50 → 1.103 ok ✓ (no false positive on the right answer — the key property)
+    #   0.40 → 1.214 vs ceiling 1.200  caught ✓      0.46 → 1.195 vs 1.174  caught ✓
+    #   0.60 → 0.978 below the floor   caught ✓
+    #   0.54 → 1.023  MISSED           0.70 → 1.024  MISSED
+    # So UNDER-estimated t_c is caught reliably, while OVER-estimated is caught only in
+    # a window — past it the per-step rounding redistributes and pushes the plateau back
+    # inside the band. This is a one-sided sanity bound, NOT a cycle-time estimator; the
+    # UI says so. Use the TSA / cycle-time panel to actually determine t_c.
+    sw_eff  <- if (length(ub$tau_lin) && is.finite(ub$tau_lin[1]) && is.finite(tc))
+                 ub$tau_lin[1] - tc else NA_real_
+    ceiling_ratio <- if (is.finite(sw_eff) && is.finite(tc) && tc > 0)
+                       1 + sw_eff / tc else NA_real_
+    tc_flag <- if (!is.finite(plateau) || !is.finite(ceiling_ratio)) NA_character_
+               else if (plateau < 0.995) "too_large"
+               else if (plateau > ceiling_ratio * 1.005) "too_small"
+               else "ok"
+    list(lag = lag, npair = npair, ntrk = ntrk, ratio = ratio, keep = keep,
+         tc = tc, trust_lag = trust_lag, plateau = plateau,
+         sw_eff = sw_eff, ceiling_ratio = ceiling_ratio, tc_flag = tc_flag,
+         min_lag = max(1L, as.integer(input$trk_uni_min_lag %||% 4L)),
+         max_lag = max(3L, as.integer(input$trk_uni_max_lag %||% 50L)))
+  })
+
+  output$trk_msd_bindiag_plot <- renderPlotly({
+    req(isTRUE(input$trk_msd_unified), isTRUE(input$trk_msd_show_bindiag))
+    d <- tryCatch(trk_msd_bindiag(), error = function(e) NULL)
+    shiny::validate(shiny::need(!is.null(d), "Click 'Plot MSD' first."))
+    dark <- isTRUE(isolate(input$trk_dark_mode))
+    bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
+    k  <- d$keep
+    fig <- plot_ly() %>%
+      add_trace(x = d$lag[k], y = d$npair[k], type = "scatter", mode = "lines+markers",
+                line = list(color = "rgba(70,110,180,0.9)", width = 2),
+                marker = list(size = 3, color = "rgba(70,110,180,0.9)"),
+                name = "pairs / lag", yaxis = "y") %>%
+      add_trace(x = d$lag[k], y = d$ratio[k], type = "scatter", mode = "lines",
+                line = list(color = "#C0392B", width = 2),
+                name = "real Δt / linearized axis", yaxis = "y2")
+    # Reference: real Δt == the linearized axis (ratio = 1) on the right axis.
+    shp <- list(list(type = "line", x0 = min(d$lag[k]), x1 = max(d$lag[k]),
+                     y0 = 1, y1 = 1, yref = "y2",
+                     line = list(color = if (dark) "rgba(200,200,200,0.4)" else "rgba(90,90,90,0.4)",
+                                 width = 1, dash = "dot")))
+    # Shade the fit window, and mark the trust boundary.
+    shp[[length(shp)+1L]] <- list(type = "rect", x0 = d$min_lag, x1 = d$max_lag,
+      y0 = 0, y1 = 1, yref = "paper", fillcolor = "rgba(120,160,120,0.10)",
+      line = list(width = 0), layer = "below")
+    ann <- list()
+    if (is.finite(d$trust_lag)) {
+      shp[[length(shp)+1L]] <- list(type = "line", x0 = d$trust_lag, x1 = d$trust_lag,
+        y0 = 0, y1 = 1, yref = "paper",
+        line = list(color = "#E67E22", width = 1.5, dash = "dash"))
+      ann[[1]] <- list(x = d$trust_lag, y = 1, yref = "paper", yanchor = "bottom",
+        text = sprintf("counts drop past %d×", d$trust_lag), showarrow = FALSE,
+        font = list(size = 9, color = "#E67E22"))
+    }
+    fig %>% layout(
+      xaxis = list(title = "cycle lag", color = fg),
+      yaxis = list(title = "pairs / lag", type = "log", color = fg,
+                   gridcolor = if (dark) "rgba(255,255,255,0.12)" else "rgba(0,0,0,0.10)"),
+      yaxis2 = list(title = "real Δt / linearized axis", overlaying = "y", side = "right",
+                    color = "#C0392B", zeroline = FALSE),
+      paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
+      legend = list(orientation = "v", x = 1.08, xanchor = "left", y = 1,
+                    font = list(color = fg)),
+      margin = list(r = 10),
+      shapes = shp, annotations = ann,
+      uirevision = "msd_bindiag"
+    )
+  })
+
+  output$trk_msd_bindiag_note <- renderUI({
+    req(isTRUE(input$trk_msd_unified), isTRUE(input$trk_msd_show_bindiag))
+    d <- tryCatch(trk_msd_bindiag(), error = function(e) NULL); req(!is.null(d))
+    k <- d$keep & d$lag >= d$min_lag & d$lag <= d$max_lag
+    mean_ratio <- if (any(k)) mean(d$ratio[k], na.rm = TRUE) else NA_real_
+    bias_pct   <- if (is.finite(mean_ratio)) 100 * (mean_ratio - 1) else NA_real_
+    linear_tau <- isTRUE(input$trk_uni_linear_tau)
+    tags$div(style = "font-size:0.82em; color:#555; margin:4px 0;",
+      if (is.finite(mean_ratio))
+        tags$div(
+          tags$b("Linearized vs real-Δt axis: "),
+          sprintf("real Δt averages %+.1f%% vs the linearized axis (lag × cycle + SW, Vogler's T_LIN) over the fit window. ", bias_pct),
+          if (is.finite(bias_pct) && abs(bias_pct) > 1)
+            tags$span(
+              "Both axes carry one SW, so they coincide at lag 1; real Δt then pulls ahead because it accrues an SW ",
+              tags$b("per step"), " while the linearized axis charges it once. This shifts ", tags$b("absolute"),
+              " D by about that much between the two, but ", tags$b("cancels for relative A-vs-B comparisons"), ". ",
+              if (linear_tau)
+                "You are on Béla's linearized axis — the published, validated convention (his exact T_LIN = k·t_c + SW); keep it. "
+              else
+                "You are on the real-Δt axis (literal elapsed time per bin) — an exploratory cross-check, not Béla's method. ",
+              "Béla validated absolute D on the linearized axis, so treat it as the reference and real-Δt as the cross-check.")
+          else tags$span(style = "color:#3a7d3a;", "The two axes agree here (overhead negligible) — the choice doesn't matter.")),
+      if (is.finite(d$trust_lag))
+        tags$div(style = "margin-top:2px;",
+          tags$b("Pair-count trust boundary: "),
+          sprintf("counts stay ≥20%% of peak up to lag %d (≈ %.3g ms). Beyond that the MSD tail is sparse and wobbles — keep the upper fit limit at or below it.",
+                  d$trust_lag, d$trust_lag * d$tc)),
+      tags$div(style = "color:#888; margin-top:2px;",
+        tags$b("Reading the right-hand (red) curve: "),
+        "a rise from 1 to a plateau is the expected shape. A pair spanning k cycles in m steps takes k·t_c + ",
+        tags$b("m"), "·SW of real time, while the linearized axis charges SW once (k·t_c + SW). So the ratio is 1 at lag 1 and rises to about 1 + (steps per cycle)·SW/t_c, at most 1 + SW/t_c. ",
+        if (is.finite(d$plateau))
+          tags$span("Plateau here: ", tags$b(sprintf("%.3f", d$plateau)),
+                    sprintf(" (+%.1f%%)", 100 * (d$plateau - 1)),
+                    if (is.finite(d$ceiling_ratio))
+                      sprintf(", within an allowed band of 1.000–%.3f (= 1 + SW/t_c, SW ≈ %.3g ms). ",
+                              d$ceiling_ratio, d$sw_eff) else ". ") else NULL,
+        "The excess over 1 is the absolute-D difference between the two axis conventions; it cancels in A-vs-B comparisons. ",
+        tags$b("Cycle-time check: "),
+        "a correct cycle time puts the plateau between 1 and 1 + SW/t_c. ",
+        if (identical(d$tc_flag, "too_large"))
+          tags$span(style = "color:#c03030;",
+            sprintf("⚠ It is %.3f, below 1. Real elapsed time cannot be shorter than the linearized axis, so the cycle time is too large — re-check it in TSA.",
+                    d$plateau))
+        else if (identical(d$tc_flag, "too_small"))
+          tags$span(style = "color:#c03030;",
+            sprintf("⚠ It is %.3f, above the %.3f ceiling — more overhead than one SW per step allows, so the cycle time is too small — re-check it in TSA.",
+                    d$plateau, d$ceiling_ratio))
+        else if (identical(d$tc_flag, "ok"))
+          tags$span(style = "color:#3a7d3a;", "Within the band — consistent with the cycle time in use.")
+        else NULL,
+        " This is a one-sided bound, not a cycle-time estimate: a mildly over-estimated cycle time still lands inside the band. The plateau's level is the signal, not its flatness.",
+        tags$br(),
+        tags$b("Left-hand (blue) curve: "),
+        "pairs backing each lag, on a log axis. Jagged at low lag because dark gaps make some cycle-lags reachable more often than others; it then falls away because a track of N localizations offers only ~(N−k) pairs at lag k. Keep the upper fit limit where it is still well populated.")
+    )
   })
 
   # Cache the unified MSD's σ_loc (from the OLSF intercept) whenever it recomputes,
@@ -6884,10 +7254,12 @@ tracking_server <- function(input, output, session) {
   #
   #        D = s² / (2·Δt)        and after sqrt(Δt) normalisation:  D = s'² / d
   #
-  #   N co-existing populations -> a WEIGHTED MIXTURE of N Rayleigh components,
-  #        p(r) = Σ_k w_k · (r / s_k²) · exp( −r² / (2 s_k²) ),   Σ w_k = 1
+  #   N co-existing populations -> a WEIGHTED MIXTURE of N chi-distributed components,
+  #        p(r) = Σ_k w_k · C_d · r^(d−1) / s_k^d · exp( −r² / (2 s_k²) ),   Σ w_k = 1
   #   fitted here by maximum likelihood. Each fitted s_k gives that population's
-  #   D_k, and w_k its abundance.
+  #   D_k, and w_k its abundance. d = spatial dimensions: d=2 is the classic Rayleigh
+  #   (Schütz 1997), d=3 the Maxwell form used when z is included. s_k is the PER-AXIS
+  #   spread either way, so D_k = s_k²/2 regardless of d.
   #
   # THE MINFLUX ADAPTATION (two routes, pick one)
   #   Jumps must be pooled at a COMMON Δt or the mixture is meaningless.
@@ -6912,9 +7284,9 @@ tracking_server <- function(input, output, session) {
   #   4. If normalising, r <- r / sqrt(Δt).
   #   5. Histogram the pooled jumps (upper tail truncated at the 99.5th pct so a
   #      few outliers do not stretch the axis).
-  #   6. Fit the N-component Rayleigh mixture by MLE. Parameters are optimised as
-  #      log(s_k) and softmax weights, so widths stay positive and weights sum to 1
-  #      without constrained optimisation.
+  #   6. Fit the N-component chi-d mixture by MLE (Rayleigh in 2D, Maxwell in 3D).
+  #      Parameters are optimised as log(s_k) and softmax weights, so widths stay
+  #      positive and weights sum to 1 without constrained optimisation.
   #   7. Convert widths to D, subtracting the localization-noise contribution
   #      (`loc_bias`), and clamp at 0 — a component at the floor is noise, not motion.
   #   8. Compute r_noise = sqrt(2d)·σ_loc, the RMS length of a pure-noise step:
@@ -6922,14 +7294,14 @@ tracking_server <- function(input, output, session) {
   #
   # RETURNS a list:
   #   mids, dens ...... histogram (x, density) for plotting
-  #   sigs[k], ws[k] .. fitted Rayleigh widths and mixture weights
+  #   sigs[k], ws[k] .. fitted per-axis widths and mixture weights
   #   D_vals[k] ....... per-component D (noise-corrected, clamped >= 0)
-  #   n_comp, norm_dt, integrated_only, t_cycle, dt0, use_z
+  #   n_comp, norm_dt, integrated_only, t_cycle, dt0, use_z, d_fit (2 or 3)
   #   n_jumps, sigma_loc, r_noise, min_dt_used, max_dt_used, step_mode
   #
-  # CAVEAT: a Rayleigh mixture assumes every population is FREELY diffusing.
-  # Confined or anomalous motion is not Rayleigh, and extra components may then
-  # be fitting curve shape rather than real populations. Keep N small.
+  # CAVEAT: the mixture assumes every population is FREELY diffusing. Confined or
+  # anomalous motion does not follow this law, and extra components may then be
+  # fitting curve shape rather than real populations. Keep N small.
   # ============================================================================
   jdd_bundle <- eventReactive(input$trk_jdd_run, {
     req(isTRUE(input$trk_show_jdd))
@@ -6961,7 +7333,9 @@ tracking_server <- function(input, output, session) {
     df <- df[order(df$tid, df$tim), ]
     sp <- split(df, df$tid)
 
-    use_z_jdd <- "z" %in% names(df) && sum(is.finite(df$z)) > 0
+    # Real axial data only. A placeholder all-zero z column would make this fit the 3D
+    # Maxwell law to what are really 2D distances (dz ≡ 0), biasing D by −33%.
+    use_z_jdd <- .has_real_z(df)
     jumps  <- numeric(0)
     dt_all <- numeric(0)
     withProgress(message = "Computing JDD…", value = 0, {
@@ -7022,9 +7396,24 @@ tracking_server <- function(input, output, session) {
     mids <- h$mids[is.finite(h$mids)]
     dens <- h$density[seq_along(mids)]
 
-    # --- Rayleigh mixture MLE ------------------------------------------------
-    # p(r) = sum_k w_k * (r/s_k^2) * exp(-r^2 / (2*s_k^2))
+    # --- Jump-distance mixture MLE (dimension-correct) ------------------------
+    # The distance |Δr| of a d-dimensional isotropic Gaussian displacement follows a
+    # SCALED CHI distribution with d degrees of freedom:
+    #
+    #   p_d(r) = C_d · r^(d−1) / s^d · exp(−r² / (2 s²)),   C_d = 1/(2^(d/2−1)·Γ(d/2))
+    #
+    #   d = 2 → Rayleigh   (C = 1)          — the classic Schütz 1997 2D form
+    #   d = 3 → Maxwell    (C = √(2/π))     — the correct law when z is included
+    #
+    # s is the PER-AXIS standard deviation in BOTH cases, so E[r²] = d·s² and the
+    # conversion to D is the same in 2D and 3D (see `divisor` below). Using the 2D
+    # Rayleigh shape on 3D distances (as this did previously) fits a measurably worse
+    # likelihood, rescales s by √1.5, and — because the σ_loc bias term is defined on
+    # the per-axis variance — under-subtracts the noise floor by a third in 3D.
+    #
     # Parameters: log(sigma_k), and for k>1: log(w_k / w_K) (softmax)
+    d_jdd  <- if (use_z_jdd) 3L else 2L
+    C_jdd  <- 1 / (2^(d_jdd / 2 - 1) * gamma(d_jdd / 2))
     rayleigh_mix_nll <- function(par) {
       sigs <- exp(par[seq_len(n_comp)])
       if (n_comp > 1) {
@@ -7035,7 +7424,8 @@ tracking_server <- function(input, output, session) {
       }
       if (any(!is.finite(sigs)) || any(!is.finite(ws))) return(1e15)
       lik <- Reduce(`+`, lapply(seq_len(n_comp), function(k)
-        ws[k] * (jumps / sigs[k]^2) * exp(-jumps^2 / (2 * sigs[k]^2))
+        ws[k] * C_jdd * jumps^(d_jdd - 1) / sigs[k]^d_jdd *
+          exp(-jumps^2 / (2 * sigs[k]^2))
       ))
       lik[lik <= 0] <- .Machine$double.eps
       -sum(log(lik))
@@ -7072,11 +7462,14 @@ tracking_server <- function(input, output, session) {
     dt0 <- median(dt_all, na.rm = TRUE)
     if (!is.finite(dt0) || dt0 <= 0) dt0 <- NA_real_
 
-    # D from sigma (when norm_dt = TRUE, σ is in nm/√ms so σ²/2 is nm²/ms):
-    #   2D (Rayleigh): E[r²] = 2σ²; 2D MSD = 4D·Δt  →  D = σ²/2
-    #   3D (Maxwell):  E[r²] = 3σ²; 3D MSD = 6D·Δt  →  D = σ²/3
-    # When z is included the fit is still Rayleigh-shaped but σ reflects 3D spread.
-    divisor <- if (use_z_jdd) 3 else 2
+    # D from sigma (when norm_dt = TRUE, σ is in nm/√ms so σ²/2 is nm²/ms).
+    # σ is the PER-AXIS spread in both 2D and 3D (the chi PDF above is parameterised
+    # that way), and a d-dimensional walk has E[r²] = d·σ² = 2·d·D·Δt. The d cancels:
+    #   2D: E[r²] = 2σ² = 4D·Δt  →  D = σ²/2
+    #   3D: E[r²] = 3σ² = 6D·Δt  →  D = σ²/2
+    # so ONE divisor is correct for both — and it matches the σ_loc bias term below,
+    # which is likewise defined on the per-axis variance.
+    divisor <- 2
 
     # σ_loc correction (only meaningful when norm_dt = TRUE):
     # The measured σ_fit² = 2D + 2σ_loc²/Δt_typical (per-coordinate loc noise adds
@@ -7098,7 +7491,7 @@ tracking_server <- function(input, output, session) {
 
     list(mids = mids, dens = dens, sigs = sigs, ws = ws, D_vals = D_vals,
          n_comp = n_comp, norm_dt = norm_dt, n_jumps = length(jumps),
-         use_z = use_z_jdd, dt0 = dt0, sigma_loc = sigma_loc, r_noise = r_noise,
+         use_z = use_z_jdd, d_fit = d_jdd, dt0 = dt0, sigma_loc = sigma_loc, r_noise = r_noise,
          step_mode = step_mode, integrated_only = integ_only, t_cycle = t_c_jdd,
          min_dt_used = if (min_dt > 0) min_dt else NA_real_,
          max_dt_used = if (is.finite(max_dt)) max_dt else NA_real_)
@@ -7114,8 +7507,12 @@ tracking_server <- function(input, output, session) {
 
     r_seq <- seq(0, max(bd$mids) * 1.15, length.out = 500)
 
+    # Same chi-d PDF the MLE fitted (Rayleigh in 2D, Maxwell in 3D) — the drawn curve
+    # must be the fitted curve, or the overlay silently disagrees with the table.
+    .d_ov <- bd$d_fit %||% 2L
+    .C_ov <- 1 / (2^(.d_ov / 2 - 1) * gamma(.d_ov / 2))
     rayleigh_comp <- function(r, sig, w)
-      w * (r / sig^2) * exp(-r^2 / (2 * sig^2))
+      w * .C_ov * r^(.d_ov - 1) / sig^.d_ov * exp(-r^2 / (2 * sig^2))
 
     total_dens <- Reduce(`+`, lapply(seq_len(bd$n_comp), function(k)
       rayleigh_comp(r_seq, bd$sigs[k], bd$ws[k])
@@ -7176,8 +7573,10 @@ tracking_server <- function(input, output, session) {
     if (is.null(bd)) return(NULL)
 
     show_D    <- isTRUE(bd$norm_dt)
-    d_formula <- if (isTRUE(bd$use_z)) "D = (\u03C3\u00B2 \u2212 2\u03C3\u1D38\u1D52\u1D9C\u00B2/\u27E8\u0394t\u27E9)/3" else
-                                        "D = (\u03C3\u00B2 \u2212 2\u03C3\u1D38\u1D52\u1D9C\u00B2/\u27E8\u0394t\u27E9)/2"
+    # \u03C3 is the per-axis spread in both 2D and 3D (chi-d PDF), so the /2 is dimension-
+    # independent; only the fitted PDF shape changes (Rayleigh 2D / Maxwell 3D).
+    d_formula <- sprintf("D = (\u03C3\u00B2 \u2212 2\u03C3\u1D38\u1D52\u1D9C\u00B2/\u27E8\u0394t\u27E9)/2   [%s]",
+                         if (isTRUE(bd$use_z)) "3D, Maxwell" else "2D, Rayleigh")
     dt0_str   <- if (is.finite(bd$dt0)) sprintf("%.2g ms", bd$dt0) else "n/a"
     max_dt_str <- if (is.finite(bd$max_dt_used)) sprintf("%.4g ms", bd$max_dt_used) else "none"
 
@@ -7242,8 +7641,12 @@ tracking_server <- function(input, output, session) {
     content  = function(file) {
       bd <- jdd_bundle()
       shiny::validate(shiny::need(!is.null(bd), "No JDD computed."))
+      # chi-d PDF as fitted (Rayleigh 2D / Maxwell 3D) — keep the export in step
+      # with the plot and the fitted parameters.
+      .d_ov <- bd$d_fit %||% 2L
+      .C_ov <- 1 / (2^(.d_ov / 2 - 1) * gamma(.d_ov / 2))
       rayleigh_comp <- function(r, sig, w)
-        w * (r / sig^2) * exp(-r^2 / (2 * sig^2))
+        w * .C_ov * r^(.d_ov - 1) / sig^.d_ov * exp(-r^2 / (2 * sig^2))
       out <- data.frame(mid_nm = bd$mids, density = bd$dens)
       out$fit_total <- Reduce(`+`, lapply(seq_len(bd$n_comp), function(k)
         rayleigh_comp(bd$mids, bd$sigs[k], bd$ws[k])
@@ -7353,7 +7756,10 @@ tracking_server <- function(input, output, session) {
     df <- trk(); req(nrow(df) > 0)
     min_pts <- max(4L, as.integer(input$trk_conf_min_pts))
 
-    use_z_conf <- "z" %in% names(df) && sum(is.finite(df$z)) > 0
+    # Real axial data only. A placeholder all-zero z column leaves the distances
+    # unchanged but would set d = 3 in the σ_loc subtraction (over-correcting) and
+    # build a 3D free-walk null for 2D data (misclassifying confinement).
+    use_z_conf <- .has_real_z(df)
     df <- df[is.finite(df$x) & is.finite(df$y) & (if (use_z_conf) is.finite(df$z) else TRUE), ]
     sp <- split(df, df$tid)
 
@@ -7576,8 +7982,7 @@ tracking_server <- function(input, output, session) {
     # Dimensionality: net displacement (and the free null) in 2D or 3D. "Auto" uses z when
     # it carries real signal. 2D data → 2D; 3D data → 3D (Rayleigh vs Maxwell null). The
     # geometry null (Step 2) then projects (2D) or stays 3D to match.
-    z_has <- "z" %in% names(df) && sum(is.finite(df$z)) > 0 &&
-             stats::sd(df$z[is.finite(df$z)]) > 1
+    z_has <- .has_real_z(df)
     dmode <- input$trk_disp_dims %||% "auto"
     use3d <- (identical(dmode, "auto") && z_has) || identical(dmode, "3d")
     if (use3d && !z_has) use3d <- FALSE                       # asked for 3D but no z signal
