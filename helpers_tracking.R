@@ -103,50 +103,28 @@ prep_tracking <- function(df, normalize_per_tid = TRUE) {
 }
 
 
-# ── sim_free_geom_rnet() ──────────────────────────────────────────────────────
-# GOAL: the GEOMETRY-AWARE free-diffusion null for the displacement test (Step 2), for
-# ANY of the simulator geometries. Simulate FREE Brownian diffusion on the chosen shape
-# and return each track's NET start→end displacement in the 2D image projection — so
-# "how far a molecule gets" is judged against free diffusion ON THAT GEOMETRY, not an
-# infinite plane. Closed surfaces (sphere/rod/ellipsoid) cap displacement at ~their size;
-# an unbounded plane (membrane/free) does not, so those reproduce the infinite-plane null.
+# ── .geom_ops() ───────────────────────────────────────────────────────────────
+# Shared geometry engine for the free-diffusion nulls. Returns the operators for one
+# shape so that every null (net displacement, MSD, ...) steps molecules through the
+# SAME physics — if these ever diverged the two nulls would disagree for reasons that
+# had nothing to do with the data.
 #
-# PHYSICS: tangent Brownian step on the surface then project back to it (the same operators
-# as the Diffusion Simulator), vectorised across all M tracks (one matrix op per cycle).
-# 2D image projection drops z (the long axis lies in-plane, the usual mounting).
-#
-# PROJECTION MATCHING (match_projection = TRUE): a measured 2D D from a curved surface is
-# the PROJECTED D, which is < the true surface D (the azimuthal component is foreshortened;
-# e.g. exactly 3/4 for a cylinder). So we EMPIRICALLY calibrate that factor for the chosen
-# geometry — one short single-step pass — and drive the null at D_surf = D_meas / factor,
-# so both nulls agree at short T and the closed-surface band diverges only where finite
-# size + curvature bite. Set FALSE to feed D straight through.
-#
-# dur_ms  : track durations (ms) to match (resample from real data)
-# D_nm2ms : measured per-axis diffusion coefficient (nm²/ms)
-# geom    : "sphere" | "rod" | "ellipsoid" | "membrane" | "free"
-# params  : list(R, r, Lcyl, a, b, c, mtilt) — only the relevant ones are read
-# returns : numeric vector (length M) of net displacements R_net (nm), + attr "D_surf"
-sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
-                               cyc_ms = 0.5, proj2d = TRUE, match_projection = TRUE,
-                               mode = c("surface", "volume")) {
+# geom  : "sphere" | "rod" | "ellipsoid" | "membrane" | "free"
+# params: list(R, r, Lcyl, a, b, c, mtilt) — only the relevant entries are read
+# mode  : "surface" = confined to the boundary (2 DOF on a curved sheet)
+#         "volume"  = free 3D motion inside, reflecting off the boundary
+# returns list(one_step(P, sd), rand_start(m), is_flat, is_vol)
+.geom_ops <- function(geom, params = list(), mode = c("surface", "volume")) {
   mode <- match.arg(mode)
   `%|NA|%` <- function(a, b) if (!is.null(a) && is.finite(a)) a else b
-  M <- length(dur_ms)
-  if (M == 0L || !is.finite(D_nm2ms) || D_nm2ms <= 0) return(numeric(0))
-  n_cyc <- pmax(2L, as.integer(round(dur_ms / cyc_ms))); nmax <- max(n_cyc)
-
   R    <- params$R    %|NA|% 500;  rr   <- params$r %|NA|% 400;  Lcyl <- params$Lcyl %|NA|% 2000
   abc  <- if (identical(geom, "sphere")) c(R, R, R)
-          else c(params$a %|NA|% 500, params$b %|NA|% 500, params$c %|NA|% 900)   # ellipsoid
+          else c(params$a %|NA|% 500, params$b %|NA|% 500, params$c %|NA|% 900)
   mtilt <- (params$mtilt %|NA|% 0) * pi / 180
-  is_rod <- identical(geom, "rod"); is_ell <- geom %in% c("sphere", "ellipsoid")
+  is_ell  <- geom %in% c("sphere", "ellipsoid")
   is_flat <- geom %in% c("free", "membrane")
-
-  # Tilted-plane basis for the membrane (flat sheet inclined by mtilt); free = untilted 3D.
   n_hat <- c(sin(mtilt), 0, cos(mtilt)); e1 <- c(cos(mtilt), 0, -sin(mtilt)); e2 <- c(0, 1, 0)
 
-  # ── vectorised geometry operators (P is M×3) ──────────────────────────────────
   dotrows <- function(A, B) rowSums(A * B)
   geo_normal <- function(P) {
     if (is_ell) { N <- sweep(P, 2, abc^2, "/"); N / sqrt(dotrows(N, N)) }
@@ -175,11 +153,11 @@ sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
     }
   }
   geo_rand <- function(m) {                                    # uniform ON the boundary
-    if (is_ell) geo_project(sweep(matrix(rnorm(3 * m), m, 3), 2, abc, "*"))
-    else { s <- runif(m, 0, Lcyl); phi <- runif(m, 0, 2 * pi); cbind(s, rr * cos(phi), rr * sin(phi)) }
+    if (is_ell) geo_project(sweep(matrix(stats::rnorm(3 * m), m, 3), 2, abc, "*"))
+    else { s <- stats::runif(m, 0, Lcyl); phi <- stats::runif(m, 0, 2 * pi)
+           cbind(s, rr * cos(phi), rr * sin(phi)) }
   }
-  # Reflect a point back INSIDE the shape (used for interior/volume diffusion).
-  geo_reflect <- function(P) {
+  geo_reflect <- function(P) {                                 # back INSIDE the shape
     if (is_ell) {
       U <- sweep(P, 2, abc, "/"); nu <- sqrt(dotrows(U, U))
       f <- ifelse(nu > 1, (2 - nu) / nu, 1); f[!is.finite(f)] <- 1; f <- pmax(f, 0)
@@ -203,13 +181,14 @@ sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
   }
   geo_rand_in <- function(m) {                                 # uniform WITHIN the volume
     if (is_ell) {
-      d <- matrix(rnorm(3 * m), m, 3); d <- d / sqrt(dotrows(d, d))
-      sweep(d * runif(m)^(1 / 3), 2, abc, "*")
-    } else {                                                   # rod: rejection sample the capsule
+      d <- matrix(stats::rnorm(3 * m), m, 3); d <- d / sqrt(dotrows(d, d))
+      sweep(d * stats::runif(m)^(1 / 3), 2, abc, "*")
+    } else {
       out <- matrix(NA_real_, m, 3); need <- seq_len(m)
       while (length(need)) {
         k <- length(need)
-        p <- cbind(runif(k, -rr, Lcyl + rr), runif(k, -rr, rr), runif(k, -rr, rr))
+        p <- cbind(stats::runif(k, -rr, Lcyl + rr), stats::runif(k, -rr, rr),
+                   stats::runif(k, -rr, rr))
         a <- p[, 1]
         ins <- ifelse(a >= 0 & a <= Lcyl, p[, 2]^2 + p[, 3]^2 <= rr^2,
                ifelse(a < 0, dotrows(p, p) <= rr^2,
@@ -220,17 +199,53 @@ sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
     }
   }
   is_vol <- identical(mode, "volume") && !is_flat
-  # One free step for all M points at step SD `sd`, returning the new M×3 positions.
-  # surface → tangent step then re-project onto the boundary;
-  # volume  → isotropic 3D step then reflect back inside.
   one_step <- function(P, sd) {
-    G <- matrix(rnorm(nrow(P) * 3, 0, sd), nrow(P), 3)
+    G <- matrix(stats::rnorm(nrow(P) * 3, 0, sd), nrow(P), 3)
     if (is_flat) {
       if (identical(geom, "free")) P + G
-      else P + outer(G[, 1], e1) + outer(G[, 2], e2)          # membrane: 2 DOF in the tilted plane
+      else P + outer(G[, 1], e1) + outer(G[, 2], e2)        # membrane: 2 DOF in the tilted plane
     } else if (is_vol) geo_reflect(P + G)
-    else { N <- geo_normal(P); geo_project(P + (G - N * dotrows(G, N))) }  # tangent step + reproject
+    else { N <- geo_normal(P); geo_project(P + (G - N * dotrows(G, N))) }
   }
+  rand_start <- function(m) {
+    if (is_flat) matrix(0, m, 3) else if (is_vol) geo_rand_in(m) else geo_rand(m)
+  }
+  list(one_step = one_step, rand_start = rand_start, is_flat = is_flat, is_vol = is_vol)
+}
+
+# ── sim_free_geom_rnet() ──────────────────────────────────────────────────────
+# GOAL: the GEOMETRY-AWARE free-diffusion null for the displacement test (Step 2), for
+# ANY of the simulator geometries. Simulate FREE Brownian diffusion on the chosen shape
+# and return each track's NET start→end displacement in the 2D image projection — so
+# "how far a molecule gets" is judged against free diffusion ON THAT GEOMETRY, not an
+# infinite plane. Closed surfaces (sphere/rod/ellipsoid) cap displacement at ~their size;
+# an unbounded plane (membrane/free) does not, so those reproduce the infinite-plane null.
+#
+# PHYSICS: tangent Brownian step on the surface then project back to it (the same operators
+# as the Diffusion Simulator), vectorised across all M tracks (one matrix op per cycle).
+# 2D image projection drops z (the long axis lies in-plane, the usual mounting).
+#
+# PROJECTION MATCHING (match_projection = TRUE): a measured 2D D from a curved surface is
+# the PROJECTED D, which is < the true surface D (the azimuthal component is foreshortened;
+# e.g. exactly 3/4 for a cylinder). So we EMPIRICALLY calibrate that factor for the chosen
+# geometry — one short single-step pass — and drive the null at D_surf = D_meas / factor,
+# so both nulls agree at short T and the closed-surface band diverges only where finite
+# size + curvature bite. Set FALSE to feed D straight through.
+#
+# dur_ms  : track durations (ms) to match (resample from real data)
+# D_nm2ms : measured per-axis diffusion coefficient (nm²/ms)
+# geom    : "sphere" | "rod" | "ellipsoid" | "membrane" | "free"
+# params  : list(R, r, Lcyl, a, b, c, mtilt) — only the relevant ones are read
+# returns : numeric vector (length M) of net displacements R_net (nm), + attr "D_surf"
+sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
+                               cyc_ms = 0.5, proj2d = TRUE, match_projection = TRUE,
+                               mode = c("surface", "volume")) {
+  mode <- match.arg(mode)
+  M <- length(dur_ms)
+  if (M == 0L || !is.finite(D_nm2ms) || D_nm2ms <= 0) return(numeric(0))
+  n_cyc <- pmax(2L, as.integer(round(dur_ms / cyc_ms))); nmax <- max(n_cyc)
+  ops <- .geom_ops(geom, params, mode)
+
   # Observed axes: 2 when the data is a 2D image projection (drop z), 3 when tracked in 3D.
   nobs   <- if (proj2d) 2L else 3L
   to_obs <- function(P) P[, seq_len(nobs), drop = FALSE]
@@ -242,19 +257,19 @@ sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
   D_surf <- D_nm2ms
   if (match_projection && !identical(geom, "free")) {
     ncal <- 4000L; sdc <- sqrt(2 * D_nm2ms * cyc_ms)
-    P0 <- if (is_flat) matrix(0, ncal, 3) else if (is_vol) geo_rand_in(ncal) else geo_rand(ncal)
-    d2 <- to_obs(one_step(P0, sdc)) - to_obs(P0)
+    P0 <- ops$rand_start(ncal)
+    d2 <- to_obs(ops$one_step(P0, sdc)) - to_obs(P0)
     f2 <- mean(rowSums(d2^2)) / (nobs * sdc^2)
     if (is.finite(f2) && f2 > 0.05) D_surf <- D_nm2ms / f2
   }
   sd <- sqrt(2 * D_surf * cyc_ms)
 
   # ── main pass ─────────────────────────────────────────────────────────────────
-  P  <- if (is_flat) matrix(0, M, 3) else if (is_vol) geo_rand_in(M) else geo_rand(M)
+  P  <- ops$rand_start(M)
   S2 <- to_obs(P); E2 <- S2
   for (i in 2:nmax) {
     alive <- i <= n_cyc
-    Pn <- one_step(P, sd); P[alive, ] <- Pn[alive, ]
+    Pn <- ops$one_step(P, sd); P[alive, ] <- Pn[alive, ]
     ended <- i == n_cyc
     if (any(ended)) E2[ended, ] <- to_obs(P)[ended, ]
   }
@@ -395,3 +410,152 @@ split_by_tid_to_dir <- function(df, out_dir,
 }
 
 
+
+
+# ── sim_free_ci_null() ────────────────────────────────────────────────────────
+# GOAL: the free-diffusion null for the per-track MSD CONFINEMENT INDEX (CI).
+#
+# CI = (MSD_late/MSD_early) / (tau_late/tau_early) over a track's own MSD window.
+# For ideal free Brownian motion CI = 1, but the OBSERVED free value is NOT 1: the
+# localization-noise term 2*d*sigma^2 sits on every MSD point and inflates the EARLY
+# window more than the late one, pushing CI below 1. How far below depends on
+# sigma_loc, D, the cycle time, the fit window and the track length — so there is no
+# universal threshold and the null has to be simulated at the data's own conditions.
+#
+# Free tracks are generated with the SAME irregular sampling as the data: each step
+# spans k cycles drawn from the measured dark-gap distribution `gap_p`, so the null
+# inherits the real integrated/dark mix rather than assuming an even clock.
+#
+# WHY THE NULL IS ALSO MATCHED ON D. The free CI is governed by the dimensionless
+# ratio  x = sigma^2 / (D * t_c) — how large the localization noise is relative to the
+# motion in one cycle. A SLOW track has a bigger x, so the noise intercept lifts its
+# early lags more and its free CI sits lower. Measured at N=200, sigma = 10 nm: the
+# free median runs 0.325 at D = 20 nm^2/ms and 0.922 at D = 2000, i.e. a factor of
+# ~2.8 across the D range. Calibrating every track against a single ensemble-D null
+# would therefore call the slow half of a heterogeneous population "confined". At
+# small sigma the dependence nearly vanishes (at sigma = 1.5 nm the same sweep moves
+# the median only 0.917 -> 0.967), which is why the caller may collapse the D grid to
+# one point when the noise is negligible.
+#
+# n_grid   : localization counts to simulate the null at (nearest-N lookup by caller)
+# D_grid   : per-axis D values (nm^2/ms) to simulate at; length 1 = the old behaviour
+# n_sim    : free tracks per (n, D) grid point
+# t_c      : cycle time (ms)         sigma : localization sigma (nm)
+# ndim     : 2 or 3
+# gap_p    : probabilities of a step spanning 1,2,3,... cycles (measured from the data)
+# min_lag/max_lag : the SAME cycle-lag fit window the real CI uses
+# returns  : data.frame(n, D, lo05, med, hi95) — CI quantiles at each (n, D) pair
+sim_free_ci_null <- function(n_grid, D_grid = 100, n_sim = 200L, t_c = 0.2, sigma = 10,
+                             ndim = 2L, gap_p = c(0.55, 0.22, 0.09, 0.05, 0.04, 0.05),
+                             min_lag = 4L, max_lag = 50L, progress = NULL) {
+  gap_p <- gap_p[is.finite(gap_p) & gap_p > 0]
+  if (!length(gap_p)) gap_p <- 1
+  gap_p <- gap_p / sum(gap_p)
+  kmax  <- length(gap_p)
+  D_grid <- D_grid[is.finite(D_grid) & D_grid > 0]
+  if (!length(D_grid)) D_grid <- 100
+
+  # CI of one simulated free track, using cycle-index binning exactly as the app does.
+  ci_one <- function(N, D) {
+    k   <- sample.int(kmax, N - 1L, TRUE, prob = gap_p)
+    cyc <- c(0L, cumsum(k))
+    pos <- matrix(0, N, ndim)
+    sd_step <- sqrt(2 * D * t_c * k)
+    for (j in seq_len(ndim))
+      pos[, j] <- cumsum(c(0, stats::rnorm(N - 1L, 0, sd_step)))
+    pos <- pos + matrix(stats::rnorm(N * ndim, 0, sigma), N, ndim)
+    # per-track MSD by integer cycle lag, capped at max_lag (bounds the inner loop)
+    s <- numeric(max_lag); cnt <- integer(max_lag)
+    for (i in seq_len(N - 1L)) {
+      # Every step spans >= 1 cycle, so lag >= (j - i); j beyond i + max_lag can never
+      # land in the window. That bounds the inner loop without dropping any pair.
+      jj  <- seq.int(i + 1L, min(N, i + max_lag))
+      lag <- cyc[jj] - cyc[i]
+      ok  <- lag >= 1L & lag <= max_lag
+      if (!any(ok)) next
+      jj <- jj[ok]; b <- lag[ok]
+      dr2 <- rowSums((pos[jj, , drop = FALSE] -
+                      matrix(pos[i, ], length(jj), ndim, byrow = TRUE))^2)
+      s[b]   <- s[b] + dr2
+      cnt[b] <- cnt[b] + 1L
+    }
+    m   <- ifelse(cnt > 0L, s / cnt, NA_real_)
+    lags <- seq_len(max_lag)
+    keep <- which(is.finite(m) & lags >= min_lag & lags <= max_lag)
+    if (length(keep) < 5L) return(NA_real_)
+    tt <- lags[keep] * t_c; yy <- m[keep]
+    ne <- max(2L, floor(0.15 * length(keep)))
+    tf <- stats::median(tt[seq_len(ne)]); tl <- stats::median(tt[seq(length(tt) - ne + 1L, length(tt))])
+    mf <- stats::median(yy[seq_len(ne)]); ml <- stats::median(yy[seq(length(yy) - ne + 1L, length(yy))])
+    if (!is.finite(mf) || mf <= 0 || !is.finite(tl) || tl <= tf) return(NA_real_)
+    (ml / mf) / (tl / tf)
+  }
+
+  cells <- expand.grid(n = pmax(5L, as.integer(n_grid)), D = D_grid)
+  out <- lapply(seq_len(nrow(cells)), function(g) {
+    if (is.function(progress)) progress(g / nrow(cells))
+    N <- cells$n[g]; Dg <- cells$D[g]
+    v <- vapply(seq_len(n_sim), function(i) ci_one(N, Dg), numeric(1))
+    v <- v[is.finite(v)]
+    if (length(v) < 10L)
+      return(data.frame(n = N, D = Dg, lo05 = NA_real_, med = NA_real_, hi95 = NA_real_))
+    q <- stats::quantile(v, c(0.05, 0.50, 0.95), names = FALSE)
+    data.frame(n = N, D = Dg, lo05 = q[1], med = q[2], hi95 = q[3])
+  })
+  do.call(rbind, out)
+}
+
+
+# ── sim_free_geom_msd() ───────────────────────────────────────────────────────
+# GOAL: the free-diffusion MSD curve ON a given cell geometry — the reference the
+# measured MSD should be read against when the cell is small enough to matter.
+#
+# WHY IT IS NEEDED. On a closed surface the MSD cannot grow forever: once a molecule
+# has explored the shape its displacement saturates, so FREE diffusion already
+# produces a bending, plateauing MSD. Fit a straight line across that bend and D comes
+# out low; fit the confined model and it reports a "confinement size" that is really
+# the cell. The distortion is negligible while the fit window is short and grows with
+# it — on a rod (r 400, L 2000 nm, D 200 nm^2/ms) the fitted D runs 0.995 of truth over
+# a 50-cycle window, 0.965 at 500 cycles and 0.893 at 2000. This curve makes that
+# visible instead of leaving it to be discovered as a fake plateau.
+#
+# The molecules are FREE throughout: any bend is geometry alone. Comparing the measured
+# curve against it separates "the cell is small" from "the molecule is trapped".
+#
+# lag_cycles : integer cycle lags to evaluate (the MSD panel's own lag grid)
+# D_surf     : the TRUE motion D (nm^2/ms) — i.e. the d_eff-corrected D the MSD panel
+#              now reports, NOT a raw per-axis value; no projection re-calibration is
+#              applied here, unlike sim_free_geom_rnet which is fed a measured per-axis D
+# geom/params/mode : as .geom_ops()
+# cyc_ms     : simulation time step (the acquisition cycle, or a coarser step)
+# proj2d     : TRUE = observe x,y only (2D tracking); FALSE = all three coordinates
+# M          : number of simulated molecules
+# returns    : data.frame(lag, tau, msd) in cycles / ms / nm^2
+sim_free_geom_msd <- function(lag_cycles, D_surf, geom = "rod", params = list(),
+                              cyc_ms = 0.5, proj2d = TRUE,
+                              mode = c("surface", "volume"), M = 1500L) {
+  mode <- match.arg(mode)
+  lag_cycles <- sort(unique(as.integer(lag_cycles[is.finite(lag_cycles) & lag_cycles >= 1])))
+  if (!length(lag_cycles) || !is.finite(D_surf) || D_surf <= 0) return(NULL)
+  ops   <- .geom_ops(geom, params, mode)
+  nobs  <- if (proj2d) 2L else 3L
+  nmax  <- max(lag_cycles)
+  sd    <- sqrt(2 * D_surf * cyc_ms)
+
+  P  <- ops$rand_start(M)
+  # Keep only the positions the requested lags actually need, so memory stays flat
+  # even for very long windows.
+  want <- c(0L, lag_cycles)
+  keep <- new.env(parent = emptyenv())
+  assign("0", P[, seq_len(nobs), drop = FALSE], envir = keep)
+  for (i in seq_len(nmax)) {
+    P <- ops$one_step(P, sd)
+    if (i %in% lag_cycles) assign(as.character(i), P[, seq_len(nobs), drop = FALSE], envir = keep)
+  }
+  P0 <- get("0", envir = keep)
+  msd <- vapply(lag_cycles, function(L) {
+    Pl <- get(as.character(L), envir = keep)
+    mean(rowSums((Pl - P0)^2))
+  }, numeric(1))
+  data.frame(lag = lag_cycles, tau = lag_cycles * cyc_ms, msd = msd)
+}

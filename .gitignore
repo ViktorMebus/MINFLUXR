@@ -4,6 +4,11 @@ README.md
 deadcode_tracking.R
 deadcode_smlm.R
 
+# Retired analyses — kept locally for reference, not part of the shipped app.
+# These are NOT sourced by global.R; the app must run without them.
+retired_ui.R
+retired_tracking_server.R
+
 # Local test/sample data — never upload. Raw MINFLUX exports are hundreds of MB
 # (GitHub hard-rejects >100 MB per file) and are not needed to run the app.
 Test data/

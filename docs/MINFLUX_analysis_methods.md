@@ -303,7 +303,7 @@ relative comparison between conditions acquired identically; never as an absolut
 ## I-B. Tracking (SPT) analysis
 
 ### I-B.0 Cycle time & Time-Signature Analysis (the foundation for everything Δt-aware)
-The **Time Signature Analysis (TSA)** tab is a faithful R port of **Béla Vogler's MINFLUX Time-Signature
+The **Time Signature Analysis (TSA)** tab is a faithful R port of **Bela Vogler's MINFLUX Time-Signature
 Analysis (MFX-TSA)** — §2 of his `the_road_to_minflux_msd` tutorial (Vogler et al. 2025, *Commun. Biol.*;
 reference implementation *Toolbox_for_MINFLUX_SPT / MinSpt*). The correspondence is direct:
 - **cycle time / hardware parameters** — MinSpt `initialize_tsa` + `estimate_time_signal_parameter`
@@ -342,13 +342,12 @@ Checked directly against `Test data/251027-202407_GP67H-track-014.npy` (650,042 
   comb. At the old default of 80 bins the grid ran **1.63 bins per cycle**, so each peak landed at a
   different offset inside its bin and the bar centres sat **5–25% of a cycle away from the true peaks**,
   drifting systematically across the range (+25%, −23%, −19%, −14%, −10%, −5% for k = 1…6) with empty
-  bins interleaved — which is what made the plot look misaligned. Default binning is now
+  bins interleaved — which is what made the plot look misaligned. Binning is now always
   **one bar per cycle count**: edges on the classification boundaries `SW + (k ± ½)·t_c`, so each bar is
   exactly one cycle count centred on its peak (verified: bar centres match the peaks to 0.0e+00 ms) and
   the histogram is literally a picture of the `round((Δt − SW)/t_c)` the analysis performs. Fixed-width
-  binning remains selectable. A **log count axis** option was added (counts span ~100× from the 1-cycle
-  peak into the dark tail), plus a **rug of distinct observed Δt values** — a tick that does not sit
-  under a bar centre is an interval the current cycle time does not explain.
+  binning survives only as an internal fallback when no cycle time is available. A **log count axis**
+  option is offered, since counts span ~100× from the 1-cycle peak into the dark tail.
 - **Consequence for the TSA Δt plot: the KDE overlay was REMOVED (2026-07-30).** It had been described
   in-UI as revealing a "bell-shaped cluster around each cycle count" — but no such bell exists. Since
   each peak is a near-delta spike, 100% of the curve's width was kernel bandwidth rather than timing
@@ -428,8 +427,18 @@ Checked directly against `Test data/251027-202407_GP67H-track-014.npy` (650,042 
   on a stable whole-window fit so p is reproducible) and **iterative** (Bela's exact loop — converges onto
   the lowest, least-noisy lags). Fit window default **5–50 cycles** (Vogler `fit_limits`).
 - **Non-linear models** (whole window — they need curvature):
-  - **Confined:** `MSD = A(1 − e^{−τ/t_c}) + C` → local `D = A/(2d·t_c)`, confinement size **L = √(3A)**,
-    plateau A; flagged *degenerate* if t_c > 2·max(τ) (no plateau resolved).
+  - **Confined:** `MSD = A(1 − e^{−τ/t_c}) + C` → local `D = A/(2d·t_c)`, confinement size
+    **L_c = √(6A/d)**, plateau A; flagged *degenerate* if t_c > 2·max(τ) (no plateau resolved).
+    **L_c is fitted from the data, never entered** — it is read off the plateau A, so it is only as
+    meaningful as the plateau is resolved (hence the *degenerate* flag) and is additionally warned
+    about when L_c < 2σ_loc.
+    **Dimensionality fix (2026-07-30):** this was `√(3A)` for all d. A particle uniformly exploring a
+    d-dimensional box of side L_c has Var(Δx) = L_c²/6 per axis, so A = d·L_c²/6 and L_c = √(6A/d) —
+    which reduces to √(3A) in 2D but **over-estimated L_c by √(3/2) = 1.22× in 3D**. Verified against
+    reflecting-boundary simulations and by round-tripping ideal curves through `.msd_model_fit`
+    (L_c recovered to <0.01% at d = 2 and 3, for L_c = 140/300/800 nm).
+    **Symbol note:** the confinement size is written **L_c** and the MINFLUX targeted-coordinate-pattern
+    diameter **L_TCP** (D_max panel). Both used to be plain "L", which read as one quantity.
   - **Directed:** `MSD = 2d·D·τ + (v·τ)² + C` → D and drift speed **v**.
   - **Anomalous:** `MSD = 2d·D·τ^α + C` → exponent **α** (fit on the *ensemble* MSD, with a parametric
     α SE from the fit covariance, labelled a lower bound since MSD lags are correlated).
@@ -516,6 +525,143 @@ the null false-positive rate by construction), confined tracks are ~3× enriched
 called confined. Residuals (both conservative): the Rmax extreme-value bias above; and a genuinely
 confined but very slow molecule can be missed if it barely explores. Corroborate with the τ-based MSD
 confinement index / plateau.
+
+#### Effective dimensionality of the MSD (added 2026-08-03)
+`MSD = 2·d_eff·D·τ`, where **d_eff follows the MOTION and its projection, not the number of
+recorded coordinates** (`.msd_d_eff`, threaded into `msd_fit_olsf`, `msd_fit_olsf_iterative` and
+`.msd_model_fit` via `coef_override`; `ndim` still carries the geometric dimension because Michalet's
+optimal point count is derived for real spatial dimensions).
+
+| motion | tracked | d_eff | note |
+|---|---|---|---|
+| volume | 3D | 3 | the plain case |
+| volume | 2D | 2 | dropping z leaves two independent axes |
+| surface | 3D | 2 | 2 DOF however many coordinates are recorded |
+| surface | 2D | 1 + ⟨n_z²⟩ | shape-dependent — see below |
+
+The last row is the subtle one, and it is the case the user raised: **the cell is three-dimensional
+even when tracking is not.** A molecule on a curved surface steps in its local tangent plane, and how
+much of that step survives projection into the image plane depends on how the surface is tilted there.
+Averaging over the shape gives ⟨n_z²⟩ = 1/3 for a sphere, 1/2 for a cylinder whose axis lies in the
+image plane, and 1 for a flat membrane parallel to it — hence **d_eff = 4/3 (sphere), 3/2 (rod),
+2 (flat membrane)**, i.e. MSD = 8Dτ/3, 3Dτ and 4Dτ. A membrane tilted by θ gives 1 + cos²θ, between the
+rod and flat values; not offered separately. All four factors verified by simulation to three decimals.
+
+**This is a first-order error on D, not a refinement.** Round-tripped against free diffusion on a
+sphere (R = 800 nm) and a rod (r = 400, L = 2000 nm), true D = 200 nm²/ms:
+
+| case | old | fixed |
+|---|---|---|
+| 3D coords, surface motion | 0.697 | 1.045 |
+| 2D coords, surface on a sphere | 0.675 | 1.012 |
+| 2D coords, surface on a rod | 0.759 | 1.012 |
+
+Exposed as **Molecule moves** (volume / surface) plus, when surface motion is recorded in 2D, a
+**Cell shape** selector. Defaults to volume, so existing results are unchanged. The estimates line
+states the relation in force whenever d_eff ≠ ndim. Applied to the ensemble fit, the per-track fits,
+the per-cluster models, the bootstrap and the per-segment (HMM state) MSD.
+
+#### Free-diffusion-on-a-geometry MSD reference (added 2026-08-03)
+`sim_free_geom_msd` + `msd_geom_null`. On a **closed** cell the MSD of a **free** molecule bends and
+eventually saturates on its own, so a bend is not by itself evidence of trapping. This simulates free
+diffusion on the chosen shape at the fitted D — same lag grid, same observed coordinates — and overlays
+the curve it produces. Measured curve *on* the green line ⇒ the cell explains the bend; *below* it ⇒
+confinement beyond the cell.
+
+**This is window-dependent, which is the whole point.** Over a short window the molecule covers far
+less than the cell and the two are indistinguishable; the gap opens as the upper fit limit is raised.
+Free diffusion on a rod (r = 400, L = 2000 nm, D = 200 nm²/ms, 2D projection), fitted over [4, upper]:
+
+| upper (cycles) | D recovered |
+|---|---|
+| 50 | 100% |
+| 250 | 97% |
+| 500 | 97% |
+| 1000 | 94% |
+| 2000 | 90% |
+
+so a 2000-cycle window costs ~10% of D to geometry alone. The estimates line reports this figure for
+the window in use and warns below 95%. It is a Monte-Carlo estimate with ~2% run-to-run scatter
+(measured over 10 seeds at M = 4000), so it is rounded to 5% and labelled as approximate rather than
+quoted to the percent.
+
+**The shape enters the MSD in two separate places** (verified against simulation to <1%):
+1. **The divisor**, at every lag, independent of size — the d_eff table above.
+2. **The ceiling**, only once the molecule has explored the shape. The MSD saturates at the mean
+   squared separation of two random points on it: **sphere 2R² (3D), 4R²/3 (projected); rod
+   L²/6 + 2r² (3D), L²/6 + r² (projected)**. Every term is a **length squared** — the volume
+   (4/3·πR³) never appears. Size sets where the curve bends over, not how steeply it rises.
+
+**The ceiling is what fakes biology, and it fakes it in every non-linear model.** Simulating free
+diffusion on a 500 nm sphere (2D, surface) over a 4–2000 cycle window and fitting each model returns:
+
+| model | what pure geometry gives |
+|---|---|
+| linear | ~95% of the true D |
+| confined | **L_c ≈ 1000 nm** — a converged, entirely spurious corral |
+| anomalous | **α ≈ 0.86** — sub-diffusive with nothing anomalous present |
+| directed | v ≈ 0 ✅ — geometry does not fake drift |
+
+So the overlay does not only serve the free/linear case: with it enabled, the estimates line fits
+**whichever model is selected** to the simulated free curve and reports what the shape alone would
+return, next to the measured value, warning when the shape already accounts for most of it. Note the
+d_eff correction itself applies to all four models regardless (it flows through `coef_override` into
+`.msd_model_fit`).
+
+**Design notes.** The geometry (shape + dimensions) lives in one shared **Sample geometry** block at the
+top of the Analysis tab — `trk_geom_type` plus the dimension inputs — read by the MSD projection factor,
+the MSD overlay and the displacement Step-2 null, so the sample cannot be described two different ways.
+Options are None / sphere / rod / ellipsoid / flat membrane / **filament**, and *Molecule moves* carries
+the matching 1/2/3-DOF choice (a filament covers in-vitro motor assays). `None` and `filament` have no
+closed surface to simulate on and map to the unbounded case via `.geom_for_null`, so Step 2 correctly
+reduces to the Step-1 band rather than inventing a shape. Earlier drafts had the geometry read from the
+**Displacement vs Diffusion** panel, so the cell is defined once and both tests use it; surface/volume follows
+the MSD panel's *Molecule moves*. D fed in is the **d_eff-corrected** D this panel now reports, i.e. a
+true motion D, so no projection re-calibration is applied — unlike `sim_free_geom_rnet`, which receives
+a raw per-axis D and calibrates internally. The geometry operators were factored out into a shared
+**`.geom_ops()`** used by both nulls, so they cannot drift apart; the refactor was verified
+bit-identical across all five shapes × both modes. Cost scales with the largest lag, not the number of
+grid points: ~0.1 s at 50 cycles, 1.6 s at 2000, 4.2 s at the 5000 cap.
+
+**Curvature vs the DOF term.** With d_eff handled, curvature costs only a few per cent of D at the
+default short window (~3% at R = 400 nm, ~15% only by R = 100 nm) — the DOF/projection factor above is
+much the larger error. Geometry matters mainly when the fit window is long, which is exactly when this
+overlay should be enabled.
+
+### I-B.6a Displacement vs diffusion (net displacement test)
+`trk_disp_bundle`. Per track, net start→end displacement `R_net = |r(T) − r(0)|` against the free
+expectation. Depends only on the two endpoints and the true elapsed time T, so it is **inherently robust
+to irregular Δt** — no cycle binning needed. Endpoint noise `2·d·σ_loc²` is subtracted.
+
+**Motion vs observation degrees of freedom (added 2026-07-30).** The band is
+`R_net² = 2·D_mot·T·χ²(d_mot)`, where **d_mot is the degrees of freedom of the MOTION, not the number of
+recorded coordinates** (`d_obs`). They differ for a molecule confined to a *surface* (membrane, cell
+envelope) but tracked in 3D: 2 DOF observed on 3 axes. Two consequences, both now handled:
+1. A per-axis estimator (CVE, or MSD with `ndim = 3`) spreads 2-DOF motion over 3 axes and reports
+   `D_meas = D_true · d_mot/d_obs` — exactly **2/3** for a surface in 3D (simulated: 0.675). The panel
+   rescales it: `D_mot = D_meas · d_obs/d_mot`. A **manual** D is taken as the true motion D and passed
+   through unchanged.
+2. The χ² degrees of freedom follow the motion, so the band uses `χ²(d_mot)`.
+
+Getting (1) right but not (2) leaves the *mean* correct while the *band shape* is wrong — the two errors
+cancel in `⟨R_net²⟩` but not in the quantiles. Measured on simulated free-on-surface tracks
+(D = 200 nm²/ms, T = 100 ms, all genuinely free):
+
+| band | sub-diffusive | free | super-diffusive |
+|---|---|---|---|
+| old (`d_obs` only) | **11.4%** | 81.4% | 7.2% |
+| corrected (`d_mot = 2`) | 5.2% | 90.0% | 4.8% |
+
+so surface-bound molecules were being called sub-diffusive at ~2.3× the nominal rate. When
+`d_mot == d_obs` (all 2D data, and true volume diffusion in 3D) both terms cancel and the expression
+reduces exactly to the previous one — verified unchanged on simulated 3D volume diffusion (5.0/90.1/4.9).
+The choice is exposed as **Motion type: volume (3 DOF) / surface (2 DOF)**, shown only for 3D data,
+defaulting to volume so existing results are unaffected.
+
+**Step 2 (geometry null)** already handled this independently: `sim_free_geom_rnet` has a
+`mode = surface | volume` switch and empirically calibrates the projection factor (`f = 2/3` for a curved
+surface tracked in 3D, `3/4` for a 2D projection of a cylinder), so it is fed the **raw per-axis D**, not
+the rescaled `D_mot` — passing the rescaled value would double-correct.
 
 ### I-B.7 Directionality / turn-angle autocorrelation — [Part II §2.6]
 `dir_bundle`. **Turn angle** between consecutive displacement vectors θ = acos( (Δr_i·Δr_{i+1}) /
@@ -800,7 +946,7 @@ ways that matter for every downstream estimator:
 
 ## 3a. MSD on MINFLUX — computation, confinement & what is non-standard
 
-The MSD tool follows **Béla Vogler's `the_road_to_minflux_msd` workflow** (Vogler et al. 2025), the
+The MSD tool follows **Bela Vogler's `the_road_to_minflux_msd` workflow** (Vogler et al. 2025), the
 only published MSD treatment specific to MINFLUX. The research landscape here is genuinely sparse;
 this section records what is *standard* (safe) versus *non-standard/unsolved* (deliberately not done).
 

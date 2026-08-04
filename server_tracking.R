@@ -114,7 +114,8 @@
 ##     per-track D / ergodicity  trk_unified_tdiff        ~6410
 ##   Change-point + GMM ........ cpd_segments_rv          ~4616
 ##   Jump-distance (JDD) ....... jdd_bundle               ~7078
-##   Confinement ............... conf_bundle              ~7420
+##   Confinement index (MSD) ... conf_ci_bundle           ~8060
+##     (the Rg/Rmax shape test was retired 2026-08-03 -> retired_tracking_server.R)
 ##   Directionality ............ dir_bundle               ~7627
 ##   Speed & transport ......... trk_export_summary       ~7978
 ##   Diffusion-state HMM ....... hmm_bundle               ~8298
@@ -221,7 +222,7 @@ tracking_server <- function(input, output, session) {
     manual <- suppressWarnings(as.numeric(input$trk_sigma_loc_nm %||% 0))
     if (is.finite(manual) && manual > 0) "manual override"
     else if (is.finite(trk_sigma_loc_cve())) "calibration (CVE)"
-    else if (is.finite(trk_sigma_loc_rv()))  "unified MSD fit"
+    else if (is.finite(trk_sigma_loc_rv()))  "MSD fit"
     else "not set"
   })
 
@@ -1268,7 +1269,9 @@ tracking_server <- function(input, output, session) {
     nm <- if (nrow(input$trk_file) > 1L)
             sprintf("%d files merged (%s, …)", nrow(input$trk_file), input$trk_file$name[1])
           else input$trk_file$name[1]
-    chunk_info <- {
+    # Chunks scope the playback animation only, so the label mentions them only in
+    # Playback mode — in Full tracks the whole dataset is always shown.
+    chunk_info <- if (!identical(input$trk_view_mode_main %||% "full", "playback")) "" else {
       sel <- input$trk_chunk_sel
       if (identical(sel, "__all__"))        " — All chunks"
       else if (isTruthy(sel))              paste0(" — ", basename(sel))
@@ -3137,6 +3140,9 @@ tracking_server <- function(input, output, session) {
   # suppressWarnings can't catch). Stays FALSE until a plot with data renders —
   # layout_trigger alone isn't enough (it can be set while frames_store is empty).
   trk_plot_ready    <- reactiveVal(FALSE)
+  # Always NULL since the Rg/Rmax panel was retired (2026-08-03) — the observer that
+  # filled it moved to retired_tracking_server.R. Kept so the playback colour override
+  # below needs no change, and so reinstating the retired panel just works.
   conf_color_map_stored    <- reactiveVal(NULL)  # pre-computed tid->hex when conf coloring is on
   cluster_color_map_stored <- reactiveVal(NULL)  # pre-computed tid->hex when MSD cluster coloring is on
 
@@ -4845,7 +4851,7 @@ tracking_server <- function(input, output, session) {
     vec  <- vec[is.finite(vec) & vec > 0]
     shiny::validate(shiny::need(length(vec) > 0,
       "No Δt values — need at least 2 time points per TID."))
-    n_bins  <- max(10L, as.integer(input$trk_dt_hist_bins %||% 80L))
+    n_bins  <- 80L    # only used by the no-cycle-time fallback binning below
     dark    <- isTRUE(isolate(input$trk_dark_mode))
     bg_col  <- if (dark) "#000000" else "#FFFFFF"
     fg_col  <- if (dark) "#FFFFFF" else "#333333"
@@ -4868,17 +4874,16 @@ tracking_server <- function(input, output, session) {
     }
     if (!is.finite(cc_sw)) cc_sw <- 0
 
-    # ── Binning ───────────────────────────────────────────────────────────────
-    # Δt is not continuous: it takes values SW + k·t_c for integer k. A free-width
-    # histogram therefore aliases against that comb — at the default 80 bins the grid
-    # runs ~1.63 bins per cycle, so each peak lands at a different offset inside its
-    # bin (0.01, 0.64, 0.28, 0.91, … of a bin width) and the bars drift visibly away
-    # from the cycle markers, with empty bins interleaved.
-    # "cycle" mode instead puts the bin EDGES on the classification boundaries,
-    # SW + (k ± ½)·t_c, so every bar is exactly one cycle count, centred on its peak.
-    # The picture is then identical to the round((Δt − SW)/t_c) the analysis performs.
-    use_cycle_bins <- !identical(input$trk_dt_bin_mode %||% "cycle", "free") &&
-                      is.finite(t_c) && t_c > 0
+    # ── Binning: one bar per cycle count ──────────────────────────────────────
+    # Δt is not continuous: it takes values SW + k·t_c for integer k. Fixed-width bins
+    # alias against that comb — at 80 bins the grid runs ~1.63 bins per cycle, so each
+    # peak lands at a different offset inside its bin and the bars drift visibly away
+    # from the cycle markers, with empty bins interleaved. Instead the bin EDGES sit on
+    # the classification boundaries SW + (k ± ½)·t_c, so every bar is exactly one cycle
+    # count centred on its peak, and the picture is identical to the
+    # round((Δt − SW)/t_c) the analysis performs. Falls back to fixed-width bins only
+    # when no cycle time is available.
+    use_cycle_bins <- is.finite(t_c) && t_c > 0
     if (use_cycle_bins) {
       kv    <- round((vec - cc_sw) / t_c)
       kv    <- kv[is.finite(kv) & kv >= 1]
@@ -4910,19 +4915,6 @@ tracking_server <- function(input, output, session) {
                  "Δt %{x:.4g} ms<br>%{y:,} steps<extra></extra>"
                else "Δt %{x:.4g} ms<br>%{y:,}<extra></extra>",
                showlegend = FALSE)
-    # Rug of the DISTINCT observed Δt values. Cheap (one tick per unique value, not per
-    # step) and it shows the quantisation directly: ticks that do not line up under a
-    # bar centre are intervals the current cycle time does not explain.
-    uv <- unique(round(vec, 6))
-    if (length(uv) <= 5000L) {
-      fig <- fig %>% add_trace(
-        x = uv, y = rep(ybase, length(uv)), type = "scatter", mode = "markers",
-        marker = list(symbol = "line-ns-open", size = 6,
-                      color = if (dark) "rgba(255,255,255,0.35)" else "rgba(0,0,0,0.30)",
-                      line = list(width = 1)),
-        hovertemplate = "observed Δt %{x:.5g} ms<extra></extra>",
-        name = "observed Δt values", showlegend = FALSE)
-    }
     fig <- fig %>%
       add_trace(x = c(dt_med, dt_med), y = c(ybase, ymax),
                 type = "scatter", mode = "lines",
@@ -5010,7 +5002,7 @@ tracking_server <- function(input, output, session) {
       ),
       if (!is.null(rc) && is.finite(rc$cycle) && rc$cycle > 0)
         tags$div(style = "color:#3a5a8a; margin-top:2px;",
-          tags$b("Peak-fit cycle time (Béla-style regression): "),
+          tags$b("Peak-fit cycle time: "),
           tags$span(style = "font-weight:bold;", sprintf("%.4g ms", rc$cycle)),
           sprintf("   ·   SW offset %.3g ms   ·   R² = %.4f   ·   fit on %d cycle peaks",
                   rc$sw, rc$r2 %||% NA_real_, rc$n),
@@ -5078,7 +5070,7 @@ tracking_server <- function(input, output, session) {
     )
 
     params <- list(
-      mode               = "unified MSD (cumulative cycle-index binning)",
+      mode               = "MSD (cumulative cycle-index binning)",
       time_unit          = "ms",
       space_unit         = "µm",
       tau_axis           = if (linear_tau) "linearized lag × cycle" else "real mean Δt per bin",
@@ -5090,7 +5082,10 @@ tracking_server <- function(input, output, session) {
       eDIFF_um2_s        = if (!is.null(fr)) fr$D / 1e3 else NA_real_,
       tDIFF_um2_s        = if (!is.null(td)) td$tDIFF else NA_real_,
       n_tracks           = ub$n_tracks,
-      msd_formula        = sprintf("MSD = %dD*tau + %d*sigma^2", 2L * ub$ndim, 2L * ub$ndim)
+      msd_formula        = sprintf("MSD = %.4gD*tau + %.4g*sigma^2 (d_eff = %.4g)",
+                                   ub$coef_eff %||% (2L * ub$ndim),
+                                   ub$coef_eff %||% (2L * ub$ndim),
+                                   ub$d_eff %||% ub$ndim)
     )
 
     list(data = data, params = params)
@@ -5104,7 +5099,7 @@ tracking_server <- function(input, output, session) {
     req(isTRUE(input$trk_msd_show_hist) || isTRUE(input$trk_msd_cluster))
     td <- tryCatch(trk_unified_tdiff(), error = function(e) NULL)
     shiny::validate(shiny::need(!is.null(td) && !is.null(td$pertrack) && nrow(td$pertrack) > 0,
-      "Enable the Unified MSD and click 'Plot MSD' to compute per-track diffusion."))
+      "Enable the MSD and click 'Plot MSD' to compute per-track diffusion."))
     td$pertrack
   })
 
@@ -5154,6 +5149,197 @@ tracking_server <- function(input, output, session) {
 
     list(col_map = col_map, palette = pal, n_clusters = k,
          fits = fits, cluster_ids = setNames(new_lbl, as.character(fits$tid)))
+  })
+
+  # ── Per-cluster motion model ────────────────────────────────────────────────
+  # The k-means split above groups tracks by D and confinement index, but it does not
+  # say WHAT KIND of motion each group shows. Here each cluster's own ensemble MSD
+  # (mean of its members' TAMSDs) is fitted with all four models and the best one is
+  # selected by AICc, so a cluster can be reported as free / confined / directed /
+  # anomalous rather than just "slow" or "fast".
+  #
+  # AICc (not raw residuals) because the models differ in parameter count: linear has
+  # 2, the others 3. n here is the number of MSD lag points in the fit window, which is
+  # small, so the small-sample correction matters. Lags are correlated, so this is a
+  # ranking heuristic, not a likelihood test — reported as such.
+  msd_cluster_models <- reactive({
+    cl <- tryCatch(msd_cluster_rv(), error = function(e) NULL)
+    ub <- tryCatch(msd_unified_bundle(), error = function(e) NULL)
+    if (is.null(cl) || is.null(ub) || is.null(ub$track_msd)) return(NULL)
+    min_lag <- max(1L, as.integer(input$trk_uni_min_lag %||% 4L))
+    max_lag <- max(min_lag + 2L, as.integer(input$trk_uni_max_lag %||% 50L))
+    tau_all <- if (isTRUE(input$trk_uni_linear_tau)) ub$tau_lin else ub$tau
+    win <- ub$lag >= min_lag & ub$lag <= max_lag & ub$keep_lag & is.finite(tau_all)
+    if (sum(win) < 5L) return(NULL)
+
+    ids <- cl$cluster_ids
+    rows <- lapply(seq_len(cl$n_clusters), function(cc) {
+      tids_c <- names(ids)[ids == cc]
+      cols   <- which(colnames(ub$track_msd) %in% tids_c)
+      if (!length(cols)) return(NULL)
+      # Cluster ensemble MSD = mean of member TAMSDs (same convention as the eMSD).
+      y <- rowMeans(ub$track_msd[, cols, drop = FALSE], na.rm = TRUE)[win]
+      s <- tau_all[win]
+      okp <- is.finite(s) & is.finite(y) & y > 0
+      if (sum(okp) < 5L) return(NULL)
+      s <- s[okp]; y <- y[okp]; np <- ub$npairs[win][okp]
+
+      aicc_of <- function(fr, k_par) {
+        if (is.null(fr) || is.null(fr$tau_fit)) return(NA_real_)
+        yhat <- stats::approx(fr$tau_fit, fr$msd_fit, xout = s, rule = 2)$y
+        rss  <- sum((y - yhat)^2); n <- length(y)
+        if (!is.finite(rss) || rss <= 0 || n <= k_par + 2L) return(NA_real_)
+        n * log(rss / n) + 2 * k_par + (2 * k_par * (k_par + 1)) / (n - k_par - 1)
+      }
+      # The free model is fitted here by plain OLS over the SAME window as the other
+      # three, NOT by the OLSF used for the headline D. OLSF deliberately fits only the
+      # first p (Michalet-optimal) lags, so its residuals over the full window are not
+      # comparable with full-window non-linear fits — scoring it that way made every
+      # free cluster look like a 3-parameter model (free won 0/10 on simulated free
+      # curves; 9/10 once fitted on the same window). The headline D is unaffected;
+      # this OLS is used only to rank the models against each other.
+      cv <- 2L * ub$ndim
+      free_fr <- tryCatch({
+        lf <- stats::lm(y ~ s)
+        list(D = unname(stats::coef(lf)[2]) / cv,
+             sigma_loc = sqrt(max(0, unname(stats::coef(lf)[1])) / cv),
+             tau_fit = s, msd_fit = unname(stats::fitted(lf)))
+      }, error = function(e) NULL)
+      cand <- list(
+        free      = list(fr = free_fr, k = 2L),
+        confined  = list(fr = tryCatch(.msd_model_fit(s, y, np, ub$ndim, "confined",
+                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff),
+                                       error = function(e) NULL), k = 3L),
+        directed  = list(fr = tryCatch(.msd_model_fit(s, y, np, ub$ndim, "directed",
+                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff),
+                                       error = function(e) NULL), k = 3L),
+        anomalous = list(fr = tryCatch(.msd_model_fit(s, y, np, ub$ndim, "anomalous",
+                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff),
+                                       error = function(e) NULL), k = 3L))
+      aic <- vapply(names(cand), function(nm) aicc_of(cand[[nm]]$fr, cand[[nm]]$k), numeric(1))
+      if (!any(is.finite(aic))) return(NULL)
+      auto_best <- names(cand)[which.min(replace(aic, !is.finite(aic), Inf))]
+      # Per-cluster override: the whole point is to be able to say "Cluster 1 is free,
+      # Cluster 2 is confined" and see both fits, so an explicit choice wins over AICc.
+      # "auto" (default) keeps the AICc pick.
+      pick <- input[[paste0("trk_cmodel_", cc)]] %||% "auto"
+      if (!identical(pick, "auto") && !is.null(cand[[pick]]$fr)) best <- pick else best <- auto_best
+      bfr  <- cand[[best]]$fr
+      forced <- !identical(pick, "auto") && !identical(best, auto_best)
+      # A confined fit that never reached its plateau is really just a line.
+      if (identical(best, "confined") && isTRUE(bfr$degenerate)) best <- "free (no plateau)"
+      detail <- switch(sub(" .*", "", best),
+        confined  = sprintf("L_c = %.0f nm", bfr$L_conf),
+        directed  = sprintf("v = %.3g µm/s", bfr$v_um_s),
+        anomalous = sprintf("α = %.2f", bfr$alpha),
+        "")
+      d_aic <- sort(aic[is.finite(aic)])
+      list(
+        row = data.frame(
+          cluster = cc, n_tracks = length(tids_c),
+          model = best, auto_model = auto_best, forced = forced,
+          D_um2_s = if (is.finite(bfr$D)) bfr$D / 1e3 else NA_real_,
+          detail = detail,
+          # Gap to the runner-up: small = the models are not really distinguishable here.
+          dAICc = if (length(d_aic) >= 2L) unname(d_aic[2] - d_aic[1]) else NA_real_,
+          stringsAsFactors = FALSE),
+        # Observed cluster eMSD + the fitted curve, for the overlay plot (µm², ms).
+        curve = list(cluster = cc, tau = s, msd = y,
+                     fit_tau = bfr$tau_fit, fit_msd = bfr$msd_fit))
+    })
+    rows <- Filter(Negate(is.null), rows)
+    if (!length(rows)) return(NULL)
+    list(table  = do.call(rbind, lapply(rows, `[[`, "row")),
+         curves = lapply(rows, `[[`, "curve"))
+  })
+
+  # One model selector per cluster. Auto = the AICc pick; anything else forces that
+  # model on that cluster, so different populations can be modelled differently.
+  output$trk_msd_cluster_model_ui <- renderUI({
+    req(isTRUE(input$trk_show_msd), isTRUE(input$trk_msd_cluster))
+    cl <- tryCatch(msd_cluster_rv(), error = function(e) NULL)
+    if (is.null(cl)) return(NULL)
+    ch <- c("Auto (best AICc)" = "auto", "Free / Brownian" = "free",
+            "Confined" = "confined", "Directed" = "directed", "Anomalous" = "anomalous")
+    tags$div(style = "margin-top:4px;",
+      tags$div(style = "font-size:0.85em; color:#555; margin-bottom:2px;",
+               "Model per cluster"),
+      lapply(seq_len(cl$n_clusters), function(cc) {
+        div(style = "display:inline-block; width:49%; padding-right:4px; vertical-align:top;",
+            selectInput(paste0("trk_cmodel_", cc),
+                        label = HTML(sprintf(
+                          "<span style='color:%s;font-weight:bold;'>Cluster %d</span>",
+                          cl$palette[cc], cc)),
+                        choices = ch, selected = "auto", width = "100%"))
+      }))
+  })
+
+  output$trk_msd_cluster_models <- renderUI({
+    req(isTRUE(input$trk_show_msd), isTRUE(input$trk_msd_cluster))
+    res <- tryCatch(msd_cluster_models(), error = function(e) NULL)
+    if (is.null(res)) return(NULL)
+    tb  <- res$table
+    pal <- tryCatch(msd_cluster_rv()$palette, error = function(e) NULL)
+    tags$div(style = "font-size:0.85em; margin-top:6px;",
+      tags$b("Motion model per cluster"),
+      tags$table(style = "width:100%; border-collapse:collapse; margin-top:3px;",
+        tags$tr(style = "color:#666; text-align:left;",
+          tags$th("Cluster"), tags$th("Tracks"), tags$th("Model"),
+          tags$th("D (µm²/s)"), tags$th(""), tags$th("ΔAICc")),
+        lapply(seq_len(nrow(tb)), function(i) {
+          r <- tb[i, ]
+          tags$tr(style = "border-top:1px solid #eee;",
+            tags$td(tags$span(style = sprintf("color:%s; font-weight:bold;",
+                                              if (!is.null(pal)) pal[r$cluster] else "#333"),
+                              sprintf("%d", r$cluster))),
+            tags$td(r$n_tracks),
+            tags$td(tags$b(r$model),
+                    # Make it obvious when a forced choice differs from the AICc pick.
+                    if (isTRUE(r$forced))
+                      tags$span(style = "color:#b26a00;",
+                                sprintf(" (set; AICc: %s)", r$auto_model)) else NULL),
+            tags$td(if (is.finite(r$D_um2_s)) sprintf("%.3g", r$D_um2_s) else "—"),
+            tags$td(r$detail),
+            tags$td(if (is.finite(r$dAICc)) sprintf("%.1f", r$dAICc) else "—"))
+        })),
+      tags$div(style = "color:#888; margin-top:3px;",
+        "Each cluster's own ensemble MSD is fitted with the free, confined, directed and anomalous models. On Auto the best is chosen by AICc; a cluster set to a specific model uses that one. ",
+        tags$b("ΔAICc"), " is the gap between the two best models — below ~2 they are not distinguishable on this data. MSD lag points are correlated, so this ranks models, it is not a likelihood test.")
+    )
+  })
+
+  # Cluster eMSD curves with each cluster's fitted model overlaid.
+  output$trk_msd_cluster_curves <- renderPlotly({
+    req(isTRUE(input$trk_show_msd), isTRUE(input$trk_msd_cluster))
+    res <- tryCatch(msd_cluster_models(), error = function(e) NULL)
+    shiny::validate(shiny::need(!is.null(res), "Click 'Plot MSD' to compute cluster models."))
+    cl   <- msd_cluster_rv()
+    dark <- isTRUE(isolate(input$trk_dark_mode))
+    bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
+    tb <- res$table
+    fig <- plot_ly()
+    for (cv in res$curves) {
+      col <- cl$palette[cv$cluster]
+      lbl <- tb$model[match(cv$cluster, tb$cluster)]
+      fig <- fig %>%
+        add_trace(x = cv$tau, y = cv$msd / 1e6, type = "scatter", mode = "markers",
+                  marker = list(size = 5, color = col),
+                  name = sprintf("Cluster %d eMSD", cv$cluster))
+      if (!is.null(cv$fit_tau))
+        fig <- fig %>%
+          add_trace(x = cv$fit_tau, y = pmax(0, cv$fit_msd) / 1e6,
+                    type = "scatter", mode = "lines",
+                    line = list(color = col, width = 2, dash = "dash"),
+                    name = sprintf("Cluster %d: %s", cv$cluster, lbl))
+    }
+    fig %>% layout(
+      xaxis = list(title = "τ (ms)", color = fg),
+      yaxis = list(title = "MSD (µm²)", color = fg, rangemode = "tozero"),
+      paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
+      legend = list(font = list(color = fg, size = 10), orientation = "h",
+                    x = 0, xanchor = "left", y = -0.34, yanchor = "top"),
+      margin = list(l = 55, r = 20, t = 10, b = 110),
+      uirevision = "msd_cluster_curves")
   })
 
   # Observer: keep cluster_color_map_stored in sync
@@ -5503,10 +5689,16 @@ tracking_server <- function(input, output, session) {
   # auto_pmin = FALSE: fit the first k points (caller-chosen window).
   # auto_pmin = TRUE : two-stage iterative Michalet optimal point selection.
   # `dt_cycle` is the cycle time (for x); `Npts` the trajectory length for L(N).
+  # coef_override: the MSD-vs-D coefficient, when it is NOT simply 2*ndim. A molecule
+  # confined to a SURFACE moves in 2 degrees of freedom however many coordinates are
+  # recorded, and a 2D projection of a curved surface is foreshortened by a
+  # geometry-dependent factor, so the divisor is not the recorded dimensionality (see
+  # .msd_d_eff). `ndim` still carries the GEOMETRIC dimension, because Michalet's
+  # optimal point count is derived for real spatial dimensions.
   msd_fit_olsf <- function(tau, msd, npairs, k, ndim = 2L,
                            auto_pmin = FALSE, R = 0, Npts = NA_real_,
-                           dt_cycle = NA_real_) {
-    coef_val <- 2L * ndim  # 4 (2D) or 6 (3D)
+                           dt_cycle = NA_real_, coef_override = NULL) {
+    coef_val <- if (is.null(coef_override)) 2L * ndim else coef_override
     ok_all <- is.finite(tau) & is.finite(msd) & tau > 0
     tau <- tau[ok_all]; msd <- msd[ok_all]
     n_avail <- length(tau)
@@ -5569,10 +5761,11 @@ tracking_server <- function(input, output, session) {
   # for slope (→ D) and intercept (→ σ²). This deliberately converges on the
   # LOWEST lags (least error-prone), reproducing his numbers. `tau` is the lag
   # axis (use the linearized lag×cycle axis for a faithful match); D = slope/(2d).
-  msd_fit_olsf_iterative <- function(tau, msd, ndim = 2L, R = 0,
+  # coef_override as in msd_fit_olsf.
+  msd_fit_olsf_iterative <- function(tau, msd, ndim = 2L, R = 0, coef_override = NULL,
                                      dt_cycle = NA_real_, N = NA_real_,
                                      max_attempts = 1000L) {
-    coef_val <- 2L * ndim
+    coef_val <- if (is.null(coef_override)) 2L * ndim else coef_override
     ok <- is.finite(tau) & is.finite(msd) & tau > 0
     tau <- tau[ok]; msd <- msd[ok]
     n_avail <- length(tau)
@@ -5724,7 +5917,7 @@ tracking_server <- function(input, output, session) {
   # surfaced as a warning next to the MSD/eDIFF result (single source of truth). Above
   # ~D_max the MINFLUX localization loop can no longer keep the doughnut centred, so D
   # is systematically UNDER-estimated (Vogler et al. 2025; SimuFLUX, Marin & Ries 2025).
-  # Pure function of the localization table + TCP diameter L (nm) & hardware dead-time
+  # Pure function of the localization table + TCP diameter L_TCP (nm) & hardware dead-time
   # t_hw (ms). Returns D_max in um^2/s (Vogler form preferred, simple form fallback).
   dmax_estimate <- function(df, L = 400, t_hw = 0.05) {
     if (is.null(df) || !nrow(df) || !all(c("tid","tim") %in% names(df))) return(NULL)
@@ -5807,7 +6000,7 @@ tracking_server <- function(input, output, session) {
       htmltools::tags$table(
         style = "width:100%; border-collapse:collapse;",
         htmltools::tags$tr(
-          htmltools::tags$td(style="padding:3px 6px; color:#666;", "TCP diameter L"),
+          htmltools::tags$td(style="padding:3px 6px; color:#666;", "TCP diameter L_TCP"),
           htmltools::tags$td(style="padding:3px 6px; font-weight:bold;", sprintf("%g nm", L))
         ),
         htmltools::tags$tr(
@@ -5831,7 +6024,7 @@ tracking_server <- function(input, output, session) {
             if(is.finite(n_pl)) sprintf("%.1f", n_pl) else "— (no ECO column)")
         ),
         htmltools::tags$tr(style="border-top:1px solid #ddd;",
-          htmltools::tags$td(style="padding:4px 6px; color:#666;", htmltools::HTML("D<sub>max</sub> simple (L² / 16·t_loc)")),
+          htmltools::tags$td(style="padding:4px 6px; color:#666;", htmltools::HTML("D<sub>max</sub> simple (L_TCP² / 16·t_loc)")),
           htmltools::tags$td(style="padding:4px 6px;", if(is.finite(D_max_simple)) sprintf("%.3g µm²/s", D_max_simple) else "—")
         ),
         htmltools::tags$tr(
@@ -5853,8 +6046,8 @@ tracking_server <- function(input, output, session) {
 
       htmltools::tags$div(
         style = "margin-top:8px; font-size:0.82em; color:#666;",
-        htmltools::HTML("D<sub>max</sub> simple = L² / (16 · t_loc). "),
-        htmltools::HTML("D<sub>max</sub> Vogler = (L²/16) · ψ_MFX / (N_PL + ψ_MFX · t_hw), from Vogler et al. (2025, Commun. Biol.). "),
+        htmltools::HTML("D<sub>max</sub> simple = L_TCP² / (16 · t_loc). "),
+        htmltools::HTML("D<sub>max</sub> Vogler = (L_TCP²/16) · ψ_MFX / (N_PL + ψ_MFX · t_hw), from Vogler et al. (2025, Commun. Biol.). "),
         "t_loc = ECO / EFO × 1000 (ms) — the time to collect ECO photons at rate EFO. ",
         "ECO is the photon count per localization (= N_PL directly). ",
         "Median Δt is shown as a cross-check. ",
@@ -6119,6 +6312,59 @@ tracking_server <- function(input, output, session) {
   # NOTE: units are nm² and ms throughout. Consumers convert to µm²/s at the
   # point of display (divide nm²/ms by 1e3).
   # ============================================================================
+  # ── Effective MSD divisor ───────────────────────────────────────────────────
+  # MSD = 2 · d_eff · D · τ. d_eff is NOT simply the number of recorded coordinates:
+  # it is set by how many directions the molecule can actually move in, and by how
+  # that motion is foreshortened when projected onto the image plane.
+  #
+  #   motion   tracked        d_eff   why
+  #   volume   3D              3      3 DOF on 3 axes — the plain case
+  #   volume   2D              2      dropping z leaves 2 independent axes
+  #   surface  3D              2      2 DOF however many coordinates are recorded
+  #   surface  2D              1 + ⟨n_z²⟩, geometry-dependent (below)
+  #
+  # The last row is the subtle one: a molecule on a curved surface steps in its local
+  # tangent plane, and the fraction of that step that survives projection depends on
+  # how the surface is tilted. Averaging over the shape gives ⟨n_z²⟩ = 1/3 for a
+  # sphere, 1/2 for a cylinder whose axis lies in the image plane, and 1 for a flat
+  # membrane parallel to it — so d_eff = 4/3, 3/2 and 2. Verified by simulation to
+  # three decimals. A membrane tilted by θ gives 1 + cos²θ, between the rod and flat
+  # values; it is not offered separately.
+  #
+  # Getting this wrong is a first-order error on D, not a refinement: using the
+  # recorded dimensionality for a surface-bound molecule under-reports D by 1/3 when
+  # tracked in 3D, and by 1/3 (sphere) or 1/4 (rod) when tracked in 2D.
+  # Extended for 1-DOF motion (a motor on a filament). Recorded in 3D the answer is
+  # just the motion's own dimensionality; recorded in 2D it is reduced by whatever
+  # fraction of a step points out of the image plane, which is ⟨n_z²⟩ (surface) or
+  # ⟨u_z²⟩ (filament) for the shape in use:
+  #   surface  on a sphere    ⟨n_z²⟩ = 1/3 → d_eff = 4/3
+  #            on a rod       ⟨n_z²⟩ = 1/2 → d_eff = 3/2   (axis in the image plane)
+  #            on a membrane  ⟨n_z²⟩ = 1   → d_eff = 2     (tilt θ gives 1 + cos²θ)
+  #   filament in-plane                    → d_eff = 1
+  # An unspecified shape ("none") is taken to lie in the image plane, the common
+  # flat-mount case and the least surprising default — it applies no reduction.
+  # The simulated free-motion nulls understand closed/flat surfaces only. "None" is
+  # genuinely unbounded, and a filament has no surface to diffuse on, so both fall back
+  # to the unbounded case — the null then reduces to the infinite-plane one, which is
+  # the right answer rather than a fudge.
+  .geom_for_null <- function(g) if (g %in% c("sphere", "rod", "ellipsoid", "membrane")) g else "free"
+
+  # Human-readable name of the shared geometry, for panels that only echo it.
+  .geom_label <- function(g) switch(g %||% "none",
+    none = "None — unbounded", sphere = "Sphere", rod = "Rod / spherocylinder",
+    ellipsoid = "Ellipsoid", membrane = "Flat membrane", filament = "Filament / linear track", g)
+
+  .msd_d_eff <- function(d_obs) {
+    motion <- input$trk_motion %||% "volume"
+    if (identical(motion, "volume")) return(as.numeric(d_obs))
+    d_mot <- if (identical(motion, "filament")) 1 else 2
+    if (d_obs >= 3L) return(d_mot)               # all coordinates recorded: no projection loss
+    if (identical(motion, "filament")) return(1) # a track lying in the image plane
+    switch(input$trk_geom_type %||% "none",
+           sphere = 4 / 3, ellipsoid = 4 / 3, rod = 3 / 2, membrane = 2, 2)
+  }
+
   msd_unified_bundle <- eventReactive(input$trk_msd_compute, {
     req(isTRUE(input$trk_show_msd), isolate(isTRUE(input$trk_msd_unified)))
     t_c <- isolate(trk_cycle_time())
@@ -6149,7 +6395,7 @@ tracking_server <- function(input, output, session) {
     tk_np  <- matrix(0L, max_lag, n_tracks)   # per-track pair counts
     tk_dt  <- matrix(0,  max_lag, n_tracks)   # per-track Σ Δt (for mean-Δt-per-bin)
 
-    withProgress(message = "Computing Unified MSD…", value = 0, {
+    withProgress(message = "Computing MSD…", value = 0, {
       for (k in seq_along(sp)) {
         incProgress(1 / n_tracks)
         tb <- sp[[k]]; n <- nrow(tb)
@@ -6221,8 +6467,72 @@ tracking_server <- function(input, output, session) {
          track_msd = track_msd, tk_names = tk_names,
          msd_q25 = msd_q25, msd_q75 = msd_q75,
          t_cycle = t_c, has_z = has_z, ndim = if (has_z) 3L else 2L,
+         # MSD = 2*d_eff*D*tau. d_eff follows the MOTION and its projection, not the
+         # recorded coordinate count -- see .msd_d_eff.
+         d_eff = .msd_d_eff(if (has_z) 3L else 2L),
+         coef_eff = 2 * .msd_d_eff(if (has_z) 3L else 2L),
          track_weighted = track_weight, n_dropped_negD = n_dropped_negD,
          n_tracks = sum(colSums(tk_np) > 0))
+  })
+
+  # ── Free-diffusion-on-a-geometry MSD reference ──────────────────────────────
+  # On a closed cell the MSD of a FREE molecule bends and eventually saturates, so a
+  # bend in the measured curve is not by itself evidence of trapping. This simulates
+  # free diffusion on the chosen shape at the fitted D and returns the curve it would
+  # produce, on the same lag grid and the same observed coordinates as the data.
+  #
+  # The geometry is taken from the Displacement vs Diffusion panel rather than
+  # duplicated here — one cell definition, used by both tests.
+  #
+  # D fed in is the FITTED D from this panel, which is already corrected for motion
+  # degrees of freedom and projection (see .msd_d_eff), i.e. a true surface D. That is
+  # why no projection re-calibration is applied, unlike the net-displacement null which
+  # receives a raw per-axis D.
+  msd_geom_null <- reactive({
+    req(isTRUE(input$trk_msd_geom))
+    ub <- tryCatch(msd_unified_bundle(), error = function(e) NULL); req(!is.null(ub))
+    fr <- tryCatch(msd_unified_fit(ub), error = function(e) NULL)
+    req(!is.null(fr), is.finite(fr$D), fr$D > 0)
+    geom <- .geom_for_null(input$trk_geom_type %||% "none")
+    params <- list(
+      R    = max(1, as.numeric(input$trk_disp_R    %||% 500)),
+      r    = max(1, as.numeric(input$trk_disp_r    %||% 400)),
+      Lcyl = max(1, as.numeric(input$trk_disp_L    %||% 2000)),
+      a    = max(1, as.numeric(input$trk_disp_a    %||% 500)),
+      b    = max(1, as.numeric(input$trk_disp_b    %||% 500)),
+      c    = max(1, as.numeric(input$trk_disp_c    %||% 900)),
+      mtilt = max(0, as.numeric(input$trk_disp_mtilt %||% 0)))
+    # Anything that is not volume-filling sits on the boundary (same mapping the
+    # displacement null uses), so filament and surface both simulate on the surface.
+    mode <- if (identical(input$trk_motion %||% "volume", "volume")) "volume" else "surface"
+    keep <- ub$keep_lag & is.finite(ub$msd)
+    lags <- ub$lag[keep]
+    if (!length(lags)) return(NULL)
+    # Lag grid: log-spaced across the whole range so the overlay reads well on any
+    # scale, PLUS an even spread inside the fit window. The fit-window points are what
+    # the D-shortfall estimate below is regressed on, and a purely log grid leaves that
+    # regression resting on a handful of long lags, which made it noisy.
+    lo_w <- max(1L, as.integer(input$trk_uni_min_lag %||% 4L))
+    hi_w <- max(lo_w + 2L, as.integer(input$trk_uni_max_lag %||% 50L))
+    hi_w <- min(hi_w, max(lags))
+    grid <- unique(c(
+      round(exp(seq(log(1), log(max(lags)), length.out = 40))),
+      round(seq(lo_w, hi_w, length.out = min(30L, max(3L, hi_w - lo_w + 1L))))))
+    grid <- sort(grid[grid >= 1L])
+    # Cost scales with the LARGEST lag, not the number of points, so keep the ensemble
+    # large — the long-lag points are the noisy ones and they carry the signal.
+    M <- 4000L
+    res <- withProgress(message = "Simulating free diffusion on the geometry…", value = 0.4,
+      sim_free_geom_msd(grid, D_surf = fr$D, geom = geom, params = params,
+                        cyc_ms = ub$t_cycle, proj2d = (ub$ndim == 2L),
+                        mode = mode, M = M))
+    if (is.null(res) || !nrow(res)) return(NULL)
+    res$tau_lin <- res$lag * ub$t_cycle
+    attr(res, "geom") <- geom; attr(res, "mode") <- mode
+    attr(res, "dims") <- .disp_geom_dims(geom, params)
+    attr(res, "D") <- fr$D
+    attr(res, "coef") <- ub$coef_eff %||% (2 * ub$ndim)
+    res
   })
 
   # Fit helper shared by the unified plot + estimates (OLSF + Michalet p_min)
@@ -6238,12 +6548,14 @@ tracking_server <- function(input, output, session) {
     if (isTRUE(input$trk_uni_iterative)) {
       # Bela's exact iterative loop — converges on the lowest, least-noisy lags.
       msd_fit_olsf_iterative(tau_use[ok], ub$msd[ok], ndim = ub$ndim, R = 0,
-                             dt_cycle = ub$t_cycle, N = sum(ok))
+                             dt_cycle = ub$t_cycle, N = sum(ok),
+                             coef_override = ub$coef_eff)
     } else {
       # Robust full-window-anchored Michalet (default).
       msd_fit_olsf(tau_use[ok], ub$msd[ok], ub$npairs[ok],
                    k = sum(ok), ndim = ub$ndim,
-                   auto_pmin = TRUE, R = 0, Npts = 1e4, dt_cycle = ub$t_cycle)
+                   auto_pmin = TRUE, R = 0, Npts = 1e4, dt_cycle = ub$t_cycle,
+                   coef_override = ub$coef_eff)
     }
   }
 
@@ -6258,22 +6570,38 @@ tracking_server <- function(input, output, session) {
   # s = τ (ms, already windowed), y = MSD (nm²). model ∈ linear/confined/directed/
   # anomalous. Returns $model, $D (nm²/ms), $sigma_loc (nm), $tau_fit, $msd_fit (nm²)
   # + extras (L_conf, tau_c_ms, plateau_um2, degenerate / v_um_s / alpha).
-  .msd_model_fit <- function(s, y, npairs, ndim, model, use_iter, t_cycle) {
-    coef_v <- 2L * ndim
+  .msd_model_fit <- function(s, y, npairs, ndim, model, use_iter, t_cycle,
+                             coef_override = NULL) {
+    coef_v <- if (is.null(coef_override)) 2L * ndim else coef_override
     if (identical(model, "linear")) {
       if (length(s) < 3L) return(NULL)
       return(if (isTRUE(use_iter))
-               msd_fit_olsf_iterative(s, y, ndim = ndim, R = 0, dt_cycle = t_cycle, N = length(s))
+               msd_fit_olsf_iterative(s, y, ndim = ndim, R = 0, dt_cycle = t_cycle,
+                                      N = length(s), coef_override = coef_override)
              else
                msd_fit_olsf(s, y, npairs, k = length(s), ndim = ndim,
-                            auto_pmin = TRUE, R = 0, Npts = 1e4, dt_cycle = t_cycle))
+                            auto_pmin = TRUE, R = 0, Npts = 1e4, dt_cycle = t_cycle,
+                            coef_override = coef_override))
     }
     if (length(s) < 4L) return(NULL)
-    nls_fit <- function(formula, start, lower, upper) tryCatch(
-      stats::nls(formula, data = data.frame(s = s, y = y), start = start,
-                 lower = lower, upper = upper, algorithm = "port",
-                 control = stats::nls.control(maxiter = 200, warnOnly = TRUE)),
-      error = function(e) NULL)
+    # `warnOnly = TRUE` makes nls RETURN a fit instead of erroring when it cannot
+    # converge — but it still prints "Convergence failure: singular convergence (7)"
+    # to the console, once per attempt, which is noise the user cannot act on (each
+    # cluster × each of the three non-linear models is an attempt). The failure is not
+    # ignored: it is recorded on the fit and folded into the `degenerate` flag below,
+    # which is what the UI already reports. Singular convergence means the parameters
+    # are not identifiable over this window — usually no plateau has been reached —
+    # so the coefficients that come back must not be presented as a real fit.
+    nls_fit <- function(formula, start, lower, upper) {
+      f <- tryCatch(suppressWarnings(
+        stats::nls(formula, data = data.frame(s = s, y = y), start = start,
+                   lower = lower, upper = upper, algorithm = "port",
+                   control = stats::nls.control(maxiter = 200, warnOnly = TRUE))),
+        error = function(e) NULL)
+      if (is.null(f)) return(NULL)
+      attr(f, "converged") <- isTRUE(tryCatch(f$convInfo$isConv, error = function(e) NA))
+      f
+    }
     D0   <- max(1e-6, (max(y) - min(y)) / (coef_v * max(s)))
     C0   <- max(0, min(y, na.rm = TRUE))
     tseq <- seq(min(s), max(s), length.out = 200)
@@ -6284,9 +6612,19 @@ tracking_server <- function(input, output, session) {
                      upper = list(A = Inf, tc = Inf, C = Inf))
       if (is.null(fit)) return(NULL)
       cf <- coef(fit); A <- unname(cf["A"]); tc <- unname(cf["tc"]); C <- unname(cf["C"])
-      degenerate <- (tc > 2 * max(s)) || (A > 3 * max(y, na.rm = TRUE))
+      # A non-converged fit is degenerate too: singular convergence means the plateau
+      # was never resolved, which is exactly what this flag already communicates.
+      degenerate <- (tc > 2 * max(s)) || (A > 3 * max(y, na.rm = TRUE)) ||
+                    !isTRUE(attr(fit, "converged"))
+      # Confinement size L_c from the fitted plateau A. For a particle uniformly
+      # exploring a d-dimensional box of side L_c, each axis contributes
+      # Var(Δx) = L_c²/6, so the steady-state MSD is A = d·L_c²/6 and
+      #     L_c = sqrt(6·A/d)
+      # which gives the familiar sqrt(3A) in 2D and sqrt(2A) in 3D. Verified against
+      # reflecting-boundary simulations (d=2 and d=3, L_c = 140/200/300 nm, recovered
+      # to <1%). Using the 2D form in 3D would inflate L_c by sqrt(3/2) = 1.22×.
       list(model = "confined", D = A / (coef_v * tc), sigma_loc = sqrt(max(0, C / coef_v)),
-           L_conf = sqrt(3 * A), tau_c_ms = tc, plateau_um2 = A / 1e6, degenerate = degenerate,
+           L_conf = sqrt(6 * A / ndim), tau_c_ms = tc, plateau_um2 = A / 1e6, degenerate = degenerate,
            tau_fit = tseq, msd_fit = A * (1 - exp(-tseq / tc)) + C, ndim = ndim, method = "confined")
     } else if (identical(model, "directed")) {
       fit <- nls_fit(y ~ coef_v * D * s + (v * s)^2 + C,
@@ -6296,6 +6634,7 @@ tracking_server <- function(input, output, session) {
       if (is.null(fit)) return(NULL)
       cf <- coef(fit); D <- unname(cf["D"]); v <- unname(cf["v"]); C <- unname(cf["C"])
       list(model = "directed", D = D, sigma_loc = sqrt(max(0, C / coef_v)), v_um_s = v,
+           degenerate = !isTRUE(attr(fit, "converged")),
            tau_fit = tseq, msd_fit = coef_v * D * tseq + (v * tseq)^2 + C, ndim = ndim, method = "directed")
     } else if (identical(model, "anomalous")) {
       fit <- nls_fit(y ~ coef_v * D * s^a + C,
@@ -6305,6 +6644,7 @@ tracking_server <- function(input, output, session) {
       if (is.null(fit)) return(NULL)
       cf <- coef(fit); D <- unname(cf["D"]); a <- unname(cf["a"]); C <- unname(cf["C"])
       list(model = "anomalous", D = D, alpha = a, sigma_loc = sqrt(max(0, C / coef_v)),
+           degenerate = !isTRUE(attr(fit, "converged")),
            tau_fit = tseq, msd_fit = coef_v * D * tseq^a + C, ndim = ndim, method = "anomalous")
     } else NULL
   }
@@ -6321,7 +6661,8 @@ tracking_server <- function(input, output, session) {
           ub$lag >= min_lag & ub$lag <= max_lag
     if (sum(ok) < 4L) return(NULL)
     .msd_model_fit(tau_use[ok], ub$msd[ok], ub$npairs[ok], ub$ndim, model,
-                   isTRUE(input$trk_uni_iterative), ub$t_cycle)
+                   isTRUE(input$trk_uni_iterative), ub$t_cycle,
+                   coef_override = ub$coef_eff)
   }
 
   # Cached per-track analysis from the UNIFIED MSD — the single source for the
@@ -6368,10 +6709,12 @@ tracking_server <- function(input, output, session) {
       okc <- is.finite(mv); if (sum(okc) < 3L) return(NULL)
       tt <- tau_w[okc]; yy <- mv[okc]; N_tr <- sum(is.finite(col))
       fr_tr <- if (use_iter)
-        msd_fit_olsf_iterative(tt, yy, ndim = ub$ndim, R = 0, dt_cycle = t_c_e, N = N_tr)
+        msd_fit_olsf_iterative(tt, yy, ndim = ub$ndim, R = 0, dt_cycle = t_c_e, N = N_tr,
+                               coef_override = ub$coef_eff)
       else
         msd_fit_olsf(tt, yy, rep(1L, length(tt)), k = length(tt), ndim = ub$ndim,
-                     auto_pmin = TRUE, R = 0, Npts = N_tr, dt_cycle = t_c_e)
+                     auto_pmin = TRUE, R = 0, Npts = N_tr, dt_cycle = t_c_e,
+                     coef_override = ub$coef_eff)
       if (is.null(fr_tr) || !is.finite(fr_tr$D) || fr_tr$D <= 0) return(NULL)
       # Confinement index: actual MSD growth vs the free-diffusion expectation,
       # using the median of the first/last 15% of the windowed bins (robust to a
@@ -6418,9 +6761,11 @@ tracking_server <- function(input, output, session) {
       eD <- if (sum(winc) >= 3L) {
         frc <- tryCatch(
           if (use_iter) msd_fit_olsf_iterative(tau_sel[winc], emsd[winc], ndim = ub$ndim,
-                                               R = 0, dt_cycle = ub$t_cycle, N = sum(winc))
+                                               R = 0, dt_cycle = ub$t_cycle, N = sum(winc),
+                                               coef_override = ub$coef_eff)
           else msd_fit_olsf(tau_sel[winc], emsd[winc], rep(1L, sum(winc)), k = sum(winc),
-                            ndim = ub$ndim, auto_pmin = TRUE, R = 0, Npts = 1e4, dt_cycle = ub$t_cycle),
+                            ndim = ub$ndim, auto_pmin = TRUE, R = 0, Npts = 1e4,
+                            dt_cycle = ub$t_cycle, coef_override = ub$coef_eff),
           error = function(e) NULL)
         if (!is.null(frc) && is.finite(frc$D)) frc$D / 1e3 else NA_real_
       } else NA_real_
@@ -6502,13 +6847,31 @@ tracking_server <- function(input, output, session) {
       okq <- is.finite(q25) & is.finite(q75)
       if (any(okq)) fig <- fig %>% add_trace(
         x = c(tau[okq], rev(tau[okq])), y = c(q75[okq], rev(q25[okq])),
-        type = "scatter", mode = "none", fill = "toself",
-        fillcolor = "rgba(70,130,200,0.18)", line = list(color = "transparent"),
-        name = "IQR", showlegend = TRUE)
+        # mode = "lines" with a transparent line, NOT mode = "none": passing a line
+        # object with mode="none" makes plotly print "A line object has been specified,
+        # but lines is not in the mode / Adding lines to the mode..." to the console.
+        type = "scatter", mode = "lines", fill = "toself",
+        fillcolor = "rgba(70,130,200,0.18)",
+        line = list(color = "rgba(0,0,0,0)", width = 0),
+        hoverinfo = "skip", name = "IQR", showlegend = TRUE)
     }
     fig <- fig %>% add_trace(x = tau, y = msd, type = "scatter", mode = "lines+markers",
         marker = list(size = 5, color = "steelblue"), line = list(color = "steelblue", width = 2),
-        name = "Unified MSD")
+        # Name the curve for what it actually is: eMSD = mean of the per-track TAMSDs
+        # (track-weighted), otherwise the pair-weighted ensemble average.
+        name = if (isTRUE(ub$track_weighted)) "eMSD (track-weighted)"
+               else "Ensemble MSD (pair-weighted)")
+    # Free-diffusion-on-the-cell reference. Drawn in the same green as the geometry
+    # band in Displacement vs Diffusion, since it is the same idea applied to the MSD.
+    gm <- tryCatch(msd_geom_null(), error = function(e) NULL)
+    if (!is.null(gm) && nrow(gm)) {
+      gx <- if (linear_tau) gm$tau_lin else gm$tau
+      fig <- fig %>% add_trace(
+        x = gx, y = gm$msd / 1e6, type = "scatter", mode = "lines",
+        line = list(color = "#1B9E5A", width = 2, dash = "dash"),
+        name = sprintf("free on %s (%s)", attr(gm, "geom"), attr(gm, "mode")),
+        hovertemplate = "free-on-geometry<br>τ %{x:.4g} ms<br>MSD %{y:.4g} µm²<extra></extra>")
+    }
     if (!is.null(fr)) {
       # Model fit curve (from fr$tau_fit / fr$msd_fit; same for every model).
       fx <- if (!is.null(fr$tau_fit)) fr$tau_fit else seq(regime_x, max(tau), length.out = 100)
@@ -6519,7 +6882,7 @@ tracking_server <- function(input, output, session) {
       fit_name <- switch(fr$model %||% "linear",
         confined  = if (isTRUE(fr$degenerate))
                       sprintf("Confined: no plateau in window (≈linear, D=%.3g)", fr$D / 1e3)
-                    else sprintf("Confined: D=%.3g µm²/s, L=%.0f nm", fr$D / 1e3, fr$L_conf),
+                    else sprintf("Confined: D=%.3g µm²/s, L_c=%.0f nm", fr$D / 1e3, fr$L_conf),
         directed  = sprintf("Directed: D=%.3g µm²/s, v=%.3g µm/s", fr$D / 1e3, fr$v_um_s),
         anomalous = sprintf("Anomalous: D=%.3g, α=%.2f", fr$D / 1e3, fr$alpha),
         sprintf("OLSF D=%.3g µm²/s (%d pts)", fr$D / 1e3, fr$n_points %||% NA))
@@ -6568,9 +6931,12 @@ tracking_server <- function(input, output, session) {
                                "τ (ms, true mean Δt per bin)", color = fg),
                 yaxis = list(title = "MSD (µm²)", color = fg, rangemode = "tozero"),
                 paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
-                # Legend beside the plot (right), not overlaying it.
-                legend = list(font = list(color = fg, size = 10)),
-                margin = list(l = 55, r = 10, t = 10, b = 45),
+                # Legend BELOW the plot: the right-hand side is occupied by the N(τ)
+                # axis, and plotly's default right-hand legend sits on top of it.
+                legend = list(font = list(color = fg, size = 10),
+                              orientation = "h", x = 0, xanchor = "left",
+                              y = -0.34, yanchor = "top"),
+                margin = list(l = 55, r = 60, t = 10, b = 110),
                 shapes = regime_shapes, uirevision = "msd_unified")
     if (is.finite(regime) && regime > 0)
       lay$annotations <- list(list(
@@ -6637,24 +7003,7 @@ tracking_server <- function(input, output, session) {
       stats::median(ratio[keep & is.finite(ratio) &
                           lag >= stats::quantile(kl, 0.90, names = FALSE)], na.rm = TRUE)
     else NA_real_
-    # ── Is t_c right? Bound the plateau, don't test for flatness. ───────────────
-    # A tempting check is "has the ratio flattened?" — but that DOESN'T work: a wrong
-    # t_c shifts the plateau LEVEL while the curve still flattens perfectly (simulated
-    # t_c 0.46/0.54/0.60 against a true 0.50 all flatten, top-half drift < 0.05%).
-    # What a wrong t_c does move is the level, and the level is bounded. With
-    # ratio(k) = (k·t_c + m·SW)/(k·t_c + SW) and m ∈ [1, k], a CORRECT t_c must give
-    #     1  ≤  plateau  ≤  1 + SW/t_c
-    # (floor at m=1, ceiling when every step is integrated). Outside that range the
-    # cycle time itself is wrong: BELOW 1 ⇒ t_c too large, ABOVE the ceiling ⇒ too
-    # small. Recover SW from the axis itself (tau_lin[1] = 1·t_c + SW).
-    # Verified against a true t_c of 0.50 with SW 0.08 (so ceiling 1.160):
-    #   0.50 → 1.103 ok ✓ (no false positive on the right answer — the key property)
-    #   0.40 → 1.214 vs ceiling 1.200  caught ✓      0.46 → 1.195 vs 1.174  caught ✓
-    #   0.60 → 0.978 below the floor   caught ✓
-    #   0.54 → 1.023  MISSED           0.70 → 1.024  MISSED
-    # So UNDER-estimated t_c is caught reliably, while OVER-estimated is caught only in
-    # a window — past it the per-step rounding redistributes and pushes the plateau back
-    # inside the band. This is a one-sided sanity bound, NOT a cycle-time estimator; the
+   
     # UI says so. Use the TSA / cycle-time panel to actually determine t_c.
     sw_eff  <- if (length(ub$tau_lin) && is.finite(ub$tau_lin[1]) && is.finite(tc))
                  ub$tau_lin[1] - tc else NA_real_
@@ -6730,17 +7079,16 @@ tracking_server <- function(input, output, session) {
       if (is.finite(mean_ratio))
         tags$div(
           tags$b("Linearized vs real-Δt axis: "),
-          sprintf("real Δt averages %+.1f%% vs the linearized axis (lag × cycle + SW, Vogler's T_LIN) over the fit window. ", bias_pct),
+          sprintf("real Δt averages %+.1f%% vs the linearized axis (lag × cycle + SW) over the fit window. ", bias_pct),
           if (is.finite(bias_pct) && abs(bias_pct) > 1)
             tags$span(
               "Both axes carry one SW, so they coincide at lag 1; real Δt then pulls ahead because it accrues an SW ",
               tags$b("per step"), " while the linearized axis charges it once. This shifts ", tags$b("absolute"),
               " D by about that much between the two, but ", tags$b("cancels for relative A-vs-B comparisons"), ". ",
               if (linear_tau)
-                "You are on Béla's linearized axis — the published, validated convention (his exact T_LIN = k·t_c + SW); keep it. "
+                "The linearized axis is in use. It is the published convention (Vogler et al. 2025) and the one absolute D was validated against. "
               else
-                "You are on the real-Δt axis (literal elapsed time per bin) — an exploratory cross-check, not Béla's method. ",
-              "Béla validated absolute D on the linearized axis, so treat it as the reference and real-Δt as the cross-check.")
+                "The real-Δt axis is in use — literal elapsed time per bin. This is a cross-check; the linearized axis (Vogler et al. 2025) is the published convention and the reference for absolute D. ")
           else tags$span(style = "color:#3a7d3a;", "The two axes agree here (overhead negligible) — the choice doesn't matter.")),
       if (is.finite(d$trust_lag))
         tags$div(style = "margin-top:2px;",
@@ -6778,12 +7126,24 @@ tracking_server <- function(input, output, session) {
     )
   })
 
-  # Cache the unified MSD's σ_loc (from the OLSF intercept) whenever it recomputes,
-  # so the D-map and other short-lag tools can use it as the noise floor.
+  # Cache the unified MSD's σ_loc (the LINEAR OLSF intercept — never a non-linear
+  # model's offset, which is not separable) as the FALLBACK noise floor, used only when
+  # neither a manual value nor the CVE estimate is available.
+  #
+  # This intercept is an extrapolation of the fit window back to τ = 0, so it absorbs
+  # anything that is not linear-in-τ at short lags, not just localization noise. On
+  # confined or otherwise bending data it therefore reads HIGH — simulated confined
+  # tracks with a true σ_loc of 2.4 nm returned 3.7 nm from the linear intercept. The
+  # CVE estimate is model-free (it reads the anti-correlation of consecutive steps,
+  # which is a pure noise signature) and is preferred wherever available; that ordering
+  # is enforced in trk_sigma_loc_eff.
+  #
+  # Require strictly > 0: a fit whose intercept collapses to exactly zero has not
+  # measured anything, and caching 0 would silently disable every noise correction.
   observeEvent(msd_unified_bundle(), {
     ub <- tryCatch(msd_unified_bundle(), error = function(e) NULL); if (is.null(ub)) return()
     fr <- tryCatch(msd_unified_fit(ub), error = function(e) NULL)
-    if (!is.null(fr) && is.finite(fr$sigma_loc) && fr$sigma_loc >= 0)
+    if (!is.null(fr) && is.finite(fr$sigma_loc) && fr$sigma_loc > 0)
       trk_sigma_loc_rv(fr$sigma_loc)
   }, ignoreInit = TRUE)
 
@@ -6841,10 +7201,23 @@ tracking_server <- function(input, output, session) {
     eD_ci <- if (!is.null(eb) && is.finite(eb$lo)) sprintf(" (95%% CI %.3g–%.3g)", eb$lo, eb$hi) else ""
     sig_eff <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)   # noise floor for sanity flags
     ergo  <- if (is.finite(tDIFF) && is.finite(fr$D) && fr$D > 0) tDIFF / (fr$D / 1e3) else NA_real_
+    # Say which MSD-to-D relation is in force whenever it is not the plain one, since
+    # it scales D directly.
+    dof_note <- {
+      de <- ub$d_eff %||% ub$ndim
+      if (abs(de - ub$ndim) > 1e-9)
+        htmltools::div(style = "color:#555; font-size:0.86em; margin-top:2px;",
+          htmltools::HTML(sprintf(
+            "Restricted motion: MSD = %.4g·D·τ (d<sub>eff</sub> = %.4g) on %dD coordinates%s. Reading it as %dD motion would report D a factor %.3g too low.",
+            ub$coef_eff, de, ub$ndim,
+            if (ub$ndim == 2L) sprintf(", projected from a %s", .geom_label(input$trk_geom_type)) else "",
+            ub$ndim, de / ub$ndim)))
+      else NULL
+    }
     extra <- switch(model,
       confined  = if (isTRUE(fr$degenerate))
-                    "  |  ⚠ no plateau reached in window — L unconstrained (MSD still rising; lengthen tracks / raise the upper limit, or this population isn't confined on this timescale)"
-                  else sprintf("  |  confinement L = %.0f nm%s  ·  plateau = %.3g µm²  ·  τ_c = %.3g ms",
+                    "  |  ⚠ no plateau reached in window — L_c unconstrained (MSD still rising; lengthen tracks / raise the upper limit, or this population isn't confined on this timescale)"
+                  else sprintf("  |  confinement size L_c = %.0f nm%s  ·  plateau = %.3g µm²  ·  τ_c = %.3g ms",
                                fr$L_conf,
                                if (is.finite(sig_eff) && is.finite(fr$L_conf) && fr$L_conf < 2 * sig_eff)
                                  # extra[] flows through sprintf into an escaped string, so no
@@ -6854,25 +7227,96 @@ tracking_server <- function(input, output, session) {
       directed  = {
         vnoise <- if (is.finite(sig_eff) && is.finite(ub$t_cycle) && ub$t_cycle > 0)
                     sqrt(2 * ub$ndim) * sig_eff / ub$t_cycle else NA_real_   # nm/ms = µm/s
-        sprintf("  |  velocity v = %.3g µm/s%s", fr$v_um_s,
+        sprintf("  |  velocity v = %.3g µm/s%s%s", fr$v_um_s,
                 if (is.finite(vnoise) && is.finite(fr$v_um_s) && fr$v_um_s < vnoise)
-                  sprintf(" ⚠ at/below noise floor (%.3g µm/s — consistent with noise)", vnoise) else "")
+                  sprintf(" ⚠ at/below noise floor (%.3g µm/s — consistent with noise)", vnoise) else "",
+                if (isTRUE(fr$degenerate)) " ⚠ fit did not converge — parameters not identifiable over this window" else "")
       },
-      anomalous = sprintf("  |  α = %.2f (%s)", fr$alpha,
+      anomalous = sprintf("  |  α = %.2f (%s)%s", fr$alpha,
                           if (fr$alpha < 0.9) "sub-diffusive / confined"
-                          else if (fr$alpha > 1.1) "super-diffusive / directed" else "≈ Brownian"),
+                          else if (fr$alpha > 1.1) "super-diffusive / directed" else "≈ Brownian",
+                          if (isTRUE(fr$degenerate)) " ⚠ fit did not converge — parameters not identifiable over this window" else ""),
       "")
     method_lbl <- switch(model,
       linear = if (identical(fr$method, "OLSF-iterative")) "iterative OLSF" else "anchored Michalet",
       confined = "confined model", directed = "directed model", anomalous = "anomalous model", "model")
     D_lbl <- if (identical(model, "linear")) "eDIFF (ensemble)" else "D (local, ensemble)"
+    # How much is the CELL bending the curve inside the fit window? Compares the
+    # simulated free-on-geometry MSD to a straight line at the same D over the same
+    # lags: a large shortfall means the fitted D is being pulled down by the geometry,
+    # not by biology, and the window should be shortened (or the bend interpreted as
+    # the cell).
+    geom_note <- {
+      gm <- tryCatch(msd_geom_null(), error = function(e) NULL)
+      if (is.null(gm) || !nrow(gm)) NULL else {
+        lo <- max(1L, as.integer(input$trk_uni_min_lag %||% 4L))
+        hi <- max(lo + 2L, as.integer(input$trk_uni_max_lag %||% 50L))
+        w  <- gm$lag >= lo & gm$lag <= hi
+        # Fit the SELECTED model to the simulated free-on-geometry curve, over the same
+        # window, and report what it returns. Nothing is confined, drifting or anomalous
+        # in that simulation, so whatever comes back is the shape alone — the baseline
+        # the measured parameter has to beat. This generalises the D-shortfall check to
+        # every model: on a closed shape the confined model reports a spurious corral
+        # and the anomalous model a sub-diffusive exponent, purely from the ceiling.
+        fg <- if (sum(w) < 4L) NULL else
+          tryCatch(.msd_model_fit(gm$tau[w], gm$msd[w], rep(1000L, sum(w)), ub$ndim,
+                                  model, FALSE, ub$t_cycle, coef_override = attr(gm, "coef")),
+                   error = function(e) NULL)
+        if (is.null(fg)) NULL else {
+          Dtrue <- attr(gm, "D")
+          rat   <- if (is.finite(fg$D) && Dtrue > 0) fg$D / Dtrue else NA_real_
+          # Model-specific line: what does pure geometry hand back?
+          say <- switch(model,
+            confined = if (is.finite(fg$L_conf))
+                sprintf("would itself fit as a %s of L_c &asymp; %.0f nm%s",
+                        if (isTRUE(fg$degenerate)) "non-converged corral" else "corral",
+                        fg$L_conf,
+                        if (is.finite(fr$L_conf))
+                          sprintf(", against your fitted %.0f nm", fr$L_conf) else "")
+              else NULL,
+            directed = if (is.finite(fg$v_um_s))
+                sprintf("would itself fit as v &asymp; %.3g &micro;m/s%s", fg$v_um_s,
+                        if (is.finite(fr$v_um_s)) sprintf(", against your fitted %.3g", fr$v_um_s) else "")
+              else NULL,
+            anomalous = if (is.finite(fg$alpha))
+                sprintf("would itself fit as &alpha; &asymp; %.2f%s", fg$alpha,
+                        if (is.finite(fr$alpha)) sprintf(", against your fitted %.2f", fr$alpha) else "")
+              else NULL,
+            if (is.finite(rat)) sprintf("fitted the same way returns about %.0f%% of its true D",
+                                        5 * round(100 * rat / 5)) else NULL)
+          if (is.null(say)) NULL else {
+            # Warn when the shape alone already explains most of what was measured.
+            bad <- switch(model,
+              confined  = is.finite(fg$L_conf) && is.finite(fr$L_conf) && fg$L_conf < 2 * fr$L_conf,
+              anomalous = is.finite(fg$alpha) && fg$alpha < 0.95,
+              directed  = FALSE,
+              is.finite(rat) && rat < 0.95)
+            col <- if (isTRUE(bad)) "#b26a00" else "#3a7d3a"
+            htmltools::div(style = sprintf("color:%s; font-size:0.86em; margin-top:2px;", col),
+              htmltools::HTML(sprintf(
+                "Free diffusion on this %s (%s, %s) %s &mdash; simulated, so nothing there is trapped or driven. %s",
+                attr(gm, "geom"), attr(gm, "dims"), attr(gm, "mode"), say,
+                if (isTRUE(bad))
+                  "The shape alone accounts for much of the measured value, so treat it as geometry rather than biology and shorten the upper fit limit."
+                else "The shape alone does not account for the measured value over this window.")))
+          }
+        }
+      }
+    }
     htmltools::div(style = "font-size:0.87em; color:#444; margin:6px 0;",
+      dof_note, geom_note,
       htmltools::tags$b("MSD: "),
       sprintf("%s = %.4g%s  |  tDIFF (per-track mean, n=%d) = %.4g µm²/s%s  |  ",
               D_lbl, fr$D / 1e3, eD_ci, n_tD, tDIFF, tD_ci),
       sigloc(),
-      sprintf(" = %.2f nm  |  %s  |  ergodicity = %.2f%s",
-              fr$sigma_loc, method_lbl, ergo, extra),
+      # The offset is only separable in the LINEAR model. In the non-linear models it
+      # competes with the plateau / exponent for the same part of the curve and is
+      # bounded below at zero, so it routinely collapses to exactly 0 — which is a
+      # failure to measure it, not a measurement of zero. Say so rather than print 0.00.
+      if (identical(model, "linear") || (is.finite(fr$sigma_loc) && fr$sigma_loc > 0.01))
+        sprintf(" = %.2f nm", fr$sigma_loc)
+      else " not separable in this model",
+      sprintf("  |  %s  |  ergodicity = %.2f%s", method_lbl, ergo, extra),
       htmltools::br(),
       htmltools::tags$span(style = "color:#888; font-size:0.9em;",
         sprintf("n = %d tracks%s  |  %s  |  cycle = %.4g ms  |  τ axis = %s",
@@ -6926,7 +7370,7 @@ tracking_server <- function(input, output, session) {
   #   appears one or more cycles later. This turns the raw timestamps into that
   #   cycle-level story, which is the foundation every Δt-aware estimator uses.
   #
-  #   Adapted from Béla Vogler's MINFLUX Time-Signature Analysis (MFX-TSA),
+  #   Adapted from Bela Vogler's MINFLUX Time-Signature Analysis (MFX-TSA),
   #   Vogler et al. 2025 (Commun. Biol.); reference implementation
   #   Toolbox_for_MINFLUX_SPT (cf. its `print_cycle_stats`).
   #
@@ -7657,303 +8101,219 @@ tracking_server <- function(input, output, session) {
     }
   )
 
-  # Free-diffusion null for the Rg/Rmax ratio, as a function of the number of
-  # localizations N. A confined track has a LOWER ratio than a free walk — but so
-  # does a SHORT free walk (extreme-value Rmax dominates at small N), which is why a
-  # single fixed threshold over-calls confinement on short tracks. This simulates
-  # free Gaussian walks of matching N (the ratio is scale-free, so D and Δt drop out)
-  # and returns the ratio distribution, giving an N-matched null. ndim = 2 or 3.
-  .free_walk_ratio_dist <- function(N_pos, ndim, M = 200L) {
-    if (N_pos < 3L) return(rep(NA_real_, M))
-    vapply(seq_len(M), function(i) {
-      steps <- matrix(stats::rnorm((N_pos - 1L) * ndim), N_pos - 1L, ndim)
-      cs    <- if (ndim == 1L) matrix(cumsum(steps), ncol = 1L) else apply(steps, 2, cumsum)
-      pos   <- rbind(matrix(0, 1L, ndim), cs)        # N_pos × ndim, walk starts at origin
-      d2    <- rowSums(sweep(pos, 2, colMeans(pos), "-")^2)
-      mx    <- max(d2); if (!is.finite(mx) || mx <= 0) return(NA_real_)
-      sqrt(mean(d2)) / sqrt(mx)
-    }, numeric(1))
-  }
+
+
 
   # ============================================================================
-  # conf_bundle() — CONFINEMENT (is the molecule trapped in a bounded region?)
+  # conf_ci_bundle() — PER-TRACK CONFINEMENT FROM THE MSD SHAPE (CI + simulated null)
   # ============================================================================
+  # The most sensitive per-track confinement test in the app. Uses the confinement
+  # index already computed per track by the MSD:
   #
-  # GOAL
-  #   Decide, per track, whether the molecule explored a BOUNDED region (a
-  #   corral, domain, or binding site) or wandered freely. Unlike the MSD this is
-  #   a purely SPATIAL shape test, so it is completely independent of the
-  #   irregular MINFLUX timing.
+  #     CI = (MSD_late / MSD_early) / (tau_late / tau_early)
   #
-  # THE MATH
-  #   For a track's localizations p_1..p_n with centroid p̄:
+  # WHY THIS ONE. It compares a track's own SHORT lags against its own LONG lags, so
+  # it needs no external D and cannot be biased by D varying between molecules — the
+  # confound that inflates the Displacement-vs-Diffusion split. It is not circular
+  # (short and long lags are different information) and it inherits the cycle-index
+  # binning, so irregular Δt is already handled.
   #
-  #        Rg²  = (1/n) Σ |p_i − p̄|²        radius of gyration = RMS spread
-  #        Rmax = max_i |p_i − p̄|           furthest single excursion
-  #        ratio = Rg / Rmax                 a SHAPE descriptor, scale-free
+  # WHY IT NEEDS A SIMULATED NULL. For ideal free motion CI = 1, but the OBSERVED free
+  # value is not: the 2·d·σ_loc² intercept sits on every MSD point and lifts the EARLY
+  # window more than the late one, pushing free CI below 1. How far below depends on
+  # σ_loc, D, cycle time, fit window and track length, so there is no universal
+  # threshold — the null is simulated at the data's own conditions and matched per
+  # track on localization count. Simulated free CI medians run ≈0.67–0.77 with the 5th
+  # percentile moving 0.28 → 0.63 from N=50 to N=800, which is why matching on N matters.
   #
-  #   `ratio` is dimensionless and unchanged if you scale the whole track, so it
-  #   describes the SHAPE of the cloud rather than its size:
-  #     - a bounded walk fills its domain      -> Rg close to Rmax -> HIGH ratio
-  #     - a free walk wanders to a far extreme -> Rmax >> typical  -> LOWER ratio
+  # VALIDATION (in silico, MINFLUX-like: t_c 0.191 ms, σ_loc 10 nm, D 0.2 µm²/s, N=200):
+  #   free → 7.3% confined / 89.2% free-like / 3.5% directed  (target 5/90/5)
+  #   confined L=100 nm → 89.5% detected;  L=250 nm → 25.0% detected
+  #   directed v=0.4 µm/s → NOT detected (6.2%) — see the caveat below.
   #
-  #   NOISE CORRECTION. Localization error inflates every radial distance. Its
-  #   average contribution is subtractable:
-  #
-  #        Rg²_true = Rg²_meas − d·σ² ·(1 − 1/n)
-  #
-  #   The (1 − 1/n) is because the centroid p̄ is estimated from the SAME noisy
-  #   points, which absorbs part of the noise. The same first-order term is
-  #   subtracted from Rmax².
-  #
-  # THE KEY CORRECTION (2026-07) — WHY A FIXED THRESHOLD DOES NOT WORK
-  #   `ratio` depends on the NUMBER of localizations even for a free walk (a
-  #   short walk has had less opportunity to produce an extreme excursion), so
-  #   no single cut-off can separate confined from free across track lengths.
-  #   Fix: compare each track against simulated FREE random walks with the SAME
-  #   localization count (`.free_walk_ratio_dist`, scale-free so D and Δt drop
-  #   out), and classify by where it falls in that matched null:
-  #
-  #        ratio > free 95th pct  ->  "confined"        (more compact than free)
-  #        ratio < free  5th pct  ->  "directed/escape" (more extended than free)
-  #        otherwise              ->  "free-like"
-  #
-  #   Simulation also settled the DIRECTION: a reflected-boundary (confined) walk
-  #   gives ratio ~0.60 vs ~0.53 for free, i.e. confinement is the UPPER tail.
-  #   The app's old fixed thresholds ("confined < 0.35") sat below every real
-  #   regime AND read the direction backwards; they were removed.
-  #
-  # OBJECTS IT CALLS (inputs)
-  #   trk(), trk_sigma_loc_eff(), .free_walk_ratio_dist()
-  #   inputs: trk_conf_run (Run trigger), trk_conf_min_pts, trk_conf_sub_noise,
-  #           trk_conf_naware
-  #
-  # STEP BY STEP
-  #   1. Split into tracks, keep those with enough localizations.
-  #   2. Per track compute Rg, Rmax and their ratio, subtracting the σ_loc noise
-  #      term from both when enabled.
-  #   3. Build the N-matched free-diffusion null on a grid of localization counts
-  #      (nearest-N lookup keeps the cost bounded), recording its 5th/50th/95th pct.
-  #   4. Classify each track two-tailed, and store conf_dev = how far it sits from
-  #      the free median in null half-widths (+ = confined). conf_dev drives the
-  #      plot colour and the per-track track colouring.
-  #
-  # RETURNS a data.frame, one row per track:
-  #   tid, Rg_nm, Rmax_nm, ratio, n_pts,
-  #   free_lb05 / free_med / free_ub95 ... the matched null for that track's N
-  #   more_compact, more_extended ........ the two-tailed flags
-  #   conf_dev, conf_class ............... signed deviation and label
-  #   attributes: sub_noise, sigma_loc, naware
-  #
-  # RESIDUAL CAVEATS (both conservative, i.e. they under-call confinement):
-  #   Rmax is an extreme value — the first-order σ subtraction removes its
-  #   AVERAGE inflation but not the extreme-value selection bias (no closed
-  #   form). And a genuinely confined but very slow molecule that barely explores
-  #   its domain can still read as free-like. Corroborate with the MSD plateau.
-  # ============================================================================
-  conf_bundle <- eventReactive(input$trk_conf_run, {
-    req(isTRUE(input$trk_show_conf))
-    df <- trk(); req(nrow(df) > 0)
-    min_pts <- max(4L, as.integer(input$trk_conf_min_pts))
+  # LIMITS. Detection is set by how far a free molecule would travel in the same time
+  # relative to the confinement size: the resolution floor √(2·d·D·T) is reported so a
+  # null result can be read as "no confinement below this scale" rather than "free".
+  # CI is weak for DIRECTED motion (a modest drift barely lifts the late/early ratio) —
+  # use Directionality or Speed & Transport for transport.
+  conf_ci_bundle <- eventReactive(input$trk_conf_ci_run, {
+    td <- tryCatch(trk_unified_tdiff(), error = function(e) NULL)
+    shiny::validate(shiny::need(!is.null(td) && !is.null(td$pertrack) && nrow(td$pertrack) > 0,
+      "Run the MSD first (Plot MSD) — the confinement index comes from the per-track MSD."))
+    pt <- td$pertrack
+    pt <- pt[is.finite(pt$conf_index), , drop = FALSE]
+    shiny::validate(shiny::need(nrow(pt) >= 5L, "Too few tracks with a usable confinement index."))
 
-    # Real axial data only. A placeholder all-zero z column leaves the distances
-    # unchanged but would set d = 3 in the σ_loc subtraction (over-correcting) and
-    # build a 3D free-walk null for 2D data (misclassifying confinement).
-    use_z_conf <- .has_real_z(df)
-    df <- df[is.finite(df$x) & is.finite(df$y) & (if (use_z_conf) is.finite(df$z) else TRUE), ]
-    sp <- split(df, df$tid)
-
-    # Optional σ_loc correction: localization noise inflates Rg. Measured per-axis
-    # variance = true variance + σ_loc², so Rg²_meas = Rg²_true + d·σ_loc²·(1−1/n)
-    # (d = 2 or 3; the (1−1/n) accounts for estimating the centroid from the same
-    # noisy points). Subtract it, clamped ≥ 0.
-    # Rmax is an extreme value: E[d²_meas of the argmax] ≈ d²_true + d·σ_loc²·(1−1/n),
-    # so we apply the SAME first-order subtraction to Rmax². This removes the AVERAGE
-    # noise inflation of the extreme point but NOT the extreme-value selection bias
-    # (the max is chosen partly because its noise was positive), which has no closed
-    # form — so Rmax stays mildly conservative (biased slightly high) on short tracks.
-    # No-op when σ_loc is unset.
-    d_dim     <- if (use_z_conf) 3 else 2
-    sig_loc   <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
-    sub_noise <- isTRUE(input$trk_conf_sub_noise) && is.finite(sig_loc) && sig_loc > 0
-
-    rows <- withProgress(message = "Computing confinement…", value = 0,
-      lapply(seq_along(sp), function(i) {
-      if (i %% 50L == 0L) incProgress(50 / length(sp))
-      nm <- names(sp)[i]
-      tb <- sp[[nm]]
-      if (nrow(tb) < min_pts) return(NULL)
-      cx <- mean(tb$x); cy <- mean(tb$y)
-      cz <- if (use_z_conf) mean(tb$z) else 0
-      d2 <- (tb$x - cx)^2 + (tb$y - cy)^2 + if (use_z_conf) (tb$z - cz)^2 else 0
-      noise2 <- if (sub_noise) d_dim * sig_loc^2 * (1 - 1 / nrow(tb)) else 0
-      rg2 <- mean(d2)
-      if (sub_noise) rg2 <- rg2 - noise2
-      Rg   <- sqrt(max(0, rg2))
-      Rmax <- sqrt(max(0, max(d2) - noise2))   # first-order noise-corrected extreme
-      if (!is.finite(Rmax) || Rmax == 0) return(NULL)
-      ratio <- Rg / Rmax
-      data.frame(tid = nm, Rg_nm = Rg, Rmax_nm = Rmax,
-                 ratio = ratio, n_pts = nrow(tb),
-                 stringsAsFactors = FALSE)
-    }))
-    rows <- rows[!sapply(rows, is.null)]
-    shiny::validate(shiny::need(length(rows) > 0,
-      "Too few tracks — lower 'Min points per TID'."))
-    res <- do.call(rbind, rows)
-
-    # N-matched free-diffusion null (TWO-TAILED, neutral). Simulations show a free
-    # random walk of N localizations has Rg/Rmax ≈ 0.53, a domain-CONFINED (reflected)
-    # walk ≈ 0.60 (HIGHER — it fills its bounded region), and directed/escape motion is
-    # ≤ free. So confinement is the UPPER tail, not the lower one. We therefore report
-    # each track relative to the free null at its own N, in BOTH directions, without
-    # asserting the (mis-calibrated) fixed 0.35/0.45 thresholds:
-    #   more_compact  = ratio > free 95th pct  → domain-confined / bounded
-    #   more_extended = ratio < free  5th pct  → directed / super-diffusive / escape
-    # Null simulated on an N grid (nearest-N lookup) to bound cost; it is noise-free.
-    naware <- isTRUE(input$trk_conf_naware)
-    if (naware && nrow(res) > 0) {
-      Ns    <- res$n_pts
-      uN    <- unique(Ns)
-      gridN <- if (length(uN) <= 40L) sort(uN)
-               else sort(unique(pmax(3L, round(seq(min(Ns), max(Ns), length.out = 40L)))))
-      withProgress(message = "Free-diffusion null…", value = 0, {
-        qs <- vapply(seq_along(gridN), function(j) {
-          incProgress(1 / length(gridN))
-          d <- .free_walk_ratio_dist(gridN[j], d_dim, M = 300L)
-          stats::quantile(d, c(0.05, 0.50, 0.95), na.rm = TRUE, names = FALSE)
-        }, numeric(3))
-      })
-      idx     <- pmax(1L, findInterval(Ns, gridN, all.inside = TRUE))
-      hi      <- pmin(idx + 1L, length(gridN))
-      nearest <- ifelse(abs(Ns - gridN[idx]) <= abs(Ns - gridN[hi]), idx, hi)
-      res$free_lb05  <- qs[1, nearest]
-      res$free_med   <- qs[2, nearest]
-      res$free_ub95  <- qs[3, nearest]
-      res$more_compact  <- res$ratio > res$free_ub95   # domain-confined / bounded
-      res$more_extended <- res$ratio < res$free_lb05   # directed / escape
-      # Deviation from the free-diffusion null (+ = confined, − = extended), scaled by
-      # the null half-width so it is an approximate z-score. Drives the plot colour and
-      # the per-track colour map. Class label for the summary breakdown.
-      halfw <- pmax(1e-6, (res$free_ub95 - res$free_lb05) / 2)
-      res$conf_dev   <- (res$ratio - res$free_med) / halfw
-      res$conf_class <- ifelse(res$more_compact, "confined",
-                        ifelse(res$more_extended, "extended", "free-like"))
-    } else {
-      res$free_lb05 <- NA_real_; res$free_med <- NA_real_; res$free_ub95 <- NA_real_
-      res$more_compact <- NA; res$more_extended <- NA
-      res$conf_dev <- NA_real_; res$conf_class <- NA_character_
+    df  <- trk(); t_c <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    shiny::validate(shiny::need(is.finite(t_c) && t_c > 0, "Cycle time unknown."))
+    ub  <- tryCatch(msd_unified_bundle(), error = function(e) NULL)
+    ndim <- if (!is.null(ub)) ub$ndim else 2L
+    sig <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
+    if (!is.finite(sig) || sig < 0) sig <- 0
+    b   <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
+    D_use <- if (!is.null(b) && is.finite(b$D_cve) && b$D_cve > 0) b$D_cve else {
+      dm <- stats::median(pt$D_um2_s[is.finite(pt$D_um2_s) & pt$D_um2_s > 0], na.rm = TRUE)
+      if (is.finite(dm)) dm * 1e3 else NA_real_
     }
+    shiny::validate(shiny::need(is.finite(D_use) && D_use > 0,
+      "Need a D — run Data Quality & Calibration, or the MSD."))
 
-    attr(res, "sub_noise") <- sub_noise
-    attr(res, "sigma_loc") <- if (sub_noise) sig_loc else NA_real_
-    attr(res, "naware")    <- naware
-    res
+    # Per-track localization count and the dataset's real dark-gap distribution, so the
+    # null tracks are sampled exactly like the data.
+    npts <- table(df$tid)
+    pt$n_loc <- as.integer(npts[as.character(pt$tid)])
+    pt <- pt[is.finite(pt$n_loc) & pt$n_loc >= 5L, , drop = FALSE]
+    shiny::validate(shiny::need(nrow(pt) >= 5L, "Too few tracks after matching localization counts."))
+    d2 <- df[order(df$tid, df$tim), ]
+    same <- c(FALSE, d2$tid[-1] == d2$tid[-nrow(d2)])
+    kk <- pmax(1L, as.integer(round(c(NA, diff(d2$tim))[same] / t_c)))
+    kk <- kk[is.finite(kk) & kk >= 1L]
+    gap_p <- if (length(kk) > 50L) { tb <- tabulate(pmin(kk, 15L), nbins = 15L); tb / sum(tb) }
+             else c(0.55, 0.22, 0.09, 0.05, 0.04, 0.05)
+
+    min_lag <- max(1L, as.integer(input$trk_uni_min_lag %||% 4L))
+    max_lag <- max(min_lag + 2L, as.integer(input$trk_uni_max_lag %||% 50L))
+    Ns <- pt$n_loc
+    grid <- if (length(unique(Ns)) <= 8L) sort(unique(Ns))
+            else sort(unique(pmax(5L, round(stats::quantile(Ns, seq(0, 1, length.out = 8L),
+                                                            names = FALSE)))))
+    nsim <- max(50L, min(500L, as.integer(input$trk_conf_ci_nsim %||% 200L)))
+
+    # ── D grid ────────────────────────────────────────────────────────────────
+    # The free CI depends on x = σ_loc²/(D·t_c), so the null is matched on each
+    # track's OWN D as well as its length — otherwise the slow half of a
+    # heterogeneous population is measured against a null built for the fast half and
+    # comes out "confined". The grid collapses to a single point (the cheap path, and
+    # identical to matching on N alone) when that dependence cannot bite: either the
+    # noise is negligible at the fastest tracks, or the per-track D barely varies.
+    Dtr <- pt$D_um2_s * 1e3                       # per-track D, nm²/ms
+    ok_D <- is.finite(Dtr) & Dtr > 0
+    Dtr[!ok_D] <- D_use
+    x_of <- function(D) if (sig > 0) sig^2 / (D * t_c) else 0
+    D_rng <- if (any(ok_D)) stats::quantile(Dtr[ok_D], c(0.05, 0.95), names = FALSE)
+             else c(D_use, D_use)
+    needs_D_grid <- sig > 0 && is.finite(D_rng[1]) && D_rng[1] > 0 &&
+                    x_of(D_rng[2]) > 0.3 &&        # noise matters somewhere
+                    (D_rng[2] / D_rng[1]) > 2      # and D actually varies
+    D_grid <- if (needs_D_grid)
+                exp(seq(log(D_rng[1]), log(D_rng[2]), length.out = 4L))
+              else D_use
+    ncell <- length(grid) * length(D_grid)
+    nul <- withProgress(message = "Simulating free-CI null…", value = 0,
+      sim_free_ci_null(grid, D_grid = D_grid, n_sim = nsim, t_c = t_c, sigma = sig,
+                       ndim = ndim, gap_p = gap_p, min_lag = min_lag, max_lag = max_lag,
+                       progress = function(f) incProgress(1 / ncell)))
+    # nearest cell in (log N, log D)
+    idx <- vapply(seq_len(nrow(pt)), function(i) {
+      which.min((log(nul$n) - log(Ns[i]))^2 + (log(nul$D) - log(Dtr[i]))^2)
+    }, integer(1))
+    pt$null_D  <- nul$D[idx]
+    pt$ci_lo05 <- nul$lo05[idx]; pt$ci_med <- nul$med[idx]; pt$ci_hi95 <- nul$hi95[idx]
+    pt$ci_class <- ifelse(pt$conf_index < pt$ci_lo05, "confined",
+                   ifelse(pt$conf_index > pt$ci_hi95, "directed", "free-like"))
+    # Resolution floor: how far a free molecule travels over the median track duration.
+    durs <- tapply(df$tim, df$tid, function(v) diff(range(v)))
+    T_med <- stats::median(as.numeric(durs), na.rm = TRUE)
+    attr(pt, "resolv") <- sqrt(2 * ndim * D_use * T_med)
+    attr(pt, "D_use") <- D_use; attr(pt, "sigma") <- sig
+    attr(pt, "T_med") <- T_med; attr(pt, "null") <- nul; attr(pt, "nsim") <- nsim
+    attr(pt, "D_matched") <- length(D_grid) > 1L
+    attr(pt, "x_noise") <- x_of(D_use)
+    pt
   })
 
-  output$trk_conf_plot <- renderPlotly({
-    res  <- conf_bundle()
-    dark <- isTRUE(isolate(input$trk_dark_mode))
-    bg_col <- if (dark) "#000000" else "#FFFFFF"
-    fg_col <- if (dark) "#FFFFFF" else "#333333"
-
-    # Colour by deviation from the N-matched free-diffusion null: RED = more compact
-    # than free (confined), BLUE = more extended (directed/escape), GREY = free-like.
-    # (Higher Rg/Rmax than matched free walks = confined \u2014 the physically-correct
-    # direction; the old fixed 0.35/0.45 reading was inverted.)
-    have_dev <- "conf_dev" %in% names(res) && any(is.finite(res$conf_dev))
-    cvar  <- if (have_dev) res$conf_dev else (res$ratio - stats::median(res$ratio, na.rm = TRUE))
-    clim  <- max(0.5, stats::quantile(abs(cvar), 0.95, na.rm = TRUE))
-    cls   <- if (have_dev) res$conf_class else rep("", nrow(res))
-    plot_ly(res,
-      x = ~Rmax_nm, y = ~Rg_nm,
-      marker = list(size = 6, opacity = 0.78,
-                    color = cvar, cmin = -clim, cmax = clim,
-                    colorscale = list(c(0, "#3060C0"), c(0.5, "#B8B8B8"), c(1, "#C03030")),
-                    colorbar = list(title = "confined \u2192<br>\u2190 extended", len = 0.6)),
-      text  = ~sprintf("TID: %s<br>R\u2092: %.1f nm<br>R\u2098\u2090\u02E3: %.1f nm<br>ratio: %.3f<br>n: %d<br>%s",
-                       tid, Rg_nm, Rmax_nm, ratio, n_pts, cls),
-      hovertemplate = "%{text}<extra></extra>",
-      type = "scatter", mode = "markers"
-    ) %>% layout(
-      xaxis  = list(title = "R\u2098\u2090\u02E3 (nm)", color = fg_col),
-      yaxis  = list(title = "R\u2092 (nm)",              color = fg_col),
-      paper_bgcolor = bg_col, plot_bgcolor = bg_col,
-      font = list(color = fg_col),
-      annotations = list(list(
-        text = "vs N-matched free null:  higher R\u2092/R\u2098\u2090\u02E3 = confined (red)  |  lower = directed/escape (blue)",
-        xref = "paper", yref = "paper", x = 0.5, y = 1.06,
-        showarrow = FALSE, font = list(size = 10.5, color = fg_col)
-      )),
-      uirevision = "conf"
-    )
+  output$trk_conf_ci_summary <- renderUI({
+    req(isTRUE(input$trk_show_conf))
+    pt <- tryCatch(conf_ci_bundle(), error = function(e) NULL)
+    if (is.null(pt) || !nrow(pt)) return(NULL)
+    f_c <- mean(pt$ci_class == "confined"); f_f <- mean(pt$ci_class == "free-like")
+    f_d <- mean(pt$ci_class == "directed")
+    rv2 <- attr(pt, "resolv")
+    tags$div(style = "font-size:0.9em; margin:6px 0; padding:6px 8px; border-left:3px solid #1a8a1a; background:rgba(26,138,26,0.05);",
+      tags$b("MSD confinement index vs a simulated free null"), tags$br(),
+      tags$b(style = "color:#1a8a1a; font-size:1.02em;",
+        sprintf("Confined %.0f%%  ·  free-like %.0f%%  ·  directed %.0f%%",
+                100 * f_c, 100 * f_f, 100 * f_d)),
+      tags$div(style = "color:#666; margin-top:2px;",
+        sprintf("n = %d tracks · null simulated from this dataset: σ_loc = %.2f nm, D = %.3g µm²/s, cycle time and dark-gap pattern as measured, %d free tracks per grid point. Matched per track on localization count%s.",
+                nrow(pt), attr(pt, "sigma"), attr(pt, "D_use") / 1e3, attr(pt, "nsim"),
+                if (isTRUE(attr(pt, "D_matched"))) " and on each track's own D" else "")),
+      if (isTRUE(attr(pt, "D_matched")))
+        tags$div(style = "color:#666; margin-top:2px;",
+          "Per-track D varies enough here, relative to the localization noise, to move the free range — so the null is matched on D as well as length. Without that, slower molecules would be judged against a null built for the faster ones and read as confined.")
+      else NULL,
+      tags$div(style = "color:#666; margin-top:2px;",
+        sprintf("Resolution floor: a free molecule covers ~%.0f nm in the median track (%.1f ms). Confinement LARGER than this cannot be seen — a low confined %% means \"nothing confined below ~%.0f nm\", not \"free\".",
+                rv2, attr(pt, "T_med"), rv2)),
+      tags$div(style = "color:#888; margin-top:2px;",
+        "Each tail holds ~5% of free tracks by construction. This test is sensitive to confinement but ",
+        tags$b("weak for directed motion"), " — use Directionality or Speed & Transport for transport."))
   })
 
-  output$trk_conf_summary <- renderUI({
-    res <- conf_bundle()
-    rc <- .mean_ci(res$ratio)                       # track-level median/IQR + mean 95% CI
-    med_ratio <- rc$median
-    ci_note <- if (is.finite(rc$q1))
-      tags$span(style = "color:#555;", sprintf("  |  IQR %.3f–%.3f", rc$q1, rc$q3))
-    else NULL
-    corr_note <- if (isTRUE(attr(res, "sub_noise")))
-      tags$span(style = "color:#888;", "  |  Rg & Rmax ", sigloc(), "-corrected (", sigloc(),
-        sprintf(" = %.2f nm)", attr(res, "sigma_loc")))
-    else
-      tags$span(style = "color:#888;", "  |  not noise-corrected (set ", sigloc(), " to enable)")
-    # PRIMARY result: the N-matched free-diffusion classification (physically-correct
-    # direction — confined = HIGHER Rg/Rmax than matched free walks).
-    primary <- if (isTRUE(attr(res, "naware")) && any(!is.na(res$more_compact))) {
-      pct_cmp <- mean(res$more_compact,  na.rm = TRUE) * 100
-      pct_ext <- mean(res$more_extended, na.rm = TRUE) * 100
-      pct_fre <- max(0, 100 - pct_cmp - pct_ext)
-      tags$div(style = "margin-top:2px;",
-        tags$b(style = "color:#1a8a1a; font-size:1.02em;",
-          sprintf("Confined %.0f%%  ·  free-like %.0f%%  ·  directed/escape %.0f%%",
-                  pct_cmp, pct_fre, pct_ext)),
-        tags$div(style = "color:#666; margin-top:1px;",
-          "vs an N-matched free-diffusion null: confined = Rg/Rmax above the free 95th pct at that localization count; directed/escape = below the 5th. Removes the track-length confound."))
-    } else
-      tags$div(style = "color:#b26a00; margin-top:2px;",
-        "Enable the N-matched free-diffusion test for the confinement call — the raw Rg/Rmax ratio alone is track-length-dependent, not a reliable confinement measure.")
-    tags$div(style = "font-size:0.88em; margin:4px 0;",
-      primary,
-      tags$div(style = "color:#888; margin-top:3px;",
-        tags$b(sprintf("n = %d tracks", nrow(res))),
-        tags$span(sprintf("  |  median R\u2092/R\u2098\u2090\u02E3 = %.3f", med_ratio)),
-        ci_note, corr_note)
-    )
-  })
-
-  output$trk_dl_conf_csv <- downloadHandler(
-    filename = function() paste0("confinement_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content  = function(file) write.csv(conf_bundle(), file, row.names = FALSE)
+  output$trk_dl_conf_ci_csv <- downloadHandler(
+    filename = function() paste0("confinement_index_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) write.csv(conf_ci_bundle(), file, row.names = FALSE)
   )
 
-  # Observer: keep conf_color_map_stored in sync with confinement results.
-  # Runs BEFORE the fire_frames observer so frames_store sees the fresh map.
-  observe({
-    if (!isTRUE(input$trk_conf_color_tracks)) {
-      conf_color_map_stored(NULL)
-      return()
+  # CI against localization count, with the simulated free band behind it. Plotting
+  # against N makes the N-matching visible: the band narrows as tracks get longer,
+  # which is exactly why a single fixed threshold would be wrong.
+  output$trk_conf_ci_plot <- renderPlotly({
+    req(isTRUE(input$trk_show_conf))
+    pt <- tryCatch(conf_ci_bundle(), error = function(e) NULL)
+    shiny::validate(shiny::need(!is.null(pt) && nrow(pt) > 0,
+      "Run the MSD, then click 'Run confinement index'."))
+    dark <- isTRUE(isolate(input$trk_dark_mode))
+    bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
+    nul <- attr(pt, "null")
+    # When the null is matched on D too there is a band per D value; show the one
+    # nearest the ensemble D so the plot stays a single readable band.
+    if (!is.null(nul) && length(unique(nul$D)) > 1L) {
+      Dref <- unique(nul$D)[which.min(abs(log(unique(nul$D)) - log(attr(pt, "D_use"))))]
+      nul <- nul[nul$D == Dref, , drop = FALSE]
     }
-    res <- conf_bundle()
-    if (is.null(res) || nrow(res) == 0) { conf_color_map_stored(NULL); return() }
-    # Colour by deviation from the N-matched free-diffusion null: RED = confined
-    # (higher Rg/Rmax than matched free walks), BLUE = directed/extended. Falls back
-    # to a corrected raw-ratio direction (high = confined = red) when the null is off.
-    ramp <- colorRamp(c("#3060C0", "#B8B8B8", "#C03030"))   # blue(extended)→grey→red(confined)
-    if ("conf_dev" %in% names(res) && any(is.finite(res$conf_dev))) {
-      clim <- max(0.5, stats::quantile(abs(res$conf_dev), 0.95, na.rm = TRUE))
-      t01  <- pmax(0, pmin(1, (res$conf_dev + clim) / (2 * clim)))
-    } else {
-      t01  <- pmax(0, pmin(1, res$ratio))                  # high ratio → red (confined)
+    cols <- c(confined = "#2c7fb8", `free-like` = "#9e9e9e", directed = "#e31a1c")
+    fig <- plot_ly()
+    if (!is.null(nul) && nrow(nul) > 1) {
+      o <- order(nul$n)
+      fig <- fig %>%
+        add_trace(x = nul$n[o], y = nul$hi95[o], type = "scatter", mode = "lines",
+                  line = list(color = "rgba(120,120,120,0)"), showlegend = FALSE,
+                  hoverinfo = "skip") %>%
+        add_trace(x = nul$n[o], y = nul$lo05[o], type = "scatter", mode = "lines",
+                  fill = "tonexty", fillcolor = "rgba(150,150,150,0.18)",
+                  line = list(color = "rgba(120,120,120,0)"),
+                  name = if (isTRUE(attr(pt, "D_matched")))
+                           "free 5–95% (at the ensemble D)" else "free 5–95% (simulated)",
+                  hoverinfo = "skip") %>%
+        add_trace(x = nul$n[o], y = nul$med[o], type = "scatter", mode = "lines",
+                  line = list(color = "#888", dash = "dash", width = 2),
+                  name = "free median", hoverinfo = "skip")
     }
-    t01[!is.finite(t01)] <- 0.5
-    rgb_mat  <- ramp(t01)
-    hex_cols <- rgb(rgb_mat[, 1], rgb_mat[, 2], rgb_mat[, 3], maxColorValue = 255)
-    conf_color_map_stored(setNames(hex_cols, as.character(res$tid)))
+    for (cl in names(cols)) {
+      idx <- pt$ci_class == cl
+      if (!any(idx)) next
+      fig <- fig %>% add_trace(
+        x = pt$n_loc[idx], y = pt$conf_index[idx], type = "scatter", mode = "markers",
+        marker = list(size = 6, color = cols[[cl]], opacity = 0.75,
+                      line = list(width = 0.3, color = "rgba(0,0,0,0.3)")),
+        name = sprintf("%s (%d)", cl, sum(idx)),
+        text = sprintf("TID %s<br>%d locs · CI %.3f<br>%s",
+                       pt$tid[idx], pt$n_loc[idx], pt$conf_index[idx], cl),
+        hovertemplate = "%{text}<extra></extra>")
+    }
+    fig %>% layout(
+      xaxis = list(title = "localizations in track", color = fg, type = "log"),
+      yaxis = list(title = "confinement index (CI)", color = fg),
+      paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
+      legend = list(font = list(color = fg, size = 10), orientation = "h",
+                    x = 0, xanchor = "left", y = -0.34, yanchor = "top"),
+      margin = list(l = 55, r = 20, t = 10, b = 110),
+      uirevision = "conf_ci")
   })
+
+
+
 
   # ============================================================================
   # trk_disp_bundle() — NET DISPLACEMENT vs DIFFUSION  (Step 1 of the geometry test)
@@ -7987,6 +8347,27 @@ tracking_server <- function(input, output, session) {
     use3d <- (identical(dmode, "auto") && z_has) || identical(dmode, "3d")
     if (use3d && !z_has) use3d <- FALSE                       # asked for 3D but no z signal
     d_obs <- if (use3d) 3L else 2L
+    # ── Degrees of freedom of the MOTION vs of the OBSERVATION ─────────────────
+    # d_obs is how many coordinates are recorded; d_mot is how many the molecule can
+    # actually move in. They differ for a molecule confined to a SURFACE (a membrane,
+    # a cell envelope) but tracked in 3D: 2 DOF observed on 3 axes.
+    # Two consequences, both handled here:
+    #   1. A per-axis estimator (CVE, or MSD with ndim = 3) spreads 2-DOF motion over
+    #      3 axes, so it reports D_meas = D_true · d_mot/d_obs — exactly 2/3 for a
+    #      surface in 3D (simulated: 0.675). Undo it: D_mot = D_meas · d_obs/d_mot.
+    #   2. R_net² follows χ² with d_mot degrees of freedom, not d_obs.
+    # Getting (1) right but not (2) leaves the MEAN correct while the BAND is the wrong
+    # shape: on simulated free-on-surface data the old d_obs-only form gave
+    # 11.4% sub / 81.4% free / 7.2% super instead of 5/90/5; with d_mot it gives
+    # 5.2/90.0/4.8. When d_mot == d_obs (2D data, or true volume diffusion) both terms
+    # cancel and this reduces exactly to the previous expression.
+    # Degrees of freedom of the motion, from the shared Sample geometry setting.
+    d_mot <- {
+      mo <- input$trk_motion %||% "volume"
+      if (identical(mo, "filament")) 1L
+      else if (identical(mo, "surface")) min(2L, d_obs)
+      else d_obs
+    }
 
     keep <- is.finite(df$x) & is.finite(df$y) & is.finite(df$tim) &
             (if (use3d) is.finite(df$z) else TRUE)
@@ -8012,6 +8393,10 @@ tracking_server <- function(input, output, session) {
     D_man <- suppressWarnings(as.numeric(input$trk_disp_dman %||% NA_real_)) * 1e3  # µm²/s → nm²/ms
     D_use <- switch(dsrc, msd = D_msd, manual = D_man, D_cve)
     d_lab <- switch(dsrc, msd = "MSD fit", manual = "manual", "CVE")
+    # In-plane (motion) D. CVE and the MSD fit are per-axis over d_obs recorded axes, so
+    # for 2-DOF motion tracked in 3D they read low by d_mot/d_obs and are rescaled here.
+    # A MANUAL D is taken to be the true motion D already, so it is passed through.
+    D_mot <- if (identical(dsrc, "manual")) D_use else D_use * d_obs / d_mot
     shiny::validate(shiny::need(is.finite(D_use) && D_use > 0, switch(dsrc,
       msd    = "No MSD D yet — press Plot MSD in the MSD panel (or switch the D source to CVE).",
       manual = "Enter a positive D (µm²/s) for the manual D source.",
@@ -8033,7 +8418,9 @@ tracking_server <- function(input, output, session) {
         ex2  <- (tb$x - tb$x[1])^2 + (tb$y - tb$y[1])^2 + if (use3d) (tb$z - tb$z[1])^2 else 0
         Rmax <- sqrt(max(0, max(ex2) - noise2))
         pl   <- sum(sqrt(diff(tb$x)^2 + diff(tb$y)^2 + if (use3d) diff(tb$z)^2 else 0))
-        free_rms <- sqrt(2 * d_obs * D_use * T_ms)            # √(4DT) in 2D, √(6DT) in 3D
+        # ⟨R_net²⟩ = 2·d_mot·D_mot·T. With d_mot = d_obs this is √(4DT) in 2D and
+        # √(6DT) in 3D; for a surface tracked in 3D it becomes √(4·D_mot·T).
+        free_rms <- sqrt(2 * d_mot * D_mot * T_ms)
         data.frame(tid = names(sp)[i], n_pts = ne, dur_ms = T_ms,
                    Rnet_nm = Rnet, Rmax_nm = Rmax, path_nm = pl,
                    free_rms_nm = free_rms,
@@ -8045,22 +8432,42 @@ tracking_server <- function(input, output, session) {
     res <- do.call(rbind, rows)
 
     # Per-track free (infinite-plane) 5/95 band and two-tailed classification. R_net² for
-    # free diffusion is 2DT·χ²(d_obs), so the band unifies as √(2DT·qchisq(p, d_obs))
-    # (Rayleigh in 2D, Maxwell in 3D).
-    sc2 <- 2 * D_use * res$dur_ms
-    res$free_lo05 <- sqrt(sc2 * stats::qchisq(0.05, d_obs))
-    res$free_hi95 <- sqrt(sc2 * stats::qchisq(0.95, d_obs))
+    # free diffusion is 2·D_mot·T·χ²(d_mot) — the χ² degrees of freedom follow the MOTION,
+    # not the number of recorded coordinates (see the d_mot note above).
+    sc2 <- 2 * D_mot * res$dur_ms
+    res$free_lo05 <- sqrt(sc2 * stats::qchisq(0.05, d_mot))
+    res$free_hi95 <- sqrt(sc2 * stats::qchisq(0.95, d_mot))
     res$class <- ifelse(res$Rnet_nm < res$free_lo05, "sub-diffusive",
                  ifelse(res$Rnet_nm > res$free_hi95, "super-diffusive", "free-consistent"))
     # Self-contained columns so the CSV carries everything Step 2 needs.
     res$D_ens_um2_s  <- D_use / 1e3
+    res$D_motion_um2_s <- D_mot / 1e3
     res$sigma_loc_nm <- if (is.finite(sig)) sig else NA_real_
     res$dims         <- d_obs
+    res$motion_dof   <- d_mot
     res$D_source     <- d_lab
     attr(res, "D_use") <- D_use; attr(res, "sigma") <- sig; attr(res, "d_obs") <- d_obs
+    attr(res, "d_mot") <- d_mot; attr(res, "D_mot") <- D_mot
     attr(res, "d_lab") <- d_lab
     attr(res, "D_cve") <- D_cve; attr(res, "D_msd") <- D_msd
     res
+  })
+
+  # Echo the shared geometry inside the displacement panel, so the Step-2 band states
+  # which shape it is using without owning a second copy of the control.
+  output$trk_disp_geom_echo <- renderUI({
+    g <- input$trk_geom_type %||% "none"
+    params <- list(R = input$trk_disp_R, r = input$trk_disp_r, Lcyl = input$trk_disp_L,
+                   a = input$trk_disp_a, b = input$trk_disp_b, c = input$trk_disp_c,
+                   mtilt = input$trk_disp_mtilt)
+    dims <- tryCatch(.disp_geom_dims(.geom_for_null(g), params), error = function(e) "")
+    htmltools::div(style = "font-size:0.85em; margin:2px 0 4px;",
+      htmltools::tags$b("Geometry: "), .geom_label(g),
+      if (nzchar(dims)) htmltools::span(style = "color:#666;", sprintf("  (%s)", dims)) else NULL,
+      if (identical(.geom_for_null(g), "free"))
+        htmltools::div(style = "color:#b26a00;",
+          "No bounding shape — this band matches the unbounded null above. Set a shape in Sample geometry to test against a closed cell.")
+      else NULL)
   })
 
   # ── Step 2: GEOMETRY-AWARE free null (free diffusion ON the chosen geometry) ───────
@@ -8083,7 +8490,7 @@ tracking_server <- function(input, output, session) {
     if (!isTRUE(input$trk_disp_geom)) return(NULL)
     res <- trk_disp_bundle(); req(nrow(res) > 0)
     D_use <- attr(res, "D_use")
-    geom  <- input$trk_disp_geom_type %||% "rod"
+    geom  <- .geom_for_null(input$trk_geom_type %||% "none")
     params <- list(
       R    = max(1, as.numeric(input$trk_disp_R    %||% 500)),
       r    = max(1, as.numeric(input$trk_disp_r    %||% 400)),
@@ -8095,26 +8502,62 @@ tracking_server <- function(input, output, session) {
     cyc   <- tryCatch(isolate(trk_cycle_time()), error = function(e) NA_real_)
     if (!is.finite(cyc) || cyc <= 0) cyc <- stats::median(diff(sort(res$dur_ms))) # crude fallback
     if (!is.finite(cyc) || cyc <= 0) return(NULL)
-    # Match the real DURATION distribution (R_net depends on T); cap at the 98th pct so a
-    # rare very-long track can't blow up the per-cycle loop, and resample to a stable pool.
-    dcap <- stats::quantile(res$dur_ms, 0.98, na.rm = TRUE)
-    durs <- pmin(sample(res$dur_ms, 4000L, replace = TRUE), dcap)
+    # Match the real DURATION distribution (R_net depends on T) over its FULL range.
+    # This used to be truncated at the 98th percentile to bound the per-cycle loop, which
+    # left the longest tracks — the ones carrying the most information about confinement —
+    # judged against a flat-extrapolated band. Cost scales with the number of simulation
+    # steps (longest duration / step), so instead of dropping those tracks the SIMULATION
+    # STEP is coarsened: Brownian statistics are step-size invariant, so a larger step with
+    # SD = √(2·D·dt) gives the same R_net distribution provided the step stays small
+    # compared with the geometry. Measured on a rod (r = 400 nm, D = 200 nm²/ms): stepping
+    # at 1×/5×/10×/25× the cycle gave median R_net 292/305/306/302 nm and p95 753/782/787/786
+    # while the run time fell from 2.6 s to 0.09 s.
+    # Simulate on a LOG-SPACED GRID spanning the observed durations, with replicates at
+    # each point, rather than resampling the empirical durations. Resampling plus
+    # equal-count binning put the last bin's MEDIAN far below the longest track, so the
+    # band visibly stopped short of the data and the few longest tracks — the most
+    # informative ones — were classified against a flat extrapolation. On a grid the
+    # band is defined at the maximum duration by construction.
+    dv <- res$dur_ms[is.finite(res$dur_ms) & res$dur_ms > 0]
+    if (!length(dv)) return(NULL)
+    d_rng <- range(dv)
+    if (d_rng[1] <= 0 || !is.finite(d_rng[2])) return(NULL)
+    n_grid_t <- 24L; n_rep <- 200L
+    grid_t <- if (d_rng[2] / d_rng[1] > 1.05)
+                exp(seq(log(d_rng[1]), log(d_rng[2]), length.out = n_grid_t))
+              else rep(d_rng[2], 1L)
+    durs  <- rep(grid_t, each = n_rep)
+    T_max <- max(durs, na.rm = TRUE)
+    step_budget <- 4000L
+    dt_sim <- max(cyc, T_max / step_budget)
+    # Keep the step well below the smallest geometry dimension, or the tangent-step-and-
+    # reproject operator loses accuracy. Unbounded shapes have no such limit.
+    gmin <- switch(geom, sphere = params$R, rod = params$r,
+                   ellipsoid = min(params$a, params$b, params$c), Inf)
+    if (is.finite(gmin) && gmin > 0 && is.finite(D_use) && D_use > 0) {
+      dt_geom <- (0.05 * gmin)^2 / (2 * D_use)     # step SD ≤ 5% of the smallest dimension
+      dt_sim  <- min(dt_sim, max(cyc, dt_geom))
+    }
     # 2D data → simulate the 3D geometry and PROJECT (the cell is 3D even if tracking is 2D);
     # 3D data → keep all three axes.
     proj2d <- (attr(res, "d_obs") %||% 2L) == 2L
-    gmode  <- input$trk_disp_geom_mode %||% "surface"     # on the boundary vs inside the volume
+    # Same "Molecule moves" choice that sets the Step-1 degrees of freedom.
+    # "surface" and "filament" both mean the molecule is on the boundary; only a
+    # volume-filling molecule reflects around inside it.
+    gmode  <- if (identical(input$trk_motion %||% "volume", "volume")) "volume" else "surface"
     rnet <- withProgress(message = "Simulating free-on-geometry null…", value = 0.4,
-                         sim_free_geom_rnet(durs, D_use, geom, params, cyc, proj2d = proj2d,
+                         sim_free_geom_rnet(durs, D_use, geom, params, dt_sim, proj2d = proj2d,
                                             mode = gmode))
     if (!length(rnet)) return(NULL)
     D_surf <- attr(rnet, "D_surf") %||% D_use
-    # Equal-count duration bins → local 5/50/95 percentile curve of the free null.
-    ord <- order(durs); ds <- durs[ord]; rs <- as.numeric(rnet)[ord]
-    bi  <- cut(seq_along(ds), breaks = 25L, labels = FALSE)
-    bt  <- as.numeric(tapply(ds, bi, stats::median))
-    blo <- as.numeric(tapply(rs, bi, stats::quantile, 0.05))
-    bmd <- as.numeric(tapply(rs, bi, stats::quantile, 0.50))
-    bhi <- as.numeric(tapply(rs, bi, stats::quantile, 0.95))
+    # One 5/50/95 summary per grid duration — the band therefore spans the full range of
+    # observed track durations, ending exactly at the longest track.
+    rs  <- as.numeric(rnet)
+    gid <- rep(seq_along(grid_t), each = n_rep)[seq_along(rs)]
+    bt  <- grid_t[sort(unique(gid))]
+    blo <- as.numeric(tapply(rs, gid, stats::quantile, 0.05))
+    bmd <- as.numeric(tapply(rs, gid, stats::quantile, 0.50))
+    bhi <- as.numeric(tapply(rs, gid, stats::quantile, 0.95))
     # Classify each REAL track against the geometry null at its own duration.
     lo_r <- stats::approx(bt, blo, xout = res$dur_ms, rule = 2)$y
     hi_r <- stats::approx(bt, bhi, xout = res$dur_ms, rule = 2)$y
@@ -8139,11 +8582,15 @@ tracking_server <- function(input, output, session) {
     dark <- isTRUE(isolate(input$trk_dark_mode))
     bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
     D_use <- attr(res, "D_use"); d_obs <- attr(res, "d_obs") %||% 2L
+    # Band uses the MOTION dof / motion D (see trk_disp_bundle); identical to the old
+    # expression whenever d_mot == d_obs.
+    d_mot <- attr(res, "d_mot") %||% d_obs
+    D_mot <- attr(res, "D_mot") %||% D_use
     tg  <- seq(max(1e-6, min(res$dur_ms)), max(res$dur_ms), length.out = 120)
-    sc2 <- 2 * D_use * tg   # R_net² = 2DT·χ²(d_obs): Rayleigh in 2D, Maxwell in 3D
-    med <- sqrt(sc2 * stats::qchisq(0.5, d_obs))
-    lo  <- sqrt(sc2 * stats::qchisq(0.05, d_obs))
-    hi  <- sqrt(sc2 * stats::qchisq(0.95, d_obs))
+    sc2 <- 2 * D_mot * tg   # R_net² = 2·D_mot·T·χ²(d_mot)
+    med <- sqrt(sc2 * stats::qchisq(0.5, d_mot))
+    lo  <- sqrt(sc2 * stats::qchisq(0.05, d_mot))
+    hi  <- sqrt(sc2 * stats::qchisq(0.95, d_mot))
     gn  <- trk_disp_geom_null()   # NULL unless the Step-2 geometry option is on
     pt_class <- if (!is.null(gn)) gn$gclass else res$class
     fig <- plot_ly() %>%
@@ -8201,6 +8648,16 @@ tracking_server <- function(input, output, session) {
         n, attr(res, "d_obs") %||% 2L, D_use / 1e3, attr(res, "d_lab") %||% "CVE",
         if (is.finite(sig)) sprintf(" · σ<sub>loc</sub> = %.2f nm", sig) else "", T_med)),
       {
+        # Only worth stating when the motion dof differs from the recorded coordinates.
+        dm <- attr(res, "d_mot") %||% d_obs; Dm <- attr(res, "D_mot") %||% D_use
+        if (dm != d_obs)
+          htmltools::div(style = "color:#555; margin-top:3px;",
+            htmltools::HTML(sprintf(
+              "Surface motion: <b>%d degrees of freedom</b> on %d recorded axes. The per-axis D is rescaled to the in-plane value <b>%.3g µm²/s</b> and the free band uses χ²(%d).",
+              dm, d_obs, Dm / 1e3, dm)))
+        else NULL
+      },
+      {
         # Cross-check: if the two estimators disagree, the verdict is D-sensitive.
         Dc <- attr(res, "D_cve"); Dm <- attr(res, "D_msd")
         if (is.finite(Dc) && is.finite(Dm) && Dc > 0 && Dm > 0 && abs(log(Dm / Dc)) > log(1.3))
@@ -8217,6 +8674,23 @@ tracking_server <- function(input, output, session) {
       htmltools::div(style = "color:#555; margin-top:5px;",
         htmltools::HTML(sprintf(
           "Resolution floor: with this D and duration, a molecule explores ~<b>%.0f nm</b> (RMS free extent) — confinement <i>smaller</i> than this is invisible to the test.", resolv))),
+      {
+        # ONE ensemble D sets the band for every track, so a population with a wide
+        # spread of per-track D reads as sub-diffusive at the slow end even when every
+        # molecule is free. Quantified on simulated all-free populations: the
+        # sub-diffusive call runs ~5.5% at no spread, ~6.9% at sd(ln D)=0.6 and ~12%
+        # at sd(ln D)=1.0. Warn using the per-track D spread when the MSD has been run.
+        td <- tryCatch(trk_unified_tdiff(), error = function(e) NULL)
+        Dv <- if (!is.null(td) && !is.null(td$pertrack)) td$pertrack$D_um2_s else NULL
+        Dv <- Dv[is.finite(Dv) & Dv > 0]
+        sdl <- if (length(Dv) >= 20L) stats::sd(log10(Dv)) else NA_real_
+        if (is.finite(sdl) && sdl > 0.35)
+          htmltools::div(style = "color:#B8860B; margin-top:5px; font-size:0.95em;",
+            htmltools::HTML(sprintf(
+              "&#9888; Per-track D spans a wide range (sd of log<sub>10</sub>D = %.2f, i.e. ~%.0f× between the 5th and 95th percentile). The band uses a <b>single ensemble D</b> for every track, so slower-than-average molecules fall below it even when they diffuse freely — this inflates the sub-diffusive fraction. Treat the split as an upper bound on confinement and compare with Confinement Analysis, which is D-independent.",
+              sdl, 10^(2 * 1.645 * sdl))))
+        else NULL
+      },
       {
         gn <- trk_disp_geom_null()
         if (is.null(gn))
@@ -8263,11 +8737,6 @@ tracking_server <- function(input, output, session) {
     filename = function() paste0("displacement_vs_D_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
     content  = function(file) write.csv(trk_disp_bundle(), file, row.names = FALSE)
   )
-
-  # Rebuild frames (baking new colors in) when the confinement color toggle changes.
-  observeEvent(input$trk_conf_color_tracks, {
-    fire_frames()
-  }, ignoreInit = TRUE)
 
   # ============================================================================
   # dir_bundle() — DIRECTIONALITY (is the motion persistent, random, or reversing?)
@@ -8516,7 +8985,7 @@ tracking_server <- function(input, output, session) {
                 bd$r_noise))
     else
       tags$span(style = "color:#888;", tags$br(),
-        "Set ", sigloc(), " (run the unified MSD, or enter it in Acquisition Parameters) to see how much of the turn-angle signal is localization noise.")
+        "Set ", sigloc(), " (run the MSD, or enter it in Acquisition Parameters) to see how much of the turn-angle signal is localization noise.")
     tags$div(style = "font-size:0.88em; margin:4px 0;",
       tags$b(sprintf("n = %d turn angles", length(bd$angles))),
       tags$span(sprintf(
@@ -9089,6 +9558,58 @@ tracking_server <- function(input, output, session) {
 
   # Where along the track is transport strongest? (0 = start, 1 = end)
   # Uses the peak-drift-velocity position (not first crossing, which is start-biased).
+  # ── Is a late-track excursion real, or the tracker searching? ────────────────
+  # WHERE an event sits along the track cannot answer that on its own: a molecule
+  # leaving and a tracker losing its molecule both produce fast outward motion at the
+  # end. What separates them is whether the localizations during the event were still
+  # being found on schedule. So plot position (x) against the event's integrated
+  # fraction (y): a molecule that is genuinely present keeps being localized and sits
+  # high; a tracker searching accumulates dark cycles and sinks, typically at the far
+  # right where tracks end. y is independent of the drift threshold that found the
+  # event, which is what makes it evidence rather than restatement.
+  output$trk_export_corrob <- renderPlotly({
+    req(isTRUE(input$trk_show_speed))
+    s <- trk_export_summary()
+    dark <- isTRUE(isolate(input$trk_dark_mode))
+    bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
+    e <- s[s$has_export %in% TRUE, , drop = FALSE]
+    e <- e[is.finite(e$export_onset_frac) & is.finite(e$event_integ_frac), , drop = FALSE]
+    shiny::validate(shiny::need(nrow(e) > 0,
+      "No candidate segments yet — press 'Run speed & transport', or relax the threshold."))
+    pal <- c(supported = "#1B9E5A", `dark-dominated` = "#C0392B", `low-photon` = "#B8860B")
+    fig <- plot_ly()
+    for (lv in names(pal)) {
+      i <- which(e$event_support %in% lv)
+      if (!length(i)) next
+      fig <- fig %>% add_trace(
+        x = e$export_onset_frac[i], y = e$event_integ_frac[i],
+        type = "scatter", mode = "markers",
+        marker = list(size = 8, color = pal[[lv]], opacity = 0.75,
+                      line = list(width = 0.4, color = "rgba(0,0,0,0.35)")),
+        name = sprintf("%s (%d)", lv, length(i)),
+        text = sprintf("TID %s<br>starts at %.0f%% of track<br>integrated %.2f · photons %.2f×<br>%s",
+                       e$tid[i], 100 * e$export_onset_frac[i], e$event_integ_frac[i],
+                       e$event_eco_ratio[i], e$event_support[i]),
+        hovertemplate = "%{text}<extra></extra>")
+    }
+    fig %>% layout(
+      xaxis = list(title = "where the segment starts along the track (0 = start, 1 = end)",
+                   range = c(-0.02, 1.02), color = fg),
+      yaxis = list(title = "integrated fraction during the segment",
+                   range = c(-0.02, 1.02), color = fg),
+      shapes = list(list(type = "line", x0 = -0.02, x1 = 1.02, y0 = 0.5, y1 = 0.5,
+                         line = list(color = "rgba(120,120,120,0.45)", dash = "dot", width = 1))),
+      annotations = list(list(x = 0.02, y = 0.52, xref = "x", yref = "y",
+        text = "above: molecule still being found · below: dark-cycle dominated",
+        showarrow = FALSE, xanchor = "left", yanchor = "bottom",
+        font = list(size = 9, color = "rgba(120,120,120,0.9)"))),
+      paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
+      legend = list(font = list(color = fg, size = 10), orientation = "h",
+                    x = 0, xanchor = "left", y = -0.24, yanchor = "top"),
+      margin = list(l = 60, r = 20, t = 10, b = 90),
+      uirevision = "export_corrob")
+  })
+
   output$trk_export_onset_hist <- renderPlotly({
     req(isTRUE(input$trk_show_speed))
     s <- trk_export_summary()
@@ -9707,7 +10228,7 @@ tracking_server <- function(input, output, session) {
                   bd$D_noise, d_unit, bd$sigma_loc_nm))
       else
         tags$p(style = "color:#888; font-size:0.92em; margin-top:4px;",
-          "Set \u03C3_loc (run the unified MSD, or enter it in Acquisition Parameters) to flag noise/immobile-limited states.")
+          "Set \u03C3_loc (run the MSD, or enter it in Acquisition Parameters) to flag noise/immobile-limited states.")
       ,
       # Continuous-time transition rates (\u0394t-correct). The per-step matrix A conflates
       # switching with each step's irregular \u0394t; the generator Q, estimated from the
@@ -9864,7 +10385,10 @@ tracking_server <- function(input, output, session) {
       tau_use <- if (linear_tau) lag_v * t_c else ifelse(npk > 0L, dts[, k] / npk, lag_v * t_c)
       okf <- is.finite(tau_use) & is.finite(msd) & lag_v >= min_lag & lag_v <= max_fit & npk > 0L
       fr  <- if (sum(okf) >= 3L)
-               tryCatch(.msd_model_fit(tau_use[okf], msd[okf], npk[okf], ndim, model, use_iter, t_c),
+               # Same motion/projection correction as the main MSD panel, so a
+               # per-state D is on the same footing as the ensemble D.
+               tryCatch(.msd_model_fit(tau_use[okf], msd[okf], npk[okf], ndim, model, use_iter, t_c,
+                                       coef_override = 2 * .msd_d_eff(ndim)),
                         error = function(e) NULL) else NULL
       list(state = k, n_seg = n_seg[k], n_pts = n_pts[k], D_hmm = bd$D_vals[k] / 1e3,
            lag = lag_v, tau = tau_use, msd = msd, npairs = npk, fr = fr)
@@ -9890,7 +10414,7 @@ tracking_server <- function(input, output, session) {
       if (!is.null(fr)) {
         lbl <- switch(fr$model %||% "linear",
           confined  = if (isTRUE(fr$degenerate)) sprintf("State %d: ≈linear (no plateau)", st$state)
-                      else sprintf("State %d confined: D=%.3g, L=%.0f nm", st$state, fr$D / 1e3, fr$L_conf),
+                      else sprintf("State %d confined: D=%.3g, L_c=%.0f nm", st$state, fr$D / 1e3, fr$L_conf),
           directed  = sprintf("State %d directed: D=%.3g, v=%.3g µm/s", st$state, fr$D / 1e3, fr$v_um_s),
           anomalous = sprintf("State %d: D=%.3g, α=%.2f", st$state, fr$D / 1e3, fr$alpha),
           sprintf("State %d linear: D=%.3g µm²/s", st$state, fr$D / 1e3))
@@ -9912,7 +10436,7 @@ tracking_server <- function(input, output, session) {
     rows <- lapply(sm$states, function(st) {
       fr <- st$fr
       param <- if (is.null(fr)) "—" else switch(fr$model %||% "linear",
-        confined  = if (isTRUE(fr$degenerate)) "no plateau (≈linear)" else sprintf("L = %.0f nm", fr$L_conf),
+        confined  = if (isTRUE(fr$degenerate)) "no plateau (≈linear)" else sprintf("L_c = %.0f nm", fr$L_conf),
         directed  = sprintf("v = %.3g µm/s", fr$v_um_s),
         anomalous = sprintf("α = %.2f", fr$alpha), "—")
       D_msd <- if (!is.null(fr) && is.finite(fr$D)) sprintf("%.3g", fr$D / 1e3) else "—"
@@ -9931,7 +10455,7 @@ tracking_server <- function(input, output, session) {
           htmltools::tags$th))),
         htmltools::tags$tbody(rows)),
       htmltools::tags$div(style = "color:#888; font-size:0.92em;",
-        "States are the HMM diffusion states (sorted slow→fast). Switch the Unified MSD ",
+        "States are the HMM diffusion states (sorted slow→fast). Switch the MSD ",
         "'Fit model' to Confined (for a slow/wall state → size L) or Directed (fast/exported → velocity v)."))
   })
 
