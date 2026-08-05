@@ -166,6 +166,22 @@ smlm_server <- function(input, output, session) {
   uploaded_df_rv  <- reactiveVal(NULL)
   smlm_file_store <- reactiveVal(list())   # fname → data frame
 
+  # ── Axial (z) calibration ────────────────────────────────────────────────
+  # MINFLUX z is multiplied by a scaling factor at import to correct the
+  # refractive-index mismatch between immersion medium and sample. pyMINFLUX
+  # ships 0.7 as a default; the physically correct value depends on the actual
+  # index pair and imaging depth, and 0.67 is also in use — so it is exposed
+  # rather than hard-coded.
+  #
+  # It multiplies EVERY axial distance downstream: z trace spread, cluster
+  # extent in z, 3D nearest-neighbour distances, Rg. Treat it as a calibration
+  # to be measured on a known standard, not a display preference.
+  SMLM_Z_SCALE_DEFAULT <- 0.7
+  # The factor currently baked into smlm_file_store() — the single source of
+  # truth. input$z_scale is only a PENDING value until Plot Data commits it, so
+  # nothing may read the input directly to decide what the data is scaled by.
+  z_scale_applied <- reactiveVal(SMLM_Z_SCALE_DEFAULT)
+
   # Helper: load one file from a temp path, return df or NULL
   .load_one_file <- function(path, fname) {
     ext <- get_ext(fname)
@@ -178,6 +194,7 @@ smlm_server <- function(input, output, session) {
             incProgress(0.20, detail = "Reading CSV")
             read.csv(path, check.names = FALSE)
           },
+
           "json" = {
             incProgress(0.10, detail = "Reading JSON (can take a while)")
             read_minflux_json_as_df(
@@ -186,7 +203,10 @@ smlm_server <- function(input, output, session) {
               keep_valid_only = TRUE,
               final_itr = NA_integer_,
               cfr_strategy = "last_nonzero",
-              z_scale = 0.7,
+              # Read RAW: .npy/.json come straight off the instrument with no
+              # axial correction applied. The app-wide factor is applied once,
+              # below, for every source alike.
+              z_scale = 1.0,
               dwell_time_ms = 1.0,
               pool_dcr = isTRUE(input$pool_dcr_json)
             )
@@ -199,7 +219,10 @@ smlm_server <- function(input, output, session) {
               keep_valid_only = TRUE,
               final_itr = NA_integer_,
               cfr_strategy = "last_nonzero",
-              z_scale = 0.7,
+              # Read RAW: .npy/.json come straight off the instrument with no
+              # axial correction applied. The app-wide factor is applied once,
+              # below, for every source alike.
+              z_scale = 1.0,
               dwell_time_ms = 1.0,
               pool_dcr = isTRUE(input$pool_dcr_json)
             )
@@ -210,6 +233,36 @@ smlm_server <- function(input, output, session) {
         incProgress(0.15, detail = "Canonicalizing columns")
         loaded <- canonicalize_minflux_df(loaded)
         if (!"z" %in% names(loaded)) loaded$z <- 0
+
+        # ── Normalise the axial calibration across all three sources ──────────
+        # Everything reaching this point is reduced to RAW (uncorrected) z, then
+        # the single app-wide factor is applied. Without this, .npy/.json would
+        # follow the calibration control while CSVs stayed frozen at whatever
+        # their producer baked in — and a CSV would get 0.7 applied twice.
+        #
+        #   .npy / .json  raw already (read above with z_scale = 1)
+        #   .csv          divide out the factor its producer applied
+        if (identical(ext, "csv")) {
+          loaded  <- strip_csv_z_calibration(loaded)     # -> raw
+          src_cal <- attr(loaded, "z_cal")
+        } else {
+          src_cal <- list(factor = 1.0, source = "raw instrument data", certain = TRUE)
+        }
+        # Applied at the COMMITTED factor, not the pending input value, so the
+        # store is never left at a factor the user has not confirmed.
+        loaded$z <- loaded$z * z_scale_applied()         # -> app calibration
+        attr(loaded, "z_cal") <- src_cal
+
+        # Say nothing about the axial calibration for planar data — a 2D upload
+        # should not produce messages about z. has_axial_data() tests VARIATION,
+        # not presence: 2D exports still carry a z column, filled with zeros.
+        if (identical(ext, "csv") && isTRUE(src_cal$has_z)) {
+          showNotification(
+            sprintf("%s: axial calibration %.3f detected (%s)%s.",
+                    fname, src_cal$factor, src_cal$source,
+                    if (isTRUE(src_cal$certain)) "" else " — assumed, not recorded in the file"),
+            type = if (isTRUE(src_cal$certain)) "message" else "warning", duration = 8)
+        }
         incProgress(0.05, detail = "Finalizing")
         loaded
       })
@@ -225,12 +278,27 @@ smlm_server <- function(input, output, session) {
     store     <- smlm_file_store()
     new_names <- character(0)
 
+    adopt_factor <- NULL   # a recorded (not guessed) factor from an uploaded file
+
     for (i in seq_len(nrow(input$file))) {
       fname <- input$file$name[i]
       if (fname %in% names(store)) next   # already loaded — skip duplicate
 
       df <- .load_one_file(input$file$datapath[i], fname)
       if (is.null(df)) next
+
+      # A file of ours records the factor it was written at. Adopt it so the
+      # control reflects the data being loaded and z comes back exactly as
+      # exported. Only `certain` factors are adopted — the 0.7 assumed for
+      # pyMINFLUX and legacy exports is a guess and must not silently become
+      # the session's calibration.
+      # ...and only when the file actually has axial data: adopting a factor for
+      # a planar dataset would change a number that affects nothing, while
+      # announcing it.
+      zc <- attr(df, "z_cal")
+      if (!is.null(zc) && isTRUE(zc$certain) && isTRUE(zc$has_z) &&
+          is.finite(zc$factor) && zc$factor > 0)
+        adopt_factor <- zc$factor
 
       df$.dataset_tag <- paste0(sample(c(0:9, letters[1:6]), 4, replace = TRUE), collapse = "")
       store[[fname]] <- df
@@ -265,6 +333,14 @@ smlm_server <- function(input, output, session) {
     updateSelectInput(session, "active_file",
                       choices  = names(store),
                       selected = new_names[1])
+
+    # Adopt a recorded axial factor, once, at upload. commit_z_scale() rescales
+    # everything already in the store to match, so the newly loaded file ends up
+    # at exactly the z it was exported with.
+    if (!is.null(adopt_factor)) {
+      updateNumericInput(session, "z_scale", value = adopt_factor)
+      commit_z_scale(adopt_factor, reason = "Axial calibration from file")
+    }
   }, ignoreInit = TRUE)
 
   # Switch active dataset when the file selector changes
@@ -651,9 +727,144 @@ smlm_server <- function(input, output, session) {
     shiny::validate(shiny::need(!is.null(df) && nrow(df) > 0, "No data loaded yet."))
     df
   })
-  
+
+  # =========================================================================
+  # commit_z_scale() — APPLY THE AXIAL CALIBRATION TO DATA ALREADY IN MEMORY
+  # =========================================================================
+  # GOAL
+  #   Rescale every loaded dataset from the currently-applied axial factor to a
+  #   new one. Rescaling by the ratio is exact and avoids re-reading files;
+  #   z_scale_applied() tracks what is baked into the store so the ratio is
+  #   always right.
+  #
+  # WHY IT IS NOT WIRED TO input$z_scale DIRECTLY
+  #   Applying it replaces the active dataset, which fires the "new dataset"
+  #   reset below. Committing only on Plot Data (or on an upload that records
+  #   its own factor) keeps the change deliberate and lets the guard below tell
+  #   a rescale apart from a genuine dataset change.
+  #
+  # ARGUMENTS  new : the factor to apply;  reason : shown in the notification
+  # RETURNS    TRUE if anything was rescaled
+  # =========================================================================
+  z_rescale_guard <- reactiveVal(FALSE)
+
+  commit_z_scale <- function(new, reason = "Axial calibration") {
+    new <- suppressWarnings(as.numeric(new))
+    old <- z_scale_applied()
+    if (!length(new) || !is.finite(new) || new <= 0) return(invisible(FALSE))
+    if (!is.finite(old) || old <= 0) { z_scale_applied(new); return(invisible(FALSE)) }
+    if (isTRUE(all.equal(new, old))) return(invisible(FALSE))
+
+    ratio <- new / old
+    store <- smlm_file_store()
+
+    # Nothing axial loaded: record the factor so a later 3D upload and any export
+    # label are right, but do no work and stay silent. Rescaling zeros and
+    # announcing it is the noise this guard exists to prevent.
+    if (!any(vapply(store, has_axial_data, logical(1)))) {
+      z_scale_applied(new)
+      return(invisible(FALSE))
+    }
+
+    if (length(store)) {
+      # Tell the reset observer this is a rescale of the SAME data, not a new
+      # dataset — otherwise every metadata filter the user set is wiped.
+      z_rescale_guard(TRUE)
+      store <- lapply(store, function(d) {
+        if (is.data.frame(d) && "z" %in% names(d)) d$z <- d$z * ratio
+        d
+      })
+      smlm_file_store(store)
+      cur <- isolate(input$active_file)
+      if (!is.null(cur) && nzchar(cur) && !is.null(store[[cur]])) uploaded_df_rv(store[[cur]])
+      # The z spread filter is expressed in nm, and nm along z just changed
+      # meaning — carrying the old bound over would filter on a stale scale.
+      sd_filt$z <- c(0, Inf)
+    }
+    z_scale_applied(new)
+    showNotification(sprintf("%s set to %.3f — z distances rescaled by %.4f. Axial spread filter cleared.",
+                             reason, new, ratio), type = "message", duration = 6)
+    invisible(TRUE)
+  }
+
+  # Commit on Plot Data, so typing a value does not rescale mid-keystroke.
+  observeEvent(input$plot_data, {
+    commit_z_scale(input$z_scale)
+  }, ignoreInit = TRUE)
+
+  # Does the ACTIVE dataset actually carry axial data? Three states, because
+  # "nothing loaded yet" must not look like "this data is 2D": an empty app
+  # showing a greyed-out panel reads as broken rather than as not-applicable.
+  smlm_z_state <- reactive({
+    df <- uploaded_df_rv()
+    if (is.null(df) || !nrow(df)) return("nodata")
+    if (!"z" %in% names(df) || !any(is.finite(df$z)) ||
+        stats::sd(df$z, na.rm = TRUE) <= 1e-6) return("planar")
+    "3d"
+  })
+
+  # Dim (not hide) the panel for planar data. Hiding it would raise "where did
+  # the setting go?"; dimmed-and-disabled shows it exists and says why it is off.
+  observe({
+    ok <- !identical(smlm_z_state(), "planar")
+    shinyjs::toggleState("z_scale", condition = ok)
+    shinyjs::toggleClass(id = "z_scale_group", class = "dimmed", condition = !ok)
+  })
+
+  # Every axis-bearing control follows the SAME planar test as the calibration
+  # panel, so a dataset can never be simultaneously "2D" for one control and
+  # "3D" for another. 3D mode and the XZ/YZ side views on planar data do not
+  # error — they render a flat line — which is exactly the kind of quietly wrong
+  # plot worth making unreachable.
+  observe({
+    planar <- identical(smlm_z_state(), "planar")
+
+    shinyjs::toggleState(selector = "input[name='mode3d'][value='3D']",       condition = !planar)
+    shinyjs::toggleState(selector = "input[name='view_plane_2d'][value='XZ']", condition = !planar)
+    shinyjs::toggleState(selector = "input[name='view_plane_2d'][value='YZ']", condition = !planar)
+
+    # Disabling a radio does not deselect it. Without this, loading planar data
+    # while sitting in 3D/XZ would leave the view stuck in a mode whose control
+    # is greyed out — unreachable and unfixable from the UI.
+    if (planar) {
+      if (!identical(isolate(input$mode3d) %||% "2D", "2D"))
+        updateRadioButtons(session, "mode3d", selected = "2D")
+      if (!identical(isolate(input$view_plane_2d) %||% "XY", "XY"))
+        updateRadioButtons(session, "view_plane_2d", selected = "XY")
+    }
+  })
+
+  output$z_axes_note <- renderUI({
+    if (!identical(smlm_z_state(), "planar")) return(NULL)
+    helpText(tags$b("2D dataset: "), "3D mode and the XZ / YZ side views are unavailable.")
+  })
+
+  # Shows whether the typed value is live yet.
+  output$z_scale_status <- renderUI({
+    if (identical(smlm_z_state(), "planar"))
+      return(helpText(tags$b("Not applicable: "),
+                      "the active dataset has no axial (z) data."))
+
+    pend <- suppressWarnings(as.numeric(input$z_scale))
+    appl <- z_scale_applied()
+    if (!length(pend) || !is.finite(pend) || pend <= 0)
+      return(helpText(sprintf("Applied: %.3f. Enter a positive factor.", appl)))
+    if (isTRUE(all.equal(pend, appl)))
+      helpText(sprintf("Applied: %.3f.", appl))
+    else
+      helpText(tags$b(sprintf("Pending: %.3f", pend)),
+               sprintf(" (applied: %.3f) — press Plot Data to apply.", appl))
+  })
+
+
   # --------- 2) RESET FILTERS ON NEW DATASET ----------
   observeEvent(uploaded_df(), {
+    # An axial rescale replaces the active dataset object but it is the SAME
+    # data — resetting every filter here would discard the user's whole setup
+    # just because they changed the z factor. commit_z_scale() has already
+    # cleared the one filter whose units actually changed (axial spread).
+    if (isTRUE(z_rescale_guard())) { z_rescale_guard(FALSE); return() }
+
     # Respect the lock: when the user has checked "Lock filters", keep the
     # current filter values when switching between loaded files.
     # We still need to arm sd_skip_arming so the SD range observer doesn't fire
@@ -768,10 +979,14 @@ smlm_server <- function(input, output, session) {
       target_sd_y             = input$target_sd_y,
       target_sd_z             = input$target_sd_z,
 
+      z_scale             = input$z_scale,
+
       enable_clustering   = input$enable_clustering,
       eps                 = input$eps,
-      minpts              = input$minpts,
-      exclude_unclustered = input$exclude_unclustered,
+      # part of the merge metric: eps only means the same thing alongside it
+      deblink_anisotropic = input$deblink_anisotropic,
+      # minPts is derived from tid_length_range and exclude_unclustered no longer
+      # exists, so neither is saved — both would be stale on reload.
       
       enable_cluster2  = input$enable_cluster2,
       eps2             = input$eps2,
@@ -1133,7 +1348,29 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("cluster2_prune_tol"))) updateNumericInput(session, "cluster2_prune_tol", value = as.numeric(getv("cluster2_prune_tol")))
     if (!is.null(getv("eps2")))    updateNumericInput(session, "eps2", value = as.numeric(getv("eps2")))
     if (!is.null(getv("minpts2"))) updateNumericInput(session, "minpts2", value = as.numeric(getv("minpts2")))
-    
+
+    # ── PRIMARY (de-blinking) settings ──
+    # These were written to the settings file but never restored, so a reloaded
+    # analysis silently ran with the default radius. minpts / exclude_unclustered
+    # are deliberately absent: minPts now derives from tid_length_range, and
+    # exclude_unclustered no longer exists (de-blinking never removes molecules).
+    if (!is.null(getv("eps"))) updateNumericInput(session, "eps", value = as.numeric(getv("eps")))
+    if (!is.null(getv("deblink_anisotropic")))
+      updateCheckboxInput(session, "deblink_anisotropic", value = isTRUE(getv("deblink_anisotropic")))
+    # Restored last so the parameters above are in place before it takes effect.
+    if (!is.null(getv("enable_clustering")))
+      updateCheckboxInput(session, "enable_clustering", value = isTRUE(getv("enable_clustering")))
+
+    # Axial calibration: rescales every z distance, so it must survive a reload.
+    if (!is.null(getv("z_scale"))) {
+      zs <- as.numeric(getv("z_scale"))
+      updateNumericInput(session, "z_scale", value = zs)
+      # Loading settings is itself an explicit action, so commit rather than
+      # leaving the restored calibration pending behind a Plot Data press.
+      commit_z_scale(zs, reason = "Axial calibration from settings")
+    }
+
+
     # checkboxes
     cb_ids <- c(
       # master toggle first, so the restored parameters actually take effect
@@ -1555,6 +1792,141 @@ smlm_server <- function(input, output, session) {
     }
   })
 
+  # ── Data-driven de-blink radius (primary DBSCAN eps) ──────────────────────
+  # Brackets eps between the scale at which a trace holds itself together and
+  # the scale at which distinct traces chain. See suggest_deblink_eps() in
+  # helpers_smlm.R for the method and its assumptions.
+  # The suggestion is written into input$eps only on an explicit click: eps is
+  # persisted in saved settings, so a silently self-adjusting value would make
+  # a reloaded analysis irreproducible.
+  deblink_suggestion <- reactiveVal(NULL)
+
+  # GOAL: run the estimator against the data the primary DBSCAN will actually
+  # see (post-filter), with the same minPts and dimensionality.
+  compute_deblink_suggestion <- function() {
+    df <- tryCatch(filtered_df(), error = function(e) NULL)
+    if (is.null(df) || !nrow(df)) return(NULL)
+    suggest_deblink_eps(
+      df,
+      minpts = deblink_minpts(input),
+      min_n  = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
+      # use_z is deliberately NOT tied to input$mode3d: the primary DBSCAN always
+      # clusters in x/y/z, so viewing a 3D dataset as a 2D projection must not
+      # change the suggested radius. suggest_deblink_eps() decides 3D-ness from
+      # the data (a real 2D file carries z = 0 and is detected as 2D).
+      use_z       = TRUE,
+      anisotropic = isTRUE(input$deblink_anisotropic)
+    )
+  }
+
+  observeEvent(input$suggest_eps, {
+    est <- compute_deblink_suggestion()
+    if (is.null(est)) {
+      deblink_suggestion(NULL)
+      showNotification("Not enough traces with enough localizations to measure a de-blink radius. Lower 'Min localizations per trace for spread' or relax the filters.",
+                       type = "warning", duration = 6)
+      return()
+    }
+    deblink_suggestion(est)
+    updateNumericInput(session, "eps", value = est$suggested)
+    showNotification(
+      sprintf("De-blink radius set to %.1f nm (%s).", est$suggested,
+              if (isTRUE(est$gap_ok)) "within measured bounds"
+              else "lower bound only - no separable ceiling"),
+      type = if (isTRUE(est$gap_ok)) "message" else "warning", duration = 6
+    )
+  })
+
+  # minPts is shown, not edited: it follows the Trace ID Length filter so the two
+  # cannot contradict each other. See deblink_minpts() in helpers_smlm.R.
+  output$deblink_minpts_note <- renderUI({
+    helpText(sprintf(
+      "Minimum points: %d — follows the Trace ID Length filter's lower bound, so any trace long enough to pass filtering can form a molecule on its own.",
+      deblink_minpts(input)))
+  })
+
+  output$deblink_eps_summary <- renderUI({
+    est <- deblink_suggestion()
+    if (is.null(est)) return(NULL)
+
+    fmt <- function(v, unit = " nm") if (is.finite(v)) paste0(round(v, 2), unit) else "not resolved"
+    els <- list(
+      helpText(sprintf("Measured on %d traces (%d used, %dD)%s.",
+                       est$n_traces, est$n_used, est$dims,
+                       if (is.finite(est$n_mol))
+                         sprintf(", collapsing to %d molecules", est$n_mol) else "")),
+      helpText(sprintf("Trace holds together above: %s. Traces begin to chain above: %s.",
+                       fmt(est$eps_lo), fmt(est$eps_hi))),
+      helpText(sprintf("Median trace spread σ: %s. Suggested radius = %sσ.",
+                       fmt(est$sigma),
+                       if (is.finite(est$ratio)) format(est$ratio) else "-"))
+    )
+    if (isTRUE(est$aniso)) {
+      els <- append(els, list(helpText(sprintf(
+        "Per-axis σ: x %s, y %s, z %s → axis weights %s. Radius applies in this weighted metric.",
+        fmt(est$sigma_ax[1], ""), fmt(est$sigma_ax[2], ""), fmt(est$sigma_ax[3], ""),
+        paste(round(est$weights, 2), collapse = " / ")))))
+    }
+    if (!isTRUE(est$gap_ok)) {
+      els <- append(els, list(helpText(tags$b("No separable ceiling: "), est$note)))
+    }
+    do.call(tagList, els)
+  })
+
+  # Diagnostic: the two distance populations the bounds come from. Gated on the
+  # checkbox so the per-trace loop does not run on every filter change.
+  deblink_gap_data <- reactive({
+    req(isTRUE(input$view_deblink_gap), isTRUE(input$enable_clustering))
+    compute_deblink_suggestion()
+  })
+
+  output$deblink_gap_plot <- renderPlot({
+    est <- deblink_gap_data()
+    validate(need(!is.null(est), "Not enough traces to measure a de-blink radius."))
+
+    w <- c(est$within, est$linkage); w <- w[is.finite(w) & w > 0]
+    b <- est$between;               b <- b[is.finite(b) & b > 0]
+    validate(need(length(w) >= 2, "Not enough within-trace distances to plot."))
+
+    xmax <- stats::quantile(c(w, b), 0.99, names = FALSE)
+    if (!is.finite(xmax) || xmax <= 0) xmax <- max(w, na.rm = TRUE)
+
+    # Both densities scaled to their own peak: the interest is where the two
+    # populations sit relative to each other, not their relative counts.
+    scal <- function(v) {
+      d <- stats::density(v, n = 512L, from = 0, to = xmax)
+      d$y <- d$y / max(d$y); d
+    }
+    # Each curve and its derived bound share a hue but differ in line type, and
+    # the two hues are far apart — so curve-vs-bound and within-vs-between stay
+    # distinguishable, including for red/green colour blindness.
+    COL_W <- "#1f78b4"   # blue   — within trace
+    COL_B <- "#e08214"   # orange — between molecules
+    COL_E <- "#d7191c"   # red    — current radius
+
+    dw <- scal(w)
+    graphics::plot(dw$x, dw$y, type = "l", col = COL_W, lwd = 2.5,
+                   ylim = c(0, 1.15), xlab = "distance (nm)",
+                   ylab = "density (scaled to peak)",
+                   main = "De-blink radius: within-trace vs between-molecule distances")
+    if (length(b) >= 2) {
+      db <- scal(b)
+      graphics::lines(db$x, db$y, col = COL_B, lwd = 2.5)
+    }
+    # bounds: dotted / dot-dash, distinct from the dashed current radius
+    graphics::abline(v = est$eps_lo, col = COL_W, lwd = 2, lty = 3)
+    if (is.finite(est$eps_hi)) graphics::abline(v = est$eps_hi, col = COL_B, lwd = 2, lty = 4)
+    e_cur <- suppressWarnings(as.numeric(input$eps))
+    if (length(e_cur) == 1 && is.finite(e_cur))
+      graphics::abline(v = e_cur, col = COL_E, lwd = 2.5, lty = 2)
+
+    graphics::legend("topright", bty = "n", cex = 0.9,
+                     legend = c("within trace", "between de-blinked molecules",
+                                "lower bound", "chaining ceiling", "current radius"),
+                     col = c(COL_W, COL_B, COL_W, COL_B, COL_E),
+                     lty = c(1, 1, 3, 4, 2), lwd = c(2.5, 2.5, 2, 2, 2.5))
+  })
+
   output$download_two_color_settings <- downloadHandler(
     filename = function() {
       base <- if (!is.null(input$active_file) && nzchar(input$active_file)) tools::file_path_sans_ext(input$active_file) else "smlm"
@@ -1654,6 +2026,16 @@ smlm_server <- function(input, output, session) {
       # Friendly export names
       names(df)[names(df) == ".dataset_tag"]  <- "dataset_tag"
       names(df)[names(df) == "n_in_cluster2"] <- "n_in_scid"
+
+      # Axial provenance: z below is written at this factor. Re-importing divides
+      # it out before applying the then-current calibration, so a round-trip is
+      # exact instead of relying on the 0.7 assumption in
+      # detect_csv_z_calibration(). Written even for 2D data — it costs one
+      # column and removes the guess for every future reader.
+      # The COMMITTED factor — that is what the exported z is actually at. Using
+      # the pending input value would mislabel the file whenever the control has
+      # been typed into but not applied.
+      df$z_scale_applied <- z_scale_applied()
 
       write.csv(df, file, row.names = FALSE)
     }
@@ -2246,13 +2628,11 @@ smlm_server <- function(input, output, session) {
     tags$span(style = "font-size: 13px; color: #555;", nm)
   })
 
-  output$view_plane_2d_ui <- renderUI({
-    df <- uploaded_df()
-    has_z <- !is.null(df) && "z" %in% names(df) && any(is.finite(df$z))
-    choices <- if (has_z) c("XY", "XZ", "YZ") else c("XY")
-    radioButtons("view_plane_2d", "Viewing plane",
-                 choices = choices, inline = TRUE, selected = "XY")
-  })
+  # view_plane_2d is now a static input (ui_smlm.R). The old renderUI dropped
+  # XZ/YZ from the choices when `any(is.finite(df$z))` was FALSE — which never
+  # fired for a 2D MINFLUX file, because those carry z = 0 and 0 IS finite. So
+  # side views were offered on planar data and produced a flat line. The planar
+  # observer below disables them on z VARIATION instead.
   observeEvent(input$enable_clustering, {
     req(input$file)
     plot_trigger(Sys.time())
@@ -4404,6 +4784,19 @@ smlm_server <- function(input, output, session) {
       
       df$cluster <- 0L
 
+      # Per-axis de-blink metric (see deblink_axis_weights in helpers_smlm.R).
+      # Computed once over the whole df so every branch below shares one space.
+      # NULL = the previous isotropic behaviour, unchanged.
+      aw1 <- if (isTRUE(input$deblink_anisotropic))
+        deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+        else NULL
+      dbs_pts <- function(idx) apply_deblink_weights(
+        as.matrix(df[idx, c("x","y","z")]), aw1)
+
+      # minPts is the Trace ID Length filter's lower bound, not a free control —
+      # see deblink_minpts() in helpers_smlm.R.
+      mp1 <- deblink_minpts(input)
+
       mplex_on <- "mplex_channel" %in% names(df) && any(!is.na(df$mplex_channel))
       if (mplex_on) {
         # Multiplex: clusters are confined to a single channel (run DBSCAN per
@@ -4412,16 +4805,15 @@ smlm_server <- function(input, output, session) {
         for (chv in sort(unique(df$mplex_channel[!is.na(df$mplex_channel)]))) {
           idx <- which(df$mplex_channel == chv)
           if (!length(idx)) next
-          pts <- as.matrix(df[idx, c("x","y","z")])
-          cl  <- dbscan::dbscan(pts, eps = input$eps, minPts = input$minpts)
+          cl  <- dbscan::dbscan(dbs_pts(idx), eps = input$eps, minPts = mp1)
           cid <- cl$cluster
           cid[cid > 0] <- cid[cid > 0] + (next_id - 1L)
           df$cluster[idx] <- cid
           if (any(cid > 0)) next_id <- max(cid, na.rm = TRUE) + 1L
         }
       } else if (scope == "all" || mode == "none") {
-        pts <- as.matrix(df[, c("x","y","z")])
-        cl  <- dbscan::dbscan(pts, eps = input$eps, minPts = input$minpts)
+        cl  <- dbscan::dbscan(dbs_pts(seq_len(nrow(df))),
+                              eps = input$eps, minPts = mp1)
         df$cluster <- cl$cluster
       } else {
         # run DBSCAN per requested group subset
@@ -4432,8 +4824,7 @@ smlm_server <- function(input, output, session) {
         for (g in groups_to_run) {
           idx <- which(df$analysis_group == g)
           if (length(idx) >= 1) {
-            pts <- as.matrix(df[idx, c("x","y","z")])
-            cl  <- dbscan::dbscan(pts, eps = input$eps, minPts = input$minpts)
+            cl  <- dbscan::dbscan(dbs_pts(idx), eps = input$eps, minPts = mp1)
             cid <- cl$cluster
             # offset to keep unique IDs across groups
             cid[cid > 0] <- cid[cid > 0] + (next_id - 1L)
@@ -4444,9 +4835,9 @@ smlm_server <- function(input, output, session) {
       }
       
       # Preserve-TID mode: reassign all points of each TID to the cluster that
-      # holds the plurality of that TID's non-noise DBSCAN points. TIDs where
-      # every point is noise remain noise. This prevents TID splitting and merges
-      # TIDs that overlap spatially into the same cluster.
+      # holds the plurality of that TID's non-noise DBSCAN points. This prevents
+      # TID splitting and merges TIDs that overlap spatially into one cluster.
+      # TIDs that are entirely noise become singletons below.
       if (TRUE) {
         tid_plurality <- df %>%
           dplyr::filter(cluster != 0L) %>%
@@ -4462,13 +4853,15 @@ smlm_server <- function(input, output, session) {
           dplyr::select(-cluster_new)
       }
 
+      # Merge-only: a trace DBSCAN could not merge becomes its own molecule
+      # instead of being dropped. See deblink_assign_singletons(). After this,
+      # cluster 0 no longer exists, so the downstream `cluster != 0` filters
+      # keep every trace that survived the metadata and spread filters.
+      df <- deblink_assign_singletons(df)
+
       pal <- rep(base_colors, length.out = max(1, max(df$cluster, na.rm = TRUE) + 1))
       df$color <- ifelse(df$cluster == 0, "#bdbdbd",
                          pal[(df$cluster %% length(pal)) + 1])
-
-      if (isTRUE(input$exclude_unclustered)) {
-        df <- df %>% dplyr::filter(cluster != 0)
-      }
     } else {
       # color by TID
       extended_palette_tid <- rep(base_colors, length.out = nrow(df))

@@ -8,6 +8,11 @@
 # identical widget — helpers_shared.R is sourced before both ui_*.R files.
 
 tracking_ui <- fluidPage(
+  # Tracking's shinyjs calls (reset, delay, toggleState) previously worked only
+  # because smlm_ui declares useShinyjs() into the same navbarPage document.
+  # Declared here too so this tab does not depend on the SMLM tab existing;
+  # Shiny de-duplicates the html dependency, so the double call costs nothing.
+  useShinyjs(),
   tags$head(tags$style(HTML("
     details.sim-group { margin: 2px 0 6px 0; }
     details.sim-group > summary {
@@ -19,6 +24,16 @@ tracking_ui <- fluidPage(
       content: \"\\25B8\"; color: #888; margin-right: 6px;
     }
     details.sim-group[open] > summary::before { content: \"\\25BE\"; }
+    /* A panel that does not apply to the loaded data: dimmed but still visible,
+       so it stays discoverable and can say why it is inactive. */
+    details.sim-group.dimmed > summary { color: #9aa0a6; }
+    details.sim-group.dimmed { opacity: 0.55; }
+    /* A radio choice that does not apply to the loaded data. Shiny wraps each
+       choice label in a <span> right after its <input>, so the disabled input
+       can grey its own text without touching the other choices. */
+    .radio input:disabled + span,
+    .radio-inline input:disabled + span,
+    .shiny-input-radiogroup input:disabled + span { color: #9aa0a6; cursor: not-allowed; }
   "))),
   titlePanel("MINFLUXR - Tracking"),
 
@@ -69,6 +84,28 @@ tracking_ui <- fluidPage(
             uiOutput("trk_chunk_stat")
           ),
           ),  # /Data Upload
+          tags$hr(),
+
+          # ── Axial (z) calibration ───────────────────────────────────────────
+          # Mirrors the SMLM tab: a property of the DATASET, set next to the
+          # upload it describes, not buried in the display controls. Files are
+          # read uncorrected (.npy/.json at z_scale = 1, CSVs stripped of
+          # whatever factor they arrived with), so this is the only axial
+          # correction applied anywhere in the tracking pipeline.
+          tags$details(class = "sim-group", id = "trk_z_scale_group",
+          tags$summary(tags$b("Axial (z) calibration")),
+          numericInput("trk_z_scale", "Axial (z) scaling factor",
+                       value = TRK_Z_SCALE_DEFAULT, min = 0.05, max = 3, step = 0.01),
+          helpText(style = "font-size:0.82em; color:#666; margin-top:-6px;",
+            "Refractive-index mismatch correction between the objective immersion and the ",
+            "mounting medium. Growth medium or alternative mountants",
+            "differs per sample setup, so it is worth checking the refractive index of your imaging mountant",
+            tags$b("Rescales all z-dependent results")),
+          uiOutput("trk_z_scale_status"),
+          helpText(style = "font-size:0.82em; color:#666;",
+            "Takes effect on Plot Data. Loading a file that records its own factor adopts ",
+            "that value."),
+          ),  # /Axial calibration
           tags$hr(),
 
           # ── Acquisition parameters (optional cycle-time model) ──────────────
@@ -364,8 +401,19 @@ tracking_ui <- fluidPage(
 
           tags$details(class = "sim-group", open = NA,
           tags$summary(tags$b("Display Options")),
-          uiOutput("trk_view_mode_ui"),
-          uiOutput("trk_view_plane_ui"),
+          # Static (not renderUIs) so the disabled state applied by the planar-data
+          # observer in server_tracking.R cannot be wiped by a re-render. On 2D
+          # data these are greyed rather than removed, matching the axial
+          # calibration panel — the control stays visible and says why it is off.
+          radioButtons("trk_view_mode", NULL,
+                       choices = c("2D" = "2d", "3D" = "3d"),
+                       selected = "2d", inline = TRUE),
+          conditionalPanel(
+            condition = "input.trk_view_mode == '2d'",
+            radioButtons("trk_view_plane", "Viewing plane",
+                         choices = c("XY", "XZ", "YZ"), selected = "XY", inline = TRUE)
+          ),
+          uiOutput("trk_z_axes_note"),
           numericInput("trk_pt_size", "Marker size", value = 6, min = 1),
           radioButtons("trk_color_mode", "Color localizations by",
                        choices = c("Track ID" = "tid", "Dark cycles (integration)" = "dark",

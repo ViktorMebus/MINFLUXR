@@ -142,6 +142,16 @@ smlm_ui <- fluidPage(
       content: \"\\25B8\"; color: #888; margin-right: 6px;
     }
     details.sim-group[open] > summary::before { content: \"\\25BE\"; }
+    /* A panel that does not apply to the loaded data: dimmed but still visible,
+       so it stays discoverable and can say why it is inactive. */
+    details.sim-group.dimmed > summary { color: #9aa0a6; }
+    details.sim-group.dimmed { opacity: 0.55; }
+    /* A radio choice that does not apply to the loaded data. Shiny wraps each
+       choice label in a <span> right after its <input>, so the disabled input
+       can grey its own text without touching the other choices. */
+    .radio input:disabled + span,
+    .radio-inline input:disabled + span,
+    .shiny-input-radiogroup input:disabled + span { color: #9aa0a6; cursor: not-allowed; }
   "))),
   titlePanel("MINFLUXR - SMLM"),
 
@@ -188,12 +198,32 @@ smlm_ui <- fluidPage(
       ),
       conditionalPanel(
         condition = "input.mode3d == '2D'",
-        uiOutput("view_plane_2d_ui")
+        # Static (not a renderUI) so the disabled state applied by the planar-data
+        # observer in server_smlm.R cannot be wiped by a re-render. XZ/YZ are
+        # greyed rather than removed, so it stays visible WHY they are unavailable.
+        radioButtons("view_plane_2d", "Viewing plane",
+                     choices = c("XY", "XZ", "YZ"), inline = TRUE, selected = "XY")
       ),
+      uiOutput("z_axes_note"),
       ),  # /Data Upload
       tags$hr(),
 
       
+      ### Axial calibration ===
+      # Deliberately OUTSIDE tags$div(id = "filters_form"): that div is wiped by
+      # shinyjs::reset("filters_form") whenever a dataset changes, which would
+      # snap the calibration back to 0.7 — and since applying it updates the
+      # dataset, the two would ping-pong. It is also not a filter.
+      tags$details(class = "sim-group", id = "z_scale_group",
+      tags$summary(tags$b("Axial (z) calibration")),
+      numericInput("z_scale", "Axial (z) scaling factor",
+                   value = 0.7, min = 0.05, max = 3, step = 0.01),
+      uiOutput("z_scale_status"),
+      helpText("Takes effect on Plot Data. Loading a file that records its own factor ",
+               "adopts that value."),
+      ),  # /Axial calibration
+      tags$hr(),
+
       ### 2) Metadata Filtering ===
       tags$details(class = "sim-group", open = NA,
       tags$summary(tags$b("Metadata Filtering")),
@@ -225,6 +255,7 @@ smlm_ui <- fluidPage(
                  
                  
                ),
+
                # Trace spread z control appears only in 3D
                checkboxInput("view_SD", "Inspect trace spread (\u03C3\u0303)", value = FALSE),
                conditionalPanel(
@@ -416,9 +447,33 @@ smlm_ui <- fluidPage(
       conditionalPanel(
         condition = "input.enable_clustering == true",
         numericInput("eps", "De-blink radius — DBSCAN epsilon (nm)", value = 10, min = 1),
-        numericInput("minpts", "Minimum Points", value = 4, min = 1),
-        checkboxInput("exclude_unclustered", "Exclude unclustered points", value = FALSE),
-        helpText("TIDs are not split: all localizations of a trace ID join the same de-blinked molecule (majority vote). Trace IDs that overlap spatially are merged into one de-blinked molecule.")
+        uiOutput("deblink_minpts_note"),
+
+        # ── anisotropic metric (see deblink_axis_weights in helpers_smlm.R) ──
+        checkboxInput("deblink_anisotropic",
+                      "Scale axes by their own spread (anisotropic radius)", value = FALSE),
+        helpText("Weights x, y and z by their measured trace spread before merging, so one radius ",
+                 "fits all three axes. Affects the merge decision only — reported distances, ",
+                 "cluster sizes and Rg stay in true nm."),
+
+        # ── data-driven eps suggestion (see suggest_deblink_eps in helpers_smlm.R) ──
+        actionButton("suggest_eps", "Suggest radius from trace spread", class = "btn-sm"),
+        helpText("Measures the radius at which a trace's own localizations stay one cluster, ",
+                 "and the radius at which separate traces begin to chain together. ",
+                 "Writes the suggestion into the radius field above; it is not applied automatically."),
+        uiOutput("deblink_eps_summary"),
+        checkboxInput("view_deblink_gap", "Show de-blink radius diagnostic", value = FALSE),
+        conditionalPanel(
+          condition = "input.view_deblink_gap == true",
+          plotOutput("deblink_gap_plot", height = "280px"),
+          helpText("Blue: distances within a trace. Orange: nearest-neighbour spacing between de-blinked molecules. ",
+                   "Dotted blue and dot-dash orange mark the measured bounds; dashed red is the current radius.")
+        ),
+
+        helpText("TIDs are not split: all localizations of a trace ID join the same de-blinked molecule (majority vote). ",
+                 "Trace IDs that overlap spatially are merged into one de-blinked molecule. ",
+                 "De-blinking only merges — a trace it cannot merge becomes its own single-blink molecule, ",
+                 "so no molecule is removed here. Removal is the job of the metadata and spread filters.")
       ),
       ),  # /De-blinking (raw-point DBSCAN)
       tags$hr(),

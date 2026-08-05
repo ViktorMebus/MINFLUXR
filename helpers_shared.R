@@ -860,6 +860,131 @@ collapse_minflux_iterations <- function(df, keep_itr = 9L) {
 #
 # df      : a data.frame from any reader / any MINFLUX export vintage
 # returns : the same data with canonical column names and types
+# =============================================================================
+# detect_csv_z_calibration() — WHAT AXIAL FACTOR IS ALREADY BAKED INTO A CSV?
+# =============================================================================
+#
+# GOAL
+#   A CSV never contains raw instrument z. Something upstream already applied an
+#   axial (refractive-index) correction, and applying ours on top would square
+#   the factor. This identifies what was already applied so the caller can
+#   divide it out and re-apply the app-wide value — making every source respond
+#   identically to the axial calibration control.
+#
+# THE THREE CSV PROVENANCES
+#   1. OUR export, current   — carries a `z_scale_applied` column. Exact: the
+#                              factor is read from the file, never guessed.
+#   2. OUR export, older     — has `dataset_tag` but no `z_scale_applied`. Every
+#                              such export was written at 0.7.
+#   3. pyMINFLUX export      — neither column; header is
+#                              tid,tim,x,y,z,efo,cfr,eco,dcr,dwell,fluo.
+#                              pyMINFLUX applies its 0.7 default before writing.
+#
+# THE ASSUMPTION, STATED PLAINLY
+#   Cases 2 and 3 are inferred, not measured — nothing in those files records
+#   the factor. Both are assumed to be 0.7 because every known producer of a
+#   MINFLUX CSV ships that default. A CSV written with pyMINFLUX's z-scaling
+#   turned off, or by some other tool, would be misread, and there is no way to
+#   detect that from the data. Hence `certain`: the caller should say out loud
+#   which branch it took.
+#
+# ARGUMENTS  df : the freshly read CSV (before canonicalization)
+# RETURNS
+#   list(factor, source, certain) — `factor` is what is already applied to z.
+# =============================================================================
+PYMINFLUX_Z_SCALE_DEFAULT <- 0.7
+
+detect_csv_z_calibration <- function(df) {
+  nms <- names(df)
+
+  # 1. Explicit provenance — the only non-guessing branch.
+  if ("z_scale_applied" %in% nms) {
+    v <- suppressWarnings(as.numeric(df$z_scale_applied))
+    v <- v[is.finite(v) & v > 0]
+    if (length(v)) {
+      return(list(factor = stats::median(v),
+                  source = "this app (factor recorded in the file)",
+                  certain = TRUE))
+    }
+  }
+
+  # 2. Our own older export — tagged, but predates the provenance column.
+  if (any(c("dataset_tag", ".dataset_tag") %in% nms)) {
+    return(list(factor = PYMINFLUX_Z_SCALE_DEFAULT,
+                source = "this app (older export, no recorded factor)",
+                certain = FALSE))
+  }
+
+  # 3. Anything else — pyMINFLUX or an unknown producer.
+  py_cols <- c("tid", "tim", "x", "y", "z", "efo", "cfr", "eco", "dcr", "dwell", "fluo")
+  looks_py <- all(py_cols %in% nms)
+  list(factor = PYMINFLUX_Z_SCALE_DEFAULT,
+       source  = if (looks_py) "pyMINFLUX export" else "unrecognized CSV",
+       certain = FALSE)
+}
+
+# =============================================================================
+# has_axial_data() — DOES THIS DATASET CARRY REAL z AT ALL?
+# =============================================================================
+#
+# GOAL
+#   One predicate both tabs consult BEFORE doing, or saying, anything about the
+#   axial calibration. A 2D acquisition should never see a message about z being
+#   detected, removed, rescaled or adopted — those are answers to a question the
+#   data does not pose.
+#
+# WHY A COLUMN CHECK IS NOT ENOUGH
+#   A planar dataset usually still has a z column: MINFLUX 2D exports write
+#   z = 0, and the loaders synthesise `z <- 0` when it is missing entirely. So
+#   presence proves nothing — only VARIATION does. A constant z (whatever its
+#   value) carries no axial structure and cannot be calibrated.
+#
+# ARGUMENTS
+#   df     : data.frame that may have a z column
+#   min_sd : SD in nm below which z counts as flat. The default is a float-noise
+#            floor; the tracking tab passes 1 nm to match .has_real_z(), which
+#            already governs its 2D/3D view toggle.
+#   min_n  : minimum finite z values before an SD is trustworthy
+#
+# RETURNS  TRUE only when z varies enough to be worth calibrating.
+# =============================================================================
+has_axial_data <- function(df, min_sd = 1e-6, min_n = 1L) {
+  if (is.null(df) || !is.data.frame(df) || !("z" %in% names(df))) return(FALSE)
+  zv <- suppressWarnings(as.numeric(df$z))
+  zv <- zv[is.finite(zv)]
+  if (length(zv) < max(1L, min_n)) return(FALSE)
+  s <- suppressWarnings(stats::sd(zv))
+  is.finite(s) && s > min_sd
+}
+
+# =============================================================================
+# strip_csv_z_calibration() — RETURN A CSV'S z TO RAW, UNCORRECTED nm
+# =============================================================================
+# GOAL
+#   Undo whatever axial factor a CSV arrived with, so the caller can apply the
+#   one factor the user controls. Every tab must normalise to raw before
+#   applying its calibration, or .npy/.json and .csv drift apart and a CSV gets
+#   the correction applied twice.
+#
+# ARGUMENTS  df : freshly read CSV (before canonicalization)
+# RETURNS    df with raw z, the provenance column dropped, and the detection
+#            result attached as attr(df, "z_cal") for the caller to report.
+# =============================================================================
+strip_csv_z_calibration <- function(df) {
+  cal <- detect_csv_z_calibration(df)
+  # Whether the caller should say anything about this at all. Computed before
+  # the division so it describes the file as it arrived.
+  cal$has_z <- has_axial_data(df)
+  if ("z" %in% names(df) && is.finite(cal$factor) && cal$factor > 0 && cal$factor != 1) {
+    df$z <- suppressWarnings(as.numeric(df$z)) / cal$factor
+  }
+  # Consumed here — a stale value must not survive into the analysis frame and
+  # be re-read on a later round-trip.
+  df$z_scale_applied <- NULL
+  attr(df, "z_cal") <- cal
+  df
+}
+
 canonicalize_minflux_df <- function(df) {
   stopifnot(is.data.frame(df))
 

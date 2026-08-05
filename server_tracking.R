@@ -288,10 +288,11 @@ tracking_server <- function(input, output, session) {
   # distances. Requiring real spread is the criterion msd_unified_bundle and
   # trk_disp_bundle already used; this makes it the single shared definition so the
   # dimension decision cannot drift between tools again.
+  # Tracking's 3D test, kept as a named wrapper because it has many call sites.
+  # Delegates to the shared predicate so the axial-calibration panel and the
+  # 2D/3D view toggle can never disagree about whether a dataset has z.
   .has_real_z <- function(df, min_sd = 1) {
-    if (is.null(df) || !"z" %in% names(df)) return(FALSE)
-    zv <- df$z[is.finite(df$z)]
-    length(zv) > 10L && is.finite(stats::sd(zv)) && stats::sd(zv) > min_sd
+    has_axial_data(df, min_sd = min_sd, min_n = 11L)
   }
 
   # ============================================================================
@@ -872,68 +873,104 @@ tracking_server <- function(input, output, session) {
       options = list(maxOptions = 5000)
     )
   })
-  # View mode toggle: 2D / 3D (only rendered when data has a z column)
-  output$trk_view_mode_ui <- renderUI({
-    req(isTRUE(has_z()))
-    tagList(
-      radioButtons("trk_view_mode", NULL,
-                   choices  = c("2D" = "2d", "3D" = "3d"),
-                   selected = isolate(input$trk_view_mode %||% "2d"),
-                   inline   = TRUE),
-      numericInput("trk_z_stretch", "Z correction factor (×)",
-                   value = isolate(input$trk_z_stretch %||% 1.0),
-                   min = 0.2, max = 10, step = 0.05),
-      helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
-        "Multiplies every z by this factor and ", tags$b("rescales all z-dependent results"),
-        " — the 3D view, the XZ/YZ side views, and z-aware metrics. Use it to correct the ",
-        "axial squash/stretch from a refractive-index mismatch between the objective ",
-        "immersion and the sample mounting medium (which changes with growth media). ",
-        "1.0 = no correction.")
-    )
+  # 2D/3D toggle and the XY/XZ/YZ plane selector are static inputs (ui_tracking.R).
+  # They used to be renderUIs that VANISHED on planar data. Two reasons that is
+  # worse than greying them:
+  #   - a control that disappears reads as a bug, not as "not applicable";
+  #   - the plane selector keyed off trk(), which only exists after Plot Data, so
+  #     it was absent on upload and appeared later.
+  # The observer below disables the z-dependent choices instead, using the SAME
+  # planar test as the axial calibration panel.
+  observe({
+    planar <- identical(trk_z_state(), "planar")
+
+    shinyjs::toggleState(selector = "input[name='trk_view_mode'][value='3d']",  condition = !planar)
+    shinyjs::toggleState(selector = "input[name='trk_view_plane'][value='XZ']", condition = !planar)
+    shinyjs::toggleState(selector = "input[name='trk_view_plane'][value='YZ']", condition = !planar)
+
+    # Disabling a radio does not deselect it — force the view back, or a planar
+    # upload while in 3D/XZ leaves the plot in a mode whose control is greyed out.
+    if (planar) {
+      if (!identical(isolate(input$trk_view_mode) %||% "2d", "2d"))
+        updateRadioButtons(session, "trk_view_mode", selected = "2d")
+      if (!identical(isolate(input$trk_view_plane) %||% "XY", "XY"))
+        updateRadioButtons(session, "trk_view_plane", selected = "XY")
+    }
+  })
+
+  output$trk_z_axes_note <- renderUI({
+    if (!identical(trk_z_state(), "planar")) return(NULL)
+    helpText(tags$b("2D dataset: "), "3D mode and the XZ / YZ side views are unavailable.")
   })
 
   # Switching view mode requires a full plot rebuild
   observeEvent(input$trk_view_mode, {
-    # Fire only on a GENUINE 2D/3D change. On upload the input is (re)created with the
-    # same value the plot was just rendered with (loop$rendered_view), so its creation
-    # fire is skipped — no redundant rebuild, no fragile time window.
+    # Compare against what was last RENDERED, so a programmatic reset to "2d"
+    # (planar guard above) or a value that already matches the plot does not
+    # trigger a redundant rebuild.
     if (identical(input$trk_view_mode %||% "2d", loop$rendered_view %||% "2d")) return()
     fire_layout("view_mode_2d3d")
   }, ignoreInit = TRUE)
-
-  # 2D viewing plane (XY / XZ / YZ) — only meaningful for z-bearing data in 2D mode.
-  # Mirrors the SMLM Display tab: XZ/YZ remap the plotted axes so a side view of the
-  # z-structure is possible without switching to full 3D. Hidden in 3D mode and when
-  # the dataset is planar (no finite, non-constant z).
-  output$trk_view_plane_ui <- renderUI({
-    req(identical(input$trk_view_mode %||% "2d", "2d"))
-    # Only offer side views when z is genuinely present AND varies (a z column that
-    # is all-zero or constant has no side structure to show — matches "Z different
-    # from 0"). Uses the same trk() the 2D/3D toggle already depends on.
-    df  <- tryCatch(trk(), error = function(e) NULL)
-    zz  <- if (!is.null(df) && "z" %in% names(df)) df$z[is.finite(df$z)] else numeric(0)
-    req(length(zz) > 0, diff(range(zz)) > 1e-6)
-    radioButtons("trk_view_plane", "Viewing plane",
-                 choices  = c("XY", "XZ", "YZ"),
-                 selected = isolate(input$trk_view_plane %||% "XY"),
-                 inline   = TRUE)
-  })
   # A plane change is a coordinate remap baked in frames_store, so it needs a rebuild —
   # same creation-fire guard as the 2D/3D toggle (compare to the plane last rendered).
   observeEvent(input$trk_view_plane, {
     if (identical(input$trk_view_plane %||% "XY", loop$rendered_plane %||% "XY")) return()
     fire_layout("view_plane")
   }, ignoreInit = TRUE)
-  # Z correction factor: debounce so rapid typing / arrow-key changes don't hammer
-  # fire_layout. fire_layout bumps data_ver, which re-runs the analysis pipeline (so
-  # z-aware metrics pick up the new factor) and plot_trigger (so the view rebuilds).
-  trk_z_stretch_d <- debounce(reactive({ input$trk_z_stretch }), 500)
-  observeEvent(trk_z_stretch_d(), {
-    val <- trk_z_stretch_d()
-    req(is.numeric(val), is.finite(val), val >= 0.1)
-    if (isTRUE(all.equal(val, loop$rendered_zs %||% 1.0))) return()  # unchanged since last render → skip creation fire
-    fire_layout("z_correction")
-  }, ignoreInit = TRUE)
+  # ── Axial calibration: pending vs applied ────────────────────────────────
+  # input$trk_z_scale is only a PENDING value; trk_z_applied() is what the data
+  # is actually scaled by. Committing on Plot Data matches how every other
+  # tracking setting behaves (see the note above observeEvent(input$trk_plot_data))
+  # and avoids re-running the whole pipeline on every keystroke — the reason the
+  # old control needed a debounce.
+  trk_z_applied <- reactiveVal(TRK_Z_SCALE_DEFAULT)
+
+  observeEvent(input$trk_plot_data, {
+    val <- suppressWarnings(as.numeric(input$trk_z_scale))
+    if (!length(val) || !is.finite(val) || val <= 0) return()
+    if (isTRUE(all.equal(val, trk_z_applied()))) return()
+    trk_z_applied(val)
+    # Record it either way, but only announce it when there is axial data for it
+    # to act on — a 2D dataset should never surface a z message.
+    if (identical(trk_z_state(), "3d"))
+      showNotification(sprintf("Axial calibration applied: %.3f.", val),
+                       type = "message", duration = 5)
+    # No fire_layout here on purpose: the generic Plot Data handler below already
+    # calls it, and priority = 10 guarantees this runs first — so that single
+    # rebuild picks up the new factor. Firing here too would rebuild twice.
+  }, ignoreInit = TRUE, priority = 10)
+
+  # Three states, because "nothing uploaded yet" must not look like "this data is
+  # 2D". Reads the RAW loaded data, not trk(), so the panel settles as soon as a
+  # file is uploaded rather than waiting for the first Plot Data.
+  trk_z_state <- reactive({
+    df <- tryCatch(trk_raw_loaded(), error = function(e) NULL)
+    if (is.null(df) || !nrow(df)) return("nodata")
+    if (isTRUE(.has_real_z(df))) "3d" else "planar"
+  })
+
+  # Dim (not hide) for planar data — see the SMLM equivalent for the reasoning.
+  observe({
+    ok <- !identical(trk_z_state(), "planar")
+    shinyjs::toggleState("trk_z_scale", condition = ok)
+    shinyjs::toggleClass(id = "trk_z_scale_group", class = "dimmed", condition = !ok)
+  })
+
+  output$trk_z_scale_status <- renderUI({
+    if (identical(trk_z_state(), "planar"))
+      return(helpText(tags$b("Not applicable: "),
+                      "the uploaded dataset has no axial (z) data."))
+
+    pend <- suppressWarnings(as.numeric(input$trk_z_scale))
+    appl <- trk_z_applied()
+    if (!length(pend) || !is.finite(pend) || pend <= 0)
+      return(helpText(sprintf("Applied: %.3f. Enter a positive factor.", appl)))
+    if (isTRUE(all.equal(pend, appl)))
+      helpText(sprintf("Applied: %.3f.", appl))
+    else
+      helpText(tags$b(sprintf("Pending: %.3f", pend)),
+               sprintf(" (applied: %.3f) — press Plot Data to apply.", appl))
+  })
 
   # ---- Big-file detection & chunking/compression on upload ---------------------
   observeEvent(input$trk_file, {
@@ -993,10 +1030,14 @@ tracking_server <- function(input, output, session) {
         if (!is.data.frame(d)) return(NULL)
         d <- canonicalize_minflux_df(d)
       } else if (grepl("\\.json$", nm)) {
-        d <- read_minflux_json_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE)
+        # z_scale = 1: chunks store RAW z. The axial calibration is applied once,
+        # in trk_raw_df(), so every format lands on the same footing.
+        d <- read_minflux_json_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE,
+                                     z_scale = 1.0)
         jitr <- if ("itr" %in% names(d) && nrow(d) > 0) max(d$itr, na.rm = TRUE) else NA_integer_
       } else if (grepl("\\.npy$", nm)) {
-        d <- read_minflux_npy_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE)
+        d <- read_minflux_npy_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE,
+                                    z_scale = 1.0)
         jitr <- if ("itr" %in% names(d) && nrow(d) > 0) max(d$itr, na.rm = TRUE) else NA_integer_
       } else {
         return(NULL)
@@ -1132,6 +1173,42 @@ tracking_server <- function(input, output, session) {
       fire_layout("file_nomanifest")
     }
   }, ignoreInit = TRUE)
+
+  # ── Adopt an axial factor recorded in an uploaded CSV ─────────────────────
+  # Reads a small head of each file rather than the whole thing, so this stays
+  # cheap even for a multi-GB export. A sample rather than a single row because
+  # z VARIATION is what decides whether the calibration applies at all, and one
+  # row cannot show variation — a planar file must be passed over in silence.
+  #
+  # Done here rather than inside trk_raw_loaded() because that is a reactive:
+  # writing to an input from inside one is a side effect in the wrong place.
+  #
+  # Only `certain` factors are adopted — i.e. a real z_scale_applied column. The
+  # 0.7 assumed for pyMINFLUX and legacy exports is a guess, and a guess must not
+  # silently become the session's calibration.
+  observeEvent(input$trk_file, {
+    req(input$trk_file)
+    adopt <- NULL
+    for (i in seq_len(nrow(input$trk_file))) {
+      if (!grepl("\\.csv(\\.gz)?$", tolower(input$trk_file$name[i]))) next
+      head_df <- tryCatch(
+        as.data.frame(data.table::fread(input$trk_file$datapath[i], nrows = 2000L,
+                                        showProgress = FALSE)),
+        error = function(e) NULL)
+      if (is.null(head_df) || !nrow(head_df)) next
+      if (!has_axial_data(head_df, min_sd = 1)) next   # planar: nothing to adopt
+      cal <- detect_csv_z_calibration(head_df)
+      if (isTRUE(cal$certain) && is.finite(cal$factor) && cal$factor > 0) adopt <- cal$factor
+    }
+    if (is.null(adopt) || isTRUE(all.equal(adopt, trk_z_applied()))) return()
+
+    updateNumericInput(session, "trk_z_scale", value = adopt)
+    # Committed straight away: an upload is itself an explicit action, and the
+    # pipeline is being rebuilt anyway, so there is nothing to defer to Plot Data.
+    trk_z_applied(adopt)
+    showNotification(sprintf("Axial calibration %.3f adopted from the uploaded file.", adopt),
+                     type = "message", duration = 6)
+  }, ignoreInit = TRUE, priority = 20)   # before the loaders read the data
   
   # ---- Load CSV/fast formats OR a pre-split chunk ----
   trk_raw_loaded <- reactive({
@@ -1173,10 +1250,25 @@ tracking_server <- function(input, output, session) {
       } else if (grepl("\\.rds$", name)) {
         obj <- readRDS(path); shiny::validate(shiny::need(is.data.frame(obj), "RDS must contain a data.frame")); obj
       } else if (grepl("\\.csv(\\.gz)?$", name)) {
-        data.table::fread(path, showProgress = FALSE, nThread = max(1, parallel::detectCores()-1)) |> as.data.frame()
+        # A CSV always arrives with some axial factor already applied; strip it
+        # back to raw so trk_raw_df() can apply the user's calibration alone.
+        cdf <- data.table::fread(path, showProgress = FALSE,
+                                 nThread = max(1, parallel::detectCores()-1)) |> as.data.frame()
+        cdf <- strip_csv_z_calibration(cdf)
+        zc  <- attr(cdf, "z_cal")
+        # Silent for planar data — a 2D upload should not mention z at all.
+        if (!is.null(zc) && isTRUE(zc$has_z)) {
+          showNotification(
+            sprintf("Axial calibration %.3f detected (%s)%s and removed; the Z factor below now applies.",
+                    zc$factor, zc$source,
+                    if (isTRUE(zc$certain)) "" else " — assumed, not recorded in the file"),
+            type = if (isTRUE(zc$certain)) "message" else "warning", duration = 8)
+        }
+        cdf
       } else if (grepl("\\.json$", name)) {
         withProgress(message = "Reading MINFLUX JSON...", value = 0, {
-          out <- read_minflux_json_as_df(path, keep_final_only = TRUE, keep_valid_only = TRUE)
+          out <- read_minflux_json_as_df(path, keep_final_only = TRUE, keep_valid_only = TRUE,
+                                         z_scale = 1.0)
           if (is.data.frame(out) && nrow(out) > 0) {
             itr_used <- if ("itr" %in% names(out)) max(out$itr, na.rm = TRUE) else NA_integer_
             if (!is.na(itr_used)) {
@@ -1190,7 +1282,8 @@ tracking_server <- function(input, output, session) {
         })
       } else if (grepl("\\.npy$", name)) {
         withProgress(message = "Reading MINFLUX .npy...", value = 0, {
-          read_minflux_npy_as_df(path, keep_final_only = TRUE, keep_valid_only = TRUE)
+          read_minflux_npy_as_df(path, keep_final_only = TRUE, keep_valid_only = TRUE,
+                                 z_scale = 1.0)
         })
       } else {
         shiny::validate(shiny::need(FALSE, "Unsupported file type"))
@@ -1227,7 +1320,10 @@ tracking_server <- function(input, output, session) {
   # no effect on the metadata panels or the raw-stats ranges.
   trk_raw_df <- reactive({
     df <- trk_raw_loaded()
-    zf <- suppressWarnings(as.numeric(input$trk_z_stretch %||% 1.0))
+    # trk_raw_loaded() is RAW, uncorrected z for every format (readers use
+    # z_scale = 1; CSVs are stripped on load), so this is the ONE place the
+    # axial calibration enters the tracking pipeline.
+    zf <- trk_z_applied()
     if (is.finite(zf) && zf > 0 && zf != 1.0 && "z" %in% names(df) && any(is.finite(df$z)))
       df$z <- df$z * zf
     df
@@ -2951,6 +3047,10 @@ tracking_server <- function(input, output, session) {
       if (length(drop_cols)) df <- df[, !names(df) %in% drop_cols, drop = FALSE]
       # tim is stored internally in ms; convert back to seconds for export
       if ("tim" %in% names(df)) df$tim <- df$tim / 1000
+      # Axial provenance: z below is at this factor. Re-importing (here or in the
+      # SMLM tab) divides it out instead of falling back to the 0.7 guess in
+      # detect_csv_z_calibration(), so a round-trip is exact.
+      df$z_scale_applied <- trk_z_applied()
       write.csv(df, file, row.names = FALSE)
     }
   )
@@ -3924,12 +4024,12 @@ tracking_server <- function(input, output, session) {
   output$trk_track2D <- renderPlotly({
     req(!is.na(layout_trigger()))
     # Record the EFFECTIVE view-mode / z-stretch / chunk this render used (with the
-    # same defaults the render applies). The view_mode / z_stretch / chunk_sel
+    # same defaults the render applies). The view_mode / z_scale / chunk_sel
     # observers compare against these and skip firing when unchanged — so their
     # INPUT CREATION after an upload (value == the just-rendered default) never
     # triggers a redundant rebuild, without any fragile time window.
     loop$rendered_view  <- isolate(input$trk_view_mode  %||% "2d")
-    loop$rendered_zs    <- isolate(input$trk_z_stretch  %||% 1.0)
+    loop$rendered_zs    <- isolate(trk_z_applied())
     loop$rendered_chunk <- isolate(input$trk_chunk_sel  %||% "__all__")
     pre  <- isolate(frames_store()); req(is.list(pre), length(pre$frames) > 0)
     f1    <- pre$frames[[1]]
@@ -9587,10 +9687,13 @@ tracking_server <- function(input, output, session) {
         marker = list(size = 8, color = pal[[lv]], opacity = 0.75,
                       line = list(width = 0.4, color = "rgba(0,0,0,0.35)")),
         name = sprintf("%s (%d)", lv, length(i)),
-        text = sprintf("TID %s<br>starts at %.0f%% of track<br>integrated %.2f · photons %.2f×<br>%s",
-                       e$tid[i], 100 * e$export_onset_frac[i], e$event_integ_frac[i],
-                       e$event_eco_ratio[i], e$event_support[i]),
-        hovertemplate = "%{text}<extra></extra>")
+        # hoverinfo="text" rather than a hovertemplate: no template parsing, so the
+        # tooltip cannot fall back to printing the placeholder itself.
+        text = sprintf("TID %s<br>starts at %.0f%% of track<br>integrated fraction %.2f<br>photons %.2f x track median<br>%s",
+                       as.character(e$tid[i]), 100 * e$export_onset_frac[i],
+                       e$event_integ_frac[i], e$event_eco_ratio[i],
+                       as.character(e$event_support[i])),
+        hoverinfo = "text")
     }
     fig %>% layout(
       xaxis = list(title = "where the segment starts along the track (0 = start, 1 = end)",
@@ -10858,7 +10961,7 @@ tracking_server <- function(input, output, session) {
   # Fires whenever new data is loaded (upload or rechunk), regardless of whether
   # trk_chunk_sel changed. Ensures the chart always rebuilds with the new dataset.
   # This is the SINGLE authoritative first-plot trigger on load; the chunk_sel /
-  # view_mode / z_stretch observers compare against loop$rendered_* (set by the render)
+  # view_mode / z_scale observers compare against loop$rendered_* (set by the render)
   # so their input-CREATION after load does not fire extra redundant rebuilds.
   observeEvent(trk_data_key(), {
     if (!identical(trk_data_key(), "init")) fire_layout("data_key")

@@ -117,6 +117,13 @@ suppressPackageStartupMessages({
 # both spread filters. Literature (e.g. pyMINFLUX) typically uses ≥5 points.
 MIN_LOCS_FOR_SPREAD_DEFAULT <- 5L
 
+# ── Axial (z) calibration default ──────────────────────────────────────────────
+# Refractive-index mismatch correction applied to z. 0.7 is the pyMINFLUX
+# default and only a starting point: the physically correct value depends on the
+# immersion/sample index pair and imaging depth, so it belongs to the DATASET,
+# not the software. Both tabs expose it and neither hard-codes it any longer.
+TRK_Z_SCALE_DEFAULT <- 0.7
+
 # ── Tracking chunking defaults ─────────────────────────────────────────────────
 # Fall back to fst if qs could not be installed (common on macOS without
 # a working C++ toolchain / OpenMP support).
