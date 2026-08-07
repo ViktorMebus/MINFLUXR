@@ -159,6 +159,7 @@ When data contains two spectrally distinct labels recorded on two detectors, the
 
 Once groups are defined, the **nearest-neighbor (NN) distance** panel computes cross-group, within group, or all, distances. 
 
+<<<<<<< HEAD
 ### De-blink correction and Median Clustering
 
 Two independent grouping steps, answering different questions. **De-blink correction** is an instrument
@@ -198,6 +199,20 @@ medians) become the representative points for downstream analysis including Medi
 *Note:* raw-point DBSCAN was the previous method here and has been retired. It merged whenever any two
 localizations touched, so a single stray point could fuse two molecules. Against ground-truth simulation
 its error count was 35 (splits + merges) versus 10 for centroid distance and 29 for majority vote.
+=======
+### DBSCAN Clustering
+
+Two independent rounds of DBSCAN clustering are available. Both follow the standard DBSCAN definition: a point is a *core point* if it has at least `minPts` neighbors within distance `eps`; all density-reachable points from a core point form a cluster; points with fewer than `minPts` neighbors are labeled noise (cluster 0).
+
+#### Primary DBSCAN (Round 1)
+
+Runs on **raw localizations** (all points after filtering). Its purpose is to group localizations from the same or closely co-located molecules, particularly useful when one molecule produces multiple nearby trace IDs due to repeated blinking events.
+
+- `eps` — neighborhood radius in nm
+- `minPts` — minimum core-point occupancy
+- Once active, the app replaces per-TID coloring with per-cluster coloring and uses **primary cluster centroids** (rather than individual TID medians) as the representative points for all downstream analysis including Cluster2.
+- **Exclude unclustered** — optionally removes all noise points (cluster = 0) from the analysis and plots.
+>>>>>>> c4383f3519c4268414a76a4243a2691a25c5543b
 
 #### Secondary DBSCAN — Cluster2
 
@@ -322,6 +337,7 @@ A confocal image (PNG, TIFF, etc.) can be overlaid on the MINFLUX scatter plot a
 
 ### Analysis Outputs
 
+<<<<<<< HEAD
 The **Analysis** tab provides sixteen panels. Each produces an interactive plot and, where a table
 makes sense, an exportable CSV. Panels marked ⚠ carry an *exploratory* badge in the app — they are
 research tools whose interpretation is not yet settled, not validated readouts.
@@ -346,6 +362,9 @@ research tools whose interpretation is not yet settled, not validated readouts.
 | 2D KDE Density Map | Smoothed density field |
 
  All analyses operate on the filtered, clustered data visible in the Visualization tab. In 2-color mode, group membership is determined by DCR thresholding (or the `fluo` column if present).
+=======
+The **Analysis** tab provides eight quantitative tools. Each produces an interactive plot and an exportable CSV table. All analyses operate on the filtered, clustered data visible in the Visualization tab. In 2-color mode, group membership is determined by DCR thresholding (or the `fluo` column if present).
+>>>>>>> c4383f3519c4268414a76a4243a2691a25c5543b
 
 ---
 
@@ -604,6 +623,7 @@ Abberior JSON files store coordinates in **meters**. On load, the app converts t
 
 $$x_\text{nm} = x_\text{m} \times 10^9$$
 
+<<<<<<< HEAD
 **Z-axis scaling** is a user-set calibration, not a fixed constant. Files are read with **raw z**;
 the factor you set (SMLM sidebar *Axial (z) calibration*, Tracking sidebar *Axial (z) scaling factor*,
 both defaulting to 0.7) is applied once afterwards, on Plot Data. CSVs are first returned to raw z — the
@@ -614,6 +634,9 @@ distances, Rg — applying it twice would compress z by 30%, which the detection
 
 The historical note below describes the mechanics of the correction itself; scaling is applied after
 unit conversion to correct for refractive index mismatch between the sample medium and the objective immersion medium:
+=======
+**Z-axis scaling** is applied after unit conversion to correct for refractive index mismatch between the sample medium and the objective immersion medium:
+>>>>>>> c4383f3519c4268414a76a4243a2691a25c5543b
 
 $$z_\text{corrected} = z_\text{nm} \times s_z \quad (s_z = 0.7 \text{ by default})$$
 

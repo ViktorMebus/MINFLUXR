@@ -14,9 +14,9 @@
 ##   tim ....... timestamp. SECONDS on disk; the tracking tab multiplies by 1000
 ##               and works in ms from then on. The SMLM tab keeps seconds.
 ##   itr ....... MINFLUX iteration index (the localization refinement stage)
-##   efo ....... effective photon rate  -> proxy for brightness/precision
+##   efo ....... effective photon rate at offset (Hz) - equivalent to eco
 ##   cfr ....... centre-frequency ratio -> localization quality metric
-##   eco ....... effective photon count
+##   eco ....... effective photon count at offset - periphieral photon count
 ##   dcr ....... detector-channel ratio -> the colour axis for 2-colour work
 ##   Optional: dwell, fluo, lnc, fbg, ...
 ##
