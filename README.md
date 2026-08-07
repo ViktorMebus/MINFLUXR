@@ -35,7 +35,7 @@ An interactive R/Shiny application for visualization and analysis of **Abberior 
 - [Key Calculations](#key-calculations)
 - [Plugin System](#plugin-system)
 - [Further Documentation](#further-documentation)
-- [Notes & Tips](#notes-tips)
+- [Notes & Tips](#notes--tips)
 
 ## Overview
 
@@ -43,7 +43,6 @@ MINFLUXR provides three main analysis environments:
 
 | Tab | Purpose |
 |-----|---------|
-<<<<<<< HEAD
 | **SMLM** | Static super-resolution data: filtering, de-blinking, clustering, co-localization, spatial statistics |
 | **Tracking** | Single-molecule tracking: trajectory visualization, MSD, diffusion analysis |
 | **MINFLUX Simulator** | Generate synthetic MINFLUX datasets — labelled structures, whole acquisitions, and ground-truth diffusion tracks |
@@ -54,13 +53,6 @@ Each tab is split into a **Display** sub-tab (sidebar controls + plot) and an **
 The app is designed around Abberior MINFLUX `.npy` and `.json` exports, but also accepts `.csv` files
 in pyMINFLUX format or MINFLUXR's own export. In principle any `.csv` with x/y coordinates works,
 though this has not been tested.
-=======
-| **SMLM Analysis** | Static super-resolution data: filtering, clustering, spatial statistics |
-| **Tracking Analysis** | Single-molecule tracking: trajectory visualization, MSD, diffusion analysis |
-| **MINFLUX Simulator** | Generate synthetic MINFLUX datasets from geometric shapes or confocal images |
-
-The app is designed around Abberior MINFLUX .json or .npy exports and also accepts .csv files exported from pyMINFLUX format, or MINFLUXR created column-based .csv. Other .csv types which has X, Y columns may be accepted, but there is no guarantee.
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 ---
 
@@ -153,15 +145,9 @@ calibration and clustering and re-renders — settings do not live-update the pl
 
 ### Data Upload
 
-<<<<<<< HEAD
 Single- or multi-file loader accepting **`.npy`, `.json` and `.csv`**. Multiple files can be loaded
 simultaneously; use the **Active file** selector to switch between them, and **Remove Selected File**
 to drop one. **Lock filters** preserves current filter values when switching files.
-=======
-- **`.json`** - Abberior MINFLUX native export. The app reads the full multi-iteration dataset, keeps only the final (highest `itr`) localization per trace, and carries the last non-zero CFR value forward per TID
-- **`.npy`** - Abberior MINFLUX native export. The app reads the full multi-iteration dataset, keeps only the final (highest `itr`) localization per trace, and carries the last non-zero CFR value forward per TID. Legacy .npy format is not supported. Newer .npy formats are.
-- **`.csv`** - pyMINFLUX-format CSV or any flat table with x/y columns. Column names are canonicalized automatically (e.g. `x_nm`, `pos_x`, `xPos` all map to `x`).
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 - **Pool DCR across iterations** (on by default for `.npy` / `.json`) adds an ECO-weighted
   `dcr_pooled` column, a less noisy DCR summary than the final iteration alone.
@@ -169,25 +155,16 @@ to drop one. **Lock filters** preserves current filter values when switching fil
   greyed out (not hidden) when the dataset has no axial variation, so it stays visible *why* they are
   unavailable.
 
-<<<<<<< HEAD
 ### Axial (z) calibration
 
-A per-dataset refractive-index correction applied to z (default 0.7). Files are read with raw z and
+A per-dataset refractive-index correction applied to z. The default of **0.7 is the pyMINFLUX
+standard**; change it if your refractive index differs. Files are read with raw z and
 the factor is applied once, **on Plot Data** — so a saved analysis reproduces. Loading one of our own
 exports adopts the factor recorded in the file. It multiplies every axial quantity (z spread, cluster
 extent in z, 3D neighbour distances, Rg), so it is a calibration to measure on a known standard, not
 a display preference. Greyed out when the dataset has no axial variation.
 
 ### Metadata Filtering
-=======
-A 2D and 3D display mode lives here, either setting a 2D plot in XY, XZ or YZ, or as a plotly scene in 3D.
-
-## Axial Calibration
-
-Modifies z scaling of the dataset, per default this is calibrated for 0.7, a pyMINFLUX standard. If refractive index is slightly different, the user may modify this. 
-
-### Metadata filtering
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 Filters are applied sequentially in the order listed in the sidebar. All filters operate on the currently active dataset.
 
@@ -202,26 +179,17 @@ Raw data
 **Metadata filters.** Pick a variable, see its histogram (with the unfiltered data behind it in grey
 if *Show raw data* is on), and set a numeric range:
 
-<<<<<<< HEAD
-- `EFO` — Effective Frequency at Offset. Exceedingly high EFO values may indicate multi-emitters.
+- `EFO` — Effective Frequency at Offset. The averaged emission frequency over all points of the scan
+  pattern except the centre; exceedingly high values may indicate multi-emitters.
 - `CFR` — Center Frequency Ratio, EFC/EFO. Commonly used to exclude multi-emitter events; **no CFR
   cutoff is applied automatically anywhere in the app** — set it yourself if you want one.
 - `TIM` — acquisition timestamp; useful for selecting a time window
-- `DCR` — Detector Channel Ratio, used to separate two labels in 2-colour MINFLUX
-- `ECO` — total summarized photon count
-- `Dwell` — number of MINFLUX steps
-- `FLUO` — fluorophore channel index
-=======
-**Metadata filters** (Numeric range inputs):
-- `EFO` - Effective Frequency at Offset. The averaged emission frequency over all points in the scan pattern except for the center; exceedingly high EFO values may indicate multi-emitters. 
-- `CFR` - Center Frequency Ratio; the ratio of EFC (effective frequency at center) to EFO (effective frequency at offset), i.e. EFC/EFO. A common hard cutoff is CFR ≤ 0.5 to exclude multi-emitter events. For tracking data, a CFR ≤ 0.5 cutoff is applied automatically during chunking in the Tracking tab.
-
-- `TIM` - acquisition timestamp; useful for selecting a time window
-- `DCR` - Detector Channel Ratio; ratio of photons arriving at detector 1 vs detector 2, used to separate two fluorescent labels in 2-colour MINFLUX
-- `ECO` - Effective photon count at offset. The raw photon count per localization at periphery of donut.  
-- `Dwell` - Dwell time of the localization
-- `FLUO` - fluorophore channel index. A pyMINFLUX exported column, which can be used here.
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
+- `DCR` — Detector Channel Ratio; photons at detector 1 vs detector 2, used to separate two labels in
+  2-colour MINFLUX
+- `ECO` — Effective photon Count at Offset: the raw photon count per localization at the periphery of
+  the donut
+- `Dwell` — dwell time of the localization, in MINFLUX steps
+- `FLUO` — fluorophore channel index; a pyMINFLUX-exported column, usable here when present
 
 **TID length filter**: keeps only traces with a number of localizations within the specified range.
 Useful for excluding very short (potentially noise) or very long traces (potentially fiducials or
@@ -270,23 +238,13 @@ moving emitters).
 
 ### De-blink correction
 
-Merges a fluorophore's repeated blinks into one **de-blinked molecule**, so downstream analyses count
-molecules rather than blinking events. Works at **trace level** — a whole trace joins a molecule or it
-does not, so a trace is never split.
+Combats the instrument artifact where one fluorophore that blinks several times produces several trace
+IDs stacked on top of each other, overcounting the number of molecules. De-blinking merges them back
+into one **de-blinked ID** with a shared centroid, so downstream analyses count molecules rather than
+blinking events.
 
-<<<<<<< HEAD
-=======
-**Auto-detect DCR split**: fits a two-component Gaussian mixture model (GMM) to the distribution of per-TID median DCR values and finds the optimal threshold automatically. See [DCR-Based 2-Color Separation](#dcr-based-2-color-separation).
+Works at **trace level** — a whole trace joins a molecule or it does not, so a trace is never split.
 
-Once groups are defined, the **nearest-neighbor (NN) distance** panel computes cross-group, within group, or all, distances. 
-
-#### De-blink correction - Trace centroid distance merging or Majority vote of localizations.
-
-De-blink correction is attempting to combat instrument artifacts where one fluorophore that blinks several times produces several trace IDs on top of each other, ultimately overcounting the amount of molecules / fluorophores.
-This merges them back into one shared De-blinked ID and produces a shared centroid. 
-
-Works at **trace level** - where a whole trace joins a molecule or it does not, so a trace is never split.
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 Two criteria:
 
 - **Trace centroid distance** (default) — merge when two traces' median positions are closer than the
@@ -298,7 +256,6 @@ Two criteria:
   tolerance* ρ loosens the "strictly closer" test, and **Agreement** decides whether both traces must
   agree (mutual) or either is enough.
 
-<<<<<<< HEAD
 **De-blinking only merges — it never deletes.** A trace that cannot be merged becomes its own
 single-blink molecule, so every trace that survived filtering is still counted. Removing data is the
 job of the metadata and spread filters, where it is visible and reversible.
@@ -307,15 +264,6 @@ job of the metadata and spread filters, where it is visible and reversible.
 per-axis trace spread and finds the smallest k at which no unmerged re-blinks remain. Two diagnostics
 sit beside it — a density plot whose orange curve should show two humps (re-blinks left, separate
 molecules right) with your threshold in the gap, and an exploratory molecule-count-vs-threshold curve.
-=======
-**De-blinking only merges.** A trace that cannot be merged becomes its own
-single-blink molecule, so every trace that survived filtering is still counted. 
-
-**Choosing the threshold.** *Measure threshold from data* sets it from the current data: it measures the
-per-axis trace spread and finds the smallest k at which no unmerged re-blinks remain. Two diagnostics sit
-beside it — a density plot whose orange curve should show two humps (re-blinks left, separate molecules
-right) with your threshold in the gap, and an exploratory molecule-count-vs-threshold curve.
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 **Anisotropic option** — weights x, y and z by their own measured spread, so one threshold fits all
 three axes (the merge volume becomes an ellipsoid in nm, tighter along the better-resolved axis).
@@ -324,10 +272,16 @@ Affects the merge decision only; reported distances and sizes stay in true nm.
 De-blinked molecules are labelled **De-blinked ID** in hover text, and their medians (not individual
 TID medians) become the representative points for downstream analysis including Median Clustering.
 
-Previously DBSCAN was used for merging, but has since been retired for this purpose. In code things are still named cluster, as the functionality is largely the same.
-As I had two levels of DBSCAN when building this, cluster and cluster2 was used in code to differentiate. Cluster2 and cluster retains its code naming regardless of the change.
+> **Why not DBSCAN here?** Raw-point DBSCAN was the previous method and has been retired for merging:
+> it merged whenever any two localizations touched, so a single stray point could fuse two molecules.
+> Against ground-truth simulation its error count was 35 (splits + merges) versus 10 for centroid
+> distance and 29 for majority vote.
+>
+> **Naming in the code.** The build originally had two DBSCAN levels, named `cluster` and `cluster2`
+> to tell them apart. Those names are still used in the source even though the first level is now
+> de-blinking and the second is Median Clustering — so `cluster` in the code means de-blinking, and
+> `cluster2` means Median Clustering.
 
-<<<<<<< HEAD
 ### Nearest Neighbor Analysis
 
 Nearest-neighbour distances computed from median positions — de-blinked molecule medians when
@@ -338,20 +292,6 @@ When multiplexing is active a **scope** picker appears (within channel / between
 Median Clustering is active a **Within Median Cluster only** option restricts the search.
 
 ### Median Clustering
-=======
-#### Median Clustering - DBSCAN / HDBSCAN / OPTICS (Xi) between trace ID's or De-blinked ID - in code these parts are cluster2
-
-Runs on representative points for each Trace ID / De-blinked ID rather than raw localizations: one point per TID or De-blinked ID (median x/y/z) coordinate. 
-This DBSCAN pass groups those representative points into larger spatial structures.
-
-- `eps2` - neighborhood radius for the second pass (nm; default 200)
-- `minPts2` - minimum representative-point count for a Median Cluster core point (default 15)
-
-**Group scope** (in the 2-color MINFLUX branch): controls which analysis groups are clustered.
-- *All* - clusters all representative points together regardless of group
-- *Group 1 only* / *Group 2 only* - restricts Median Cluster to one color channel
-- *Split* - runs Median Cluster independently on each group with globally unique IDs, so group-1 clusters and group-2 clusters never merge
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 The app's one real clustering step. It runs on **representative points** — one point per trace median,
 or per de-blinked molecule median when de-blinking is on — and groups them into larger spatial
@@ -360,7 +300,6 @@ the nuclear envelope.
 
 Three grouping methods:
 
-<<<<<<< HEAD
 | Method | Parameters | Behaviour |
 |--------|-----------|-----------|
 | **DBSCAN** | `eps` (nm, default 200), `MinPts` | Fixed neighbourhood radius |
@@ -369,20 +308,6 @@ Three grouping methods:
 
 `MinPts` (default 15) applies to all three. Set it near the smallest number of traces you would call a
 real structure — often 3–6, not higher.
-=======
-In **2D mode**:
-- *Convex hull* - draws a convex-hull outline around each Median Cluster in the scatter plot
-
-In **3D mode**:
-- *Alpha shape* - wraps each Median Cluster in a 3D alpha shape (concave hull via `alphashape3d`)
-- *Isosurface* - renders a Gaussian-smoothed density isosurface around each Median Cluster, with controls for:
-  - Grid resolution (12–40; higher = more detail, slower)
-  - Padding around the cluster boundary (0–500 nm)
-  - Surface level - quantile of the smoothed density at which the surface is drawn (0.50–0.98; higher = tighter fit)
-  - Opacity (0–1)
-  - Smoothness sigma (10–500 nm; larger sigma = smoother, more featureless surface)
-  - Option to show a selected single Median Cluster ID, or all; single-color or per-cluster color
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 Two optional cleanup steps:
 
@@ -391,7 +316,6 @@ Two optional cleanup steps:
 - **Prune sparse cluster members** — after clustering, demote to noise any member whose local spacing
   exceeds a multiple of its cluster's typical spacing (~2 trims clear outliers; lower is stricter).
 
-<<<<<<< HEAD
 **kNN-distance plot** — sorted distance to the (MinPts−1)-th neighbour of each centroid. The elbow
 marks the structure/background split and therefore a good `eps`; the current `eps` is drawn as a red
 line.
@@ -411,9 +335,6 @@ can be restricted to one cluster ID and drawn in a single colour or per-cluster 
 
 Each cluster's representative points are fitted to a geometric model independently. Two fitting
 methods:
-=======
-Each Median Cluster representative points are fitted to a geometric model independently. The **representative point coordinates** used for fitting are per-TID medians (or per-primary-cluster centroids). Two fitting methods are available:
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 | Method | Description |
 |--------|-------------|
@@ -446,12 +367,8 @@ user-defined radius (nm) for visual comparison against the data.
 - *Arc span hint* (°) — initial angular extent for arc fitting (0 = auto-detected). The optimiser refines it.
 - *Helix turns hint* — seeds the pitch estimate only; the fitted turn count follows from the data extent and the optimised pitch.
 
-<<<<<<< HEAD
 **Compute all-model RMSD comparison** (slower) fits every shape model to each cluster and reports all
 RMSDs side-by-side, useful for model selection.
-=======
-**RMSD comparison** (*Compute all-model RMSD*, slower): fits all available shape models to each Median Cluster and reports all RMSDs side-by-side in the metrics table, useful for model selection.
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 **Additional 3D overlays**: PCA axes as coloured arrows; per-cluster summary text (centre, radius,
 RMSD) drawn on the plot; *Show distances to fit* (line segments from each representative point to the
@@ -461,27 +378,10 @@ metrics table is downloadable.
 **Membrane protein options** (requires the global reference plane to be active) relate each cluster to
 a global PCA-fitted reference surface, e.g. the plasma membrane:
 
-<<<<<<< HEAD
 - *Angle to plane* — angle between the cluster's primary PCA axis and the reference plane normal;
   0° = perpendicular to membrane, 90° = lying flat
 - *Distance to plane* — signed distance from the cluster centroid to the reference plane
 - *Bending radius* — curvature radius of an arc-like cluster:
-=======
-- *PCA axes* - draws the three principal-component vectors of each Median Cluster as coloured arrows, scaled by their extent
-- *Median Cluster summary labels* - text overlay reporting key metrics (centre coordinates, fitted radius, RMSD) per cluster directly on the 3D plot
-- *Show distances to fit* - draws line segments from each representative point to its nearest point on the fitted surface; a maximum line length filter (nm) can suppress long outlier lines
-- *Fit surface opacity* - controls transparency of the fitted mesh
-
----
-
-**Membrane protein options** (requires global reference plane to be active)
-
-These options relate each Median Cluster to a global PCA-fitted reference surface (e.g. the plasma membrane):
-
-- *Angle to plane* - angle between the primary PCA axis of the Median Cluster and the reference plane normal; 0° = perpendicular to membrane, 90° = lying flat
-- *Distance to plane* - signed distance from the Median Cluster centroid to the reference plane (positive = above, negative = below)
-- *Bending radius* - estimates the curvature radius of an arc-like cluster using:
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
   $$R_\text{bend} = \frac{\ell^2 + s^2}{2s}$$
   where $\ell$ is the PC1 half-extent (chord half-length) and $s$ is the PC2 extent (sagitta).
   **Only valid for arc-like clusters viewed roughly edge-on** — not meaningful for complete rings,
@@ -489,7 +389,6 @@ These options relate each Median Cluster to a global PCA-fitted reference surfac
 
 #### NN distances within Median Clusters
 
-<<<<<<< HEAD
 Nearest-neighbour distances between the representative points inside each cluster, drawn as lines:
 *k* (default 3), a distance-range filter, optional numeric labels (font size and offset), and a CSV
 export.
@@ -504,29 +403,6 @@ X and Y. Display controls: invert Y (origin at top-left), mirror horizontally, o
 save and load as JSON.
 
 Two **auto-alignment** modes are available once an image and pixel size are provided:
-=======
-**NN distances within Median Cluster's**
-
-Nearest-neighbor distances between the representative points inside each Median Cluster are computed and visualized as lines:
-- `k` - number of nearest neighbors to find per point (default 3)
-- Distance range filter - limits displayed lines to a user-defined nm range
-- Optional numeric labels on each line showing the distance in nm
-- Exportable as a CSV table
-
-**NN distances between Median Cluster's**
-
-Nearest-neighbor distances between the Median Cluster centroid between other Median Cluster centroids. Is computed and visualized as lines:
-
-- `k` - number of nearest neighbors to find per point (default 3)
-- Distance range filter - limits displayed lines to a user-defined nm range
-- Optional numeric labels on each line showing the distance in nm
-- Exportable as a CSV table
-
-
-### Confocal Overlay & Auto-Alignment
-
-A confocal image (PNG, TIFF, etc.) can be overlaid on the MINFLUX scatter plot as a reference. Two auto-alignment modes are available once an image and pixel size are provided:
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 **Foci mode**:
 1. Bright blobs are detected in the confocal image by Gaussian smoothing followed by iterative peak finding with a minimum peak-separation constraint.
@@ -710,87 +586,10 @@ Median Cluster. Raw localizations are deliberately not an option — they are no
 The mono-colour statistics (NN, Ripley's L, RoG) are described under
 [Key Calculations](#key-calculations). The four cross-channel panels:
 
-<<<<<<< HEAD
 #### Cross-Channel Nearest Neighbor & Co-localization Curve
 
 Directional nearest-neighbour distance from each point in one group to its nearest point in the other,
 computed in **2D (x, y)** with `RANN::nn2`:
-=======
-| Unit | Point definition |
-|------|-----------------|
-| `tid` | Per-TID median x/y/z position |
-| `pcid` | Per-primary-cluster centroid |
-| `cluster2_tid` | Per-TID median, restricted to within each Median Cluster |
-| `cluster2_pcid` | Per-primary-cluster centroid, restricted to within each Median Cluster |
-
-The $k$-th NN distance for point $i$ is:
-
-$$d_i^{(k)} = k\text{-th smallest} \;\|\mathbf{p}_i - \mathbf{p}_j\|, \quad j \neq i$$
-
-Computed with a kd-tree (`RANN::nn2`). The histogram is summarized by the median and by either the **IQR** or **MAD** as a spread indicator. In 2-color mode, cross-group distances (G1→G2, G2→G1, and within-group) can be selected independently.
-
-> The first-NN distance distribution reveals the typical inter-molecule or inter-cluster spacing. A narrow peak indicates a regular lattice-like arrangement; a broad tail suggests spatial heterogeneity.
-
----
-
-#### 2. Traces per Cluster (TID Count Histogram)
-
-Counts the number of unique TIDs per Median Cluster (or per De-blinked ID when Median Cluster is not active) and displays the distribution as a histogram.
-
-> **Caution**: in SMLM experiments a single fluorophore can produce multiple distinct trace IDs across sequential blinking events. The TID count therefore reflects the number of **blinking events**, not necessarily the number of molecules. Experiments with irreversible photoactivation (e.g. PALM) are less affected by this ambiguity.
-
----
-
-#### 3. Radius of Gyration (RoG)
-
-Quantifies the spatial compactness of each Median Cluster. **MINFLUXR computes RoG from per-TID median positions, not from individual localizations**, reducing the influence of localization noise and treating each blinking event as one representative point.
-
-For a Median Cluster containing $m$ TIDs with median positions $(\tilde{x}_k,\tilde{y}_k,\tilde{z}_k)$:
-
-**Step 1** — cluster centroid (mean of TID medians):
-
-$$\bar{x} = \frac{1}{m}\sum_{k=1}^m \tilde{x}_k, \qquad \bar{y} = \frac{1}{m}\sum_{k=1}^m \tilde{y}_k, \qquad \bar{z} = \frac{1}{m}\sum_{k=1}^m \tilde{z}_k$$
-
-**Step 2** — RoG is the RMS displacement of TID medians from the centroid:
-
-$$R_g = \sqrt{\frac{1}{m}\sum_{k=1}^m \!\left[(\tilde{x}_k - \bar{x})^2 + (\tilde{y}_k - \bar{y})^2 + (\tilde{z}_k - \bar{z})^2\right]}$$
-
-Only Median Clusters with $m \geq 2$ TIDs are included (a single point has $R_g = 0$ by definition). The exportable table reports cluster ID, TID count, centroid coordinates, and $R_g$.
-
----
-
-#### 4. Ripley's L(r)
-
-A spatial clustering statistic that tests whether points are more aggregated than expected under complete spatial randomness (CSR). MINFLUXR uses a **naive (uncorrected) estimator** — no edge correction is applied, which is fast but introduces boundary bias for points near the data extent.
-
-**Naive K estimator**:
-
-$$\hat{K}(r) = \frac{A \cdot 2}{n(n-1)} \sum_{i < j} \mathbf{1}\!\left(\|\mathbf{p}_i - \mathbf{p}_j\| \leq r\right)$$
-
-where $A$ is the bounding area of the convex hull (or bounding volume $V$ in 3D) and $n$ is the number of points. The factor of 2 accounts for the symmetric count of unordered pairs.
-
-**L-transformation**:
-
-$$\hat{L}(r) = \sqrt{\frac{\hat{K}(r)}{\pi}} \;\text{(2D)}, \qquad \hat{L}(r) = \left(\frac{3\,\hat{K}(r)}{4\pi}\right)^{1/3} \;\text{(3D)}$$
-
-The plotted quantity is $\hat{L}(r) - r$:
-- $> 0$: clustering at scale $r$ (more pairs than CSR predicts)
-- $\approx 0$: CSR
-- $< 0$: regularity / spatial inhibition
-
-**Implementation notes**:
-- $r_\text{max}$ defaults to $\min(\Delta x, \Delta y)/4$ (one quarter of the shorter data span), keeping the estimator in the statistically reliable range
-- If $n > 2000$, a random subsample of 2000 points is used and a warning is shown
-- The analysis operates on the current 2D or 3D point set (localizations or TID medians, depending on the "Show medians" toggle)
-
-No Monte Carlo CSR envelope is provided. Deviations from zero should be interpreted in the context of data set size and the observation window geometry.
-
----
-
-#### 5. Cross-Channel Nearest Neighbor & Co-localization Curve
-
-For 2-color data, computes the **directional nearest-neighbor distance** from each point in one group to its nearest point in the other group. Distances are computed in **2D (x, y only)** using `RANN::nn2`:
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 $$d_i^{G_1 \to G_2} = \min_{j \in G_2} \sqrt{(x_i - x_j)^2 + (y_i - y_j)^2}, \quad i \in G_1$$
 
@@ -815,25 +614,8 @@ within-structure measure rather than a global one. The 2000-point subsampling li
 
 #### Pair Cross-Correlation g₁₂(r)
 
-<<<<<<< HEAD
 The annulus-normalized derivative of $K_{12}$ — more sensitive to the *scale* of co-localization than
 the cumulative $L_{12}$:
-=======
-The plotted $\hat{L}_{12}(r) - r$:
-- $> 0$: groups co-localize more than expected for two independent CSR processes
-- $\approx 0$: spatial independence
-- $< 0$: spatial exclusion
-
-When Median Cluster is active, $\hat{L}_{12}$ is computed **per Median Cluster** and the results are averaged, giving a within-cluster measure of inter-channel co-localization rather than a global one. The same 2000-point subsampling limit as univariate $L(r)$ is applied per group.
-
----
-
-#### 7. Pair Cross-Correlation g₁₂(r)
-
-The pair cross-correlation function (PCF) is the annulus-normalized derivative of $K_{12}$ and is more sensitive to the *scale* of co-localization than the cumulative $L_{12}$:
-
-**2D**:
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 $$g_{12}(r) = \frac{A}{n_1 n_2} \cdot \frac{\#\text{cross-pairs in annulus}\bigl(r-\tfrac{\delta}{2},\, r+\tfrac{\delta}{2}\bigr)}{\pi\!\left[(r+\tfrac{\delta}{2})^2 - (r-\tfrac{\delta}{2})^2\right]}$$
 
@@ -899,7 +681,18 @@ almost anywhere else — the status line shows the value in use and where it cam
 
 ### Track Cleaning & Filtering
 
-Three cleaning stages run **before** any filter, in this order. Each is optional and each reports
+Cleaning runs on the raw acquisition timing; the metadata, length and duration filters then apply per
+segment:
+
+```
+Raw data
+ └── [1] Split at time gaps → Trim degraded ends → Continuity gate
+      └── [2] Metadata filters  (EFO, CFR, DCR, TIM, ECO, dwell, fluo)
+           └── [3] TID length filter  (number of points per trace)
+                └── [4] Trace duration filter  (max(tim) − min(tim), ms)
+```
+
+The three cleaning stages run **before** any filter, in this order. Each is optional and each reports
 how many localizations it removed.
 
 | Stage | Controls | What it does |
@@ -934,7 +727,7 @@ layered underneath.
 
 ---
 
-## Tracking Display Tab
+## Tracking Analysis Tab
 
 Panels in UI order. Several depend on σ_loc and the cycle time, so run **Data Quality & Calibration**
 first.
@@ -959,21 +752,11 @@ downstream.
 
 ### Sample geometry
 
-<<<<<<< HEAD
 Sets the **motion degrees of freedom**: volume (3), surface (2), or filament (1). This is not
 cosmetic. A per-axis estimator spreads 2-DOF motion over 3 recorded axes, so a membrane protein
 tracked in 3D reports D at 2/3 of its true value unless the geometry says otherwise. It also sets the
 χ² degrees of freedom for the confinement band. **Defaults to volume** — set it to surface for
 membrane work or every D and confinement call below inherits the bias.
-=======
-```
-Raw data
-   └── [1] Split tracks at time gaps -> Trim degraded ends -> Track continuity gate (drop dark-cycle heavy tracks)
-      └── [2] Metadata filters  (EFO, CFR, DCR, TIM, ECO, dwell, fluo)
-         └── [3] TID length filter  (number of points per trace)
-               └── [4] Trace duration filter  (max(tim) − min(tim) in ms)
-```
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 ### MSD (diffusion)
 
@@ -1117,11 +900,7 @@ Both the tracks and the ground truth export as CSV.
 
 ## Key Calculations
 
-<<<<<<< HEAD
 ### Unit Conversions & Import
-=======
-### Unit Conversions & .npy and .json Import
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 Abberior files store coordinates in **meters**. On load, the app converts to nanometers:
 
@@ -1267,14 +1046,10 @@ The plotted quantity is $\hat{L}(r) - r$:
 
 ### Radius of Gyration
 
-<<<<<<< HEAD
 The radius of gyration quantifies the spatial compactness of a Median Cluster. **RoG is computed from
 representative point positions** (per-TID medians, or de-blinked molecule medians when de-blinking is
 on) rather than from individual localizations, so each molecule contributes one point and localization
 noise is suppressed.
-=======
-The radius of gyration quantifies the spatial compactness of a Median Cluster. In MINFLUXR, **RoG is computed from per-TID median positions** rather than from individual localizations, so each blinking event contributes one representative point and localization noise is suppressed.
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
 
 For a cluster of $m$ points at $(\tilde{x}_k, \tilde{y}_k, \tilde{z}_k)$, the centroid is the mean of
 those positions and:
@@ -1404,7 +1179,6 @@ MINFLUXR/
 
 ## Notes & Tips
 
-<<<<<<< HEAD
 - **No automatic quality filter**: nothing is removed on load except invalid records (`vld = FALSE`).
   In particular there is **no automatic CFR cutoff** in either tab — CFR is not a reliable artefact
   discriminator for tracking data, and in SMLM it is your call. Set the CFR range yourself if you want
@@ -1428,10 +1202,3 @@ MINFLUXR/
 - **MSD fit range**: the linear fit uses Michalet & Berglund optimal-point selection for you. If you
   override it, keep to the early lags — later points rest on fewer pairs, have higher variance, and
   deviate from the linear model through confinement or undersampling.
-=======
-- **Z-axis scaling**: The default Z scale of 0.7 corrects for the refractive index mismatch between water (n ≈ 1.33) and glass (n ≈ 1.52) in a typical sample. Adjust this if your mounting medium differs.
-- **JSON CFR carry-forward**: Because CFR is measured during early MINFLUX iterations and may be NaN in the final iteration, the app takes the last non-zero CFR value across all iterations. This ensures CFR filtering works correctly on JSON data even when only the final iteration is retained.
-- **Multiple datasets**: In the SMLM tab, up to several files can be loaded simultaneously and compared using the Active file selector. Filter settings can be locked when switching to prevent accidental resets.
-- **Filter & Rechunk is non-destructive**: the original chunk set is frozen at upload time. Every Filter & Rechunk operation reads from that frozen original, so you can always recover the full dataset by resetting all filters and rechunking again.
-- **MSD fit range**: fitting only the first 20–30% of the MSD curve is strongly recommended. Later time points are based on fewer pairs, have higher variance, and deviate from the simple linear model due to confinement or insufficient sampling.
->>>>>>> 80699099d7c9ba6a47cae4a770b699050a417d03
