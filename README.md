@@ -48,7 +48,7 @@ MINFLUXR provides three main analysis environments:
 
 | Tab | Purpose |
 |-----|---------|
-| **SMLM Analysis** | Static super-resolution data: filtering, clustering, co-localization, spatial statistics |
+| **SMLM Analysis** | Static super-resolution data: filtering, clustering, spatial statistics |
 | **Tracking Analysis** | Single-molecule tracking: trajectory visualization, MSD, diffusion analysis |
 | **MINFLUX Simulator** | Generate synthetic MINFLUX datasets from geometric shapes or confocal images |
 
@@ -102,7 +102,7 @@ The following columns are read from Abberior JSON exports. Understanding them is
 
 ---
 
-## SMLM Analysis Tab
+## SMLM Display Tab
 
 ### Loading Data
 
@@ -114,7 +114,13 @@ An upload widget browser supporting single, or multiple datasets. Supported form
 
 Multiple files can be loaded simultaneously; use the **Active file** selector to switch between them. The **Lock filters** checkbox preserves current filter values when switching files.
 
-### Filtering
+A 2D and 3D display mode lives here, either setting a 2D plot in XY, XZ or YZ, or as a plotly scene in 3D.
+
+## Axial Calibration
+
+Modifies z scaling of the dataset, per default this is calibrated for 0.7, a pyMINFLUX standard. If refractive index is slightly different, the user may modify this. 
+
+### Metadata filtering
 
 Filters are applied sequentially in the order listed in the sidebar. All filters operate on the currently active dataset.
 
