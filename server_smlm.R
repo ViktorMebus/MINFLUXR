@@ -5895,47 +5895,37 @@ smlm_server <- function(input, output, session) {
         return(fig)
       }
       
-      alpha_use <- as.numeric(input$alpha_value_hull %||% 200)
-      if (!is.finite(alpha_use) || alpha_use <= 0) alpha_use <- 200
-      
+      # No alpha radius is asked for: alpha_surface_3d() derives one per group
+      # from that group's own point spacing. See its header in helpers_smlm.R for
+      # why a single global radius was both meaningless (a 30 nm molecule and a
+      # 500 nm structure need different radii) and inert (the old code drew the
+      # whole tetrahedralization, which is identical at every alpha).
       for (gid_key in as.character(group_ids)) {
-        
+
         subset_df <- pts[as.character(pts[[id_col]]) == gid_key, , drop = FALSE]
         if (nrow(subset_df) < 4) next
-        
-        pts_mat <- as.matrix(subset_df[, c("x","y","z"), drop = FALSE])
-        pts_mat <- pts_mat[stats::complete.cases(pts_mat), , drop = FALSE]
-        if (nrow(pts_mat) < 4) next
-        
-        zsd <- stats::sd(pts_mat[, 3], na.rm = TRUE)
-        if (!is.finite(zsd) || zsd < 1e-12) {
-          pts_mat[, 3] <- pts_mat[, 3] + seq_len(nrow(pts_mat)) * 1e-6
-        }
-        
-        ashape <- tryCatch(
-          alphashape3d::ashape3d(pts_mat, alpha = alpha_use),
-          error = function(e) NULL
-        )
-        if (is.null(ashape) || is.null(ashape$triang) || !nrow(ashape$triang)) next
-        
-        tris <- as.matrix(ashape$triang)
-        
+
+        srf <- alpha_surface_3d(as.matrix(subset_df[, c("x","y","z"), drop = FALSE]))
+        if (is.null(srf)) next
+
         # name-based lookup (NOW guaranteed)
         hull_col <- unname(gid_hex_map[[as.character(gid_key)]])
-        
+
         if (is.null(hull_col) || !nzchar(hull_col)) hull_col <- "#bdbdbd"
-        
+
         fig <- fig %>% plotly::add_trace(
           type = "mesh3d",
-          x = pts_mat[, 1], y = pts_mat[, 2], z = pts_mat[, 3],
-          i = tris[, 1] - 1, j = tris[, 2] - 1, k = tris[, 3] - 1,
+          # x/y/z come from srf, NOT from subset_df: alpha_surface_3d may have
+          # subsampled, and i/j/k index the points it returned.
+          x = srf$x, y = srf$y, z = srf$z,
+          i = srf$i, j = srf$j, k = srf$k,
           opacity = input$hull_opacity %||% 0.2,
-          
+
           # Force solid mesh color (Plotly sometimes ignores `color` for mesh3d)
           color       = I(hull_col),
-          facecolor   = rep(hull_col, nrow(tris)),        # per-triangle color
-          vertexcolor = rep(hull_col, nrow(pts_mat)),     # per-vertex color
-          
+          facecolor   = rep(hull_col, srf$n_tri),         # per-triangle color
+          vertexcolor = rep(hull_col, srf$n_pts),         # per-vertex color
+
           flatshading = TRUE,
           lighting = list(ambient = 1, diffuse = 0, specular = 0, roughness = 1, fresnel = 0),
           name = paste("Hull", gid_key),
@@ -6567,10 +6557,6 @@ smlm_server <- function(input, output, session) {
       if (!length(clusters)) {
         fit_log_rv("No Median Cluster structures available for fitting. Check Median Clustering DBSCAN settings (eps2/minpts2).")
       }
-      fit_alpha <- as.numeric(input$alpha_value_hull %||% 200)
-      if (!is.finite(fit_alpha) || fit_alpha <= 0) fit_alpha <- 200
-      fit_alpha <- min(300, max(0.1, fit_alpha))
-      
       cap_radius_for_cluster <- function(radius, X, cap_mult = 2.5) {
         if (!is.finite(radius) || radius <= 0) return(NA_real_)
         ctr <- colMeans(X, na.rm = TRUE)
@@ -6592,26 +6578,20 @@ smlm_server <- function(input, output, session) {
         if (!is.finite(cap) || cap <= 0) cap <- max(d, na.rm = TRUE)
         pmax(1e-6, pmin(ax, cap))
       }
-      surface_triangles <- function(ashape_obj, pts) {
-        tri <- NULL
-        if (!is.null(ashape_obj) && !is.null(ashape_obj$triang) && nrow(ashape_obj$triang) > 0) {
-          tt <- as.matrix(ashape_obj$triang)
-          if (ncol(tt) >= 4) {
-            tt <- tt[tt[, 4] >= 2L, 1:3, drop = FALSE]
-          } else if (ncol(tt) >= 3) {
-            tt <- tt[, 1:3, drop = FALSE]
-          } else {
-            tt <- NULL
-          }
-          if (!is.null(tt) && nrow(tt) > 0) tri <- tt
-        }
-        if (is.null(tri) || !nrow(tri)) {
-          tri <- tryCatch({
-            hh <- geometry::convhulln(pts, options = "Qt")
-            as.matrix(hh[, 1:3, drop = FALSE])
-          }, error = function(e) NULL)
-        }
-        tri
+      # GOAL: triangulate the surface of a FIT (sphere / ellipsoid), given the
+      # dense uniform point sampling of it that the fit functions return.
+      # Those surfaces are convex by construction, so the convex hull IS the
+      # exact triangulation — no alpha shape is needed or wanted here. (This
+      # used to build an ashape3d first and select `triang[, 4] >= 2`; column 4
+      # is `on.ch`, a 0/1 flag, so that test never passed and every call fell
+      # through to this hull anyway, after paying for a 4000-point
+      # tetrahedralization. Data clouds, which are NOT convex, are wrapped by
+      # alpha_surface_3d() instead.)
+      surface_triangles <- function(pts) {
+        tryCatch({
+          hh <- geometry::convhulln(pts, options = "Qt")
+          as.matrix(hh[, 1:3, drop = FALSE])
+        }, error = function(e) NULL)
       }
       build_tid_fit_medians <- function(d) {
         d %>%
@@ -6699,15 +6679,13 @@ smlm_server <- function(input, output, session) {
           if (input$fit_type == "sphere") {
             fit <- generate_sphere_from_cluster2(
               cluster_data,
-              alpha_value = fit_alpha,
               use_cluster1 = isTRUE(input$enable_clustering)
             )
             if (!is.null(fit)) {
               fit$radius <- cap_radius_for_cluster(fit$radius, X)
               if (!is.finite(fit$radius) || fit$radius <= 0) next
               pts <- fit$virtual_points
-              ashape <- tryCatch(alphashape3d::ashape3d(pts, alpha = fit_alpha), error = function(e) NULL)
-              surf_tris <- surface_triangles(ashape, pts)
+              surf_tris <- surface_triangles(pts)
               if (!is.null(surf_tris) && nrow(surf_tris) > 0) {
                 fig <- fig %>% add_trace(
                   type = "mesh3d",
@@ -6730,15 +6708,13 @@ smlm_server <- function(input, output, session) {
           } else if (input$fit_type == "ellipsoid") {
             fit <- generate_ellipsoid_from_cluster2(
               cluster_data,
-              alpha_value = fit_alpha,
               use_cluster1 = isTRUE(input$enable_clustering)
             )
             if (!is.null(fit)) {
               fit$axes <- cap_axes_for_cluster(fit$axes, X)
               if (!all(is.finite(fit$axes)) || any(fit$axes <= 0)) next
               pts <- fit$virtual_points
-              ashape <- fit$ashape
-              surf_tris <- surface_triangles(ashape, pts)
+              surf_tris <- surface_triangles(pts)
               if (!is.null(surf_tris) && nrow(surf_tris) > 0) {
                 fig <- fig %>% add_trace(
                   type = "mesh3d",
@@ -6894,8 +6870,7 @@ smlm_server <- function(input, output, session) {
               f$radius <- cap_radius_for_cluster(f$radius, X)
               if (!is.finite(f$radius) || f$radius <= 0) next
               pts <- mle_sample_sphere(f$center, f$radius, n = 4000)
-              ashape <- tryCatch(alphashape3d::ashape3d(pts, alpha = fit_alpha), error = function(e) NULL)
-              surf_tris <- surface_triangles(ashape, pts)
+              surf_tris <- surface_triangles(pts)
               if (!is.null(surf_tris) && nrow(surf_tris) > 0) {
                 fig <- fig %>% add_trace(
                   type = "mesh3d",
@@ -6922,8 +6897,7 @@ smlm_server <- function(input, output, session) {
               f$axes <- cap_axes_for_cluster(f$axes, X)
               if (!all(is.finite(f$axes)) || any(f$axes <= 0)) next
               pts <- mle_sample_ellipsoid(f$center, f$axes, f$R, n = 4000)
-              ashape <- tryCatch(alphashape3d::ashape3d(pts, alpha = fit_alpha), error = function(e) NULL)
-              surf_tris <- surface_triangles(ashape, pts)
+              surf_tris <- surface_triangles(pts)
               if (!is.null(surf_tris) && nrow(surf_tris) > 0) {
                 fig <- fig %>% add_trace(
                   type = "mesh3d",
@@ -7275,29 +7249,27 @@ smlm_server <- function(input, output, session) {
       for (cl2 in unique(df$cluster2[df$cluster2 != 0])) {
         group_df <- df %>% dplyr::filter(cluster2 == cl2)
         if (nrow(group_df) >= 4) {
-          pts <- as.matrix(group_df[, c("x", "y", "z")])
-          alpha_shape <- tryCatch(alphashape3d::ashape3d(pts, alpha = input$alpha_value_hull), error = function(e) NULL)
-          if (!is.null(alpha_shape)) {
-            tris <- alpha_shape$triang
-            if (nrow(tris) > 0) {
-              
-              # pick a single solid color: first non-NA cluster2 color (fallback to light gray)
-              col_hex <- group_df$cluster2_color[which(!is.na(group_df$cluster2_color) & nzchar(group_df$cluster2_color))][1]
-              if (is.na(col_hex) || !nzchar(col_hex)) col_hex <- "#bdbdbd"
-              
-              fig <- fig %>% plotly::add_trace(
-                type = "mesh3d",
-                x = pts[, 1], y = pts[, 2], z = pts[, 3],
-                i = tris[, 1] - 1, j = tris[, 2] - 1, k = tris[, 3] - 1,
-                opacity = input$hull_opacity,
-                color = I(col_hex),           
-                name = paste("Median Cluster", cl2),
-                hoverinfo = "skip",
-                hovertemplate = "",
-                showlegend = FALSE,
-                inherit = FALSE
-              )
-            }
+          # Radius derived per cluster from its own point spacing — see
+          # alpha_surface_3d() in helpers_smlm.R.
+          srf <- alpha_surface_3d(as.matrix(group_df[, c("x", "y", "z")]))
+          if (!is.null(srf)) {
+
+            # pick a single solid color: first non-NA cluster2 color (fallback to light gray)
+            col_hex <- group_df$cluster2_color[which(!is.na(group_df$cluster2_color) & nzchar(group_df$cluster2_color))][1]
+            if (is.na(col_hex) || !nzchar(col_hex)) col_hex <- "#bdbdbd"
+
+            fig <- fig %>% plotly::add_trace(
+              type = "mesh3d",
+              x = srf$x, y = srf$y, z = srf$z,   # srf may be subsampled; i/j/k index these
+              i = srf$i, j = srf$j, k = srf$k,
+              opacity = input$hull_opacity,
+              color = I(col_hex),
+              name = paste("Median Cluster", cl2),
+              hoverinfo = "skip",
+              hovertemplate = "",
+              showlegend = FALSE,
+              inherit = FALSE
+            )
           }
         }
       }
@@ -8207,12 +8179,29 @@ smlm_server <- function(input, output, session) {
     min_loc <- max(3L, as.integer(input$prec_cloud_min_loc %||% 5L))
     use_z   <- isTRUE(input$prec_cloud_use_z)
     dxall <- dyall <- dzall <- numeric(0)          # pooled residuals (length-weighted)
-    sxt <- syt <- szt <- numeric(0)                # per-TRACE SDs (one vote each, robust)
-    # Per-TRACE covariances. Needed because a cloud tilted off the x/y axes has
-    # its elongation entirely in the cross term — per-axis SDs cannot see it.
+    # Per-TRACE VARIANCES (one vote each, robust) and per-TRACE covariances. The
+    # cross terms are needed because a cloud tilted off the x/y axes has its
+    # elongation entirely there — per-axis spreads alone cannot see it.
+    vxt <- vyt <- vzt <- numeric(0)
     cxyt <- cxzt <- cyzt <- numeric(0)
+    nlt <- integer(0)                              # localizations per trace
+    # Pooled sums of squares + their exact degrees of freedom. Kept separately
+    # from the residual vectors because the correct divisor is sum(n_i - 1),
+    # NOT the number of localizations: subtracting each trace's own centre
+    # spends one degree of freedom PER TRACE. Dividing by N - 1 instead (what
+    # sd() on the pooled residuals does) reads ~5% low at 5 localizations per
+    # trace and ~1% low at 15 — a real, n-dependent underestimate of sigma.
+    ssx_all <- ssy_all <- ssz_all <- 0
+    dof_all <- dofz_all <- 0L
     per_file <- list()
     pooled   <- list()                             # per-loc residuals (dx/dy/dz) for the plot
+    # Median-of-chi-square correction. s^2 ~ sigma^2 * chisq(n-1)/(n-1), which is
+    # right-skewed, so the MEDIAN of the per-trace variances sits BELOW sigma^2 —
+    # by 16% at n = 5, i.e. sigma reads 8% low. Dividing by that distribution's
+    # own median removes it exactly (same idea as the 1.4826 that makes the MAD
+    # consistent for sigma). NOTE the usual c4 factor is the WRONG correction
+    # here: c4 corrects E[s], and this estimator takes a median, not a mean.
+    med_fac <- function(n) ifelse(n > 1L, stats::qchisq(0.5, n - 1L) / (n - 1L), NA_real_)
     withProgress(message = "Computing precision cloud...", value = 0, {
       nf <- length(store)
       for (i in seq_along(store)) {
@@ -8224,13 +8213,21 @@ smlm_server <- function(input, output, session) {
                        error = function(e) store[[fname]])
         if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) next
         hasz <- use_z && "z" %in% names(df) && any(is.finite(df$z))
+        # Residuals are taken about each trace's MEAN, not its median. The mean is
+        # the maximum-likelihood centre under the Gaussian error model this panel
+        # assumes, and it is the only centre for which the degree-of-freedom
+        # corrections below are exact — a median centre has no matching
+        # correction. It is also the honest choice: a robust centre partly
+        # ABSORBS the mislinked localizations that this panel exists to reveal.
+        # Outlier resistance is supplied instead by the per-trace median further
+        # down, which gives every trace one vote regardless of length.
         dd <- df %>%
           dplyr::group_by(tid) %>%
           dplyr::mutate(nloc = dplyr::n()) %>%
           dplyr::filter(nloc >= min_loc) %>%
-          dplyr::mutate(dx = x - stats::median(x, na.rm = TRUE),
-                        dy = y - stats::median(y, na.rm = TRUE),
-                        dz = if (hasz) z - stats::median(z, na.rm = TRUE) else NA_real_) %>%
+          dplyr::mutate(dx = x - mean(x, na.rm = TRUE),
+                        dy = y - mean(y, na.rm = TRUE),
+                        dz = if (hasz) z - mean(z, na.rm = TRUE) else NA_real_) %>%
           dplyr::ungroup()
         if (!nrow(dd)) next
         pooled[[fname]] <- data.frame(dx = dd$dx, dy = dd$dy,
@@ -8245,23 +8242,39 @@ smlm_server <- function(input, output, session) {
           stats::cov(u[ok], v[ok])
         }
         pts <- dd %>% dplyr::group_by(tid) %>%
-          dplyr::summarise(sdx = stats::sd(dx, na.rm = TRUE),
-                           sdy = stats::sd(dy, na.rm = TRUE),
-                           sdz = if (hasz) stats::sd(dz, na.rm = TRUE) else NA_real_,
+          dplyr::summarise(nl  = dplyr::n(),
+                           ssx = sum(dx^2, na.rm = TRUE),
+                           ssy = sum(dy^2, na.rm = TRUE),
+                           ssz = if (hasz) sum(dz^2, na.rm = TRUE) else NA_real_,
+                           vx  = stats::var(dx, na.rm = TRUE),
+                           vy  = stats::var(dy, na.rm = TRUE),
+                           vz  = if (hasz) stats::var(dz, na.rm = TRUE) else NA_real_,
                            cxy = safe_cov(dx, dy),
                            cxz = if (hasz) safe_cov(dx, dz) else NA_real_,
                            cyz = if (hasz) safe_cov(dy, dz) else NA_real_,
                            .groups = "drop")
-        sxt <- c(sxt, pts$sdx); syt <- c(syt, pts$sdy)
-        if (hasz) szt <- c(szt, pts$sdz[is.finite(pts$sdz)])
-        cxyt <- c(cxyt, pts$cxy)
-        if (hasz) { cxzt <- c(cxzt, pts$cxz); cyzt <- c(cyzt, pts$cyz) }
+        # ONE factor applied to every second moment of a trace, so the ellipse
+        # SHAPE (and hence the anisotropy and tilt) is untouched — only its size
+        # is de-biased.
+        mf <- med_fac(pts$nl)
+        vxt <- c(vxt, pts$vx / mf); vyt <- c(vyt, pts$vy / mf)
+        if (hasz) vzt <- c(vzt, (pts$vz / mf)[is.finite(pts$vz)])
+        cxyt <- c(cxyt, pts$cxy / mf)
+        if (hasz) { cxzt <- c(cxzt, pts$cxz / mf); cyzt <- c(cyzt, pts$cyz / mf) }
+        nlt <- c(nlt, pts$nl)
+        # Pooled sums of squares with their exact degrees of freedom.
+        dof_f  <- sum(pts$nl - 1L)
+        dofz_f <- sum((pts$nl - 1L)[is.finite(pts$ssz)])
+        ssx_all <- ssx_all + sum(pts$ssx, na.rm = TRUE)
+        ssy_all <- ssy_all + sum(pts$ssy, na.rm = TRUE)
+        ssz_all <- ssz_all + sum(pts$ssz, na.rm = TRUE)
+        dof_all <- dof_all + dof_f; dofz_all <- dofz_all + dofz_f
         per_file[[fname]] <- data.frame(
           dataset  = fname,
-          sigma_x  = stats::sd(dd$dx, na.rm = TRUE),
-          sigma_y  = stats::sd(dd$dy, na.rm = TRUE),
-          sigma_z  = if (hasz) stats::sd(dd$dz, na.rm = TRUE) else NA_real_,
-          n_traces = dplyr::n_distinct(dd$tid), n_locs = nrow(dd),
+          sigma_x  = sqrt(sum(pts$ssx, na.rm = TRUE) / max(dof_f, 1L)),
+          sigma_y  = sqrt(sum(pts$ssy, na.rm = TRUE) / max(dof_f, 1L)),
+          sigma_z  = if (dofz_f > 0) sqrt(sum(pts$ssz, na.rm = TRUE) / dofz_f) else NA_real_,
+          n_traces = nrow(pts), n_locs = nrow(dd),
           stringsAsFactors = FALSE)
       }
     })
@@ -8271,10 +8284,12 @@ smlm_server <- function(input, output, session) {
     }
     mom <- function(v, p) { v <- v[is.finite(v)]; m <- mean(v); s <- stats::sd(v)
                             if (s <= 0) NA_real_ else mean((v - m)^p) / s^p }
-    sx <- stats::sd(dxall, na.rm = TRUE); sy <- stats::sd(dyall, na.rm = TRUE)
-    sz <- if (length(dzall)) stats::sd(dzall, na.rm = TRUE) else NA_real_
-    sx_med <- stats::median(sxt, na.rm = TRUE); sy_med <- stats::median(syt, na.rm = TRUE)
-    sz_med <- if (length(szt)) stats::median(szt, na.rm = TRUE) else NA_real_
+    # Pooled sigma, exact degrees of freedom (see the accumulator comment above).
+    sx <- sqrt(ssx_all / max(dof_all, 1L)); sy <- sqrt(ssy_all / max(dof_all, 1L))
+    sz <- if (dofz_all > 0) sqrt(ssz_all / dofz_all) else NA_real_
+    sx_med <- sqrt(stats::median(vxt, na.rm = TRUE))
+    sy_med <- sqrt(stats::median(vyt, na.rm = TRUE))
+    sz_med <- if (length(vzt)) sqrt(stats::median(vzt, na.rm = TRUE)) else NA_real_
     # subsample rows for the plot (dx/dy/dz/is_fid kept aligned); σ computed from all
     P <- do.call(rbind, pooled)
 
@@ -8288,19 +8303,53 @@ smlm_server <- function(input, output, session) {
       if (sum(ok) < 3L) return(NULL)
       stats::cov(cbind(u[ok], v[ok]))
     }
-    cov_pooled <- list(
+    # cov() divides by (rows - 1); the honest divisor is sum(n_i - 1). Rescaling
+    # by that ratio keeps the drawn pooled ellipse consistent with the pooled
+    # sigma reported above, instead of ~5% tighter at short traces.
+    dof_scale <- if (dof_all > 0) (nrow(P) - 1) / dof_all else 1
+    cov_pooled <- lapply(list(
       xy = pair_cov(P$dx, P$dy),
       xz = if (length(dzall)) pair_cov(P$dx, P$dz) else NULL,
-      yz = if (length(dzall)) pair_cov(P$dy, P$dz) else NULL)
+      yz = if (length(dzall)) pair_cov(P$dy, P$dz) else NULL),
+      function(S) if (is.null(S)) NULL else S * dof_scale)
     cov_trace <- list(
-      xy = robust_median_cov(sxt^2, syt^2, cxyt),
-      xz = if (length(szt)) robust_median_cov(sxt^2, szt^2, cxzt) else NULL,
-      yz = if (length(szt)) robust_median_cov(syt^2, szt^2, cyzt) else NULL)
+      xy = robust_median_cov(vxt, vyt, cxyt),
+      xz = if (length(vzt)) robust_median_cov(vxt, vzt, cxzt) else NULL,
+      yz = if (length(vzt)) robust_median_cov(vyt, vzt, cyzt) else NULL)
 
     # Headline anisotropy comes from the ROBUST matrix and is the eigenvalue
     # ratio, not max(σx,σy)/min(σx,σy) — the latter reads ~1.0 on a 45°-tilted
     # cloud and would report drifted data as "isotropic".
     ell_r <- cov_ellipse_params(cov_trace$xy)
+
+    # ── How heavy SHOULD the tails be? ────────────────────────────────────────
+    # The pooled cloud mixes traces that do NOT share one sigma: MINFLUX
+    # precision scales as 1/sqrt(photons) and photon counts vary a lot between
+    # traces. A mixture of Gaussians of DIFFERENT widths is leptokurtic no
+    # matter how clean the data are — for X|v ~ N(0, v), kurtosis =
+    # 3·E[v²]/E[v]². So comparing the observed kurtosis against 3 (which this
+    # panel used to do, warning "possible mislinks / double events") flags
+    # perfectly good data: at a realistic spread of per-trace sigma the
+    # kurtosis of artifact-free simulated data reaches 7-15.
+    # What is diagnostic is the EXCESS over what the observed sigma spread
+    # already explains. Traces are weighted by n_i because that is how they
+    # enter the pooled cloud. The per-trace variances are themselves noisy —
+    # v̂ ~ v·χ²(n-1)/(n-1) gives E[v̂²] = v²(1 + 2/(n-1)) — so E[v²] is recovered
+    # by the EXACT factor (n-1)/(n+1). Without it, short traces manufacture a
+    # heterogeneity that is not there, the prediction comes out too low, and
+    # the panel goes back to crying artifact on clean data.
+    vv <- (vxt + vyt) / 2                          # per-trace variance, de-biased
+    ok_v <- is.finite(vv) & vv > 0 & is.finite(nlt)
+    kurt_exp <- NA_real_; sigma_spread <- NA_real_
+    if (sum(ok_v) >= 5L) {
+      v <- vv[ok_v]; nl <- nlt[ok_v]; w <- nl / sum(nl)
+      Ev  <- sum(w * v)
+      Ev2 <- sum(w * v^2 * (nl - 1L) / (nl + 1L))
+      kurt_exp <- 3 * max(Ev2, Ev^2) / Ev^2
+      # Spread of the per-trace precision itself — a real property of the
+      # acquisition, reported in its own right rather than mislabelled as tails.
+      sigma_spread <- stats::IQR(sqrt(v)) / stats::median(sqrt(v))
+    }
 
     keep <- if (nrow(P) > 40000L) sort(sample.int(nrow(P), 40000L)) else seq_len(nrow(P))
     Pp <- P[keep, , drop = FALSE]
@@ -8321,7 +8370,9 @@ smlm_server <- function(input, output, session) {
       anisotropy = max(sx, sy) / max(1e-9, min(sx, sy)),
       skew_x = mom(dxall, 3), skew_y = mom(dyall, 3),
       kurt_x = mom(dxall, 4), kurt_y = mom(dyall, 4),
-      n_locs = length(dxall), n_traces = length(sxt), has_z = length(dzall) > 0,
+      # What the per-trace sigma spread alone predicts, and that spread itself.
+      kurt_exp = kurt_exp, sigma_spread = sigma_spread,
+      n_locs = length(dxall), n_traces = length(vxt), has_z = length(dzall) > 0,
       per_file = do.call(rbind, per_file)))
     showNotification(sprintf("Precision cloud: %s localizations; σ_xy = %.2f nm.",
                              format(length(dxall), big.mark = ","), sqrt((sx^2 + sy^2) / 2)),
@@ -8333,15 +8384,19 @@ smlm_server <- function(input, output, session) {
     shiny::validate(shiny::need(!is.null(r), "Press 'Run' to compute the precision cloud."))
 
     # Each axis pair gets its own SQUARE panel: density heatmap + 1σ/2σ ellipses, a
-    # faint zero crosshair through (0,0), no background grid, and a FIXED ±L nm frame.
+    # faint zero crosshair through (0,0), no background grid, and a shared ±L nm frame.
     # The panels are built manually on explicit independent axes (x/y, x2/y2, x3/y3)
     # rather than plotly::subplot() — subplot does not reliably re-map per-panel
     # scaleanchor, which cross-linked the zoom across panels. Here each y_i is scale-
     # anchored to its own x_i, so aspect is equal (1 nm x == 1 nm y) AND zooming one
     # panel leaves the others untouched. Ellipse semi-axes are the per-axis robust σ.
-    c_1s <- "#c03030"; c_2s <- "#2c7fb8"   # 1σ = red, 2σ = blue (pooled)
+    # Colour encodes the PROBABILITY MASS, line style encodes data-vs-model:
+    # solid = where that fraction of the localizations actually is, dotted =
+    # where it would be if the cloud were Gaussian. The two coincide on clean
+    # data and separate where the model fails, which is the entire diagnostic.
+    c_1s <- "#c03030"; c_2s <- "#2c7fb8"   # 39.3% (=1σ) red, 86.5% (=2σ) blue
     c_rb <- "#1a9850"                      # robust per-trace 1σ = green
-    L <- 30                                # fixed half-range (nm), all axes
+    P_IN <- c(0.393, 0.865)                # the masses a 2D Gaussian 1σ/2σ hold
     has_z <- isTRUE(r$has_z) && any(is.finite(r$dz))
     # Sp = pooled covariance (the population the heatmap shows)
     # Sr = robust per-trace covariance (the headline σ)
@@ -8352,6 +8407,45 @@ smlm_server <- function(input, output, session) {
     ) else list(
       list(a = r$dx, b = r$dy, Sp = r$cov_pooled$xy, Sr = r$cov_trace$xy,
            la = "Δx from trace centroid (nm)", lb = "Δy from trace centroid (nm)"))
+    # ── Frame half-width, derived from the data ───────────────────────────────
+    # This used to be a hard-coded 30 nm, which only frames the plot correctly
+    # when σ happens to be ~10 nm. On any dataset with a wider cloud the heatmap
+    # filled the whole panel and the 1σ/2σ rings ran clean off it, leaving stray
+    # arcs cutting across the corners with no visible centre — the plot looked
+    # broken and over-zoomed because it WAS over-zoomed.
+    # The frame follows the CORE — the robust, one-vote-per-trace σ — at a plain
+    # 3σ. It must not be driven by the POOLED covariance: σ varies between
+    # traces (photon count), so the pooled ellipse is pulled outward by a
+    # minority of wide traces and sizing the frame to it leaves the visible
+    # cloud small in the middle with only the zero crosshair reaching the edges.
+    # A clean Gaussian therefore lands at exactly ±3σ and fills the panel; the
+    # 39.3%/86.5% contours sit at 1σ/2σ, comfortably inside.
+    # The second term is the safety valve: the radius that actually contains
+    # 86.5% of the localizations, so a genuinely wide or heavy-tailed cloud
+    # still gets its 86.5% contour inside the frame instead of having it
+    # silently dropped. It is a quantile, not a moment, so outliers cannot run
+    # away with it. ONE L is shared by all panels so they stay comparable.
+    # Each panel is framed on ITS OWN pair, not on a single shared L. In 3D
+    # σ_z is routinely 2-3x σ_xy, and one shared frame is then sized by z —
+    # which leaves the Δx-Δy cloud as a small dot in the middle of an empty
+    # panel. The axis numbers, which are printed per panel, carry the
+    # cross-panel comparison instead.
+    # NOTE no rounding to "nice" numbers: plotly chooses tick POSITIONS inside
+    # whatever range it is given, so rounding the range buys nothing and only
+    # overshoots (36 -> 40 pushes the cloud back toward the middle third).
+    ring_reach <- function(S, k) {          # semi-MAJOR bounds the ring on both axes
+      e <- cov_ellipse_params(S, k = k)
+      if (is.null(e)) NA_real_ else e$ra
+    }
+    panel_lim <- function(P) {
+      need <- c(3.0 * ring_reach(P$Sr, 1),
+                1.15 * stats::quantile(sqrt(P$a^2 + P$b^2), 0.865,
+                                       na.rm = TRUE, names = FALSE))
+      need <- need[is.finite(need)]
+      max(if (length(need)) signif(max(need), 3) else 30, 5)  # floor: never over-zoom
+    }
+    Lv <- vapply(panels, panel_lim, numeric(1))
+
     np  <- length(panels)
     gap <- if (np > 1) 0.06 else 0          # horizontal gap between panels (paper frac)
     w   <- (1 - gap * (np - 1)) / np        # each panel's width (paper frac)
@@ -8360,12 +8454,27 @@ smlm_server <- function(input, output, session) {
     shapes <- list(); axis_args <- list()
     for (i in seq_len(np)) {
       P <- panels[[i]]
+      L <- Lv[i]                            # this panel's own half-range
       xid <- if (i == 1) "x" else paste0("x", i)
       yid <- if (i == 1) "y" else paste0("y", i)
       keep <- is.finite(P$a) & is.finite(P$b)
-      fig <- fig %>% plotly::add_histogram2dcontour(x = P$a[keep], y = P$b[keep],
-        xaxis = xid, yaxis = yid, colorscale = "Hot", reversescale = TRUE, showscale = FALSE,
-        nbinsx = 60, nbinsy = 60, ncontours = 14, hoverinfo = "skip", showlegend = FALSE)
+      # ── Density: kernel estimate, not a binned histogram ───────────────────
+      # A 2D histogram estimates every bin independently, so each carries its
+      # own full Poisson noise: at 60x60 bins and ~40k points that is ~9% at the
+      # peak but ~26% at the 2σ radius and ~90% at 3σ. The outer contours — the
+      # ones the eye reads as "the shape of the cloud" — were therefore mostly
+      # shot noise, which is exactly the ragged, under-smoothed look. Re-binning
+      # cannot fix that (coarser blurs the core, finer worsens the tails); a
+      # kernel estimate can, because each point informs a neighbourhood.
+      # zsmooth = "best" then interpolates the grid so no cell edges show.
+      s_rob <- if (!is.null(P$Sr)) sqrt(mean(diag(P$Sr))) else NA_real_
+      dh <- density_hdr_2d(P$a[keep], P$b[keep], lim = L, sigma = s_rob, probs = P_IN)
+      if (!is.null(dh)) {
+        fig <- fig %>% plotly::add_heatmap(
+          x = dh$x, y = dh$y, z = t(dh$z),      # kde2d is z[x, y]; plotly wants z[y, x]
+          xaxis = xid, yaxis = yid, colorscale = "Hot", reversescale = TRUE,
+          showscale = FALSE, zsmooth = "best", hoverinfo = "skip", showlegend = FALSE)
+      }
       # Rotated ellipses as SVG paths: plotly's "circle" shape is defined by a
       # bounding box and therefore can only ever be axis-aligned, which is what
       # made a diagonally elongated cloud look circular.
@@ -8379,9 +8488,18 @@ smlm_server <- function(input, output, session) {
       }
       axl <- function(x0, x1, y0, y1) list(type = "line", xref = xid, yref = yid,
         x0 = x0, x1 = x1, y0 = y0, y1 = y1, line = list(color = "rgba(0,0,0,0.4)", width = 1))
-      shapes <- c(shapes, Filter(Negate(is.null), list(
-        ell(P$Sp, 1, c_1s, "dot"),      # 1σ pooled — matches the heatmap
-        ell(P$Sp, 2, c_2s, "dot"),      # 2σ pooled
+      # Empirical highest-density contours, drawn SOLID at the same two
+      # probability masses the dotted Gaussian rings enclose. Same mass, same
+      # colour, different line style: wherever a solid line sits outside its
+      # dotted partner, the cloud has more localizations out there than a
+      # Gaussian of the fitted width would put there. A count-level contour
+      # could not be compared to anything.
+      hdr <- lapply(dh$paths %||% list(), function(q) list(
+        type = "path", path = q$path, xref = xid, yref = yid,
+        line = list(color = if (q$prob < 0.5) c_1s else c_2s, width = 2)))
+      shapes <- c(shapes, hdr, Filter(Negate(is.null), list(
+        ell(P$Sp, 1, c_1s, "dot"),      # Gaussian 1σ (39.3%), pooled fit
+        ell(P$Sp, 2, c_2s, "dot"),      # Gaussian 2σ (86.5%), pooled fit
         ell(P$Sr, 1, c_rb, "dash"),     # 1σ robust, one vote per trace
         axl(0, 0, -L, L), axl(-L, L, 0, 0))))
       dom <- c((i - 1) * (w + gap), (i - 1) * (w + gap) + w)
@@ -8395,16 +8513,20 @@ smlm_server <- function(input, output, session) {
         title = P$lb, range = c(-L, L), zeroline = FALSE, showgrid = FALSE,
         domain = c(0, 1), anchor = xid, scaleanchor = xid, scaleratio = 1, constrain = "domain")
     }
-    # Legend swatches (once): zero-length invisible segments on panel 1. Named so
-    # the two POPULATIONS are distinguishable — the dotted rings describe the same
-    # localizations the heatmap draws, the dashed one gives each trace one vote.
+    # Legend swatches (once): zero-length invisible segments on panel 1. Paired
+    # so the comparison reads itself — solid is where the localizations are,
+    # dotted is where a Gaussian of the fitted width would put the same
+    # fraction, dashed gives every trace one vote instead of every localization.
+    sw <- function(f, nm, colr, dsh) plotly::add_lines(f,
+      x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = nm,
+      showlegend = TRUE, hoverinfo = "skip",
+      line = c(list(color = colr, width = 2), if (nzchar(dsh)) list(dash = dsh)))
     fig <- fig %>%
-      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "1σ pooled",
-        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_1s, width = 2, dash = "dot")) %>%
-      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "2σ pooled",
-        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_2s, width = 2, dash = "dot")) %>%
-      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "1σ per trace (robust)",
-        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_rb, width = 2, dash = "dash"))
+      sw("39.3% of locs (data)",     c_1s, "")    %>%
+      sw("39.3% if Gaussian (1σ)", c_1s, "dot") %>%
+      sw("86.5% of locs (data)",     c_2s, "")    %>%
+      sw("86.5% if Gaussian (2σ)", c_2s, "dot") %>%
+      sw("1σ per trace (robust)",  c_rb, "dash")
     # Legend below the x-axis title, and NOT clickable: the entries are dummy
     # zero-length traces used purely as colour swatches. The rings are layout
     # shapes, so clicking a legend item could never toggle them - it only looked
@@ -8431,19 +8553,40 @@ smlm_server <- function(input, output, session) {
     if (is.finite(r$aniso_ev) && r$aniso_ev > 1.3)
       warn <- c(warn, sprintf("elongated %.2f:1 along %.0f° (drift within traces, or an anisotropic PSF)",
                               r$aniso_ev, r$tilt_deg))
-    if (is.finite(r$kurt_x) && max(r$kurt_x, r$kurt_y, na.rm = TRUE) > 5)
-      warn <- c(warn, "heavy tails (kurtosis ≫ 3 — possible mislinks / double events)")
+    # Tails are judged against what the per-trace σ SPREAD already predicts, not
+    # against 3. A pooled cloud of Gaussians with different widths is
+    # leptokurtic by construction, and MINFLUX σ varies with photon count, so
+    # "kurtosis > 5" fires on clean data (7-15 on artifact-free simulations at a
+    # realistic σ spread). Only the excess over the predicted value is evidence.
+    # Both an absolute and a relative margin must be cleared. The relative one
+    # carries the very-short-trace case: at 5 localizations per trace the
+    # per-trace variances have 4 degrees of freedom, so the prediction is itself
+    # noisy and a bare "excess > 2" still misfires on clean simulated data.
+    kobs <- suppressWarnings(max(r$kurt_x, r$kurt_y, na.rm = TRUE))
+    if (is.finite(kobs) && is.finite(r$kurt_exp) &&
+        kobs - r$kurt_exp > 2 && kobs > 1.5 * r$kurt_exp)
+      warn <- c(warn, sprintf("heavy tails beyond what the σ spread explains (kurtosis %.1f vs %.1f expected — possible mislinks / double events)",
+                              kobs, r$kurt_exp))
     # If the length-weighted pooled σ is much larger than the per-trace median, a
     # few long/wide traces (fiducials!) dominate — flag it and point at the scan.
     if (is.finite(r$sigma_xy_med) && r$sigma_xy > 1.5 * r$sigma_xy_med)
-      warn <- c(warn, sprintf("pooled σ (%.1f) ≫ per-trace σ (%.1f): a few long/wide traces dominate — run the Fiducial scan", r$sigma_xy, r$sigma_xy_med))
+      warn <- c(warn, sprintf("pooled σ (%.1f) ≫ per-trace σ (%.1f): the pooled number is carried by a minority of wide or long traces%s",
+                              r$sigma_xy, r$sigma_xy_med,
+                              # Both a fiducial AND ordinary photon-count spread
+                              # produce this gap; naming only fiducials sent the
+                              # user hunting for contamination that need not exist.
+                              if (is.finite(r$sigma_spread) && r$sigma_spread > 0.5)
+                                " — σ also varies widely between traces (photon-count spread), so check that before assuming contamination"
+                              else " — run the Fiducial scan"))
     htmltools::div(style = "font-size:0.9em; margin-top:4px;",
       htmltools::tags$b(sprintf("σ_xy = %.2f nm (median per trace, robust)", r$sigma_xy_med)),
       if (r$has_z && is.finite(r$sigma_z_med)) sprintf(" · σ_z %.2f nm", r$sigma_z_med) else "",
-      sprintf("  |  elongation %.2f:1 at %.0f° (ρ %.2f)  |  pooled σ_xy %.2f (σ_x %.2f · σ_y %.2f · axis ratio %.2f)  |  skew x/y %.2f/%.2f  ·  kurtosis x/y %.1f/%.1f  |  %s locs, %s traces",
+      sprintf("  |  elongation %.2f:1 at %.0f° (ρ %.2f)  |  pooled σ_xy %.2f (σ_x %.2f · σ_y %.2f · axis ratio %.2f)  |  σ varies %.0f%% across traces (IQR/median)  |  skew x/y %.2f/%.2f  ·  kurtosis x/y %.1f/%.1f (%.1f expected from that σ spread)  |  %s locs, %s traces",
               r$aniso_ev, r$tilt_deg, r$rho_xy,
-              r$sigma_xy, r$sigma_x, r$sigma_y, r$anisotropy, r$skew_x, r$skew_y,
-              r$kurt_x, r$kurt_y, format(r$n_locs, big.mark = ","),
+              r$sigma_xy, r$sigma_x, r$sigma_y, r$anisotropy,
+              100 * (r$sigma_spread %||% NA_real_), r$skew_x, r$skew_y,
+              r$kurt_x, r$kurt_y, r$kurt_exp %||% NA_real_,
+              format(r$n_locs, big.mark = ","),
               format(r$n_traces, big.mark = ",")),
       if (length(warn)) htmltools::div(style = "color:#b26a00; margin-top:2px;",
         "⚠ ", paste(warn, collapse = "; "), ".") else

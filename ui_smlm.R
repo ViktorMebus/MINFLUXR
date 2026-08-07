@@ -365,10 +365,10 @@ smlm_ui <- fluidPage(
         conditionalPanel(
           condition = "input.mode3d == '3D'",
           checkboxInput("show_convex_hull", "Show Alpha Shape (3D)", value = FALSE),
-          helpText("Wraps traces (or clusters) with a 3D alpha surface."),
+          helpText("Wraps each trace (or each de-blinked ID when De-blinking is enabled) in a 3D alpha ",
+                   "surface."),
           conditionalPanel(
             condition = "input.show_convex_hull == true",
-            sliderInput("alpha_value_hull", "Alpha radius (nm) \u2014 smaller = tighter mesh", min = 0.1, max = 1000, value = 200, step = 0.1),
             sliderInput("hull_opacity", "Alpha shape opacity", min = 0.1, max = 1.0, value = 0.2, step = 0.05)
           )
         ),

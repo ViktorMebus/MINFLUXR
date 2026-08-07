@@ -1287,6 +1287,99 @@ ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
 }
 
 # =============================================================================
+# density_hdr_2d() — SMOOTH DENSITY + HIGHEST-DENSITY-REGION CONTOURS
+# =============================================================================
+#
+# GOAL
+#   Estimate the 2D density of a point cloud on a fixed frame and return both
+#   (a) a grid smooth enough to draw as a continuous heatmap, and (b) contour
+#   lines at chosen PROBABILITY MASSES rather than at arbitrary density levels.
+#
+# WHY NOT A BINNED HISTOGRAM-CONTOUR (what the precision cloud used to draw)
+#   A 2D histogram estimates each bin independently, so every bin carries full
+#   Poisson noise. For the precision cloud (~40k points, 60x60 bins) that is
+#   ~9% noise at the peak but ~26% at the 2-sigma radius and ~90% at 3 sigma —
+#   i.e. exactly the outer contours the eye reads as "the shape of the cloud"
+#   are almost pure shot noise, which is what makes the plot look ragged and
+#   under-smoothed. Re-binning cannot fix it: coarser bins blur the core,
+#   finer bins make the tails worse. A kernel estimate is the fix, because each
+#   point contributes to a neighbourhood and the estimate is continuous.
+#
+# WHY HDR LEVELS
+#   A contour at "density = 0.004" means nothing on its own. A contour holding
+#   39.3% / 86.5% of the points means a lot, because those are EXACTLY the
+#   masses a Gaussian 1-sigma and 2-sigma ellipse contain in 2D. Drawn together
+#   with the fitted ellipses, the empirical contour and the theoretical ring
+#   describe the same probability mass, so they coincide when the cloud really
+#   is Gaussian and separate visibly where it is not. That comparison is the
+#   whole diagnostic, and it is unavailable with count-based levels.
+#
+# BANDWIDTH
+#   Scott's rule for 2D (sigma * n^(-1/6)) with a floor at the grid pitch —
+#   below the pitch a kernel cannot smooth anything, it just re-creates the
+#   binning artefact. sigma is passed in (use a ROBUST sigma) rather than taken
+#   from the data, so a fiducial tail cannot inflate the bandwidth.
+#
+# ARGUMENTS
+#   a, b    : coordinates (same units)
+#   lim     : frame half-width; the grid spans [-lim, lim] on both axes
+#   sigma   : scale for the bandwidth rule (robust sigma of the cloud)
+#   n_grid  : grid points per axis
+#   probs   : probability masses to contour
+#   max_pts : subsample cap for the kernel sum (cost is O(n * n_grid))
+# RETURNS
+#   list(x, y, z, levels, paths) where paths is a list of
+#   list(prob=, d=, path=) SVG paths ready to use as plotly layout shapes, or
+#   NULL if the cloud is unusable. A requested mass that extends beyond the
+#   frame is skipped rather than drawn wrong.
+# =============================================================================
+density_hdr_2d <- function(a, b, lim, sigma, n_grid = 160L,
+                           probs = c(0.393, 0.865), max_pts = 20000L) {
+  ok <- is.finite(a) & is.finite(b)
+  a <- a[ok]; b <- b[ok]
+  if (length(a) < 20L || !is.finite(lim) || lim <= 0) return(NULL)
+  if (length(a) > max_pts) {                       # kernel sum is O(n * n_grid)
+    s <- sort(sample.int(length(a), max_pts)); a <- a[s]; b <- b[s]
+  }
+  pitch <- 2 * lim / (n_grid - 1)                  # grid spacing
+  if (!is.finite(sigma) || sigma <= 0) sigma <- stats::mad(sqrt(a^2 + b^2))
+  if (!is.finite(sigma) || sigma <= 0) return(NULL)
+  # Scott's rule, floored at the grid pitch so the kernel always spans >1 cell.
+  bw_sd <- max(sigma * length(a)^(-1 / 6), pitch)
+  # MASS::kde2d's `h` is 4x the kernel SD (it uses dnorm(sd = h/4) internally).
+  k <- tryCatch(MASS::kde2d(a, b, h = c(4 * bw_sd, 4 * bw_sd), n = n_grid,
+                            lims = c(-lim, lim, -lim, lim)),
+                error = function(e) NULL)
+  if (is.null(k) || !all(is.finite(k$z))) return(NULL)
+
+  # HDR level for mass p: walk the grid cells from densest down, accumulating
+  # probability (density x cell area) until p is reached. The density there is
+  # the level whose contour encloses exactly that mass.
+  cell <- (k$x[2] - k$x[1]) * (k$y[2] - k$y[1])
+  srt  <- sort(as.vector(k$z), decreasing = TRUE)
+  cm   <- cumsum(srt) * cell                       # mass enclosed at each level
+  in_frame <- cm[length(cm)]                       # total mass inside the frame
+  paths <- list()
+  for (p in probs) {
+    # If the frame does not even contain p of the cloud, no honest contour for p
+    # exists here — skip it rather than draw the frame edge and imply otherwise.
+    if (!is.finite(in_frame) || in_frame < p) next
+    idx <- which(cm >= p)[1]
+    lev <- srt[idx]
+    if (!is.finite(lev) || lev <= 0) next
+    cls <- tryCatch(grDevices::contourLines(k$x, k$y, k$z, levels = lev),
+                    error = function(e) NULL)
+    for (cl in cls) {
+      if (length(cl$x) < 3L) next
+      paths[[length(paths) + 1L]] <- list(
+        prob = p, d = lev,
+        path = paste0("M ", paste(sprintf("%.4f,%.4f", cl$x, cl$y), collapse = " L "), " Z"))
+    }
+  }
+  list(x = k$x, y = k$y, z = k$z, bw_sd = bw_sd, mass_in_frame = in_frame, paths = paths)
+}
+
+# =============================================================================
 # robust_median_cov() — ONE VOTE PER TRACE, BUT STILL TILT-AWARE
 # =============================================================================
 # GOAL
@@ -3301,7 +3394,159 @@ generate_arc_from_cluster2 <- function(cluster_data, n_points = 300,
        t_center = geo$t_center, arc_half = geo$arc_half)
 }
 
-generate_sphere_from_cluster2 <- function(cluster_data, alpha_value = 0.1, n_points = 4000,
+# =============================================================================
+# alpha_surface_3d() — WRAP ONE GROUP OF LOCALIZATIONS IN AN ALPHA SHAPE,
+#                      RADIUS CHOSEN FROM THE DATA
+# =============================================================================
+#
+# GOAL
+#   Given the localizations of ONE group (a trace, a de-blinked molecule, a
+#   Median Cluster), return the closed triangular surface that wraps it, ready
+#   to hand straight to plotly's mesh3d. Callers only supply points; there is
+#   deliberately no radius argument and no UI control for one.
+#
+# WHY THERE IS NO ALPHA RADIUS CONTROL ANY MORE (this was a real bug)
+#   `alphashape3d::ashape3d()` computes ONE Delaunay tetrahedralization and then,
+#   for each requested alpha, adds a COLUMN classifying every triangle. The
+#   triangle list in `$triang[, 1:3]` is therefore identical for every alpha —
+#   alpha lives only in the classification columns. The old code drew
+#   `$triang[, 1:3]` wholesale, i.e. the entire tetrahedralization, so the mesh
+#   was byte-for-byte the same at every slider position. That is why moving the
+#   "Alpha radius" slider visibly did nothing.
+#
+#   Column layout of `$triang` (verified against alphashape3d):
+#     1-3  vertex indices        4  on.ch (on convex hull)   5  attached
+#     6-8  rhoT / muT / MuT      9..  one class per alpha:
+#          0 = exterior, 1 = singular, 2 = REGULAR, 3 = interior
+#   Only REGULAR triangles form the closed boundary surface. (Check: as alpha
+#   grows the regular set converges exactly onto the convex-hull faces, while
+#   the singular count explodes — singular triangles are dangling slivers and
+#   drawing them is what produced the old opaque blob.)
+#
+# HOW THE RADIUS IS PICKED
+#   A ladder of candidate radii is built from the group's OWN spacing (multiples
+#   of its median nearest-neighbour distance) and classified in a SINGLE
+#   ashape3d call — extra alphas cost one column each, not another
+#   tetrahedralization. We then take the SMALLEST radius that passes two tests:
+#     (1) every point sits in ONE connected component (nothing shed), and
+#     (2) the regular triangles form a CLOSED surface — each edge used by
+#         exactly two of them. Test (2) matters because connectivity alone still
+#         admits radii whose boundary has holes, and plotly renders a holed mesh
+#         as a torn, see-through shell.
+#   That is the tightest honest wrap: smaller and the surface fragments, larger
+#   and detail is lost for nothing. It is scale-free, so a 30 nm de-blinked
+#   molecule and a 500 nm structure are each wrapped correctly without anyone
+#   touching a control. Falls back to the convex hull (largest rung, then
+#   geometry::convhulln) if no candidate ever qualifies.
+#
+# ARGUMENTS
+#   pts_mat : n x 3 numeric matrix of coordinates (nm)
+#   max_pts : subsample cap. Meshing cost grows steeply with n and a surface is
+#             not made more truthful by tens of thousands of vertices.
+# RETURNS
+#   list(x, y, z, i, j, k, alpha, n_tri, n_pts) with i/j/k already 0-BASED for
+#   plotly mesh3d and x/y/z the (possibly subsampled) vertices they index, or
+#   NULL when the group cannot be wrapped (<4 usable points, or no triangle
+#   survives). Callers MUST use the returned x/y/z, not their own copy of the
+#   points, because of the subsampling.
+# =============================================================================
+alpha_surface_3d <- function(pts_mat, max_pts = 2000L) {
+  if (!is.matrix(pts_mat)) pts_mat <- as.matrix(pts_mat)     # accept data.frame
+  if (ncol(pts_mat) < 3L) return(NULL)
+  pts_mat <- pts_mat[, 1:3, drop = FALSE]
+  storage.mode(pts_mat) <- "double"
+  pts_mat <- pts_mat[stats::complete.cases(pts_mat), , drop = FALSE]
+  if (nrow(pts_mat) < 4L) return(NULL)                        # a tetrahedron is the minimum
+  # Deterministic subsample (sorted) so the mesh does not flicker between renders.
+  if (nrow(pts_mat) > max_pts)
+    pts_mat <- pts_mat[sort(sample.int(nrow(pts_mat), max_pts)), , drop = FALSE]
+
+  # A group that is flat in any axis (2D data promoted to 3D, or a trace whose z
+  # never moved) has zero volume and makes the tetrahedralization degenerate.
+  # Nudge by sub-picometre amounts: invisible at nm scale, enough for the solver.
+  for (k in 1:3) {
+    sdk <- stats::sd(pts_mat[, k], na.rm = TRUE)
+    if (!is.finite(sdk) || sdk < 1e-9)
+      pts_mat[, k] <- pts_mat[, k] + seq_len(nrow(pts_mat)) * 1e-6
+  }
+
+  # --- candidate radii, expressed in the group's own units of spacing ---------
+  nnd <- tryCatch({
+    d <- RANN::nn2(pts_mat, pts_mat, k = 2L)$nn.dists[, 2]    # distance to nearest OTHER point
+    d[is.finite(d) & d > 0]
+  }, error = function(e) numeric(0))
+  # Bounding-box diagonal bounds the useful range: an alpha far above it can only
+  # ever give the convex hull, so it is the natural top rung.
+  diag_nm <- sqrt(sum((apply(pts_mat, 2, max) - apply(pts_mat, 2, min))^2))
+  base <- if (length(nnd)) stats::median(nnd) else diag_nm / 10
+  if (!is.finite(base) || base <= 0) base <- diag_nm / 10
+  if (!is.finite(base) || base <= 0) return(NULL)             # all points coincide
+  alphas <- base * c(1, 1.5, 2, 3, 4, 6, 8, 12, 20, 40)
+  alphas <- c(alphas[alphas < diag_nm], 10 * diag_nm)         # last rung = convex hull
+  alphas <- sort(unique(alphas[is.finite(alphas) & alphas > 0]))
+  if (!length(alphas)) return(NULL)
+
+  # Degenerate inputs (n == 4, all-coincident points) make ashape3d emit internal
+  # warnings on its way to returning nothing useful; they are not actionable.
+  as3d <- suppressWarnings(tryCatch(alphashape3d::ashape3d(pts_mat, alpha = alphas),
+                                    error = function(e) NULL))
+
+  # Is this triangle set a closed surface? Every edge of a closed, watertight
+  # mesh belongs to exactly two faces; an edge used once is a hole rim.
+  is_closed <- function(tt) {
+    if (is.null(tt) || nrow(tt) < 4L) return(FALSE)
+    e <- rbind(tt[, c(1, 2)], tt[, c(2, 3)], tt[, c(1, 3)])
+    e <- cbind(pmin(e[, 1], e[, 2]), pmax(e[, 1], e[, 2]))    # undirected edge key
+    all(tabulate(match(paste(e[, 1], e[, 2]), unique(paste(e[, 1], e[, 2])))) == 2L)
+  }
+
+  tt <- NULL; alpha_used <- NA_real_
+  if (!is.null(as3d) && !is.null(as3d$triang) && nrow(as3d$triang)) {
+    tri  <- as.matrix(as3d$triang)
+    # The per-alpha classification columns are the LAST length(alphas) columns, in
+    # the order the alphas were passed. Indexing from the end keeps this correct
+    # if the package ever adds a descriptive column at the front.
+    cls0 <- ncol(tri) - length(alphas)
+    # components_ashape3d() labels each point with its connected component
+    # (1 = largest, < 0 for points isolated at this radius). One component
+    # covering every point == "wraps the whole group in one piece".
+    comp <- suppressWarnings(tryCatch(
+      alphashape3d::components_ashape3d(as3d, indexAlpha = "all"),
+      error = function(e) NULL))
+    if (!is.null(comp) && !is.list(comp)) comp <- list(comp)
+    if (cls0 >= 3L) {
+      for (ii in seq_along(alphas)) {
+        cc <- if (!is.null(comp) && length(comp) == length(alphas)) comp[[ii]] else NULL
+        # Test (1): nothing shed. Skipped only if components could not be computed.
+        if (!is.null(cc) && !(length(cc) && all(is.finite(cc)) && all(cc == 1L))) next
+        cand <- tri[tri[, cls0 + ii] == 2L, 1:3, drop = FALSE]  # REGULAR = the boundary
+        if (!nrow(cand)) next
+        # Test (2): watertight. The last rung is the convex hull, always accepted.
+        if (is_closed(cand) || ii == length(alphas)) {
+          tt <- cand; alpha_used <- alphas[ii]; break
+        }
+      }
+    }
+  }
+  # Last resort: the convex hull. Correct (if loose) for any point set, and the
+  # only thing that works for the n == 4 / near-coincident cases ashape3d rejects.
+  if (is.null(tt) || !nrow(tt)) {
+    tt <- tryCatch(as.matrix(geometry::convhulln(pts_mat, options = "Qt")[, 1:3, drop = FALSE]),
+                   error = function(e) NULL)
+    alpha_used <- Inf
+  }
+  if (is.null(tt) || !nrow(tt)) return(NULL)
+
+  list(x = pts_mat[, 1], y = pts_mat[, 2], z = pts_mat[, 3],
+       i = tt[, 1] - 1L, j = tt[, 2] - 1L, k = tt[, 3] - 1L,  # plotly mesh3d is 0-based
+       alpha = alpha_used, n_tri = nrow(tt), n_pts = nrow(pts_mat))
+}
+
+# NOTE: `virtual_points` is a dense uniform sampling of the fitted SPHERE, not
+# data. Its triangulation is the convex hull by construction, so no alpha shape
+# is built here — the caller hulls it. (An `ashape` element used to be returned
+# alongside; it was never actually drawn.)
+generate_sphere_from_cluster2 <- function(cluster_data, n_points = 4000,
                                           use_cluster1 = FALSE) {
 
   coords <- medianize_coords(cluster_data, use_cluster1)
@@ -3318,11 +3563,12 @@ generate_sphere_from_cluster2 <- function(cluster_data, alpha_value = 0.1, n_poi
     geo$radius * cos(theta)
   ) + matrix(geo$center, n_points, 3, TRUE)
 
-  ashape <- tryCatch(alphashape3d::ashape3d(virtual_points, alpha = alpha_value), error = function(e) NULL)
-  list(center = geo$center, radius = geo$radius, virtual_points = virtual_points, ashape = ashape)
+  list(center = geo$center, radius = geo$radius, virtual_points = virtual_points)
 }
 
-generate_ellipsoid_from_cluster2 <- function(cluster_data, n_points = 4000, alpha_value = 0.1,
+# Same as generate_sphere_from_cluster2: a dense sampling of the fitted (convex)
+# ELLIPSOID, hulled by the caller. No alpha shape involved.
+generate_ellipsoid_from_cluster2 <- function(cluster_data, n_points = 4000,
                                              use_cluster1 = FALSE) {
   coords <- medianize_coords(cluster_data, use_cluster1)
   if (nrow(coords) < 4) return(NULL)
@@ -3339,9 +3585,8 @@ generate_ellipsoid_from_cluster2 <- function(cluster_data, n_points = 4000, alph
     geo$axes[3] * cos(theta)
   ) %*% t(geo$R) + matrix(geo$center, n_points, 3, TRUE)
 
-  ashape <- tryCatch(alphashape3d::ashape3d(ellipsoid_points, alpha = alpha_value), error = function(e) NULL)
   list(center = geo$center, axes = geo$axes, R = geo$R,
-       virtual_points = ellipsoid_points, ashape = ashape)
+       virtual_points = ellipsoid_points)
 }
 generate_helix_from_cluster2 <- function(cluster_data, n_points = 10000, turns = 3,
                                          use_cluster1 = FALSE) {
