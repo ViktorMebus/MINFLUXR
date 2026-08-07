@@ -33,6 +33,8 @@ An interactive R/Shiny application for visualization and analysis of **Abberior 
 - [Tracking Analysis Tab](#tracking-analysis-tab)
 - [MINFLUX Simulator Tab](#minflux-simulator-tab)
 - [Key Calculations](#key-calculations)
+  - SMLM: [unit conversions](#unit-conversions--import), [dwell](#dwell-time), [trace spread](#trace-spread-sd-filter), [DCR split](#dcr-based-2-color-separation), [density](#spatial-density), [NN](#nearest-neighbour-distances), [Ripley L(r)](#ripleys-lr), [RoG](#radius-of-gyration)
+  - Tracking: [TSA & cycle time](#time-signature-analysis-tsa--cycle-time), [MSD](#msd-computation), [D fitting](#diffusion-coefficient-fitting), [CVE](#cve-covariance-based-estimator), [confinement](#confinement-index), [JDD](#jump-distance-distribution-jdd), [HMM](#diffusive-state-hmm), [displacement](#displacement-vs-diffusion), [directionality](#directionality--autocorrelation), [speed & transport](#speed--transport), [D-map](#spatially-resolved-d-map), [D ceiling](#fast-diffusion-ceiling)
 - [Plugin System](#plugin-system)
 - [Further Documentation](#further-documentation)
 - [Notes & Tips](#notes--tips)
@@ -377,7 +379,11 @@ a global PCA-fitted reference surface, e.g. the plasma membrane:
   0° = perpendicular to membrane, 90° = lying flat
 - *Distance to plane* — signed distance from the cluster centroid to the reference plane
 - *Bending radius* — curvature radius of an arc-like cluster:
-  $$R_\text{bend} = \frac{\ell^2 + s^2}{2s}$$
+
+  ```math
+  R_\text{bend} = \frac{\ell^2 + s^2}{2s}
+  ```
+
   where $\ell$ is the PC1 half-extent (chord half-length) and $s$ is the PC2 extent (sagitta).
   **Only valid for arc-like clusters viewed roughly edge-on** — not meaningful for complete rings,
   spheres, or helices.
@@ -586,11 +592,15 @@ The mono-colour statistics (NN, Ripley's L, RoG) are described under
 Directional nearest-neighbour distance from each point in one group to its nearest point in the other,
 computed in **2D (x, y)** with `RANN::nn2`:
 
-$$d_i^{G_1 \to G_2} = \min_{j \in G_2} \sqrt{(x_i - x_j)^2 + (y_i - y_j)^2}, \quad i \in G_1$$
+```math
+d_i^{G_1 \to G_2} = \min_{j \in G_2} \sqrt{(x_i - x_j)^2 + (y_i - y_j)^2}, \quad i \in G_1
+```
 
 Both directions are computed independently. The **co-localization curve** is the empirical CDF:
 
-$$F(r) = \frac{1}{|G_1|}\; \#\!\left\{i \in G_1 : d_i^{G_1 \to G_2} \leq r\right\}$$
+```math
+F(r) = \frac{1}{|G_1|}\; \#\!\left\{i \in G_1 : d_i^{G_1 \to G_2} \leq r\right\}
+```
 
 — the fraction of group-1 points with a group-2 neighbour within *r*. A steep rise at small *r*
 indicates strong co-localization; a gradual rise suggests coincidental proximity.
@@ -599,7 +609,9 @@ indicates strong co-localization; a gradual rise suggests coincidental proximity
 
 Tests whether two populations co-localize beyond chance given their individual densities.
 
-$$\hat{K}_{12}(r) = \frac{A}{n_1 n_2} \sum_{i \in G_1}\sum_{j \in G_2} \mathbf{1}\!\left(\|\mathbf{p}_i - \mathbf{p}_j\| \leq r\right)$$
+```math
+\hat{K}_{12}(r) = \frac{A}{n_1 n_2} \sum_{i \in G_1}\sum_{j \in G_2} \mathbf{1}\!\left(\|\mathbf{p}_i - \mathbf{p}_j\| \leq r\right)
+```
 
 with the same L-transform as the univariate case. The plotted $\hat{L}_{12}(r) - r$: > 0 = co-localize
 more than two independent CSR processes, ≈ 0 = spatial independence, < 0 = exclusion.
@@ -612,7 +624,9 @@ within-structure measure rather than a global one. The 2000-point subsampling li
 The annulus-normalized derivative of $K_{12}$ — more sensitive to the *scale* of co-localization than
 the cumulative $L_{12}$:
 
-$$g_{12}(r) = \frac{A}{n_1 n_2} \cdot \frac{\#\text{cross-pairs in annulus}\bigl(r-\tfrac{\delta}{2},\, r+\tfrac{\delta}{2}\bigr)}{\pi\!\left[(r+\tfrac{\delta}{2})^2 - (r-\tfrac{\delta}{2})^2\right]}$$
+```math
+g_{12}(r) = \frac{A}{n_1 n_2} \cdot \frac{\#\text{cross-pairs in annulus}\bigl(r-\tfrac{\delta}{2},\, r+\tfrac{\delta}{2}\bigr)}{\pi\!\left[(r+\tfrac{\delta}{2})^2 - (r-\tfrac{\delta}{2})^2\right]}
+```
 
 with the 3D form using a spherical shell and $\tfrac{4}{3}\pi[(r+\tfrac{\delta}{2})^3 - (r-\tfrac{\delta}{2})^3]$.
 Under CSR with independent groups, $g_{12}(r) = 1$; > 1 indicates co-localization at scale *r*, < 1
@@ -624,7 +638,9 @@ pinpoints them.
 KDE maps are computed for each group on a shared grid (`MASS::kde2d`) and rendered as heatmaps.
 Bandwidth follows Silverman's rule of thumb:
 
-$$h = 0.9 \cdot \min\!\left(\hat{\sigma},\; \frac{\text{IQR}}{1.34}\right) \cdot n^{-1/5}$$
+```math
+h = 0.9 \cdot \min\!\left(\hat{\sigma},\; \frac{\text{IQR}}{1.34}\right) \cdot n^{-1/5}
+```
 
 computed on the combined x-coordinates of both groups and applied identically in x and y, so the two
 channels share a grid. Co-localization is the Pearson *r* between the two density surfaces.
@@ -899,7 +915,9 @@ Both the tracks and the ground truth export as CSV.
 
 Abberior files store coordinates in **meters**. On load, the app converts to nanometers:
 
-$$x_\text{nm} = x_\text{m} \times 10^9$$
+```math
+x_\text{nm} = x_\text{m} \times 10^9
+```
 
 **Z-axis scaling** is a user-set calibration, not a fixed constant. Files are read with **raw z**;
 the factor you set (SMLM sidebar *Axial (z) calibration*, Tracking sidebar *Axial (z) scaling factor*,
@@ -912,7 +930,9 @@ distances, Rg — applying it twice would compress z by 30%, which the detection
 Scaling is applied after unit conversion, to correct for the refractive-index mismatch between the
 sample medium and the objective immersion medium:
 
-$$z_\text{corrected} = z_\text{nm} \times s_z \quad (s_z = 0.7 \text{ by default})$$
+```math
+z_\text{corrected} = z_\text{nm} \times s_z \quad (s_z = 0.7 \text{ by default})
+```
 
 **Multi-iteration MINFLUX**: each TID produces localizations at several iteration steps (`itr`). By
 default only the final iteration is retained — chosen by the `fnl` flag for `.npy`, by
@@ -928,7 +948,9 @@ iterations.
 
 The dwell time (number of MINFLUX measurement steps per localization) is derived from the photon-count columns:
 
-$$\text{dwell} = \mathrm{round}\!\left(\frac{\text{eco}}{\text{efo} / 1000} \cdot \frac{1}{T_\text{step}}\right)$$
+```math
+\text{dwell} = \mathrm{round}\!\left(\frac{\text{eco}}{\text{efo} / 1000} \cdot \frac{1}{T_\text{step}}\right)
+```
 
 where `eco` is the total estimated photon count, `efo` is the emission rate in kHz, and $T_\text{step}$ is the user-specified dwell time per step in ms (default 1 ms). The ratio eco / (efo / 1000) gives the effective dwell duration in ms; dividing by $T_\text{step}$ converts to step counts.
 
@@ -938,11 +960,13 @@ where `eco` is the total estimated photon count, `efo` is the emission rate in k
 
 For each TID, the per-axis standard deviation of all localizations is computed:
 
-$$\sigma_x(\text{tid}) = \mathrm{SD}(\{x_i : \text{tid}_i = \text{tid}\})$$
+```math
+\sigma_x(\text{tid}) = \mathrm{SD}(\{x_i : \text{tid}_i = \text{tid}\})
+```
 
 and analogously for $\sigma_y$ and $\sigma_z$.
 
-The SD filter ranges set bounds $[\sigma_\text{min},\, \sigma_\text{max}]$; a TID is kept only if its
+The SD filter ranges set bounds $[\sigma_\text{min}, \sigma_\text{max}]$; a TID is kept only if its
 $\sigma$ falls within those bounds on every active axis. Setting the upper bound to a small value
 retains only spatially tight traces (useful for removing freely diffusing molecules), while a broad
 range passes all traces. Traces below the *Min localizations per trace* setting are excluded from the
@@ -958,17 +982,23 @@ filter range. The median spread is reported as median(σ̃) ± nMAD, with nMAD =
 
 **Per-TID median DCR** is used as a robust summary to classify each trace into one of two spectral groups:
 
-$$\widetilde{\text{dcr}}_\text{tid} = \mathrm{median}(\{\text{dcr}_i : \text{tid}_i = \text{tid}\})$$
+```math
+\widetilde{\text{dcr}}_\text{tid} = \mathrm{median}(\{\text{dcr}_i : \text{tid}_i = \text{tid}\})
+```
 
-**Manual mode**: the user defines two ranges $[d_{1,\text{lo}},\, d_{1,\text{hi}})$ and $[d_{2,\text{lo}},\, d_{2,\text{hi}}]$. A TID is assigned to group 1 or 2 if its median DCR falls in the respective range; TIDs outside both ranges are unassigned.
+**Manual mode**: the user defines two ranges $[d_{1,\text{lo}}, d_{1,\text{hi}})$ and $[d_{2,\text{lo}}, d_{2,\text{hi}}]$. A TID is assigned to group 1 or 2 if its median DCR falls in the respective range; TIDs outside both ranges are unassigned.
 
-**Auto-detect mode (GMM)**: fits a two-component Gaussian mixture model to the distribution of $\{\widetilde{\text{dcr}}_\text{tid}\}$ using the `mclust` package:
+**Auto-detect mode (GMM)**: fits a two-component Gaussian mixture model to the distribution of $\lbrace \widetilde{\text{dcr}}_\text{tid} \rbrace$ using the `mclust` package:
 
-$$p(\text{dcr}) = \pi_1 \,\mathcal{N}(\mu_1, \sigma_1^2) + \pi_2 \,\mathcal{N}(\mu_2, \sigma_2^2)$$
+```math
+p(\text{dcr}) = \pi_1 \,\mathcal{N}(\mu_1, \sigma_1^2) + \pi_2 \,\mathcal{N}(\mu_2, \sigma_2^2)
+```
 
 Components are sorted so $\mu_1 < \mu_2$ (group 1 = lower DCR). The split threshold $d^*$ is the crossing point of the two weighted component densities:
 
-$$\pi_1 \,\mathcal{N}(d^*;\mu_1, \sigma_1^2) = \pi_2 \,\mathcal{N}(d^*;\mu_2, \sigma_2^2)$$
+```math
+\pi_1 \,\mathcal{N}(d^*;\mu_1, \sigma_1^2) = \pi_2 \,\mathcal{N}(d^*;\mu_2, \sigma_2^2)
+```
 
 solved numerically in $(\mu_1, \mu_2)$ with `uniroot`. If the two component means differ by less than
 0.05 DCR units, the distribution is considered unimodal and auto-detection is aborted with a warning.
@@ -980,7 +1010,9 @@ The same fit supplies the **per-trace posterior** shown in the split-confidence 
 
 For each point (localization or TID median), the local density is the count of other points within a sphere (or disk in 2D) of radius $r$:
 
-$$\rho_i = \#\{j \neq i : \|p_i - p_j\| \leq r\}$$
+```math
+\rho_i = \#\{j \neq i : \|p_i - p_j\| \leq r\}
+```
 
 Computed via `dbscan::frNN` (fixed-radius nearest-neighbor search), which uses a kd-tree for $O(n \log n)$ performance. The radius $r$ is user-controlled (default 500 nm in the colour-by-density mode, 150 nm elsewhere).
 
@@ -990,7 +1022,9 @@ Computed via `dbscan::frNN` (fixed-radius nearest-neighbor search), which uses a
 
 The $k$-th NN distance for point $i$ is:
 
-$$d_i^{(k)} = k\text{-th smallest} \;\|\mathbf{p}_i - \mathbf{p}_j\|, \quad j \neq i$$
+```math
+d_i^{(k)} = k\text{-th smallest} \;\|\mathbf{p}_i - \mathbf{p}_j\|, \quad j \neq i
+```
 
 computed with a kd-tree (`RANN::nn2` / `dbscan::kNN`). Histograms are summarized by the median and by
 either the IQR or the MAD as a spread indicator.
@@ -1008,12 +1042,16 @@ either the IQR or the MAD as a spread indicator.
 A spatial clustering statistic that tests whether points are more aggregated than expected under
 complete spatial randomness (CSR). MINFLUXR uses a **naive (boundary-uncorrected) estimator**:
 
-$$\hat{K}(r) = \frac{A \cdot 2}{n(n-1)} \sum_{i < j} \mathbf{1}(\|\mathbf{p}_i - \mathbf{p}_j\| \leq r)$$
+```math
+\hat{K}(r) = \frac{A \cdot 2}{n(n-1)} \sum_{i < j} \mathbf{1}(\|\mathbf{p}_i - \mathbf{p}_j\| \leq r)
+```
 
 where $A$ is the bounding area (or volume $V$ in 3D) and $n$ is the number of points. The
 L-transformation:
 
-$$\hat{L}(r) = \sqrt{\frac{\hat{K}(r)}{\pi}} \quad \text{(2D)}, \qquad \hat{L}(r) = \left(\frac{3\,\hat{K}(r)}{4\pi}\right)^{1/3} \quad \text{(3D)}$$
+```math
+\hat{L}(r) = \sqrt{\frac{\hat{K}(r)}{\pi}} \quad \text{(2D)}, \qquad \hat{L}(r) = \left(\frac{3\,\hat{K}(r)}{4\pi}\right)^{1/3} \quad \text{(3D)}
+```
 
 The plotted quantity is $\hat{L}(r) - r$:
 
@@ -1049,7 +1087,9 @@ noise is suppressed.
 For a cluster of $m$ points at $(\tilde{x}_k, \tilde{y}_k, \tilde{z}_k)$, the centroid is the mean of
 those positions and:
 
-$$R_g = \sqrt{\frac{1}{m}\sum_{k=1}^{m}\left[(\tilde{x}_k - \bar{x})^2 + (\tilde{y}_k - \bar{y})^2 + (\tilde{z}_k - \bar{z})^2\right]}$$
+```math
+R_g = \sqrt{\frac{1}{m}\sum_{k=1}^{m}\left[(\tilde{x}_k - \bar{x})^2 + (\tilde{y}_k - \bar{y})^2 + (\tilde{z}_k - \bar{z})^2\right]}
+```
 
 Only clusters with $m \geq 2$ are included (a single point has $R_g = 0$ by definition). The
 exportable table reports cluster ID, point count, centroid coordinates and $R_g$. RoG is
@@ -1058,21 +1098,107 @@ own.
 
 ---
 
+### Time Signature Analysis (TSA) & Cycle Time
+
+Everything Δt-aware in the Tracking tab rests on the base **cycle time** $t_c$ — it drives
+gap-splitting, the quality gate, cycle-index MSD binning, the D-map and the CVE integrated-step
+selection. Get it wrong and every downstream number moves. The TSA panel is a faithful R port of Bela
+Vogler's MINFLUX Time-Signature Analysis (Vogler et al. 2025, *Commun. Biol.*).
+
+#### The interval law
+
+MINFLUX has no fixed clock. The molecule is localized once per cycle *when it emits*; during a dark
+cycle nothing is recorded, so the next localization simply lands one or more cycles later. Intervals
+are therefore **quantised, not distributed**:
+
+```math
+\Delta t = k \cdot t_c + \text{SW}, \qquad k \in \lbrace 1, 2, 3, \ldots \rbrace
+```
+
+where SW is a constant per-step overhead. Inverting it classifies each step:
+
+```math
+n_\text{cyc} = \operatorname{round}\!\left(\frac{\Delta t - \text{SW}}{t_c}\right), \qquad n_\text{dark} = n_\text{cyc} - 1
+```
+
+Steps with $n_\text{cyc} = 1$ are **integrated** (single-cycle) steps — the constant-Δt subset that CVE,
+JDD and the directionality tools restrict themselves to.
+
+#### Estimating $t_c$
+
+In priority order: (1) the hardware model $t_c = N_\text{iter} \cdot t_\text{dwell}$ if enabled;
+(2) a manual override; (3) a **data-driven cluster cycle** — cluster the observed Δt values, take
+$t_c = \operatorname{median}(\operatorname{diff}(\text{cluster centres}))$ and
+$\text{SW} = \text{centre}_1 - t_c$; (4) a regression from the Δt-vs-index slope.
+
+Method (3) deliberately uses the **spacing between clusters**, not the mode. This is the trap:
+
+> ⚠ **The modal Δt is not the cycle time** — it is $1 \cdot t_c + \text{SW}$. Mistaking one for the
+> other biases every D by about **−5.5%**.
+
+#### What the real data shows
+
+Measured on 650,042 within-track steps of a real acquisition (`tim` stored as float64, so this is
+genuine structure and not a storage artifact):
+
+| Quantity | Result |
+|---|---|
+| Regressed interval law | $t_c$ = 0.19161 ms, SW = 0.01153 ms, **R² = 0.9999978** |
+| App's own estimator | $t_c$ = 0.191483 ms — agrees to **0.065%** |
+| $(\Delta t - \text{SW})/t_c$ within 1% of an integer | **97.6%** of steps (99.98% within 5%) |
+| Dividing by the *mode* instead | succeeds for only **52%** |
+| Jitter within one cycle | CV = **0.0425%**, 46% of steps on a single identical value |
+
+So the comb is essentially exact, and each peak is a near-delta spike rather than a broadened
+distribution. Two consequences are baked into the panel:
+
+- **Binning is one bar per cycle count**, with edges on the classification boundaries
+  $\text{SW} + (k \pm \tfrac{1}{2}) t_c$. Fixed-width bins alias against the comb — at 80 bins the grid
+  ran 1.63 bins per cycle and bar centres drifted 5–25% of a cycle away from the true peaks, which is
+  what used to make the plot look misaligned. The histogram is now literally a picture of the
+  $n_\text{cyc}$ the analysis computes.
+- **The KDE overlay was removed.** Since each peak is a near-delta spike, 100% of that curve's width
+  was kernel bandwidth rather than timing jitter, and at higher smoothing it merged the comb into an
+  invented unimodal blob. The real distribution is the **discrete** one over cycle counts, shown by the
+  cycle-classification plot.
+
+This is also what validates the cycle-index design elsewhere: because intervals are exact integer
+cycles plus a constant offset, cumulative-cycle-index binning is not an approximation to noisy timing —
+it recovers the true elapsed time.
+
+#### Continuity score
+
+A tolerance-weighted measure of how much of a track is genuinely observed rather than inferred across
+darkness, using the same weighting as the continuity gate:
+
+```math
+w_i = 2^{-(n_{\text{cyc},i} - 1)/H}, \qquad \text{score} = \langle w_i \rangle
+```
+
+$H$ is the dark-cycle tolerance (half-life, in cycles). An integrated step scores 1 and the weight
+halves every $H$ dark cycles, so a dataset of gentle 1–2-cycle gaps scores higher than its bare
+integrated fraction would suggest. Reported for raw (frozen at upload) and analysed data side by side,
+so the effect of filtering is visible.
+
+---
+
 ### MSD Computation
 
 MINFLUX tracking data is irregularly sampled in time, because cycles are skipped when the molecule is
 dark. The Tracking tab therefore bins MSD by **integer cycle-count lag**, not wall-clock time.
 
-For a single track $\{(x_i, y_i, z_i, t_i)\}$ sorted by time, all pairs $(i, j)$ with $i < j$ are
+For a single track $\lbrace (x_i, y_i, z_i, t_i) \rbrace$ sorted by time, all pairs $(i, j)$ with $i < j$ are
 considered, and each pair contributes its squared displacement to the bin whose centre $\tau$
 satisfies $\tau_\text{lo} \leq t_j - t_i < \tau_\text{hi}$:
 
-$$\text{MSD}(\tau) = \frac{1}{N_\tau} \sum_{\substack{(i,j)\,:\,\\ \tau_\text{lo} \leq t_j - t_i < \tau_\text{hi}}} \left[(x_j - x_i)^2 + (y_j - y_i)^2 + (z_j - z_i)^2\right]$$
+```math
+\text{MSD}(\tau) = \frac{1}{N_\tau} \sum_{\substack{(i,j)\,:\,\\ \tau_\text{lo} \leq t_j - t_i < \tau_\text{hi}}} \left[(x_j - x_i)^2 + (y_j - y_i)^2 + (z_j - z_i)^2\right]
+```
 
 where $N_\tau$ is the number of pairs in that bin.
 
 The **ensemble MSD** across all tracks is computed bin-by-bin as either:
-- the **pair-weighted mean**, $\overline{\text{MSD}}(\tau) = \sum_k N_{\tau,k} \cdot \text{MSD}_k(\tau) \,/\, \sum_k N_{\tau,k}$ (downweights bins with few observations), or
+- the **pair-weighted mean**, $\overline{\text{MSD}}(\tau) = \sum_k N_{\tau,k} \cdot \text{MSD}_k(\tau) / \sum_k N_{\tau,k}$ (downweights bins with few observations), or
 - the **track-unweighted mean**, a simple average of per-track MSD values.
 
 Bins where fewer than a user-specified fraction of tracks contribute are masked as NA.
@@ -1083,7 +1209,9 @@ Bins where fewer than a user-specified fraction of tracks contribute are masked 
 
 **Brownian diffusion** model:
 
-$$\text{MSD}(\tau) = 2n D \tau + 2n \sigma_\text{loc}^2$$
+```math
+\text{MSD}(\tau) = 2n D \tau + 2n \sigma_\text{loc}^2
+```
 
 where $n$ is the number of dimensions, $D$ the diffusion coefficient (nm²/ms = µm²/s × 10⁻³), and
 $\sigma_\text{loc}$ the localization precision (nm). The intercept $2n\sigma_\text{loc}^2$ arises from
@@ -1100,7 +1228,9 @@ percentage of the curve.
 
 **Anomalous diffusion** model:
 
-$$\text{MSD}(\tau) = 2n D_\alpha \tau^\alpha + 2n \sigma_\text{loc}^2$$
+```math
+\text{MSD}(\tau) = 2n D_\alpha \tau^\alpha + 2n \sigma_\text{loc}^2
+```
 
 fitted by non-linear least squares (Levenberg–Marquardt via `minpack.lm`). The anomalous exponent:
 - $\alpha < 1$: subdiffusion (confined or obstructed)
@@ -1114,12 +1244,94 @@ for free diffusion only. Reported units: $D$ in µm²/s, $\sigma_\text{loc}$ in 
 
 ### CVE (Covariance-Based Estimator)
 
-The Data Quality panel estimates $D$ and $\sigma_\text{loc}$ without fitting an MSD curve, following
-Vestergaard et al. 2014. Using only single-cycle steps, both follow from two moments of the
-displacement series — the mean squared step $\langle|\Delta r|^2\rangle$ and the covariance of
-*consecutive* steps. Localization noise makes that covariance **negative**, which is exactly what
-separates it from real motion. This is the app's primary σ_loc and free-D readout; the MSD panel is
-the cross-check, not the other way around.
+The Data Quality panel estimates $\sigma_\text{loc}$ and $D$ **without fitting an MSD curve**
+(Vestergaard et al. 2014). This is the app's primary precision and free-D readout — the MSD panel is
+the cross-check, not the other way around — and $\sigma_\text{loc}$ from here becomes the app-wide
+noise floor consumed by the D-map, JDD, confinement, HMM, directionality and speed tools.
+
+#### Why consecutive steps carry the precision
+
+Write each recorded position as truth plus independent localization error, $x_i = x_i^\ast + \varepsilon_i$
+with $\text{Var}(\varepsilon) = \sigma_\text{loc}^2$. Then a step is
+
+```math
+\Delta x_i = x_{i+1} - x_i = \underbrace{(x_{i+1}^\ast - x_i^\ast)}_{\text{motion}} + \varepsilon_{i+1} - \varepsilon_i
+```
+
+Two **consecutive** steps share the localization at index $i+1$ — it enters $\Delta x_i$ with a $+$ and
+$\Delta x_{i+1}$ with a $-$. For Brownian motion the true increments are independent, so every term
+vanishes in the product except that shared error, which survives with a negative sign:
+
+```math
+\langle \Delta x_i \, \Delta x_{i+1} \rangle = -\langle \varepsilon_{i+1}^2 \rangle = -\sigma_\text{loc}^2
+```
+
+That sign is the whole trick. Real motion cannot produce a negative lag-1 covariance, so the two
+contributions separate cleanly with no model fitting:
+
+```math
+\sigma_\text{loc}^2 = -\langle \Delta x_i \, \Delta x_{i+1} \rangle, \qquad D_\text{CVE} = \frac{\langle \Delta x^2 \rangle}{2\Delta t} + \frac{\text{cov}_1}{\Delta t}
+```
+
+The added $\text{cov}_1$ term (negative in value) is what removes the localization-error inflation from the
+naive $\langle \Delta x^2 \rangle / 2\Delta t$. Both are computed per axis and averaged over x, y and,
+when real z is present, z.
+
+**Only consecutive integrated (single-cycle) step pairs are used.** The derivation assumes constant
+$\Delta t$; admitting dark-gap steps of varying length would bias the covariance. See TSA above for
+what "integrated" means.
+
+#### How well is σ actually resolved?
+
+The normalized lag-1 correlation $r_1 = \text{cov}_1 / \langle \Delta^2 \rangle$ has, for Brownian
+motion plus noise, the closed form
+
+```math
+r_1 = \frac{-\sigma_\text{loc}^2}{2D\Delta t + 2\sigma_\text{loc}^2}, \qquad \text{noise fraction} = -2 r_1
+```
+
+- $r_1 \to -0.5$: noise dominates the step variance, σ is cleanly resolved
+- $r_1 \to 0$: σ is a marginal residual on top of motion — the **pooled** σ is still the best estimate,
+  but per-track σ differences then mostly track mobility, not precision
+- $r_1 > 0$: correlated or directed motion dominates and σ is not resolvable there
+
+The panel reports this as a percentage and warns below 15%.
+
+#### Lateral vs axial precision
+
+The pooled σ averages x, y **and** z, but MINFLUX axial precision is typically worse than lateral, so
+one pooled number over-states $\sigma_{xy}$ and under-states $\sigma_z$. Both are computed separately,
+with the anisotropy ratio $\sigma_z / \sigma_{xy}$ (reported as `sig_aniso`). Above 1.3 the panel warns and
+offers the lateral value to enter manually — the **D-map is an x–y map and the HMM never reads z**, so
+feeding those a z-inflated floor makes them *over*-subtract noise. The app-wide default is left pooled,
+since changing it silently would move every existing result.
+
+#### Diagnostics and QC flags
+
+- **Photon–mobility coupling** $\rho$ = Spearman correlation between per-track photons and per-track
+  step variance. On MINFLUX *tracking* data a fast molecule leaves the beam pattern sooner and collects
+  *fewer* photons, so the photon channel is a mobility proxy rather than a pure brightness channel.
+  Strongly negative ρ therefore means **any ECO/EFO filter is silently a mobility filter** — surfaced
+  as a warning at $\rho \leq -0.35$.
+- **Implausible jumps**: flagged where $|\Delta r|^2 > 25 \cdot E[|\Delta r|^2]$, using
+  $E[|\Delta r|^2] = 2dD_\text{CVE}\Delta t + 2d\sigma_\text{loc}^2$ so that long dark gaps are not
+  falsely flagged.
+- **Degenerate tracks**: $\sigma^2 \leq 0$ (drift-dominated) or σ far in the outlier tail.
+- **Per-track heterogeneity**: one CVE σ per track with at least $n_\text{min}$ integrated steps,
+  skipping the first ~5 localizations of lock-on transient; reported as median, IQR, CV and a bootstrap
+  95% CI, plus a σ–EFO Spearman ρ (precision should improve with photons, so negative ρ validates the
+  model).
+
+> **Photon-quality weighting was removed.** An inverse-variance CVE weighted by a fitted
+> $\log\sigma \sim \log\text{EFO}$ model was briefly the default, then withdrawn: because photons are
+> coupled to mobility, it up-weighted slow molecules and biased D downward — the estimator was measuring
+> the very thing it was meant to correct for. The pooled σ_loc and D_CVE never used it and are
+> unaffected.
+
+> **Watch the z column.** 2D exports routinely carry an all-zero `z`, and `0` is finite — so a naive
+> presence test made the estimator treat 2D data as 3D and pool a zero-variance axis, measured at
+> σ_loc −18.4% and D_CVE −33.3%. A shared predicate (>10 finite z values **and** sd > 1 nm) now gates
+> the 3D path for CVE, MSD, JDD, confinement and displacement-vs-D alike.
 
 ---
 
@@ -1127,7 +1339,9 @@ the cross-check, not the other way around.
 
 The confinement index (CI) provides a model-free measure of diffusion character:
 
-$$\text{CI} = \frac{\text{MSD}(\tau_\text{late}) / \text{MSD}(\tau_\text{early})}{\tau_\text{late} / \tau_\text{early}}$$
+```math
+\text{CI} = \frac{\text{MSD}(\tau_\text{late}) / \text{MSD}(\tau_\text{early})}{\tau_\text{late} / \tau_\text{early}}
+```
 
 where $\tau_\text{early}$ and $\tau_\text{late}$ are the medians of the first and last 15% of lag-time
 bins (minimum 2 bins each). For free Brownian diffusion MSD ∝ τ, so CI = 1:
@@ -1144,6 +1358,140 @@ most mobile.
 > **Track-length dependence**: CI, and therefore the "confined %" readout, is **not comparable across
 > datasets with different track lengths** — a longer track has more opportunity to reveal a plateau.
 > Compare only at matched track lengths, and read the simulated null band shown alongside.
+
+---
+
+### Jump Distance Distribution (JDD)
+
+The step-length histogram is fitted with an **N-component scaled-chi mixture** — the law of $|\Delta r|$
+for a $d$-dimensional isotropic Gaussian displacement:
+
+```math
+p(r) = \sum_k w_k \, C_d \, \frac{r^{\,d-1}}{\sigma_k^{\,d}} \exp\!\left(-\frac{r^2}{2\sigma_k^2}\right), \qquad C_d = \frac{1}{2^{\,d/2-1}\,\Gamma(d/2)}
+```
+
+$d = 2$ gives the classic **Rayleigh** form, $d = 3$ the **Maxwell** form used when z is included.
+$\sigma_k$ is the **per-axis** spread in both cases. Fitted by MLE (Nelder–Mead on the negative
+log-likelihood). Per component:
+
+```math
+D = \frac{\sigma^2}{2} \quad \text{(dimension-independent)}, \qquad \sigma^2 \leftarrow \sigma^2 - \frac{2\sigma_\text{loc}^2}{\Delta t_0} \ \ (\text{clamped} \geq 0)
+```
+
+$D = \sigma^2/2$ carries no $d$ because $E[r^2] = d\sigma^2$ while $\text{MSD} = 2dD\Delta t$ — the $d$
+cancels. Steps are pooled as $r/\sqrt{\Delta t}$ by default so different cycle counts are comparable.
+A noise-floor jump distance $\sqrt{2d} \sigma_\text{loc}/\sqrt{\Delta t_0}$ marks where peaks are
+noise-dominated.
+
+> Using the 2D Rayleigh shape on 3D data biases D by roughly +32%. See `docs/MINFLUX_analysis_methods.md`
+> §I-B.4 for the in-silico verification.
+
+---
+
+### Diffusive-State HMM
+
+Per-step displacement $r$ (√Δt-normalised) with a **Rayleigh emission** over $K = 2$–4 states:
+
+```math
+\log p(r \mid k) = \log r - 2\log\sigma_k - \frac{r^2}{2\sigma_k^2}, \qquad \sigma_k = \sqrt{\frac{\sum \gamma \, r^2}{2\sum \gamma}}
+```
+
+fitted by **Baum–Welch EM** entirely in log-space, then decoded for all tracks with **Viterbi**.
+
+The fitted per-step transition matrix $A$ is *not* a rate: a 3-dark-cycle step counts as one transition
+opportunity just like a 1-cycle step. So the **generator** $Q$ is estimated separately from the decoded
+path using real elapsed time, giving dark-cycle-invariant dwell times:
+
+```math
+q_{ab} = \frac{N_{ab}}{T_a} \ (b \neq a), \qquad q_{aa} = -\sum_{b \neq a} q_{ab}, \qquad \tau_a = -\frac{1}{q_{aa}}
+```
+
+where $N_{ab}$ counts decoded $a \to b$ jumps and $T_a$ is time spent in state $a$.
+
+---
+
+### Displacement vs Diffusion
+
+Per track, the net start-to-end displacement $R_\text{net} = |r(T) - r(0)|$ is compared against the
+free-diffusion expectation. It depends only on the two endpoints and the true elapsed time $T$, so it
+is **inherently robust to irregular Δt** — no cycle binning needed:
+
+```math
+R_\text{net}^2 = 2 D_\text{mot} \, T \cdot \chi^2(d_\text{mot}), \qquad R_\text{net}^2 \leftarrow R_\text{net}^2 - 2 d \sigma_\text{loc}^2
+```
+
+$d_\text{mot}$ is the degrees of freedom of the **motion**, not the number of recorded coordinates — a
+membrane protein tracked in 3D has $d_\text{mot} = 2$ on $d_\text{obs} = 3$ axes. This is what *Sample
+geometry* sets.
+
+---
+
+### Directionality / Autocorrelation
+
+**Turn angle** between consecutive displacement vectors, and the **velocity autocorrelation** of unit
+step vectors:
+
+```math
+\theta = \arccos\!\left(\frac{\Delta r_i \cdot \Delta r_{i+1}}{|\Delta r_i|\,|\Delta r_{i+1}|}\right), \qquad AC(\text{lag}) = \langle \hat{v}_i \cdot \hat{v}_{i+\text{lag}} \rangle
+```
+
+Both use only steps spanning at most a few dark cycles — a long-gap step has an unreliable direction.
+The autocorrelation lag is **elapsed time** (cycle lag × $t_c$), not step index. A noise floor at RMS
+step $= 2\sigma_\text{loc}$ quantifies how much of any backward peak is localization noise rather than
+real anti-persistence.
+
+---
+
+### Speed & Transport
+
+Path speed $dr/dt$ cannot separate transport from diffusion — a finely sampled random walk has a high
+path speed. Two quantities that can:
+
+```math
+v_\text{drift}(t) = \frac{|\text{net displacement over window } W|}{W}, \qquad \alpha(t) = \frac{d \log \text{MSD}}{d \log \tau}
+```
+
+Diffusion's net displacement grows only as $\sqrt{t}$, so its apparent $v \sim \sqrt{4D/W}$ *shrinks*
+as the window $W$ grows, while directed transport sustains $v_\text{drift}$. Windows are defined in
+**time (ms)**, not step count, for robustness to irregular Δt. The local anomalous exponent $\alpha$ is
+a rolling log-log slope with the static-noise offset $2d\sigma^2$ subtracted per lag: $\alpha \approx 1$
+Brownian, $\alpha \to 2$ ballistic.
+
+A window is called directed when $v_\text{drift}$ exceeds the larger of two thresholds:
+
+```math
+v_\text{drift} > \max\!\left(\text{fold} \times \text{diffusive baseline},\ \frac{\sqrt{2}\,\sigma}{W}\right)
+```
+
+— measured against the track's own baseline and floored at the localization-noise velocity.
+
+---
+
+### Spatially Resolved D-map
+
+A single-lag estimator per step, midpoint-binned on an $n \times n$ grid:
+
+```math
+D_\text{raw} = \frac{r^2}{4\,\Delta t} \quad \text{(2D)}, \qquad D_\text{raw} \leftarrow D_\text{raw} - \frac{\sigma_\text{loc}^2}{\Delta t}
+```
+
+Each cell reports $\text{median}(D_\text{raw})$, which is robust to outlier jumps; cells with too few
+steps are left NA. The noise subtraction removes the spurious diffusion floor that would otherwise make
+immobile regions look mobile. This is the **short-lag limit of CVE**, far more robust than a per-cell
+MSD fit in small cells such as a bacterium.
+
+---
+
+### Fast-Diffusion Ceiling
+
+The trackable-D limit, before the localization loop loses lock:
+
+```math
+D_\text{max} = \frac{L^2}{16} \cdot \frac{\psi}{N_\text{PL} + \psi \, t_\text{hw}}
+```
+
+surfaced as a green/amber/red flag. It is a theoretical form, so it may under-warn near the
+demonstrated practical ceiling of roughly 2.5–3 µm²/s.
 
 ---
 
