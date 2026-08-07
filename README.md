@@ -173,7 +173,6 @@ Raw data
  └── [1] Metadata filters  (EFO, CFR, DCR, TIM, ECO, dwell, fluo)
       └── [2] TID length filter  (number of points per trace)
            └── [3] TID spread filter  (per-trace spread of localizations)
-                └── [4] Rogue-trace rule (optional)
 ```
 
 **Metadata filters.** Pick a variable, see its histogram (with the unfiltered data behind it in grey
@@ -272,11 +271,7 @@ Affects the merge decision only; reported distances and sizes stay in true nm.
 De-blinked molecules are labelled **De-blinked ID** in hover text, and their medians (not individual
 TID medians) become the representative points for downstream analysis including Median Clustering.
 
-> **Why not DBSCAN here?** Raw-point DBSCAN was the previous method and has been retired for merging:
-> it merged whenever any two localizations touched, so a single stray point could fuse two molecules.
-> Against ground-truth simulation its error count was 35 (splits + merges) versus 10 for centroid
-> distance and 29 for majority vote.
->
+
 > **Naming in the code.** The build originally had two DBSCAN levels, named `cluster` and `cluster2`
 > to tell them apart. Those names are still used in the source even though the first level is now
 > de-blinking and the second is Median Clustering — so `cluster` in the code means de-blinking, and
