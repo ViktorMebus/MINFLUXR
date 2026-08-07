@@ -1,7 +1,7 @@
 # MINFLUX Analysis — Methods, Mathematics & Appropriateness
 
 *Reference document for the analysis and simulation modules of MINFLUXR.*
-Last reviewed: 2026-07-24 · Compiled from the source code and from verified primary literature (see [Bibliography](#bibliography)).
+Last reviewed: 2026-08-06 · Compiled from the source code and from verified primary literature (see [Bibliography](#bibliography)).
 
 > **In-app counterpart.** Every analysis panel in the Tracking tab and the SMLM **Analysis** tab carries a
 > collapsible *"ℹ Method & MINFLUX adaptation"* box (`.method_box()` in `helpers_shared.R`) with the
@@ -51,10 +51,17 @@ Conventions used throughout:
 The SMLM tab treats each acquisition as a spatial point pattern of localizations, optionally reduced
 through a **de-blinking hierarchy** before any spatial statistic:
 
-> **localizations → trace (`tid`) median → primary cluster (DBSCAN `cluster`) median → secondary
-> structure (`cluster2`)**
+> **localizations → trace (`tid`) median → de-blinked molecule (`cluster`) median → median cluster
+> (`cluster2`)**
 
-Collapsing to trace/cluster medians is the mitigation for the labelling/blinking over-counting bias
+The two tiers answer different questions and should not be conflated. **De-blinking** is an instrument
+artifact correction: one fluorophore that blinks several times yields several trace IDs, and this tier
+merges them back into one molecule. **Median clustering** is biology: it groups distinct molecules into
+the structure they form. The word *cluster* in this document refers to the second tier; the first is
+called a *de-blinked molecule*. (The internal data column for the first tier is still named `cluster`
+for historical reasons — a rename deferred to avoid churn.)
+
+Collapsing to trace/molecule medians is the mitigation for the labelling/blinking over-counting bias
 (Part II §6.0). Most estimators can run on raw localizations or on medians (`enable_clustering`).
 
 ### I-A.1 Nearest-neighbour (NN) distances — [Part II §6.1]
@@ -78,16 +85,130 @@ Collapsing to trace/cluster medians is the mitigation for the labelling/blinking
   null — and this panel deliberately computes no null (see above). The UI now says so explicitly rather
   than implying a Clark–Evans test is being run.
 
-### I-A.2 Density-based clustering (DBSCAN / HDBSCAN / OPTICS) — [Part II §6.1]
-- **Primary clustering** (`cluster`): `dbscan::dbscan(pts, eps, minPts)` on raw localizations → labels
-  blinks/dyes of one region together. **Median clustering** (`cluster2`): the same family run on
-  trace/cluster medians → groups molecules into structures. Two-colour variants cluster each channel
-  separately (channel-2 ids offset by +10000) then lock every TID to its majority cluster.
+### I-A.2a De-blinking — merging re-blinks into molecules — [Part II §6.1]
+
+Operates at **trace level**: a whole trace joins a molecule or it does not, so a trace can never be
+split across two molecules. Two criteria, selected by `deblink_method`.
+
+- **Centroid distance** (default, `deblink_merge_centroids()`). Each trace collapses to its median
+  position; single linkage joins centroids closer than `eps_centroid`
+  (`dbscan::dbscan(M, eps, minPts = 1L)` on the centroid matrix — `minPts = 1` makes noise impossible).
+  `centroid_k` expresses that distance in units of the measured per-axis trace spread σ and drives it.
+- **Majority vote** (`deblink_merge_majority_vote()`). For each localization *p* in trace X, compare
+  d_own = |p − centroid of X computed **without** p| against d_alt = |p − nearest other trace centroid|.
+  *p* votes to merge when d_alt ≤ ρ·d_own; X and Y merge when a fraction ≥ *f* of X's localizations
+  agree (`vote_frac`, `vote_rho`, `vote_link` = mutual/either), with connected components over the
+  accepted edges. Leave-one-out is not optional: the centroid is fitted to X's own points, so without
+  it d_own is systematically too small and short traces under-merge.
+
+  Two properties are easy to get wrong. The vote fraction for two traces of the **same** molecule is
+  **≈ 0.5 by construction** (leave-one-out makes d_own and d_alt identically distributed, since both
+  centroids estimate the same position); it falls to ≈0.23 at 10 nm separation and ≈0.07 at 20 nm. So
+  *f* must sit well below 0.5 — thresholding at 0.5 tests against the null value. And because each
+  point names only its single nearest neighbour, a fluorophore that blinked three or more times splits
+  its votes across siblings; the decision therefore uses the **total** vote and then wires edges to
+  every candidate holding a real share.
+
+- **Merge-only, always.** De-blinking never removes a molecule. A trace that cannot be merged becomes
+  its own single-blink molecule (`deblink_assign_singletons()`; the centroid rule guarantees this by
+  construction), so `cluster > 0` everywhere and **ID 0 does not occur for this tier**. Removal is the
+  job of the metadata and spread filters, where it is visible and reversible. The cost is explicit and
+  preferable: with a too-tight threshold counts inflate toward the trace count rather than quietly
+  shrinking.
+- **minPts is not a free parameter.** Where it still applies it is derived from the Trace ID Length
+  filter's lower bound (`deblink_minpts()`), so it cannot silently contradict the filter the user set.
+- **Anisotropic option** (`deblink_anisotropic`, `deblink_axis_weights()` / `apply_deblink_weights()`).
+  Per-axis whitening by the measured spread, normalised by the geometric mean so the transform is
+  volume-preserving and the threshold keeps its nm meaning. A sphere in whitened space is an
+  **ellipsoid in real nm**, tighter along the better-resolved axis. Valid for the *merge decision only*
+  — reported cluster radii, R_g and neighbour distances stay in true nm.
+- **Two-colour** (`deblink_method_tc1`, `eps_tc1`, `vote_frac_tc1`, `vote_rho_tc1`) runs the same
+  criteria per channel with channel-2 ids offset by +10000, which makes cross-colour merging
+  structurally impossible rather than merely unlikely. IDs render as `A-1` / `B-1`.
+
+**Choosing the threshold.** Three data-driven aids, in increasing order of trust:
+- `suggest_centroid_threshold()` — threshold = *k* × measured per-axis spread. The *k* is the weak
+  point: it depends on how far a label moves *between* blinks, which the app cannot measure without
+  already knowing which traces are the same molecule. Calibration against ground truth: *k* ≈ 1.4 for a
+  static label, ≈2.3 at 4 nm of between-blink motion, ≈3.0 at 6 nm. Ships at 2.0.
+- `deblink_reblink_excess()` — measures *k* **from the data**. Leftover re-blinks sit a few nm apart, so
+  after merging they show as an excess of molecule pairs closer than 2σ against a 30–60 nm reference
+  shell. On real files the excess runs 78× at *k* = 1.0, 32× at 1.5 and clears at 2.0. 🟠 It is a
+  **lower bound only**: once the excess clears the test goes silent, so it detects under-merging and is
+  blind to over-merging.
+- `deblink_count_curve()` — 🟠 EXPLORATORY. Molecule count vs threshold; the knee separates "still
+  collecting re-blinks" from "now fusing distinct molecules". **Centroid criterion only** (returns NULL
+  otherwise): the knee detector keys off the steep fragmentation drop that only the raw-point curve has.
+
+**Why not raw-point DBSCAN.** The retired primary method ran `dbscan(eps, minPts)` over localizations
+and merged whenever *any* point of one cloud came within eps of *any* point of another, so one stray
+localization could fuse two molecules — and the effective two-molecule resolution degraded as
+≈ eps + 2σ√(2 ln n), i.e. **worse for longer traces**. Ground-truth simulation (360 molecules, 923
+traces, σ = 6.5 nm), errors = splits + merges at each method's own best threshold: **raw-point 35,
+majority vote 29, centroid 10**. Centroid scores 11 at the shipped *k* = 2.0. The retired code is kept
+in `deadcode_smlm.R` (local only).
+
+*A note on scale.* The optimal centroid threshold is ≈1.5–2σ, while the retired raw-point optimum was
+≈0.6σ. These are not comparable numbers: they measure different distances. Two re-blinks of one
+fluorophore have centroids a median 3.1 nm apart (95th pct 7.1 nm ≈ 1.1σ) while the nearest *different*
+molecule's centroid sits ≈54 nm away — a separation raw-point linkage discards by chaining through
+outlying localizations.
+
+### I-A.2b Median clustering (DBSCAN / HDBSCAN / OPTICS) — [Part II §6.1]
+- **Median clustering** (`cluster2`): density clustering run on de-blinked molecule medians (or trace
+  medians when de-blinking is off) → groups molecules into structures. Unlike the de-blinking tier,
+  **ID 0 means noise/unassigned here and must be excluded before counting.** Two-colour variants
+  cluster each channel separately (channel-2 ids offset by +10000).
 - **eps tuning:** an optional **kNN-distance plot** (sorted distance to the k-th neighbour) exposes the
-  density "knee" that DBSCAN's `eps` should sit at.
+  density "knee" that `eps2` should sit at. This diagnostic belongs to *this* tier only.
 - **Density field:** `compute_spatial_density()` uses `dbscan::frNN(pts, eps = r)` to count neighbours
   within radius `r` per point (fixed-radius local density used for colouring and the acquisition
   structure/background split).
+
+### I-A.2c Localization precision cloud (QC)
+
+Pools every localization minus **its own trace centroid** and recentres at (0,0): the empirical
+point-spread of the localization precision, with each molecule's true position subtracted out. Its RMS
+radius is σ_loc; the *shape* is the diagnostic.
+
+- **Rings are covariance ellipses, rotated.** Semi-axes and orientation come from the eigen-decomposition
+  of the 2×2 covariance (`cov_ellipse_params()`), drawn as an SVG path because plotly's `circle` shape is
+  defined by a bounding box and can only ever be axis-aligned.
+- **Why rotation is load-bearing.** An axis-aligned ellipse has two parameters and cannot represent a
+  *tilted* cloud: diagonal elongation inflates σx and σy equally, so σx ≈ σy and the ellipse renders as a
+  circle over a visibly stretched cloud. The old anisotropy metric max(σx,σy)/min(σx,σy) had the identical
+  blind spot — on a synthetic cloud with a true **3:1** elongation it scored **1.00 at 45°**, i.e.
+  "isotropic". Since drift within a trace is *directional*, a tilted cloud is the expected signature of
+  drift, so the metric was blind to the artifact the panel exists to detect. Anisotropy is now the
+  **eigenvalue ratio** (rotation-invariant) plus the **tilt angle**, which says *which way* the drift runs.
+- **Two populations, both drawn.** Dotted rings are the *pooled* per-localization covariance (matching the
+  heatmap, so long traces weigh more); the dashed ring is a *robust* per-trace covariance
+  (`robust_median_cov()`, element-wise median of per-trace matrices with a positive-definiteness guard,
+  one vote per trace). When the two separate, that gap **is** the "a few long/wide traces dominate"
+  diagnostic — usually fiducials.
+- **Caveat:** the spread measured here is not the microscope's precision. It is
+  σ²_photon + σ²_linker + σ²_motion. Split-half measurement on real files put the random component near
+  1.5 nm against 4.4 nm including motion — so a σ of 5–7 nm on antibody-labelled biology is expected and
+  does *not* contradict a 1–4 nm instrument specification.
+
+### I-A.2d Axial (z) calibration
+
+MINFLUX z is multiplied by a refractive-index mismatch correction. This is a **property of the dataset**
+(immersion/sample index pair, imaging depth), not of the software, so it is user-set in both tabs
+(`z_scale`, `trk_z_scale`; shared default `TRK_Z_SCALE_DEFAULT = 0.7`).
+
+- **One factor, applied once.** Readers are called with `z_scale = 1.0` so `.npy`/`.json` arrive raw;
+  CSVs are returned to raw by `strip_csv_z_calibration()` first. The user's factor is then applied at a
+  single point per tab. Without this, formats drift apart and a CSV gets the correction applied twice.
+- **CSV provenance** (`detect_csv_z_calibration()`): a `z_scale_applied` column (written by this app's
+  exports) is **exact**; a `dataset_tag` marks an older export of ours; anything else is assumed to be a
+  pyMINFLUX export. 🟡 **Cases 2 and 3 are inferred, not measured** — nothing in those files records the
+  factor, and a CSV written with z-scaling disabled would be misread. The app says which branch it took.
+- **It multiplies every axial quantity** — z trace spread, cluster extent in z, 3D neighbour distances,
+  R_g. Applying it twice compresses z by 30%; the guard above is what prevents that.
+- **Committed on Plot Data**, not live, so a saved analysis reproduces. Greyed out when the dataset has
+  no axial variation (`has_axial_data()` tests *variation*, not the presence of a z column — 2D MINFLUX
+  exports carry z = 0).
 
 ### I-A.3 Ripley's K / L(r) — [Part II §6.2]
 `compute_ripley_L(x,y,z, r_seq, use_3d)`:
@@ -923,7 +1044,7 @@ ways that matter for every downstream estimator:
 | Method | Source | Textbook | With our adaptation |
 |---|---|---|---|
 | MSD optimal-fit | Michalet 2010/2012; Vogler 2025 | 🟡 | 🟢 cycle-based path / 🟡 step-index |
-| CVE | Vestergaard 2014 | 🔴 | 🟡 (integrated-pair restriction + EFO weighting) |
+| CVE | Vestergaard 2014 | 🔴 | 🟡 (integrated-pair restriction) |
 | JDD | Schütz 1997; Weimann 2013 | 🟡 | 🟢 (√Δt norm + integrated-only mode) |
 | HMM / vbSPT | Das 2009; Persson 2013 | 🟡 | 🟢 rates (continuous-time generator) |
 | Confinement | Simson 1995 | 🟢 | 🟢 (N-matched free-diffusion null) |
@@ -1020,18 +1141,39 @@ A single molecule is reported as several localizations: fluorophores blink and r
 multivalent antibody label scatters several dyes ~10–40 nm around one epitope. This **over-counts and
 spatially spreads** each molecule, which inflates short-range nearest-neighbour peaks, Ripley/PCF
 signal, and apparent cluster counts as a *label artefact*, not biology (Annibale et al. 2011;
-Sengupta et al. 2011; Veatch et al. 2012). **Our handling:** the "median (de-blinked) clustering"
-tier collapses localizations → trace → primary cluster → median cluster before spatial statistics,
+Sengupta et al. 2011; Veatch et al. 2012). **Our handling:** the two-tier hierarchy
+collapses localizations → trace median → **de-blinked molecule** → **median cluster** before spatial
+statistics (de-blinking is the artifact correction; median clustering is the structural tier),
 which removes most multi-blink over-counting; results on *raw* localizations should be read with this
 bias in mind. This is a mitigation, not a cure (it cannot recover true molecule count below the label
 footprint).
 
-### 6.1 Nearest-neighbour, DBSCAN/HDBSCAN/OPTICS clustering — 🟢 GREEN (method)
+### 6.1 Nearest-neighbour and median clustering (DBSCAN/HDBSCAN/OPTICS) — 🟢 GREEN (method)
 - **Source:** Clark & Evans 1954 (NN statistic); Ester, Kriegel, Sander & Xu 1996 (DBSCAN);
   Ankerst et al. 1999 (OPTICS); Campello, Moulavi & Sander 2013 (HDBSCAN).
+- **Applies to the *structural* tier only** (`cluster2`). De-blinking is a different method with a
+  different provenance — see §6.1b.
 - **Fit:** density-based clustering is well-adapted to SMLM and widely used; DBSCAN in particular is a
   community standard. MINFLUX's fine precision *helps*. The only caveat is §6.0 (feed de-blinked
-  medians, tune eps to the label footprint).
+  medians, tune `eps2` to the structure scale, not the label footprint).
+
+### 6.1b De-blinking (merging re-blinks) — 🟡 AMBER (tool-original, in-silico validated)
+- **Source:** none directly. The *problem* is standard (Annibale et al. 2011 established blink-merging
+  and the dark-time calibration for camera SMLM), but Annibale's temporal grouping does not transfer:
+  a MINFLUX trace ID *is* already one continuous emission event, so the instrument has done the
+  temporal part and what remains is merging **separate traces** that are re-blinks of one fluorophore.
+  The centroid and majority-vote criteria used here (§I-A.2a) are tool-original.
+- **Validation:** in-silico against ground truth rather than against literature — 360 molecules, 923
+  traces, σ = 6.5 nm, errors = splits + merges at each method's best threshold: raw-point DBSCAN 35,
+  majority vote 29, centroid linkage 10. Threshold *k* is measured per dataset from residual re-blink
+  excess where the data allows (§I-A.2a).
+- **Caveat (why AMBER, not GREEN):** the threshold depends on how far a label moves *between* blinks,
+  and that quantity cannot be measured without already knowing which traces are the same molecule —
+  the question being asked. The residual-excess test bounds it from below only. Report the threshold
+  and the de-blinked count together; a molecule count from this tier is not a photophysics-free
+  measurement.
+- **Not applicable:** Nyquist/Shannon sampling arguments (Shroff et al. 2008) constrain *labelling
+  density*, not blink merging, and do not set this threshold.
 
 ### 6.1a Traces per cluster — 🟡 AMBER
 - **Source:** cluster-occupancy counting in the SMLM molecular-counting lineage — Annibale et al. 2011
@@ -1222,12 +1364,13 @@ footprint).
 
 | Tool | Source | Rating |
 |---|---|---|
-| NN / DBSCAN / HDBSCAN / OPTICS | Clark & Evans 1954; Ester 1996; Ankerst 1999; Campello 2013 | 🟢 (feed de-blinked) |
+| NN / median clustering (DBSCAN / HDBSCAN / OPTICS) | Clark & Evans 1954; Ester 1996; Ankerst 1999; Campello 2013 | 🟢 (feed de-blinked medians) |
+| De-blinking (centroid / majority vote) | tool-original; problem framing after Annibale 2011 | 🟡 threshold assumption (§6.1b) |
 | Traces per cluster | Annibale 2011; Sengupta 2011 | 🟡 blinking (not stoichiometry) |
 | Ripley L / L₁₂ / PCF g₁₂ | Ripley 1977; Besag 1977; Lotwick & Silverman 1982; Dixon 2002; Sengupta 2011; Veatch 2012 | 🟢 / 🟡 labelling + registration |
 | Cross-channel NN & co-loc curve | Clark & Evans 1954; Dixon 2002; Lachmanovich 2003; Dunn 2011 | 🟢 (no null of its own) |
 | Radius of gyration / anisotropy | Rudnick & Gaspari 1986; Westin 1997/2002 | 🟢 |
-| KDE + Pearson co-loc | Silverman 1986; Dunn 2011; Costes 2004 | 🟡 bandwidth |
+| KDE + Pearson co-loc | Silverman 1986; Dunn 2011 (*not* the Costes 2004 algorithm — see §6.4) | 🟡 bandwidth |
 | Shape fitting | Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989; Pearson 1901 | 🟠 exploratory |
 | GT estimate & structure size | this tool (in-silico validated); Prim 1957 | 🟠 exploratory |
 | Detection-time / crowding / NN-vs-size | this tool; Cleveland 1979; Barber 1996 | 🟠 exploratory |

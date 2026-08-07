@@ -159,18 +159,45 @@ When data contains two spectrally distinct labels recorded on two detectors, the
 
 Once groups are defined, the **nearest-neighbor (NN) distance** panel computes cross-group, within group, or all, distances. 
 
-### DBSCAN Clustering
+### De-blink correction and Median Clustering
 
-Two independent rounds of DBSCAN clustering are available. Both follow the standard DBSCAN definition: a point is a *core point* if it has at least `minPts` neighbors within distance `eps`; all density-reachable points from a core point form a cluster; points with fewer than `minPts` neighbors are labeled noise (cluster 0).
+Two independent grouping steps, answering different questions. **De-blink correction** is an instrument
+artifact fix: one fluorophore that blinks several times produces several trace IDs, and this merges them
+back into one molecule. **Median clustering** is biology: it groups distinct molecules into the structure
+they form. Only the second is DBSCAN.
 
-#### Primary DBSCAN (Round 1)
+#### De-blink correction (Round 1)
 
-Runs on **raw localizations** (all points after filtering). Its purpose is to group localizations from the same or closely co-located molecules, particularly useful when one molecule produces multiple nearby trace IDs due to repeated blinking events.
+Works at **trace level** — a whole trace joins a molecule or it does not, so a trace is never split.
+Two criteria:
 
-- `eps` — neighborhood radius in nm
-- `minPts` — minimum core-point occupancy
-- Once active, the app replaces per-TID coloring with per-cluster coloring and uses **primary cluster centroids** (rather than individual TID medians) as the representative points for all downstream analysis including Cluster2.
-- **Exclude unclustered** — optionally removes all noise points (cluster = 0) from the analysis and plots.
+- **Trace centroid distance** (default) — merge when two traces' median positions are closer than the
+  threshold. Set it in nm (`Centroid distance threshold`) or as **k × the measured trace spread**;
+  changing k rewrites the distance.
+- **Majority vote of localizations** — merge when a fraction *f* of a trace's localizations sit closer to
+  a neighbouring trace's centroid than to their own. No distance in nm. Useful values of *f* are well
+  below 0.5 (two traces of the *same* molecule score ≈0.5 by construction).
+
+**De-blinking only merges — it never deletes.** A trace that cannot be merged becomes its own
+single-blink molecule, so every trace that survived filtering is still counted. Removing data is the job
+of the metadata and spread filters, where it is visible and reversible. (There is consequently no
+"exclude unclustered" option; cluster 0 applies only to Median Clustering below.)
+
+**Choosing the threshold.** *Measure threshold from data* sets it from your own file: it measures the
+per-axis trace spread and finds the smallest k at which no unmerged re-blinks remain. Two diagnostics sit
+beside it — a density plot whose orange curve should show two humps (re-blinks left, separate molecules
+right) with your threshold in the gap, and an exploratory molecule-count-vs-threshold curve.
+
+**Anisotropic option** — weights x, y and z by their own measured spread, so one threshold fits all three
+axes (the merge volume becomes an ellipsoid in nm, tighter along the better-resolved axis). Affects the
+merge decision only; reported distances and sizes stay in true nm.
+
+De-blinked molecules are labelled **De-blinked ID** in hover text, and their medians (not individual TID
+medians) become the representative points for downstream analysis including Median Clustering.
+
+*Note:* raw-point DBSCAN was the previous method here and has been retired. It merged whenever any two
+localizations touched, so a single stray point could fuse two molecules. Against ground-truth simulation
+its error count was 35 (splits + merges) versus 10 for centroid distance and 29 for majority vote.
 
 #### Secondary DBSCAN — Cluster2
 
@@ -554,7 +581,16 @@ Abberior JSON files store coordinates in **meters**. On load, the app converts t
 
 $$x_\text{nm} = x_\text{m} \times 10^9$$
 
-**Z-axis scaling** is applied after unit conversion to correct for refractive index mismatch between the sample medium and the objective immersion medium:
+**Z-axis scaling** is a user-set calibration, not a fixed constant. Files are read with **raw z**;
+the factor you set (SMLM sidebar *Axial (z) calibration*, Tracking sidebar *Axial (z) scaling factor*,
+both defaulting to 0.7) is applied once afterwards, on Plot Data. CSVs are first returned to raw z — the
+app detects what factor they already carry, exactly when the file was exported from here (a
+`z_scale_applied` column) and by assumption otherwise. Exports write that column so a round-trip is
+exact. Because the factor multiplies every axial quantity — z spread, cluster extent, 3D neighbour
+distances, Rg — applying it twice would compress z by 30%, which the detection prevents.
+
+The historical note below describes the mechanics of the correction itself; scaling is applied after
+unit conversion to correct for refractive index mismatch between the sample medium and the objective immersion medium:
 
 $$z_\text{corrected} = z_\text{nm} \times s_z \quad (s_z = 0.7 \text{ by default})$$
 
