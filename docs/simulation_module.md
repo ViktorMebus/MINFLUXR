@@ -1,7 +1,7 @@
 # MINFLUX Diffusion-Simulation Module — Design
 
 *Design spec for a ground-truth diffusion simulator in the MINFLUXR simulator tab.*
-Status: design (2026-07) · Companion to [MINFLUX_analysis_methods.md](MINFLUX_analysis_methods.md).
+Status: **implemented** (Phases 1-3; see §8 for what remains pending) · last reviewed 2026-08-06 · Companion to [MINFLUX_analysis_methods.md](MINFLUX_analysis_methods.md).
 
 ## 1. Purpose — close the validation loop
 
@@ -85,7 +85,7 @@ One parametric **ellipsoid** + one **spherocylinder** cover all the requested sh
 | Shape | Parameters | Notes |
 |---|---|---|
 | **Membrane plane** | Lx × Ly patch, orientation (nx,ny,nz), z-offset | a wall/membrane protein imaged over a patch |
-| **Cytoplasmic slab / half-space** | box or single boundary plane | free 3D diffusion, one membrane, no far wall |
+| **Cytoplasmic slab / half-space** ⚠ *not implemented (see §8)* | box or single boundary plane | free 3D diffusion, one membrane, no far wall |
 
 ## 4. What diffuses, and how
 
@@ -93,8 +93,10 @@ One parametric **ellipsoid** + one **spherocylinder** cover all the requested sh
   case.* Overdamped Brownian in the local tangent plane, retracted onto the surface each step.
 - **Volume diffusion** — 3D Brownian inside the shape, **reflecting** at the boundary. Cytoplasmic.
 - **Modifiers** (composable; each becomes a ground-truth label):
-  - **Corrals** — a tessellation of domains with permeable walls (crossing probability p per encounter)
-    → local confinement, escape statistics.
+  - **Corrals** ⚠ *not implemented.* The confinement modifier that WAS built is an
+    **Ornstein-Uhlenbeck harmonic tether** to a per-track home position
+    (φ = e^{−t_c/τ_c}, τ_c = L_c²/D) — see §8 Phase 3 and
+    `MINFLUX_analysis_methods.md` §I-C.2. No corral tessellation exists.
   - **Directed** — drift velocity v along a direction (e.g. cell axis, MreB-like), optionally
     run-and-tumble state switching.
   - **Immobile fraction** — a subpopulation with D≈0.
@@ -105,10 +107,13 @@ One parametric **ellipsoid** + one **spherocylinder** cover all the requested sh
 Generate the continuous path at a fine internal step δt_sim (≪ cycle time), variance per axis = 2D·δt_sim.
 - **Sphere**: tangent-plane step at point **p**, then retract `p ← R·(p+step)/|p+step|` (small-step
   accurate) or apply a random small rotation (exact).
-- **Spherocylinder body**: the cylinder is **developable** (zero Gaussian curvature), so unrolled
-  coordinates (axial s ∈ [0, ℓ], arclength u = r·φ) are a **true isometric flat chart** — Brownian in
-  flat (s, u), **periodic** in φ, and at s∈{0,ℓ} **transition onto the hemispherical cap** (v1 may
-  reflect at the flat cap seam as an approximation). Map (s,φ) → 3D: (r·cosφ, r·sinφ, s).
+- **Spherocylinder body**: **superseded.** The rod surface now uses **tangent-step +
+  cylinder-project**, unified with the ellipsoid path (§8 Phase 3). The unrolled isometric chart
+  below is kept as a historical note on why the flat treatment is valid, not as a description of the
+  code: the cylinder is **developable** (zero Gaussian curvature), so unrolled coordinates
+  (axial s ∈ [0, ℓ], arclength u = r·φ) are a **true isometric flat chart** —
+  Brownian in flat (s, u), **periodic** in φ, and at s∈{0,ℓ} **transition onto the
+  hemispherical cap**. Map (s,φ) → 3D: (r·cosφ, r·sinφ, s).
 - **Ellipsoid**: nonzero curvature → no flat chart. Use tangent-step + **project back** onto the
   ellipsoid (normalize in scaled coordinates, or one Newton step). Accurate for small δt_sim.
 - **Membrane plane**: flat 2D Brownian, embedded in 3D at the chosen orientation/offset.
@@ -128,7 +133,7 @@ Subsample the fine ground-truth path the MINFLUX way:
    what produces the mixed dark-cycle structure across tracks.
 3. **σ_loc (heteroscedastic)** — per recorded localization draw N_photons (∼ Poisson around EFO·t_dwell),
    σ_loc = L_TCP/(2·√N); add Gaussian noise N(0, σ_loc²) per axis. Record `eco=N`, `efo`.
-4. **Motion blur** — R≈0 by default (sample the instantaneous position at the cycle time). Optional:
+4. **Motion blur** — R≈0 (sample the instantaneous position at the cycle time). ⚠ The optional nonzero-R path below is **not implemented**; the sampling overlay has no blur step. Optional:
    average the path over the acquisition sub-window for a small nonzero R.
 5. **Photobleaching → finite length** — end the track after a photon-budget-limited number of
    localizations (geometric/exponential), so track lengths are short and realistic.
