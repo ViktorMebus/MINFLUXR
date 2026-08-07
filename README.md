@@ -52,7 +52,7 @@ MINFLUXR provides three main analysis environments:
 | **Tracking Analysis** | Single-molecule tracking: trajectory visualization, MSD, diffusion analysis |
 | **MINFLUX Simulator** | Generate synthetic MINFLUX datasets from geometric shapes or confocal images |
 
-The app is designed around Abberior MINFLUX JSON exports and also accepts CSV files in pyMINFLUX format or any column-based CSV with x/y coordinates.
+The app is designed around Abberior MINFLUX .json or .npy exports and also accepts .csv files exported from pyMINFLUX format, or MINFLUXR created column-based .csv. Other .csv types which has X, Y columns may be accepted, but there is no guarantee.
 
 ---
 
@@ -108,8 +108,9 @@ The following columns are read from Abberior JSON exports. Understanding them is
 
 An upload widget browser supporting single, or multiple datasets. Supported formats:
 
-- **`.json`** — Abberior MINFLUX native export. The app reads the full multi-iteration dataset, keeps only the final (highest `itr`) localization per trace, and carries the last non-zero CFR value forward per TID (see [JSON Import](#unit-conversions--json-import)).
-- **`.csv`** — pyMINFLUX-format CSV or any flat table with x/y columns. Column names are canonicalized automatically (e.g. `x_nm`, `pos_x`, `xPos` all map to `x`).
+- **`.json`** - Abberior MINFLUX native export. The app reads the full multi-iteration dataset, keeps only the final (highest `itr`) localization per trace, and carries the last non-zero CFR value forward per TID
+- **`.npy`** - Abberior MINFLUX native export. The app reads the full multi-iteration dataset, keeps only the final (highest `itr`) localization per trace, and carries the last non-zero CFR value forward per TID. Legacy .npy format is not supported. Newer .npy formats are.
+- **`.csv`** - pyMINFLUX-format CSV or any flat table with x/y columns. Column names are canonicalized automatically (e.g. `x_nm`, `pos_x`, `xPos` all map to `x`).
 
 Multiple files can be loaded simultaneously; use the **Active file** selector to switch between them. The **Lock filters** checkbox preserves current filter values when switching files.
 
@@ -502,7 +503,7 @@ where $z_{1,ij}$ and $z_{2,ij}$ are the density values at pixel $(i,j)$ for grou
 
 ---
 
-## Tracking Analysis Tab
+## Tracking Display Tab
 
 ### Loading & Chunking
 
@@ -520,9 +521,10 @@ Filters are applied sequentially in three stages. Each stage operates on the out
 
 ```
 Raw data
-   └── [1] Metadata filters  (EFO, CFR, DCR, TIM, ECO, dwell, fluo)
-         └── [2] TID length filter  (number of points per trace)
-               └── [3] Trace duration filter  (max(tim) − min(tim) in ms)
+   └── [1] Split tracks at time gaps -> Trim degraded ends -> Track continuity gate (drop dark-cycle heavy tracks)
+      └── [2] Metadata filters  (EFO, CFR, DCR, TIM, ECO, dwell, fluo)
+         └── [3] TID length filter  (number of points per trace)
+               └── [4] Trace duration filter  (max(tim) − min(tim) in ms)
 ```
 
 This sequential ordering matters: the TID length and duration distributions shown in the filter histograms reflect data that has already passed the upstream filters.
@@ -592,7 +594,7 @@ Simulated data can be sent directly to the **SMLM Analysis** or **Tracking Analy
 
 ## Key Calculations
 
-### Unit Conversions & JSON Import
+### Unit Conversions & .npy and .json Import
 
 Abberior JSON files store coordinates in **meters**. On load, the app converts to nanometers:
 
@@ -779,7 +781,6 @@ MINFLUXR/
 
 ## Notes & Tips
 
-- **CFR pre-filter**: In the Tracking tab, events with CFR > 0.5 are removed automatically during chunking. This hard cutoff is standard for excluding multi-emitter contamination and is applied before all user-defined filters.
 - **Z-axis scaling**: The default Z scale of 0.7 corrects for the refractive index mismatch between water (n ≈ 1.33) and glass (n ≈ 1.52) in a typical sample. Adjust this if your mounting medium differs.
 - **JSON CFR carry-forward**: Because CFR is measured during early MINFLUX iterations and may be NaN in the final iteration, the app takes the last non-zero CFR value across all iterations. This ensures CFR filtering works correctly on JSON data even when only the final iteration is retained.
 - **Multiple datasets**: In the SMLM tab, up to several files can be loaded simultaneously and compared using the Active file selector. Filter settings can be locked when switching to prevent accidental resets.
