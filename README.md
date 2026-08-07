@@ -322,7 +322,30 @@ A confocal image (PNG, TIFF, etc.) can be overlaid on the MINFLUX scatter plot a
 
 ### Analysis Outputs
 
-The **Analysis** tab provides eight quantitative tools. Each produces an interactive plot and an exportable CSV table. All analyses operate on the filtered, clustered data visible in the Visualization tab. In 2-color mode, group membership is determined by DCR thresholding (or the `fluo` column if present).
+The **Analysis** tab provides sixteen panels. Each produces an interactive plot and, where a table
+makes sense, an exportable CSV. Panels marked ⚠ carry an *exploratory* badge in the app — they are
+research tools whose interpretation is not yet settled, not validated readouts.
+
+| Panel | What it answers |
+|-------|-----------------|
+| Dataset Groups | Define named file groups so distribution analyses relabel and pool by group |
+| Localization Precision Cloud | Every localization minus its own trace centroid — the empirical precision σ_loc, with covariance ellipses whose tilt exposes drift |
+| Fiducial / Contaminant Scan | Flags traces behaving like gold beads or aggregates rather than single molecules (report only) |
+| Trace Detection over Time | Detection rate across the acquisition — photobleaching and drop-off |
+| Batch NN Distance Histogram | Nearest-neighbour distances across files or channels |
+| Ripley's L(r) | Clustering vs randomness across length scales |
+| Trace IDs / De-blinked Molecules per Median Cluster | Occupancy — how many traces, or how many de-blinked molecules, per structure |
+| Median Clusters Detection over Time ⚠ | When structures appear during acquisition |
+| Median Clusters Crowding vs Detection-Time Shift ⚠ | Whether crowding biases when a structure is detected |
+| Within Median Clusters NN vs Cluster Size ⚠ | Internal spacing as a function of structure size |
+| Cluster Viewer and Shape Fitting ⚠ | Per-structure 3D inspection and geometric fits |
+| Radius of Gyration (RoG) | Structure size from the second moment, with anisotropy |
+| Cross-Channel NN & Co-localization | Two-colour proximity |
+| Bivariate Ripley's L₁₂(r) | Cross-channel clustering across scales |
+| Pair Cross-Correlation g₁₂(r) | Cross-channel correlation as a function of separation |
+| 2D KDE Density Map | Smoothed density field |
+
+ All analyses operate on the filtered, clustered data visible in the Visualization tab. In 2-color mode, group membership is determined by DCR thresholding (or the `fluo` column if present).
 
 ---
 

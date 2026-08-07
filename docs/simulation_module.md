@@ -151,6 +151,40 @@ Subsample the fine ground-truth path the MINFLUX way:
   v_true?, n_dark_frac, sigma_loc_med)` for scoring.
 - Buttons: download both; "Load into Tracking tab" (in-memory hand-off).
 
+### 6a. Built-in CVE round-trip (`sim_trk_cve`, `sim_server.R:3128`)
+
+The simulator scores itself: it runs the same CVE estimator the Tracking tab uses over the tracks it
+just generated, so the recovered D can be compared against the D that was dialled in. That is the
+validation loop of §1 closed in one number.
+
+**What it computes.** Only **single-cycle steps** are used (`|Δt − t_c| < 0.25·t_c`), which
+is the same integrated-pair restriction the real CVE applies — mixing multi-cycle steps would inflate
+D. Then, per Vestergaard et al. 2014:
+
+> D = ( ⟨|Δr|²⟩ + 2·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / (2·d_mot·t_c)
+> σ_loc = √( −⟨Δrᵢ·Δrᵢ₊₁⟩ / n_cart )
+
+The consecutive-step covariance is negative for localization noise (an error displaces step *i* one way
+and step *i+1* the other), which is what lets the same two moments separate D from σ_loc without an
+MSD fit.
+
+**The load-bearing subtlety: d_mot is not n_cart.** The denominator of D uses the **motion**
+dimensionality — 2 for surface diffusion, 3 for volume — while σ_loc is normalised by the
+number of **Cartesian axes observed**. For a protein diffusing on a membrane or a rod surface these
+differ: the motion is 2D but you observe x, y and z. Using n_cart = 3 in the D denominator would
+under-report D by a factor of 3/2 on exactly the geometry most MINFLUX membrane work targets. The
+simulator makes that error visible instead of arguable, because the true D is known.
+
+**How to read it.** A round-trip ratio near 1.0 means the estimator is unbiased for that geometry,
+sampling rate and σ_loc. A systematic departure is the *geometric bias* §7 asks about — and
+it is a property of the estimator-plus-geometry, not of the data, so it transfers to real acquisitions
+with the same shape and cycle time.
+
+**Caveat.** The round-trip validates the estimator against the *simulator's* motion model. It cannot
+detect a mismatch between that model and real biology — if a real protein hops between domains and
+the simulation assumes free surface diffusion, a perfect round-trip still says nothing about the real
+D. It bounds estimator error, not model error.
+
 ## 7. Validation targets (what each simulation checks)
 
 | Simulate | Checks |
