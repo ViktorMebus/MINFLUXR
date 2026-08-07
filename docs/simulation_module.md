@@ -172,8 +172,10 @@ MSD fit.
 dimensionality — 2 for surface diffusion, 3 for volume — while σ_loc is normalised by the
 number of **Cartesian axes observed**. For a protein diffusing on a membrane or a rod surface these
 differ: the motion is 2D but you observe x, y and z. Using n_cart = 3 in the D denominator would
-under-report D by a factor of 3/2 on exactly the geometry most MINFLUX membrane work targets. The
-simulator makes that error visible instead of arguable, because the true D is known.
+under-report D by a factor of 3/2 on exactly the geometry most MINFLUX membrane work targets. The app
+already corrects for this (`server_tracking.R:8449-8470`, driven by the **Sample geometry** setting);
+the round-trip is what *verifies* the correction rather than what discovers the need for it — the
+"simulated: 0.675" in that source comment is this loop reporting 2/3, as predicted.
 
 **How to read it.** A round-trip ratio near 1.0 means the estimator is unbiased for that geometry,
 sampling rate and σ_loc. A systematic departure is the *geometric bias* §7 asks about — and

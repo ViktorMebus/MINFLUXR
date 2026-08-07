@@ -676,8 +676,21 @@ tracking_server <- function(input, output, session) {
       htmltools::br(),
       htmltools::span(style = "color:#888; font-size:0.94em;",
         {
-          d_use   <- b$D_cve
-          d_tag   <- ""
+          # Report D in the MOTION's degrees of freedom, matching the
+          # Displacement-vs-Diffusion panel. A per-axis CVE spreads 2-DOF motion
+          # over 3 recorded axes, so on a surface tracked in 3D the raw value is
+          # D_true * d_mot/d_obs = 2/3 of the truth. Corrected HERE rather than in
+          # trk_cve_bundle() because the other consumer (line ~8499) applies the
+          # same factor itself and would otherwise double-correct.
+          d_obs   <- if (isTRUE(b$has_z)) 3L else 2L
+          d_mot   <- { mo <- input$trk_motion %||% "volume"
+                       if (identical(mo, "filament")) 1L
+                       else if (identical(mo, "surface")) min(2L, d_obs)
+                       else d_obs }
+          d_use   <- b$D_cve * d_obs / d_mot
+          d_tag   <- if (d_mot != d_obs)
+                       sprintf(" corrected x%d/%d for %s motion", d_obs, d_mot,
+                               input$trk_motion %||% "volume") else ""
           sprintf("cycle time = %s  ·  free D (CVE)%s = %s µm²/s  ·  %s steps",
                   if (is.finite(b$t_cycle)) sprintf("%.4g ms", b$t_cycle) else "unknown",
                   d_tag,
