@@ -124,14 +124,14 @@ Raw data
 
 
 **Metadata filters** (Numeric range inputs):
-- `EFO` — Effective Frequency at Offset. The averaged emission frequency over all points in the scan pattern except for the center; exceedingly high EFO values may indicate multi-emitters. 
-- `CFR` — Center Frequency Ratio; the ratio of EFC (effective frequency at center) to EFO (effective frequency at offset), i.e. EFC/EFO. A common hard cutoff is CFR ≤ 0.5 to exclude multi-emitter events. For tracking data, a CFR ≤ 0.5 cutoff is applied automatically during chunking in the Tracking tab.
+- `EFO` - Effective Frequency at Offset. The averaged emission frequency over all points in the scan pattern except for the center; exceedingly high EFO values may indicate multi-emitters. 
+- `CFR` - Center Frequency Ratio; the ratio of EFC (effective frequency at center) to EFO (effective frequency at offset), i.e. EFC/EFO. A common hard cutoff is CFR ≤ 0.5 to exclude multi-emitter events. For tracking data, a CFR ≤ 0.5 cutoff is applied automatically during chunking in the Tracking tab.
 
-- `TIM` — acquisition timestamp; useful for selecting a time window
-- `DCR` — Detector Channel Ratio; ratio of photons arriving at detector 1 vs detector 2, used to separate two fluorescent labels in 2-colour MINFLUX
-- `ECO` — Total summarized photon count
-- `Dwell` — number of MINFLUX steps
-- `FLUO` — fluorophore channel index
+- `TIM` - acquisition timestamp; useful for selecting a time window
+- `DCR` - Detector Channel Ratio; ratio of photons arriving at detector 1 vs detector 2, used to separate two fluorescent labels in 2-colour MINFLUX
+- `ECO` - Effective photon count at offset. The raw photon count per localization at periphery of donut.  
+- `Dwell` - Dwell time of the localization
+- `FLUO` - fluorophore channel index. A pyMINFLUX exported column, which can be used here.
 
 **TID length filter**: keeps only traces with a number of localizations within the specified range. Useful for excluding very short (potentially noise) or very long traces (potentially fiducials or moving emitters).
 
@@ -159,16 +159,12 @@ When data contains two spectrally distinct labels recorded on two detectors, the
 
 Once groups are defined, the **nearest-neighbor (NN) distance** panel computes cross-group, within group, or all, distances. 
 
-### De-blink correction and Median Clustering
+#### De-blink correction - Trace centroid distance merging or Majority vote of localizations.
 
-Two independent grouping steps, answering different questions. **De-blink correction** is an instrument
-artifact fix: one fluorophore that blinks several times produces several trace IDs, and this merges them
-back into one molecule. **Median clustering** is biology: it groups distinct molecules into the structure
-they form. Only the second is DBSCAN.
+De-blink correction is attempting to combat instrument artifacts where one fluorophore that blinks several times produces several trace IDs on top of each other, ultimately overcounting the amount of molecules / fluorophores.
+This merges them back into one shared De-blinked ID and produces a shared centroid. 
 
-#### De-blink correction (Round 1)
-
-Works at **trace level** — a whole trace joins a molecule or it does not, so a trace is never split.
+Works at **trace level** - where a whole trace joins a molecule or it does not, so a trace is never split.
 Two criteria:
 
 - **Trace centroid distance** (default) — merge when two traces' median positions are closer than the
@@ -178,12 +174,10 @@ Two criteria:
   a neighbouring trace's centroid than to their own. No distance in nm. Useful values of *f* are well
   below 0.5 (two traces of the *same* molecule score ≈0.5 by construction).
 
-**De-blinking only merges — it never deletes.** A trace that cannot be merged becomes its own
-single-blink molecule, so every trace that survived filtering is still counted. Removing data is the job
-of the metadata and spread filters, where it is visible and reversible. (There is consequently no
-"exclude unclustered" option; cluster 0 applies only to Median Clustering below.)
+**De-blinking only merges.** A trace that cannot be merged becomes its own
+single-blink molecule, so every trace that survived filtering is still counted. 
 
-**Choosing the threshold.** *Measure threshold from data* sets it from your own file: it measures the
+**Choosing the threshold.** *Measure threshold from data* sets it from the current data: it measures the
 per-axis trace spread and finds the smallest k at which no unmerged re-blinks remain. Two diagnostics sit
 beside it — a density plot whose orange curve should show two humps (re-blinks left, separate molecules
 right) with your threshold in the gap, and an exploratory molecule-count-vs-threshold curve.
@@ -195,49 +189,49 @@ merge decision only; reported distances and sizes stay in true nm.
 De-blinked molecules are labelled **De-blinked ID** in hover text, and their medians (not individual TID
 medians) become the representative points for downstream analysis including Median Clustering.
 
-*Note:* raw-point DBSCAN was the previous method here and has been retired. It merged whenever any two
-localizations touched, so a single stray point could fuse two molecules. Against ground-truth simulation
-its error count was 35 (splits + merges) versus 10 for centroid distance and 29 for majority vote.
+Previously DBSCAN was used for merging, but has since been retired for this purpose. In code things are still named cluster, as the functionality is largely the same.
+As I had two levels of DBSCAN when building this, cluster and cluster2 was used in code to differentiate. Cluster2 and cluster retains its code naming regardless of the change.
 
-#### Secondary DBSCAN — Cluster2
+#### Median Clustering - DBSCAN / HDBSCAN / OPTICS (Xi) between trace ID's or De-blinked ID - in code these parts are cluster2
 
-Runs on **representative points** rather than raw localizations: one point per TID (median x/y/z), or one point per primary cluster (centroid) if primary DBSCAN is active. This second pass groups those representative points into larger spatial structures — for example, a collection of receptor clusters arranged in a ring, or a row of nuclear pores along the nuclear envelope.
+Runs on representative points for each Trace ID / De-blinked ID rather than raw localizations: one point per TID or De-blinked ID (median x/y/z) coordinate. 
+This DBSCAN pass groups those representative points into larger spatial structures.
 
 - `eps2` - neighborhood radius for the second pass (nm; default 200)
-- `minPts2` - minimum representative-point count for a Cluster2 core point (default 15)
+- `minPts2` - minimum representative-point count for a Median Cluster core point (default 15)
 
 **Group scope** (in the 2-color MINFLUX branch): controls which analysis groups are clustered.
 - *All* - clusters all representative points together regardless of group
-- *Group 1 only* / *Group 2 only* - restricts Cluster2 to one color channel
-- *Split* - runs Cluster2 independently on each group with globally unique IDs, so group-1 clusters and group-2 clusters never merge
+- *Group 1 only* / *Group 2 only* - restricts Median Cluster to one color channel
+- *Split* - runs Median Cluster independently on each group with globally unique IDs, so group-1 clusters and group-2 clusters never merge
 
 ---
 
 **Visualization**
 
 In **2D mode**:
-- *Convex hull* - draws a convex-hull outline around each Cluster2 in the scatter plot
+- *Convex hull* - draws a convex-hull outline around each Median Cluster in the scatter plot
 
 In **3D mode**:
-- *Alpha shape* - wraps each Cluster2 in a 3D alpha shape (concave hull via `alphashape3d`)
-- *Isosurface* - renders a Gaussian-smoothed density isosurface around each Cluster2, with controls for:
+- *Alpha shape* - wraps each Median Cluster in a 3D alpha shape (concave hull via `alphashape3d`)
+- *Isosurface* - renders a Gaussian-smoothed density isosurface around each Median Cluster, with controls for:
   - Grid resolution (12–40; higher = more detail, slower)
   - Padding around the cluster boundary (0–500 nm)
   - Surface level - quantile of the smoothed density at which the surface is drawn (0.50–0.98; higher = tighter fit)
   - Opacity (0–1)
   - Smoothness sigma (10–500 nm; larger sigma = smoother, more featureless surface)
-  - Option to show a selected single Cluster2 ID, or all; single-color or per-cluster color
+  - Option to show a selected single Median Cluster ID, or all; single-color or per-cluster color
 
 ---
 
 **Fitting & Metrics** (3D only; enabled via "Fitting & Metrics" checkbox)
 
-Each Cluster2's representative points are fitted to a geometric model independently. The **representative point coordinates** used for fitting are per-TID medians (or per-primary-cluster centroids). Two fitting methods are available:
+Each Median Cluster representative points are fitted to a geometric model independently. The **representative point coordinates** used for fitting are per-TID medians (or per-primary-cluster centroids). Two fitting methods are available:
 
 | Method | Description |
 |--------|-------------|
-| **Heuristic** | Analytical: geometry derived directly from PCA axes and 5th–95th percentile extents. No iteration, no centre optimisation. Fast and always converges. |
-| **Weighted orthogonal distance** | Iterative: minimises the sum of squared Euclidean distances from each representative point to the nearest point on the model surface. Equivalent to an orthogonal regression on the geometry. |
+| **Heuristic** | Analytical: geometry derived directly from PCA axes and 5th–95th percentile extents. No iteration, no centre optimization. Fast and always converges. |
+| **Weighted orthogonal distance** | Iterative: minimizes the sum of squared Euclidean distances from each representative point to the nearest point on the model surface. Equivalent to an orthogonal regression on the geometry. |
 
 The **weighted orthogonal distance** method has additional options:
 - *Weight by per-trace precision* - each representative point is weighted by $n / \sigma_\text{spread}^2$ (proportional to $1/\text{SEM}^2$ of the median position). Traces with a single localization (undefined spread) receive the dataset-median spread as a fallback.
@@ -261,14 +255,14 @@ For **Ring**, **Arc**, and **Helix**, a *Render as tube* option draws the fitted
 - *Arc span hint* (°) — sets the initial angular extent for arc fitting (0 = auto-detected from the angular spread of the data). The optimiser refines this value.
 - *Helix turns hint* — seeds the pitch estimate only; the fitted turn count is determined by the data extent and the optimised pitch.
 
-**RMSD comparison** (*Compute all-model RMSD*, slower): fits all available shape models to each Cluster2 and reports all RMSDs side-by-side in the metrics table, useful for model selection.
+**RMSD comparison** (*Compute all-model RMSD*, slower): fits all available shape models to each Median Cluster and reports all RMSDs side-by-side in the metrics table, useful for model selection.
 
 ---
 
 **Additional 3D overlays**
 
-- *PCA axes* - draws the three principal-component vectors of each Cluster2 as coloured arrows, scaled by their extent
-- *Cluster2 summary labels* - text overlay reporting key metrics (centre coordinates, fitted radius, RMSD) per cluster directly on the 3D plot
+- *PCA axes* - draws the three principal-component vectors of each Median Cluster as coloured arrows, scaled by their extent
+- *Median Cluster summary labels* - text overlay reporting key metrics (centre coordinates, fitted radius, RMSD) per cluster directly on the 3D plot
 - *Show distances to fit* - draws line segments from each representative point to its nearest point on the fitted surface; a maximum line length filter (nm) can suppress long outlier lines
 - *Fit surface opacity* - controls transparency of the fitted mesh
 
@@ -276,27 +270,27 @@ For **Ring**, **Arc**, and **Helix**, a *Render as tube* option draws the fitted
 
 **Membrane protein options** (requires global reference plane to be active)
 
-These options relate each Cluster2 to a global PCA-fitted reference surface (e.g. the plasma membrane):
+These options relate each Median Cluster to a global PCA-fitted reference surface (e.g. the plasma membrane):
 
-- *Angle to plane* - angle between the primary PCA axis of the Cluster2 and the reference plane normal; 0° = perpendicular to membrane, 90° = lying flat
-- *Distance to plane* - signed distance from the Cluster2 centroid to the reference plane (positive = above, negative = below)
+- *Angle to plane* - angle between the primary PCA axis of the Median Cluster and the reference plane normal; 0° = perpendicular to membrane, 90° = lying flat
+- *Distance to plane* - signed distance from the Median Cluster centroid to the reference plane (positive = above, negative = below)
 - *Bending radius* - estimates the curvature radius of an arc-like cluster using:
   $$R_\text{bend} = \frac{\ell^2 + s^2}{2s}$$
   where $\ell$ is the PC1 half-extent (chord half-length) and $s$ is the PC2 extent (sagitta / bow height). **This formula is only valid for arc-like clusters viewed roughly edge-on**; it is not meaningful for complete rings, spheres, or helices.
 
 ---
 
-**NN distances within Cluster2's**
+**NN distances within Median Cluster's**
 
-Nearest-neighbor distances between the representative points inside each Cluster2 are computed and visualized as lines:
+Nearest-neighbor distances between the representative points inside each Median Cluster are computed and visualized as lines:
 - `k` - number of nearest neighbors to find per point (default 3)
 - Distance range filter - limits displayed lines to a user-defined nm range
 - Optional numeric labels on each line showing the distance in nm
 - Exportable as a CSV table
 
-**NN distances between Cluster2's**
+**NN distances between Median Cluster's**
 
-Nearest-neighbor distances between the cluster2 centroid between other cluster2 centroids. Is computed and visualized as lines:
+Nearest-neighbor distances between the Median Cluster centroid between other Median Cluster centroids. Is computed and visualized as lines:
 
 - `k` - number of nearest neighbors to find per point (default 3)
 - Distance range filter - limits displayed lines to a user-defined nm range
@@ -357,8 +351,8 @@ For each representative point, computes the distance to its $k$-th nearest neigh
 |------|-----------------|
 | `tid` | Per-TID median x/y/z position |
 | `pcid` | Per-primary-cluster centroid |
-| `cluster2_tid` | Per-TID median, restricted to within each Cluster2 |
-| `cluster2_pcid` | Per-primary-cluster centroid, restricted to within each Cluster2 |
+| `cluster2_tid` | Per-TID median, restricted to within each Median Cluster |
+| `cluster2_pcid` | Per-primary-cluster centroid, restricted to within each Median Cluster |
 
 The $k$-th NN distance for point $i$ is:
 
@@ -372,7 +366,7 @@ Computed with a kd-tree (`RANN::nn2`). The histogram is summarized by the median
 
 #### 2. Traces per Cluster (TID Count Histogram)
 
-Counts the number of unique TIDs per Cluster2 (or per primary cluster when Cluster2 is not active) and displays the distribution as a histogram.
+Counts the number of unique TIDs per Median Cluster (or per De-blinked ID when Median Cluster is not active) and displays the distribution as a histogram.
 
 > **Caution**: in SMLM experiments a single fluorophore can produce multiple distinct trace IDs across sequential blinking events. The TID count therefore reflects the number of **blinking events**, not necessarily the number of molecules. Experiments with irreversible photoactivation (e.g. PALM) are less affected by this ambiguity.
 
@@ -380,9 +374,9 @@ Counts the number of unique TIDs per Cluster2 (or per primary cluster when Clust
 
 #### 3. Radius of Gyration (RoG)
 
-Quantifies the spatial compactness of each Cluster2. **MINFLUXR computes RoG from per-TID median positions, not from individual localizations**, reducing the influence of localization noise and treating each blinking event as one representative point.
+Quantifies the spatial compactness of each Median Cluster. **MINFLUXR computes RoG from per-TID median positions, not from individual localizations**, reducing the influence of localization noise and treating each blinking event as one representative point.
 
-For a Cluster2 containing $m$ TIDs with median positions $(\tilde{x}_k,\tilde{y}_k,\tilde{z}_k)$:
+For a Median Cluster containing $m$ TIDs with median positions $(\tilde{x}_k,\tilde{y}_k,\tilde{z}_k)$:
 
 **Step 1** — cluster centroid (mean of TID medians):
 
@@ -392,7 +386,7 @@ $$\bar{x} = \frac{1}{m}\sum_{k=1}^m \tilde{x}_k, \qquad \bar{y} = \frac{1}{m}\su
 
 $$R_g = \sqrt{\frac{1}{m}\sum_{k=1}^m \!\left[(\tilde{x}_k - \bar{x})^2 + (\tilde{y}_k - \bar{y})^2 + (\tilde{z}_k - \bar{z})^2\right]}$$
 
-Only Cluster2s with $m \geq 2$ TIDs are included (a single point has $R_g = 0$ by definition). The exportable table reports cluster ID, TID count, centroid coordinates, and $R_g$.
+Only Median Clusters with $m \geq 2$ TIDs are included (a single point has $R_g = 0$ by definition). The exportable table reports cluster ID, TID count, centroid coordinates, and $R_g$.
 
 ---
 
@@ -459,7 +453,7 @@ The plotted $\hat{L}_{12}(r) - r$:
 - $\approx 0$: spatial independence
 - $< 0$: spatial exclusion
 
-When Cluster2 is active, $\hat{L}_{12}$ is computed **per Cluster2** and the results are averaged, giving a within-cluster measure of inter-channel co-localization rather than a global one. The same 2000-point subsampling limit as univariate $L(r)$ is applied per group.
+When Median Cluster is active, $\hat{L}_{12}$ is computed **per Median Cluster** and the results are averaged, giving a within-cluster measure of inter-channel co-localization rather than a global one. The same 2000-point subsampling limit as univariate $L(r)$ is applied per group.
 
 ---
 
@@ -699,7 +693,7 @@ No edge correction is applied; this introduces upward bias for points near the d
 
 ### Radius of Gyration
 
-The radius of gyration quantifies the spatial compactness of a Cluster2. In MINFLUXR, **RoG is computed from per-TID median positions** rather than from individual localizations, so each blinking event contributes one representative point and localization noise is suppressed.
+The radius of gyration quantifies the spatial compactness of a Median Cluster. In MINFLUXR, **RoG is computed from per-TID median positions** rather than from individual localizations, so each blinking event contributes one representative point and localization noise is suppressed.
 
 For a cluster of $m$ TIDs with median positions $(\tilde{x}_k, \tilde{y}_k, \tilde{z}_k)$, the centroid is $(\bar{x}, \bar{y}, \bar{z})$ (mean of TID medians) and:
 
