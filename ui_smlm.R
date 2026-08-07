@@ -182,8 +182,8 @@ smlm_ui <- fluidPage(
       fileInput("file", "Upload MINFLUX File (.npy, .json or .csv)",
                 accept = c(".csv", ".json", ".npy"), multiple = TRUE),
       checkboxInput("pool_dcr_json",
-                    "Pool DCR (JSON & .npy)",
-                    value = FALSE),
+                    "Pool DCR across iterations (.json / .npy)",
+                    value = TRUE),
       helpText("Active file:"),
       selectInput("active_file", NULL,
                   choices = character(0), width = "100%"),
@@ -438,16 +438,63 @@ smlm_ui <- fluidPage(
       ),  # /Visualization Options
       tags$hr(),
 
-            ### De-blinking (raw-point DBSCAN) (shared) ===
+            ### De-blink correction (shared) ===
       tags$details(class = "sim-group",
-      tags$summary(tags$b("De-blinking (raw-point DBSCAN)")),
-      checkboxInput("enable_clustering", "Enable de-blinking (DBSCAN on raw points)", value = FALSE),
+      tags$summary(tags$b("De-blink correction")),
+      checkboxInput("enable_clustering", "Enable de-blink correction", value = FALSE),
       helpText("Merges a fluorophore's repeated blinks (nearby localizations / trace IDs) into one",
                "de-blinked molecule, so downstream analyses count molecules rather than blinking events."),
       conditionalPanel(
         condition = "input.enable_clustering == true",
-        numericInput("eps", "De-blink radius — DBSCAN epsilon (nm)", value = 10, min = 1),
-        uiOutput("deblink_minpts_note"),
+        radioButtons("deblink_method", "Merge criterion",
+                     choices = c("Trace centroid distance" = "centroid",
+                                 "Majority vote of localizations" = "vote"),
+                     selected = "centroid"),
+        helpText("Centroid: merge when two traces sit in the same place. Majority vote: merge when ",
+                 "most of a trace's localizations are closer to a neighbouring trace than to their ",
+                 "own. Centroid is more accurate; the vote needs no distance in nm."),
+
+        conditionalPanel(
+          condition = "input.deblink_method == 'centroid'",
+          numericInput("eps_centroid", "Centroid distance threshold (nm)", value = 10, min = 0.1),
+          helpText("Two traces merge when their median positions are closer than this. ",
+                   "This is the value the merge actually uses; k below just rewrites it in ",
+                   "units of the measured trace spread."),
+          numericInput("centroid_k", "Threshold in units of trace spread (k)", value = 2.0,
+                       min = 0.5, max = 6, step = 0.1),
+          helpText("Changing k rewrites the distance above. Too low leaves re-blinks counted ",
+                   "twice; too high fuses neighbouring molecules."),
+          actionButton("suggest_eps_centroid", "Measure threshold from data", class = "btn-sm"),
+          helpText("Sets k and the threshold from your own data."),
+          uiOutput("centroid_suggest_summary"),
+          checkboxInput("view_centroid_gap", "Show centroid threshold diagnostic", value = FALSE),
+          conditionalPanel(
+            condition = "input.view_centroid_gap == true",
+            plotOutput("centroid_gap_plot", height = "280px"),
+            helpText("The orange curve has two humps: re-blinks of one fluorophore (left) and ",
+                     "separate molecules (right). Your threshold should sit in the gap between them.")
+          ),
+          checkboxInput("view_deblink_knee", "Molecule count vs threshold (exploratory)", value = FALSE),
+          conditionalPanel(
+            condition = "input.view_deblink_knee == true",
+            plotOutput("deblink_knee_plot", height = "280px"),
+            uiOutput("deblink_knee_summary"),
+            helpText("How the molecule count falls as the threshold grows. Steep while re-blinks ",
+                     "are being collected, then slow as separate molecules start fusing.")
+          )
+        ),
+        conditionalPanel(
+          condition = "input.deblink_method == 'vote'",
+          numericInput("vote_frac", "Fraction of localizations that must agree (f)",
+                       value = 0.2, min = 0.02, max = 0.9, step = 0.05),
+          helpText("Two traces of one fluorophore score about 0.5, so useful values are well ",
+                   "below that. Scores fall to ~0.23 at 10 nm apart and ~0.07 at 20 nm."),
+          numericInput("vote_rho", "Distance tolerance (rho)", value = 1.2, min = 0.5, max = 3, step = 0.1),
+          helpText("1.0 = the neighbouring trace must be strictly closer; higher is more willing to merge."),
+          radioButtons("vote_link", "Agreement", inline = TRUE,
+                       choices = c("Both traces must agree" = "mutual", "Either is enough" = "either"),
+                       selected = "mutual")
+        ),
 
         # ── anisotropic metric (see deblink_axis_weights in helpers_smlm.R) ──
         checkboxInput("deblink_anisotropic",
@@ -456,26 +503,13 @@ smlm_ui <- fluidPage(
                  "fits all three axes. Affects the merge decision only — reported distances, ",
                  "cluster sizes and Rg stay in true nm."),
 
-        # ── data-driven eps suggestion (see suggest_deblink_eps in helpers_smlm.R) ──
-        actionButton("suggest_eps", "Suggest radius from trace spread", class = "btn-sm"),
-        helpText("Measures the radius at which a trace's own localizations stay one cluster, ",
-                 "and the radius at which separate traces begin to chain together. ",
-                 "Writes the suggestion into the radius field above; it is not applied automatically."),
-        uiOutput("deblink_eps_summary"),
-        checkboxInput("view_deblink_gap", "Show de-blink radius diagnostic", value = FALSE),
-        conditionalPanel(
-          condition = "input.view_deblink_gap == true",
-          plotOutput("deblink_gap_plot", height = "280px"),
-          helpText("Blue: distances within a trace. Orange: nearest-neighbour spacing between de-blinked molecules. ",
-                   "Dotted blue and dot-dash orange mark the measured bounds; dashed red is the current radius.")
-        ),
 
         helpText("TIDs are not split: all localizations of a trace ID join the same de-blinked molecule (majority vote). ",
                  "Trace IDs that overlap spatially are merged into one de-blinked molecule. ",
                  "De-blinking only merges — a trace it cannot merge becomes its own single-blink molecule, ",
                  "so no molecule is removed here. Removal is the job of the metadata and spread filters.")
       ),
-      ),  # /De-blinking (raw-point DBSCAN)
+      ),  # /De-blink correction
       tags$hr(),
 
       ### 5) Nearest Neighbor (shared) ===
@@ -860,14 +894,42 @@ smlm_ui <- fluidPage(
           
           downloadButton("download_nn_cross_dcr", "Download 2-color NN table"),
         ),
-        checkboxInput("enable_two_color_cluster1", "2-color de-blinking (raw points)", FALSE),
+        checkboxInput("enable_two_color_cluster1", "2-color de-blink correction", FALSE),
         conditionalPanel(
           condition = "input.enable_two_color_cluster1",
-          numericInput("eps_tc1", "2-color de-blinking eps (raw points, nm)", value = 14, min = 1),
-          numericInput("minpts_tc1", "2-color DBSCAN minPts (raw)", value = 6, min = 1),
+          radioButtons("deblink_method_tc1", "2-color merge criterion",
+                       choices = c("Trace centroid distance" = "centroid",
+                                   "Majority vote of localizations" = "vote"),
+                       selected = "centroid"),
+          conditionalPanel(
+            condition = "input.deblink_method_tc1 == 'centroid'",
+            numericInput("eps_tc1", "2-color centroid distance threshold (nm)", value = 12, min = 0.1),
+            helpText("About 2\u00d7 the trace spread.")
+          ),
+          conditionalPanel(
+            condition = "input.deblink_method_tc1 == 'vote'",
+            numericInput("vote_frac_tc1", "Fraction of localizations that must agree (f)",
+                         value = 0.2, min = 0.02, max = 0.9, step = 0.05),
+            numericInput("vote_rho_tc1", "Distance tolerance (rho)",
+                         value = 1.2, min = 0.5, max = 3, step = 0.1)
+          ),
+          actionButton("suggest_eps_tc1", "Measure threshold from data", class = "btn-sm"),
+          helpText("Measures the trace spread pooled over both channels and sets the threshold. ",
+                   "Merging still happens strictly within a channel."),
+          uiOutput("tc1_suggest_summary"),
+          checkboxInput("view_tc1_gap", "Show 2-color threshold diagnostic", value = FALSE),
+          conditionalPanel(
+            condition = "input.view_tc1_gap == true",
+            plotOutput("tc1_gap_plot", height = "280px"),
+            helpText("The orange curve has two humps: re-blinks of one fluorophore (left) and ",
+                     "separate molecules (right). Your threshold should sit in the gap between them.")
+          ),
+          helpText("De-blinked IDs carry their channel: A-1, A-2 for one fluorophore and ",
+                   "B-1, B-2 for the other. Only members of the same channel can merge, so ",
+                   "two colours can never be de-blinked into one molecule."),
           conditionalPanel(
             condition = "input.mode3d == '3D'",
-            checkboxInput("show_tc1_alpha", "Wrap 2-color de-blinked molecules (tc1)", value = FALSE),
+            checkboxInput("show_tc1_alpha", "Wrap 2-color de-blinked molecules", value = FALSE),
             conditionalPanel(
               condition = "input.show_tc1_alpha == true && input.mode3d == '3D'",
               numericInput("tc1_alpha", "Alpha (smaller = tighter)", value = 120, min = 1, step = 1),
@@ -875,7 +937,6 @@ smlm_ui <- fluidPage(
               numericInput("tc1_alpha_min_pts", "Min points per cluster to wrap", value = 5, min = 2, step = 1)
             ),
           ),
-          checkboxInput("exclude_unclustered_tc1", "Exclude unclustered (2-color cluster1)", FALSE)
         ),
         checkboxInput("enable_two_color_cluster2", "2-color Median Clustering (TID medians)", FALSE),
         conditionalPanel(
@@ -1195,7 +1256,7 @@ smlm_ui <- fluidPage(
         column(3,
           h4("Localization Precision Cloud"),
           .method_box("green",
-            HTML("The direct measure of localization <b>precision</b> (the MINFLUX “resolution” — a σ, not an FWHM). Every localization is expressed relative to its OWN trace centroid and pooled at (0,0); the RMS radius is σ_loc, drawn as the 1σ and 2σ ellipses (per-axis σ_x, σ_y, σ_z)."),
+            HTML("The direct measure of localization precision. Every localization is plotted relative to its own trace centroid and pooled at (0,0); the RMS radius is σ_loc, drawn as the 1σ and 2σ ellipses (per-axis σ<sub>x</sub>, σ<sub>y</sub>, σ<sub>z</sub>)."),
             HTML("Pooled within-trace residuals average out real motion and keep only the measurement scatter, so the cloud IS the precision. Uses the <b>filtered</b> localizations — the same set the Display tab plots (metadata / length / spread filters and any fiducial exclusion applied) — so it reports the precision of the data you actually keep."),
             HTML("The <b>shape</b> is the QC: a compact isotropic disc is good; <b>elongation</b> (anisotropy &gt; ~1.3) points to drift within a trace or an anisotropic PSF; <b>heavy tails</b> (kurtosis ≫ 3) point to mis-links / double events; a net <b>skew</b> points to a systematic bias.<br><br>The frame is zoomed to the <b>robust</b> (per-trace-median) precision so the real cloud fills it. With <b>Include z</b> on, three panels are shown: XY, XZ and YZ.")),
           helpText("Pooled scatter of every localization about its trace centroid. Reports σ_x/σ_y",
@@ -1214,6 +1275,7 @@ smlm_ui <- fluidPage(
       ),
 
       tags$hr(),
+
 
       # ── QC: Fiducial / bright-contaminant flagging (report only) ──────────
       fluidRow(
@@ -1252,8 +1314,8 @@ smlm_ui <- fluidPage(
         column(3,
           h4("Trace Detection over Time"),
           .method_box("green",
-            HTML("Counts <b>unique trace IDs</b> per acquisition-time bin. A trace ID is one continuous detection of a blinking fluorophore, so this is the <b>detection-event rate</b> over the run — a standard detection-rate histogram, no MINFLUX-specific assumptions."),
-            HTML("Each trace is counted <b>once</b>, at its median <code>tim</code>, so a long trace does not dominate the early bins. Multiple files are drawn as <b>one series each</b> (or pooled per group in group mode). Each dataset has its own tim timeline, so a line is drawn only across that dataset's own window and <b>stops when its tim ends</b> — it does not drop to zero. The per-localization metadata filters apply; the trace-length filter is deliberately not applied, because short blinking events are real detections."),
+            HTML("Counts <b>unique trace IDs</b> per acquisition-time bin. A trace ID is one continuous detection of a blinking fluorophore, so this is the <b>detection-event rate</b>."),
+            HTML("Each trace is counted once, at its median <code>tim</code>, so a long trace does not dominate the early bins. Multiple files are drawn as <b>one series each</b> (or pooled per group in group mode). Each dataset has its own tim timeline, so a line is drawn only across that dataset's own window and <b>stops when its tim ends</b> — it does not drop to zero. The per-localization metadata filters apply; the trace-length filter is deliberately not applied, because short blinking events are real detections."),
             HTML("Descriptive QC, not an estimator. A declining rate over time reflects photobleaching, exhausted blinking, drift and label/sample depletion — read it as “is my acquisition stable?”, not as a single physical quantity.")),
           helpText("Unique traces (TIDs) counted once at their median acquisition time (tim),",
                    "as one series per file — or per Dataset Group when group mode is on above.",
@@ -1600,7 +1662,7 @@ smlm_ui <- fluidPage(
         column(3,
           h4("Cluster Viewer and Shape Fitting", .exploratory_badge()),
           .method_box("orange",
-            HTML("Machinery is standard, dictionary is bespoke. Fits are <b>orthogonal-distance (total least squares) MLE</b> — minimising the squared point-to-surface distance — ranked by <b>AIC</b> (Akaike 1974), its small-sample correction <b>AICc</b> (Hurvich &amp; Tsai 1989) or <b>BIC</b> (Schwarz 1978). The 2D view is a PCA projection onto PC1×PC2 (Pearson 1901). Under an iid isotropic-Gaussian residual model σ̂²&nbsp;=&nbsp;RMSD², so −2logL&nbsp;=&nbsp;n·log(2πσ̂²)+n and AICc&nbsp;=&nbsp;AIC&nbsp;+&nbsp;2k(k+1)/(n−k−1)."),
+            HTML("Machinery is standard, dictionary is bespoke. Fits are <b>orthogonal-distance (total least squares) MLE</b> — minimizing the squared point-to-surface distance — ranked by <b>AIC</b> (Akaike 1974), its small-sample correction <b>AICc</b> (Hurvich &amp; Tsai 1989) or <b>BIC</b> (Schwarz 1978). The 2D view is a PCA projection onto PC1×PC2 (Pearson 1901). Under an iid isotropic-Gaussian residual model σ̂²&nbsp;=&nbsp;RMSD², so −2logL&nbsp;=&nbsp;n·log(2πσ̂²)+n and AICc&nbsp;=&nbsp;AIC&nbsp;+&nbsp;2k(k+1)/(n−k−1)."),
             HTML("Fits <b>de-blinked trace centroids</b>, not raw localizations — otherwise the many localizations of one long trace would dominate the residual sum and the fit would describe the brightest molecule rather than the structure. MINFLUX's nm precision is what makes a ~50–200&nbsp;nm shape distinguishable at all. AICc → ∞ when n&nbsp;≤&nbsp;k+1, so the ranking blanks out rather than over-fitting a 5-point cluster."),
             HTML("<b>The shape dictionary is imposed by this tool</b> (sphere / ellipsoid / helix / ring / arc) and 'best' is a model-selection outcome, not proof of biological geometry — the true shape may not be in the list, and the ranking will still name a winner. With few, blinking-inflated points several shapes are statistically indistinguishable; RMSD always favours the most flexible model (prefer AICc). The unequal-precision problem is <b>now addressed</b> by the optional photon (<code>eco</code>) weighting above — with it off, every trace is treated as equally precise, which MINFLUX traces are not.")),
           helpText("Inspect individual Median Cluster structures in the active (plotted) file.",

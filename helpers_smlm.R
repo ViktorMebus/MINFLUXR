@@ -1228,6 +1228,92 @@ sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT) {
       .groups = "drop"
     )
 }
+# =============================================================================
+# cov_ellipse_params() — THE ERROR ELLIPSE OF A 2x2 COVARIANCE MATRIX
+# =============================================================================
+#
+# GOAL
+#   Turn a covariance matrix into a drawable, ROTATED ellipse plus the two
+#   numbers that describe the cloud's shape independently of the axes.
+#
+# WHY ROTATION MATTERS (the thing σx / σy alone cannot express)
+#   An axis-aligned ellipse has two parameters and cannot represent a TILTED
+#   cloud. Elongation along a diagonal inflates σx and σy by the SAME amount, so
+#   σx ≈ σy and the ellipse renders as a circle over a visibly stretched cloud —
+#   all the elongation lives in cov(x,y), which an axis-aligned drawing discards.
+#
+#   The same blind spot afflicts max(σx,σy)/min(σx,σy) as an anisotropy metric:
+#   a 45° cloud scores ~1.0, i.e. "isotropic". Since drift within a trace is
+#   DIRECTIONAL, a tilted cloud is the expected signature of drift — precisely
+#   the artifact the precision panel exists to catch.
+#
+#   The eigen-decomposition is the fix: eigenvectors give the true major/minor
+#   directions, sqrt(eigenvalues) the semi-axes. Their ratio is rotation-
+#   invariant, so it detects elongation at ANY angle.
+#
+# ARGUMENTS  S : symmetric 2x2 covariance matrix;  k : how many σ to scale to
+# RETURNS
+#   list(ra, rb, theta, ratio, rho, angle_deg) — ra/rb are semi-major/minor in
+#   the data's units, theta the major-axis angle in radians. NULL if unusable.
+# =============================================================================
+cov_ellipse_params <- function(S, k = 1) {
+  if (!is.matrix(S) || any(!is.finite(S))) return(NULL)
+  ev <- tryCatch(eigen(S, symmetric = TRUE), error = function(e) NULL)
+  if (is.null(ev)) return(NULL)
+  vals <- pmax(ev$values, 0)                      # clamp tiny negative round-off
+  if (!all(is.finite(vals)) || vals[1] <= 0) return(NULL)
+  th <- atan2(ev$vectors[2, 1], ev$vectors[1, 1]) # direction of the major axis
+  den <- sqrt(max(S[1, 1] * S[2, 2], 1e-12))
+  list(
+    ra    = k * sqrt(vals[1]),
+    rb    = k * sqrt(vals[2]),
+    theta = th,
+    ratio = sqrt(vals[1] / max(vals[2], 1e-12)),  # rotation-invariant anisotropy
+    rho   = S[1, 2] / den,                        # correlation, for reference
+    angle_deg = ((th * 180 / pi) + 180) %% 180    # fold to [0,180): an axis has no sign
+  )
+}
+
+# GOAL: an SVG path tracing a rotated ellipse, for plotly shapes.
+# plotly's type = "circle" shape can only ever be AXIS-ALIGNED (it is defined by
+# a bounding box), so a rotated ellipse has to be drawn as an explicit path.
+ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
+  if (!all(is.finite(c(ra, rb, theta, cx, cy))) || ra <= 0 || rb <= 0) return(NULL)
+  t  <- seq(0, 2 * pi, length.out = n)
+  ct <- cos(theta); st <- sin(theta)
+  x  <- cx + ra * cos(t) * ct - rb * sin(t) * st
+  y  <- cy + ra * cos(t) * st + rb * sin(t) * ct
+  paste0("M ", paste(sprintf("%.4f,%.4f", x, y), collapse = " L "), " Z")
+}
+
+# =============================================================================
+# robust_median_cov() — ONE VOTE PER TRACE, BUT STILL TILT-AWARE
+# =============================================================================
+# GOAL
+#   Combine many per-trace covariance matrices into one robust matrix by taking
+#   the element-wise median, so a single 2000-localization fiducial cannot
+#   dominate the shape the way it dominates a pooled estimate.
+#
+#   Element-wise medians are not guaranteed to stay positive semi-definite, so
+#   the off-diagonal is shrunk if it would exceed what the diagonal supports —
+#   without that, eigen() can return a negative eigenvalue and the ellipse
+#   collapses or inverts.
+#
+# ARGUMENTS  vxx, vyy : per-trace variances;  vxy : per-trace covariances
+# RETURNS    2x2 matrix, or NULL when there is nothing usable.
+# =============================================================================
+robust_median_cov <- function(vxx, vyy, vxy) {
+  m <- function(v) { v <- v[is.finite(v)]; if (!length(v)) NA_real_ else stats::median(v) }
+  a <- m(vxx); b <- m(vyy); c0 <- m(vxy)
+  if (!is.finite(a) || !is.finite(b) || a <= 0 || b <= 0) return(NULL)
+  if (!is.finite(c0)) c0 <- 0
+  lim <- 0.99 * sqrt(a * b)                        # keep |rho| < 1
+  if (abs(c0) > lim) c0 <- sign(c0) * lim
+  matrix(c(a, c0, c0, b), 2L, 2L)
+}
+
+# =============================================================================
+
 # --- sigma label helpers ---
 sigma_label_med_mad <- function(v, show_mad = FALSE, digits = 2) {
   v <- as.numeric(v)
@@ -4158,201 +4244,6 @@ run_cluster2_grouping <- function(pts, method = "dbscan", eps = 200, minPts = 15
   as.integer(dbscan::dbscan(pts, eps = eps, minPts = minPts)$cluster)
 }
 
-# =============================================================================
-# suggest_deblink_eps() — DATA-DRIVEN eps FOR THE PRIMARY (DE-BLINKING) DBSCAN
-# =============================================================================
-#
-# GOAL
-#   Replace the guessed de-blink radius with one measured from the data, by
-#   bracketing eps between the scale at which a trace holds ITSELF together and
-#   the scale at which DISTINCT traces start chaining into each other.
-#
-# WHY THE PRIMARY eps IS REALLY A TRACE-SPREAD QUESTION
-#   The primary DBSCAN runs on raw localizations, but the TID-plurality step
-#   that follows it (see apply_clustering_pipeline) reassigns every point of a
-#   trace to one cluster. So the operation is trace MERGING, and eps is only the
-#   linkage rule. That gives eps two hard constraints:
-#
-#     LOWER BOUND — eps must be at least the internal scatter of one trace.
-#       Below it a single fluorophore's own localizations split into several
-#       DBSCAN clusters and the plurality vote decides between fragments, which
-#       is noise, not biology.
-#     UPPER BOUND — eps must stay below the spacing between distinct molecules,
-#       or single-linkage chains separate fluorophores into one object.
-#
-#   Only the lower bound comes from trace spread. The upper bound is geometry of
-#   the sample and spread knows nothing about it — hence both are measured here.
-#
-# WHY OBSERVED SPREAD AND NOT A PRECISION ESTIMATE
-#   A trace's scatter mixes localization precision, linker motion and residual
-#   drift. For merging, the decomposition is irrelevant — eps must span the
-#   observed envelope whatever produced it. A pure sigma_loc would be an
-#   UNDER-estimate and would fragment traces.
-#
-# HOW THE LOWER BOUND IS MEASURED (DBSCAN's own criterion, not a Gaussian fudge)
-#   Per trace, two thresholds are computed and the larger is taken, because
-#   DBSCAN needs BOTH to hold before a trace survives as one cluster:
-#     eps_core .. median over the trace's points of the (minPts-1)-th nearest
-#                 neighbour distance = the eps at which a typical point of the
-#                 trace becomes a CORE point.
-#     eps_link .. a high quantile of the single-linkage merge heights (= the MST
-#                 edge lengths) of the trace = the eps at which the trace's
-#                 points are one CONNECTED component.
-#   Each is then summarised ACROSS traces at `q_within`, so the answer is a
-#   population statistic. A per-trace eps would be meaningless anyway (DBSCAN
-#   takes one global eps) and an SD from ~5 points is far too noisy to trust
-#   individually.
-#
-# HOW THE UPPER BOUND IS MEASURED
-#   NOT from raw trace medians: every trace's nearest neighbour is one of its own
-#   re-blink siblings, so the distinct-molecule population is invisible there.
-#   Instead the traces are first collapsed at eps_lo (one provisional pass of the
-#   real de-blinking), and the nearest-neighbour spacing is measured between the
-#   resulting MOLECULE medians. Its low quantile is the eps at which the closest
-#   distinct molecules would start to chain.
-#
-#   When that ceiling falls below eps_lo the two scales overlap: no eps both
-#   holds traces together and keeps molecules apart. That is a real property of
-#   crowded data and is reported (gap_ok = FALSE) rather than hidden behind a
-#   number.
-#
-# WHY THE SUGGESTION IS eps_lo AND NOT SOMETHING INSIDE THE BRACKET
-#   eps_lo is already the value that keeps `q_within` of traces intact, so it
-#   carries its own headroom. Raising eps above it buys nothing and only merges
-#   more distinct molecules; any multiplier on top would be arbitrary.
-#
-# ARGUMENTS
-#   df         : filtered data.frame with tid, x, y [, z] in nm
-#   minpts     : the minPts the primary DBSCAN will run with (sets k = minPts-1)
-#   min_n      : minimum localizations for a trace to contribute an estimate
-#   use_z      : include z when the data is genuinely 3D
-#   q_within   : across-trace quantile for the lower bound (0.90 = eps keeps 90%
-#                of traces intact)
-#   max_traces : random subsample cap, keeps the per-trace loop responsive on
-#                large files
-#
-# RETURNS
-#   list(eps_lo, eps_hi, suggested, gap_ok, sigma, ratio, n_traces, dims,
-#        within, between, note) — `within`/`between` are the raw distance
-#   vectors the diagnostic plot draws. All distances in nm.
-#   Returns NULL when there is not enough data to estimate anything.
-# =============================================================================
-suggest_deblink_eps <- function(df, minpts = 4L, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
-                                use_z = TRUE, q_within = 0.90, max_traces = 3000L,
-                                anisotropic = FALSE) {
-  if (!is.data.frame(df) || !nrow(df)) return(NULL)
-  if (!all(c("tid", "x", "y") %in% names(df))) return(NULL)
-
-  minpts <- max(2L, as.integer(minpts %||% 4L))
-  min_n  <- max(3L, as.integer(min_n  %||% MIN_LOCS_FOR_SPREAD_DEFAULT))
-  q_within <- min(max(as.numeric(q_within %||% 0.90), 0.5), 0.99)
-
-  # ── coordinate matrix; drop z when the data is flat (2D files carry z = 0) ──
-  # NOTE: 3D-ness is decided from the DATA, never from the plot mode. Viewing a
-  # 3D dataset as a 2D projection must not change the merge geometry.
-  has_z <- isTRUE(use_z) && "z" %in% names(df) &&
-    any(is.finite(df$z)) && stats::sd(df$z, na.rm = TRUE) > 1e-6
-  cols  <- if (has_z) c("x", "y", "z") else c("x", "y")
-  P     <- as.matrix(df[, cols, drop = FALSE])
-  ok    <- stats::complete.cases(P)
-  P     <- P[ok, , drop = FALSE]
-  tid   <- df$tid[ok]
-  if (nrow(P) < min_n) return(NULL)
-
-  # ── optional anisotropic metric ────────────────────────────────────────────
-  # The suggestion MUST be measured in the same metric the clustering will use,
-  # or the returned eps does not mean anything at the call site.
-  aw <- if (isTRUE(anisotropic)) deblink_axis_weights(df, min_n = min_n, use_z = has_z)
-        else list(w = c(1, 1, 1), sigma = rep(NA_real_, 3), ok = FALSE)
-  P  <- apply_deblink_weights(P, aw$w)
-
-  # ── per-trace row index groups; keep only traces long enough to measure ─────
-  grp <- split(seq_len(nrow(P)), tid)
-  grp <- grp[lengths(grp) >= min_n]
-  if (!length(grp)) return(NULL)
-
-  # Subsample for the (heavier) within-trace loop only. Trace medians below are
-  # still computed from every trace, since that part is cheap.
-  grp_w <- grp
-  if (length(grp_w) > max_traces) {
-    set.seed(1L)                                   # reproducible suggestion
-    grp_w <- grp_w[sample.int(length(grp_w), max_traces)]
-  }
-
-  # ── LOWER BOUND: within-trace core + linkage distances ─────────────────────
-  eps_core <- numeric(length(grp_w))
-  eps_link <- numeric(length(grp_w))
-  for (i in seq_along(grp_w)) {
-    pts <- P[grp_w[[i]], , drop = FALSE]
-    n   <- nrow(pts)
-    dm  <- as.matrix(stats::dist(pts))
-
-    # k-th NN distance per point (row includes the self-distance 0 at rank 1)
-    k <- min(minpts - 1L, n - 1L)
-    eps_core[i] <- stats::median(apply(dm, 1L, function(r) sort(r)[k + 1L]))
-
-    # single-linkage merge heights == MST edge lengths of this trace
-    h <- stats::hclust(stats::as.dist(dm), method = "single")$height
-    eps_link[i] <- if (length(h)) stats::quantile(h, q_within, names = FALSE) else 0
-  }
-
-  q <- function(v) {
-    v <- v[is.finite(v)]
-    if (!length(v)) NA_real_ else stats::quantile(v, q_within, names = FALSE)
-  }
-  # BOTH conditions must hold for a trace to survive as one cluster -> take max
-  eps_lo <- max(q(eps_core), q(eps_link), na.rm = TRUE)
-  if (!is.finite(eps_lo) || eps_lo <= 0) return(NULL)
-
-  # ── UPPER BOUND: spacing between DE-BLINKED MOLECULES, not raw traces ──────
-  # Collapsing at eps_lo first is what makes this measurable: on raw trace
-  # medians the nearest neighbour is almost always a re-blink of the same
-  # fluorophore, which says nothing about how close distinct molecules sit.
-  gap    <- .deblink_molecule_gap(P, tid, eps_lo, minpts)
-  eps_hi <- gap$eps_hi
-  gap_ok <- isTRUE(gap$ok) && is.finite(eps_hi) && eps_hi > eps_lo
-  if (isTRUE(gap$ok) && !gap_ok)
-    gap$note <- "Closest distinct molecules sit no further apart than one trace's own scatter - no radius both holds traces together and keeps molecules apart."
-
-  # eps_lo already keeps `q_within` of traces intact; going higher only merges
-  # more distinct molecules, so the bracket is reported but not split.
-  suggested <- eps_lo
-
-  # Median per-axis trace spread, for interpreting eps in units of sigma.
-  sds   <- sd_by_tid(df, min_n = min_n)
-  sigma <- if (is.data.frame(sds) && nrow(sds)) {
-    v <- c(stats::median(sds$sd_x, na.rm = TRUE),
-           stats::median(sds$sd_y, na.rm = TRUE),
-           if (has_z) stats::median(sds$sd_z, na.rm = TRUE) else NULL)
-    stats::median(v[is.finite(v)])
-  } else NA_real_
-
-  list(
-    eps_lo    = round(eps_lo, 2),
-    eps_hi    = if (is.finite(eps_hi)) round(eps_hi, 2) else NA_real_,
-    suggested = round(suggested, 1),
-    gap_ok    = gap_ok,
-    sigma     = if (is.finite(sigma)) round(sigma, 2) else NA_real_,
-    ratio     = if (is.finite(sigma) && sigma > 0) round(suggested / sigma, 2) else NA_real_,
-    n_traces  = length(grp),
-    n_used    = length(grp_w),
-    n_mol     = gap$n_mol,
-    dims      = if (has_z) 3L else 2L,
-    aniso     = isTRUE(aw$ok),
-    weights   = aw$w,
-    sigma_ax  = aw$sigma,
-    within    = eps_core,
-    linkage   = eps_link,
-    between   = gap$nnd %||% numeric(0),
-    note      = gap$note
-  )
-}
-
-# GOAL: column-wise median of a small coordinate matrix (avoids a dependency
-# just for this); used to place each trace at its median position.
-matrixStats_colMedian <- function(m) {
-  apply(m, 2L, stats::median, na.rm = TRUE)
-}
 
 # =============================================================================
 # deblink_axis_weights() — PUT X, Y AND Z ON A COMMON PRECISION SCALE
@@ -4431,6 +4322,375 @@ apply_deblink_weights <- function(pts, w) {
 }
 
 # =============================================================================
+# deblink_merge_centroids() — MERGE TRACES ON CENTROID AGREEMENT
+# =============================================================================
+#
+# GOAL
+#   Decide "same fluorophore?" by comparing where the traces ARE, not whether
+#   their point clouds touch. Each trace collapses to its median position and
+#   single-linkage joins centroids closer than `thr`.
+#
+# WHY THIS BEATS RAW-POINT DBSCAN (measured, not assumed)
+#   Raw-point single-linkage merges when ANY localization of one cloud comes
+#   within eps of ANY localization of another, so the outlying tails do the
+#   chaining and the effective resolution degrades as ~eps + 2*sigma*sqrt(2 ln n)
+#   — it gets WORSE as traces get longer. Centroids have no tails.
+#
+#   On ground-truth simulation (360 molecules, 923 traces, sigma 6.5 nm):
+#     raw-point DBSCAN   best at 0.62*sigma -> 35 errors (splits + merges)
+#     centroid linkage   best at 1.54*sigma -> 10 errors
+#   The reason is visible in the distance distributions: two re-blinks of one
+#   fluorophore have centroids a median 3.1 nm apart (95th pct 7.1 nm ~ 1.1
+#   sigma), while the nearest DIFFERENT molecule's centroid sits ~54 nm away.
+#   Those two populations barely overlap; raw-point linkage discards that.
+#
+# THRESHOLD SCALE
+#   ~1.5x the median per-axis trace spread. Note this is NOT the same number as
+#   the raw-point eps (~0.6 sigma) — the two methods measure different distances,
+#   which is why they have separate inputs rather than sharing one.
+#
+# NO NOISE BY CONSTRUCTION
+#   minPts = 1, so every centroid is a core point and every trace lands in a
+#   cluster. That matches the merge-only rule: de-blinking never removes a
+#   molecule (see deblink_assign_singletons).
+#
+# ARGUMENTS
+#   sub_df : rows to cluster (needs tid, x, y, z)
+#   thr    : centroid-distance threshold in nm (weighted units if w is given)
+#   w      : optional per-axis de-blink weights, same metric as everything else
+#
+# RETURNS  integer cluster id per ROW of sub_df, all > 0.
+# =============================================================================
+deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
+  n <- nrow(sub_df)
+  if (!n) return(integer(0))
+  thr <- suppressWarnings(as.numeric(thr))
+  if (!length(thr) || !is.finite(thr) || thr <= 0) thr <- 1e-9
+
+  tid <- as.character(sub_df$tid)
+  P   <- apply_deblink_weights(as.matrix(sub_df[, c("x", "y", "z"), drop = FALSE]), w)
+
+  g <- split(seq_len(n), tid)
+  M <- t(vapply(g, function(ix) matrixStats_colMedian(P[ix, , drop = FALSE]),
+                numeric(ncol(P))))
+  # Single linkage at `thr`: DBSCAN with minPts = 1 is exactly that, and it
+  # cannot emit noise.
+  cl <- tryCatch(dbscan::dbscan(M, eps = thr, minPts = 1L)$cluster,
+                 error = function(e) seq_len(nrow(M)))
+  lab <- stats::setNames(as.integer(cl), names(g))
+  unname(lab[tid])
+}
+
+# =============================================================================
+# suggest_centroid_threshold() — THE MERGE DISTANCE FROM THE TRACE SPREAD
+# =============================================================================
+#
+# GOAL
+#   Set the centroid merge distance from the per-axis trace spread the data
+#   actually shows, and hand back the two distance distributions needed to see
+#   whether that choice is sane.
+#
+# THE SCALE, AND WHERE 1.5 COMES FROM
+#   Two re-blinks of ONE fluorophore have centroids separated by roughly the
+#   distance the label wanders between blinks. Measured on ground-truth
+#   simulation, that separation is median 0.48*sigma and 95th percentile
+#   1.09*sigma, while the nearest DIFFERENT molecule's centroid sits ~8*sigma
+#   away. A threshold of ~1.5*sigma therefore collects essentially every
+#   re-blink while still sitting far below the distinct-molecule population, and
+#   1.5 is where the simulated error count bottomed out (10 errors at 1.54).
+#
+#   THAT COEFFICIENT ASSUMES THE LABEL DOES NOT MOVE BETWEEN BLINKS, and it is
+#   the weakest assumption in this whole panel. Re-running the calibration with
+#   an extra between-blink displacement shows how fast the optimum runs away:
+#
+#     between-blink motion   0 nm   2 nm   4 nm   6 nm
+#     optimal k              1.4    1.8    2.3    3.0
+#
+#   Split-half measurement on real files puts the centroid's own motion at ~4.4
+#   nm against a 1.5 nm random floor, so a real dataset is NOT in the k = 1.4
+#   column. k is therefore a visible control, defaulting to 2.0 rather than 1.5,
+#   and the app cannot measure the between-blink term for you — doing so would
+#   require knowing which traces are the same molecule, which is the question
+#   being asked. Use the count-vs-threshold curve and the diagnostic to judge it.
+#
+# ANISOTROPY
+#   When per-axis weights are supplied the coordinates are whitened first, so
+#   every axis contributes at the same precision and sigma collapses to the
+#   geometric mean of the per-axis spreads. That is why the returned `sigma` can
+#   differ from a plain RMS of sigma_x/y/z.
+#
+# ARGUMENTS
+#   df    : filtered data.frame (tid, x, y [, z])
+#   min_n : minimum localizations for a trace to contribute a spread estimate
+#   use_z : include z when the data is genuinely 3D
+#   w     : optional per-axis de-blink weights (same metric as the clustering)
+#   k     : multiplier on sigma (default 1.5, see above)
+#
+# RETURNS
+#   list(sigma_ax, sigma, suggested, within, between, frac_merged, n_traces,
+#        dims) — `within` and `between` are the raw distances the plot draws.
+#   NULL when the spread cannot be estimated.
+# =============================================================================
+suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
+                                       use_z = TRUE, w = NULL, k = 2.0) {
+  if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) return(NULL)
+  has_z <- isTRUE(use_z) && has_axial_data(df)
+  cols  <- if (has_z) c("x","y","z") else c("x","y")
+
+  keep <- stats::complete.cases(df[, cols, drop = FALSE])
+  d    <- df[keep, , drop = FALSE]
+  if (!nrow(d)) return(NULL)
+
+  P   <- as.matrix(d[, cols, drop = FALSE])
+  if (!is.null(w)) P <- sweep(P, 2L, w[seq_len(ncol(P))], "*")
+  tid <- as.character(d$tid)
+
+  g <- split(seq_len(nrow(P)), tid)
+  g <- g[lengths(g) >= max(2L, as.integer(min_n))]
+  if (length(g) < 3L) return(NULL)
+
+  # per-axis spread in the metric that will actually be clustered in
+  sd_ax <- vapply(seq_len(ncol(P)), function(k2) {
+    v <- vapply(g, function(ix) stats::sd(P[ix, k2]), numeric(1))
+    stats::median(v[is.finite(v)])
+  }, numeric(1))
+  if (!all(is.finite(sd_ax)) || any(sd_ax <= 0)) return(NULL)
+  sigma <- sqrt(mean(sd_ax^2))
+
+  # within-trace: how far a localization sits from its own trace centroid
+  within <- unlist(lapply(g, function(ix) {
+    c0 <- matrixStats_colMedian(P[ix, , drop = FALSE])
+    sqrt(rowSums(sweep(P[ix, , drop = FALSE], 2L, c0, "-")^2))
+  }), use.names = FALSE)
+
+  # between-trace: nearest-neighbour distance between trace centroids. The near
+  # population is re-blinks of one fluorophore, the far population is distinct
+  # molecules — the threshold has to land between them.
+  M  <- t(vapply(g, function(ix) matrixStats_colMedian(P[ix, , drop = FALSE]), numeric(ncol(P))))
+  nn <- tryCatch(dbscan::kNN(M, k = 1L)$dist[, 1L], error = function(e) numeric(0))
+  nn <- nn[is.finite(nn)]
+
+  sug <- k * sigma
+  list(sigma_ax   = sd_ax,
+       sigma      = sigma,
+       suggested  = round(sug, 1),
+       k          = k,
+       within     = within,
+       between    = nn,
+       # what fraction of traces would find a partner at this threshold
+       frac_merged = if (length(nn)) mean(nn <= sug) else NA_real_,
+       n_traces   = length(g),
+       dims       = ncol(P))
+}
+
+# =============================================================================
+# deblink_reblink_excess() — MEASURE k FROM THE DATA, NOT FROM SIMULATION
+# =============================================================================
+#
+# GOAL
+#   Find the smallest threshold at which no re-blinking is left over, using only
+#   the data. This replaces guessing k from a simulation-calibrated constant.
+#
+# THE IDEA
+#   If merging is incomplete, the leftovers are unmerged re-blinks of the same
+#   fluorophore — and those sit ON TOP of each other, a few nm apart. So after
+#   merging, look at the molecule nearest-neighbour distances: an excess of
+#   pairs closer than ~2 sigma, far above the local density at ordinary
+#   separations, means re-blinks are still being counted twice. Raise k until
+#   that excess disappears.
+#
+#   Measured on a real file (288 traces, sigma 5.81 nm):
+#     k = 1.0  15.1% of molecules within 2 sigma   78x the reference density
+#     k = 1.5   6.6%                               32x
+#     k = 2.0   0.0%                                0x   <- clears here
+#   That is a direct, per-dataset answer where the 1.5 default was an assumption.
+#
+# WHAT IT CAN AND CANNOT SEE
+#   It detects UNDER-merging sharply. It cannot detect OVER-merging: once the
+#   excess is gone, raising k further only fuses genuine neighbours and the test
+#   stays silent. So the value it returns is a LOWER BOUND — the smallest safe k
+#   — and the count-vs-threshold curve shows what going higher costs.
+#
+#   Another route was tried and has no power here: two traces overlapping in
+#   TIME cannot be the same fluorophore, which would certify wrong merges. On
+#   real data, 0 of 239 trace pairs within 60 nm overlapped in time — the
+#   instrument does not track two molecules at once — so that test is dead.
+#
+# ARGUMENTS
+#   df, sigma, w : as for suggest_centroid_threshold(); sigma in the same metric
+#   ks           : multipliers to try
+#   ref_lo/ref_hi: the shell (nm) used as the "ordinary density" reference
+#
+# RETURNS  list(table, k_clear) — k_clear is NA when the excess never clears.
+# =============================================================================
+deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25),
+                                   ref_lo = 30, ref_hi = 60) {
+  if (!is.data.frame(df) || !nrow(df) || !is.finite(sigma) || sigma <= 0) return(NULL)
+  cols <- intersect(c("x", "y", "z"), names(df))
+  if (length(cols) < 2L) return(NULL)
+  near <- 2 * sigma
+  shell <- (ref_hi^length(cols) - ref_lo^length(cols))
+
+  rows <- lapply(ks, function(k) {
+    th <- k * sigma
+    cl <- tryCatch(deblink_merge_centroids(df, th, w), error = function(e) NULL)
+    if (is.null(cl)) return(NULL)
+    M <- do.call(rbind, lapply(split(seq_len(nrow(df)), cl), function(ix)
+      matrixStats_colMedian(as.matrix(df[ix, cols, drop = FALSE]))))
+    if (nrow(M) < 5L) return(NULL)
+    nn <- tryCatch(dbscan::kNN(M, k = 1L)$dist[, 1L], error = function(e) NULL)
+    if (is.null(nn)) return(NULL)
+    frac <- mean(nn < near)
+    ref  <- mean(nn >= ref_lo & nn < ref_hi) / shell * near^length(cols)
+    data.frame(k = k, threshold = round(th, 2), n_molecules = nrow(M),
+               frac_close = round(frac, 4),
+               excess = if (ref > 0) round(frac / ref, 2) else NA_real_)
+  })
+  tb <- do.call(rbind, Filter(Negate(is.null), rows))
+  if (is.null(tb) || !nrow(tb)) return(NULL)
+
+  # First k where the short-range pile-up is indistinguishable from ordinary
+  # density (excess <= 1) — i.e. nothing looks like a leftover re-blink.
+  ok <- which(is.finite(tb$excess) & tb$excess <= 1)
+  list(table = tb, k_clear = if (length(ok)) tb$k[ok[1]] else NA_real_,
+       near_nm = round(near, 2))
+}
+
+# =============================================================================
+# deblink_merge_majority_vote() — LET THE LOCALIZATIONS VOTE
+# =============================================================================
+#
+# GOAL
+#   Replace "do the point clouds touch anywhere?" with "do MOST of this trace's
+#   localizations think they belong to that other trace?".
+#
+# THE CRITERION
+#   For every localization p in trace X, compare two distances:
+#     d_own  |p - centroid of X, computed WITHOUT p|
+#     d_alt  |p - centroid of the nearest OTHER trace Y|
+#   p votes to merge X into Y when d_alt <= rho * d_own. X and Y merge when at
+#   least a fraction `f` of X's localizations vote the same way.
+#
+# WHY LEAVE-ONE-OUT IS NOT OPTIONAL
+#   The centroid of X is fitted TO X's own points, so d_own is systematically
+#   too small — every point is unfairly close to its own centre. The effect goes
+#   as ~1/n, so it hits the short traces hardest, which are exactly the ones
+#   most in need of merging. Excluding p from its own centroid removes the bias
+#   exactly, and is cheap for a mean: c^(-p) = (n*c - p) / (n - 1). That is why
+#   this uses the MEAN centroid rather than the median used elsewhere.
+#
+# WHY THIS IS BETTER THAN THE RAW-POINT DBSCAN IT REPLACES
+#   Single linkage merged when ANY point of one cloud came within eps of ANY
+#   point of another, so one stray localization could fuse two molecules, and
+#   the effective resolution degraded as traces got longer. Here a stray point
+#   casts one vote and is outvoted.
+#
+#   It is also SCALE-FREE: no nanometre threshold. A diffuse trace automatically
+#   demands proportionally more separation than a tight one, so heterogeneous
+#   data (mixed labels, varying photon counts) needs no global sigma.
+#
+# SYMMETRY AND TRANSITIVITY
+#   Votes are asymmetric — a short diffuse trace may vote for a long tight one
+#   without the reverse. `mutual = TRUE` requires both directions, which is the
+#   conservative reading. Accepted pairs then form a graph and connected
+#   components become molecules; chaining is still possible but through a far
+#   stricter edge test than single linkage.
+#
+# ARGUMENTS
+#   sub_df : rows to cluster (tid, x, y, z)
+#   f      : fraction of a trace's localizations that must vote to merge (0.5)
+#   rho    : distance tolerance; 1.0 = the other centroid must be strictly
+#            closer, >1 loosens
+#   mutual : require both traces to vote for each other
+#   w      : optional per-axis de-blink weights
+#   k_cand : how many candidate centroids to consider per localization
+#
+# RETURNS  integer cluster id per ROW of sub_df, all > 0.
+# =============================================================================
+deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRUE,
+                                        w = NULL, k_cand = 4L) {
+  n <- nrow(sub_df)
+  if (!n) return(integer(0))
+  f   <- min(max(as.numeric(f   %||% 0.5), 0.01), 1)
+  rho <- max(as.numeric(rho %||% 1), 0.01)
+
+  tid  <- as.character(sub_df$tid)
+  P    <- apply_deblink_weights(as.matrix(sub_df[, c("x","y","z"), drop = FALSE]), w)
+  g    <- split(seq_len(n), tid)
+  tn   <- names(g); nT <- length(g)
+  if (nT < 2L) return(rep(1L, n))
+
+  nt  <- lengths(g)
+  tix <- match(tid, tn)                                   # trace index per row
+  C   <- t(vapply(g, function(ix) colMeans(P[ix, , drop = FALSE]), numeric(ncol(P))))
+
+  # leave-one-out own-centroid distance
+  Cl    <- (C[tix, , drop = FALSE] * nt[tix] - P) / pmax(nt[tix] - 1L, 1L)
+  d_own <- sqrt(rowSums((P - Cl)^2))
+
+  # nearest OTHER trace centroid: ask for a few candidates and skip self
+  kq <- min(as.integer(k_cand) + 1L, nT)
+  kn <- tryCatch(dbscan::kNN(C, k = kq, query = P), error = function(e) NULL)
+  if (is.null(kn)) return(as.integer(tix))
+  best_id <- integer(n); best_d <- rep(Inf, n)
+  for (j in seq_len(kq)) {
+    cand <- kn$id[, j]; dd <- kn$dist[, j]
+    take <- !is.finite(best_d) | (best_d == Inf)
+    take <- take & cand != tix
+    best_id[take] <- cand[take]; best_d[take] <- dd[take]
+  }
+
+  vote <- is.finite(best_d) & best_id > 0L & (best_d <= rho * pmax(d_own, 1e-9))
+  if (!any(vote)) return(as.integer(tix))
+
+  # Decide on the TOTAL vote, then wire up every sibling that shares it.
+  #
+  # Each point names only its single nearest other centroid, so a fluorophore
+  # that blinked three times has its votes SPLIT across the two siblings and no
+  # individual candidate clears f — the trace stays unmerged even though nearly
+  # every point voted to merge with something. So the decision uses the total
+  # vote fraction, and edges then go to each candidate holding a real share.
+  vt <- data.frame(x = tix[vote], y = best_id[vote])
+  tot <- tabulate(vt$x, nbins = nT) / nt                   # share of X's points voting
+  keep_x <- which(tot >= f)
+  if (!length(keep_x)) return(as.integer(tix))
+
+  key   <- paste(vt$x, vt$y, sep = "_")
+  cnt   <- table(key)
+  parts <- do.call(rbind, strsplit(names(cnt), "_", fixed = TRUE))
+  ed <- data.frame(x = as.integer(parts[, 1]), y = as.integer(parts[, 2]),
+                   nv = as.integer(cnt))
+  ed <- ed[ed$x %in% keep_x, , drop = FALSE]
+  # a candidate counts if it holds a real share of the votes cast, not of all
+  # points — otherwise siblings cancel each other out again
+  ed$share <- ed$nv / pmax(tabulate(vt$x, nbins = nT)[ed$x], 1L)
+  ed <- ed[ed$share >= 0.25, , drop = FALSE]
+
+  if (isTRUE(mutual) && nrow(ed)) {
+    fwd <- paste(ed$x, ed$y, sep = "_")
+    rev <- paste(ed$y, ed$x, sep = "_")
+    ed  <- ed[rev %in% fwd, , drop = FALSE]
+  }
+  # NOTE on f: the vote fraction for two traces of the SAME molecule is ~0.5 by
+  # construction (leave-one-out makes d_own and d_alt identically distributed,
+  # since both centroids estimate the same position). It falls to ~0.23 at 10 nm
+  # and ~0.07 at 20 nm separation. So f must sit well BELOW 0.5 — thresholding
+  # at 0.5 tests against the null value and rejects half of all true merges.
+
+  if (!nrow(ed)) return(as.integer(tix))
+
+  # connected components by union-find
+  parent <- seq_len(nT)
+  find <- function(a) { while (parent[a] != a) a <- parent[a]; a }
+  for (r in seq_len(nrow(ed))) {
+    ra <- find(ed$x[r]); rb <- find(ed$y[r])
+    if (ra != rb) parent[rb] <- ra
+  }
+  comp <- vapply(seq_len(nT), find, integer(1))
+  as.integer(factor(comp))[tix]
+}
+
+# =============================================================================
 # deblink_minpts() — minPts IS THE TRACE-LENGTH FILTER, NOT A FREE KNOB
 # =============================================================================
 # GOAL
@@ -4493,67 +4753,104 @@ deblink_assign_singletons <- function(df) {
   df
 }
 
+
 # =============================================================================
-# .deblink_molecule_gap() — HOW CLOSE THE NEAREST DISTINCT MOLECULES SIT
+# deblink_count_curve() — MOLECULE COUNT vs RADIUS, AND ITS KNEE   [EXPLORATORY]
 # =============================================================================
+#
 # GOAL
-#   Measure the chaining ceiling: the eps at which single-linkage would start
-#   fusing genuinely different fluorophores.
+#   Pick the de-blink radius from the data alone, with no model of precision and
+#   no ground truth: sweep eps, run the REAL merge at each value, and plot how
+#   many molecules come out.
 #
-# METHOD
-#   Run one provisional de-blinking pass at eps_lo (DBSCAN + the same
-#   TID-plurality rule the real pipeline uses), then take the nearest-neighbour
-#   spacing between the resulting molecule medians. The 5th percentile is the
-#   ceiling: at that radius ~5% of molecule pairs would already touch.
+# THE SHAPE OF THE CURVE AND WHY THE KNEE IS THE ANSWER
+#   small eps  count is inflated — re-blinks of one fluorophore stay separate
+#              and long traces fragment. The count falls STEEPLY as eps grows
+#              and genuine re-blinks start to merge.
+#   the knee   the point where that steep fall stops: the re-blinks have been
+#              collected and nothing much is left to merge correctly.
+#   large eps  a slow, steady decline — this is DISTINCT molecules being fused.
+#              It never plateaus perfectly, because there is always another
+#              neighbour to swallow.
+#   So the knee is the largest radius that is still merging mostly re-blinks.
 #
-#   The estimate is conditioned on eps_lo being roughly right — it inherits any
-#   over-merging from that first pass, so it is a diagnostic bound, not an
-#   independent measurement.
+# WHY THIS NEEDS NO LABEL / TAG INFORMATION
+#   Unlike a prior-based estimate (linker length, dye size), the knee is read off
+#   the data's own behaviour. The label geometry is already baked into where the
+#   knee falls, so asking the user to declare a tag would add an input that
+#   changes nothing.
 #
-# RETURNS list(eps_hi, ok, note); eps_hi is NA when it cannot be measured.
+# WHY IT IS MARKED EXPLORATORY
+#   The knee is a curvature maximum on a noisy, subsampled curve. It is stable
+#   when the two regimes are well separated and unreliable when they are not —
+#   which is the same crowding condition that makes de-blinking ambiguous in the
+#   first place. Treat it as evidence, not as an answer, and look at the curve.
+#
+# ARGUMENTS
+#   df       : filtered data.frame (x, y, z, tid)
+#   minpts   : the minPts the real primary DBSCAN uses
+#   eps_seq  : radii to try (nm)
+#   w        : optional per-axis de-blink weights, so the curve is measured in
+#              the same metric the clustering will use
+#   max_pts  : subsample cap — the sweep runs DBSCAN once per eps
+#
+# RETURNS  list(curve = data.frame(eps, n_molecules), knee, n_locs, n_traces)
 # =============================================================================
-.deblink_molecule_gap <- function(P, tid, eps_lo, minpts) {
-  fail <- function(msg) list(eps_hi = NA_real_, ok = FALSE, note = msg,
-                             nnd = numeric(0), n_mol = NA_integer_)
-  if (!is.finite(eps_lo) || eps_lo <= 0) return(fail("No usable lower bound."))
-
-  cl <- tryCatch(dbscan::dbscan(P, eps = eps_lo, minPts = minpts)$cluster,
-                 error = function(e) NULL)
-  if (is.null(cl)) return(fail("Provisional de-blinking pass failed."))
-
-  # TID-plurality: mirror the pipeline so the molecule set matches what the app
-  # would actually produce at this radius.
-  keep <- cl != 0L
-  if (!any(keep)) return(fail("No points cluster at the measured lower bound."))
-  tab  <- table(tid[keep], cl[keep])
-  mol  <- as.integer(colnames(tab)[max.col(tab, ties.method = "first")])
-  names(mol) <- rownames(tab)
-
-  lab <- mol[as.character(tid)]
-  ok2 <- !is.na(lab)
-  if (sum(ok2) < 3L) return(fail("Too few de-blinked molecules to measure spacing."))
-
-  # molecule medians
-  gm <- split(which(ok2), lab[ok2])
-  if (length(gm) < 3L)
-    return(fail("Fewer than three de-blinked molecules - spacing is unconstrained."))
-  M <- t(vapply(gm, function(ix) matrixStats_colMedian(P[ix, , drop = FALSE]),
-                numeric(ncol(P))))
-
-  kn <- tryCatch(dbscan::kNN(M, k = 1L)$dist[, 1L], error = function(e) NULL)
-  kn <- if (is.null(kn)) numeric(0) else kn[is.finite(kn) & kn > 0]
-  if (length(kn) < 10L) {
-    # Almost always crowding rather than a small file: the provisional pass has
-    # chained the field into a handful of objects, so there is no spacing left
-    # to measure. Say that, instead of blaming the sample size.
-    return(fail(sprintf(
-      "De-blinking at the measured radius collapses %d traces into %d molecules - too crowded to estimate a ceiling.",
-      length(unique(tid)), nrow(M))))
+deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
+                                w = NULL, max_pts = 60000L, method = "raw") {
+  if (!is.data.frame(df) || !nrow(df) || !all(c("x", "y", "tid") %in% names(df)))
+    return(NULL)
+  cols <- intersect(c("x", "y", "z"), names(df))
+  keep <- stats::complete.cases(df[, cols, drop = FALSE])
+  d    <- df[keep, , drop = FALSE]
+  if (!"z" %in% names(d)) d$z <- 0
+  if (nrow(d) < 10L) return(NULL)
+  if (nrow(d) > max_pts) {
+    set.seed(1L)                                   # reproducible curve
+    d <- d[sort(sample.int(nrow(d), max_pts)), , drop = FALSE]
   }
+  P   <- apply_deblink_weights(as.matrix(d[, cols, drop = FALSE]), w)
+  tid <- as.character(d$tid)
+  n_tr <- length(unique(tid))
 
-  list(eps_hi = stats::quantile(kn, 0.05, names = FALSE), ok = TRUE,
-       note   = "Chaining ceiling from de-blinked molecule spacing.",
-       nnd    = kn, n_mol = nrow(M))
+  # One eps -> the molecule count the pipeline would actually report: DBSCAN,
+  # then TID-plurality, then unmerged traces become their own molecule.
+  # Both criteria put every trace in a cluster, so the count is just the number
+  # of distinct labels. For "vote" the swept quantity is the vote FRACTION, not
+  # a distance — the caller supplies the right sequence.
+  Mc <- NULL
+  if (identical(method, "centroid")) {
+    gg <- split(seq_len(nrow(P)), tid)
+    Mc <- t(vapply(gg, function(ix) matrixStats_colMedian(P[ix, , drop = FALSE]),
+                   numeric(ncol(P))))
+  }
+  # CENTROID ONLY. A vote sweep was tried and withdrawn: it did not return in a
+  # usable time, and an unresponsive diagnostic is worse than an absent one.
+  # The vote criterion has no distance to sweep anyway — its parameter is a
+  # dimensionless fraction whose useful range is already documented on the input.
+  if (is.null(Mc)) return(NULL)
+  count_at <- function(e) {
+    cl <- tryCatch(dbscan::dbscan(Mc, eps = e, minPts = 1L)$cluster,
+                   error = function(err) NULL)
+    if (is.null(cl)) NA_integer_ else length(unique(cl))
+  }
+  cnt <- vapply(eps_seq, count_at, numeric(1))
+  ok  <- is.finite(cnt)
+  if (sum(ok) < 5L) return(NULL)
+  es <- eps_seq[ok]; cn <- cnt[ok]
+
+  # Knee = maximum curvature of log(count) against eps. Logs because the fall is
+  # multiplicative; curvature because the knee is where the SLOPE changes, and
+  # the slope itself never reaches zero.
+  knee <- NA_real_
+  if (length(es) >= 5L) {
+    lc <- log(pmax(cn, 1))
+    d1 <- diff(lc) / diff(es)
+    d2 <- diff(d1) / diff(es[-1])
+    if (any(is.finite(d2))) knee <- es[which.max(replace(d2, !is.finite(d2), -Inf)) + 1L]
+  }
+  list(curve = data.frame(eps = es, n_molecules = cn),
+       knee = knee, n_locs = nrow(d), n_traces = n_tr)
 }
 
 # =============================================================================
@@ -4633,8 +4930,6 @@ apply_clustering_pipeline <- function(df, input) {
   # ── Primary clustering ────────────────────────────────────────────────────
   if (isTRUE(input$enable_clustering)) {
     df$cluster <- 0L
-    eps     <- input$eps     %||% 30
-    minpts  <- deblink_minpts(input)
 
     # Per-axis metric, computed ONCE over the whole df so every group/channel
     # subset below is clustered in the same space (a per-subset metric would
@@ -4643,10 +4938,20 @@ apply_clustering_pipeline <- function(df, input) {
       deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
       else NULL
 
+    # Two merge criteria, both trace-level. "centroid" compares where the traces
+    # ARE; "vote" asks whether most of a trace's localizations think they belong
+    # to a neighbouring trace. Raw-point DBSCAN was removed: one stray
+    # localization could bridge two molecules (35 errors on ground truth, vs 11
+    # for centroid and 29 for vote).
+    method1 <- input$deblink_method %||% "centroid"
+    thr1    <- input$eps_centroid   %||% 10
+
     run_dbscan1 <- function(sub_df) {
-      pts <- as.matrix(sub_df[, c("x", "y", "z")])
-      pts <- apply_deblink_weights(pts, aw1)
-      dbscan::dbscan(pts, eps = eps, minPts = minpts)$cluster
+      if (identical(method1, "vote"))
+        return(deblink_merge_majority_vote(sub_df,
+                 f = input$vote_frac %||% 0.2, rho = input$vote_rho %||% 1.2,
+                 mutual = !identical(input$vote_link %||% "mutual", "either"), w = aw1))
+      deblink_merge_centroids(sub_df, thr1, aw1)
     }
 
     mplex_on <- "mplex_channel" %in% names(df) && any(!is.na(df$mplex_channel))
@@ -5594,31 +5899,25 @@ apply_two_color_clustering_pipeline <- function(df, input) {
 
   # ── 2. Primary two-color clustering → cluster_tc1 ──
   if (isTRUE(input$enable_two_color_cluster1 %||% FALSE)) {
+    # Centroid de-blinking per channel - mirrors the single-colour path exactly.
+    # See deblink_merge_centroids(); raw-point DBSCAN was retired to
+    # deadcode_smlm.R.
     df$cluster_tc1 <- 0L
+    aw_tc <- if (isTRUE(input$deblink_anisotropic))
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      else NULL
+    thr_tc <- suppressWarnings(as.numeric(input$eps_tc1))
+    if (!length(thr_tc) || !is.finite(thr_tc) || thr_tc <= 0) thr_tc <- 12
+    meth_tc <- input$deblink_method_tc1 %||% "centroid"
     for (g in c(1L, 2L)) {
       idx <- which(df$analysis_group == g & is.finite(df$x) & is.finite(df$y) & is.finite(df$z))
-      if (length(idx) < (input$minpts_tc1 %||% 5L)) next
-      pts <- if (use_3d) as.matrix(df[idx, c("x","y","z")]) else as.matrix(df[idx, c("x","y")])
-      cl  <- dbscan::dbscan(pts, eps = input$eps_tc1 %||% 20, minPts = input$minpts_tc1 %||% 5L)
-      cid <- cl$cluster
-      if (g == 2L) cid[cid > 0] <- cid[cid > 0] + 10000L
+      if (!length(idx)) next
+      cid <- if (identical(meth_tc, "vote"))
+        deblink_merge_majority_vote(df[idx, , drop = FALSE],
+          f = input$vote_frac_tc1 %||% 0.2, rho = input$vote_rho_tc1 %||% 1.2, w = aw_tc)
+        else deblink_merge_centroids(df[idx, , drop = FALSE], thr_tc, aw_tc)
+      if (g == 2L) cid <- cid + 10000L
       df$cluster_tc1[idx] <- cid
-    }
-    # Lock TIDs: every localization of a TID moves to the cluster its majority belongs to
-    tid_plurality <- df %>%
-      dplyr::filter(cluster_tc1 != 0L) %>%
-      dplyr::group_by(tid, cluster_tc1) %>%
-      dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
-      dplyr::group_by(tid) %>%
-      dplyr::slice_max(n, n = 1L, with_ties = FALSE) %>%
-      dplyr::ungroup() %>%
-      dplyr::select(tid, cluster_tc1_new = cluster_tc1)
-    df <- df %>%
-      dplyr::left_join(tid_plurality, by = "tid") %>%
-      dplyr::mutate(cluster_tc1 = dplyr::coalesce(cluster_tc1_new, 0L)) %>%
-      dplyr::select(-cluster_tc1_new)
-    if (isTRUE(input$exclude_unclustered_tc1 %||% FALSE)) {
-      df <- dplyr::filter(df, !is.na(cluster_tc1) & cluster_tc1 != 0L)
     }
   }
 
