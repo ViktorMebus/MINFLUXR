@@ -1118,7 +1118,7 @@ are therefore **quantised, not distributed**:
 where SW is a constant per-step overhead. Inverting it classifies each step:
 
 ```math
-n_\text{cyc} = \operatorname{round}\!\left(\frac{\Delta t - \text{SW}}{t_c}\right), \qquad n_\text{dark} = n_\text{cyc} - 1
+n_\text{cyc} = \mathrm{round}\!\left(\frac{\Delta t - \text{SW}}{t_c}\right), \qquad n_\text{dark} = n_\text{cyc} - 1
 ```
 
 Steps with $n_\text{cyc} = 1$ are **integrated** (single-cycle) steps — the constant-Δt subset that CVE,
@@ -1128,7 +1128,7 @@ JDD and the directionality tools restrict themselves to.
 
 In priority order: (1) the hardware model $t_c = N_\text{iter} \cdot t_\text{dwell}$ if enabled;
 (2) a manual override; (3) a **data-driven cluster cycle** — cluster the observed Δt values, take
-$t_c = \operatorname{median}(\operatorname{diff}(\text{cluster centres}))$ and
+$t_c = \mathrm{median}(\mathrm{diff}(\text{cluster centres}))$ and
 $\text{SW} = \text{centre}_1 - t_c$; (4) a regression from the Δt-vs-index slope.
 
 Method (3) deliberately uses the **spacing between clusters**, not the mode. This is the trap:
