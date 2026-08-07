@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Rules that protect ANYONE working on this repo. Tracked deliberately: a fresh
+# clone needs these or a collaborator's first commit can carry hundreds of MB of
+# raw data (GitHub hard-rejects >100 MB per file).
+#
+# Personal, machine-specific ignores live in .git/info/exclude instead — same
+# syntax, never tracked, never pushed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Local test/sample data — never upload. Raw MINFLUX exports are hundreds of MB
+# and are not needed to run the app; users bring their own.
+Test data/
+test data/
+*.npy
+*.msr
+*.zarr/
+
+# Large/raw data formats that occasionally land in the repo root
+*.csv.gz
+*.fst
+*.qs
+
+# Work in progress: parked features, not part of the shipped app.
+pending/
+
+# Claude Code workspace config (machine-specific)
+.claude/
+
+# R session cruft
+.Rhistory
+.Rproj.user/
+.RData
+.Ruserdata
