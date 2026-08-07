@@ -613,10 +613,10 @@ Tests whether two populations co-localize beyond chance given their individual d
 \hat{K}_{12}(r) = \frac{A}{n_1 n_2} \sum_{i \in G_1}\sum_{j \in G_2} \mathbf{1}\!\left(\|\mathbf{p}_i - \mathbf{p}_j\| \leq r\right)
 ```
 
-with the same L-transform as the univariate case. The plotted $\hat{L}_{12}(r) - r$: > 0 = co-localize
+with the same L-transform as the univariate case. The plotted L̂₁₂(r) − r: > 0 = co-localize
 more than two independent CSR processes, ≈ 0 = spatial independence, < 0 = exclusion.
 
-When Median Clustering is active, $\hat{L}_{12}$ is computed **per cluster** and averaged, giving a
+When Median Clustering is active, L̂₁₂ is computed **per cluster** and averaged, giving a
 within-structure measure rather than a global one. The 2000-point subsampling limit applies per group.
 
 #### Pair Cross-Correlation g₁₂(r)
@@ -988,7 +988,8 @@ filter range. The median spread is reported as median(σ̃) ± nMAD, with nMAD =
 
 **Manual mode**: the user defines two ranges $[d_{1,\text{lo}}, d_{1,\text{hi}})$ and $[d_{2,\text{lo}}, d_{2,\text{hi}}]$. A TID is assigned to group 1 or 2 if its median DCR falls in the respective range; TIDs outside both ranges are unassigned.
 
-**Auto-detect mode (GMM)**: fits a two-component Gaussian mixture model to the distribution of $\lbrace \widetilde{\text{dcr}}_\text{tid} \rbrace$ using the `mclust` package:
+**Auto-detect mode (GMM)**: fits a two-component Gaussian mixture model to the distribution of those
+per-TID median DCR values using the `mclust` package:
 
 ```math
 p(\text{dcr}) = \pi_1 \,\mathcal{N}(\mu_1, \sigma_1^2) + \pi_2 \,\mathcal{N}(\mu_2, \sigma_2^2)
@@ -1197,9 +1198,15 @@ satisfies $\tau_\text{lo} \leq t_j - t_i < \tau_\text{hi}$:
 
 where $N_\tau$ is the number of pairs in that bin.
 
-The **ensemble MSD** across all tracks is computed bin-by-bin as either:
-- the **pair-weighted mean**, $\overline{\text{MSD}}(\tau) = \sum_k N_{\tau,k} \cdot \text{MSD}_k(\tau) / \sum_k N_{\tau,k}$ (downweights bins with few observations), or
-- the **track-unweighted mean**, a simple average of per-track MSD values.
+The **ensemble MSD** across all tracks is computed bin-by-bin as either the **pair-weighted mean**,
+which downweights bins with few observations:
+
+```math
+\overline{\text{MSD}}(\tau) = \frac{\sum_k N_{\tau,k} \cdot \text{MSD}_k(\tau)}{\sum_k N_{\tau,k}}
+```
+
+or the **track-unweighted mean**, a simple average of per-track MSD values that treats each track
+equally regardless of how many pairs it contributes.
 
 Bins where fewer than a user-specified fraction of tracks contribute are masked as NA.
 
