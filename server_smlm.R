@@ -982,7 +982,12 @@ smlm_server <- function(input, output, session) {
       z_scale             = input$z_scale,
 
       enable_clustering   = input$enable_clustering,
-      eps                 = input$eps,
+      deblink_method      = input$deblink_method,
+      eps_centroid        = input$eps_centroid,
+      vote_frac           = input$vote_frac,
+      vote_rho            = input$vote_rho,
+      vote_link           = input$vote_link,
+      centroid_k          = input$centroid_k,
       # part of the merge metric: eps only means the same thing alongside it
       deblink_anisotropic = input$deblink_anisotropic,
       # minPts is derived from tid_length_range and exclude_unclustered no longer
@@ -1160,12 +1165,10 @@ smlm_server <- function(input, output, session) {
       
       enable_two_color_cluster1 = FALSE,
       eps_tc1 = 14,
-      minpts_tc1 = 6,
       show_tc1_alpha = FALSE,
       tc1_alpha = 120,
       tc1_alpha_opacity = 0.15,
       tc1_alpha_min_pts = 5,
-      exclude_unclustered_tc1 = FALSE,
       
       enable_two_color_cluster2 = FALSE,
       cluster2_method_tc2 = "dbscan",
@@ -1203,7 +1206,7 @@ smlm_server <- function(input, output, session) {
       "enable_two_color",
       "color_by_fluo", "use_pooled_dcr",
       "draw_nn_two_color", "show_nn_labels_two_color",
-      "enable_two_color_cluster1", "show_tc1_alpha", "exclude_unclustered_tc1",
+      "enable_two_color_cluster1", "show_tc1_alpha",
       "enable_two_color_cluster2", "show_tc2_alpha",
       "show_tc2_isosurface", "tc2_iso_selected_only"
     )
@@ -1229,7 +1232,10 @@ smlm_server <- function(input, output, session) {
     
     # clustering tc1
     if (!is.null(getv("eps_tc1"))) updateNumericInput(session, "eps_tc1", value = as.numeric(getv("eps_tc1")))
-    if (!is.null(getv("minpts_tc1"))) updateNumericInput(session, "minpts_tc1", value = as.integer(getv("minpts_tc1")))
+    for (nmv in c("vote_frac_tc1", "vote_rho_tc1"))
+      if (!is.null(getv(nmv))) updateNumericInput(session, nmv, value = as.numeric(getv(nmv)))
+    if (!is.null(getv("deblink_method_tc1")))
+      updateRadioButtons(session, "deblink_method_tc1", selected = as.character(getv("deblink_method_tc1")))
     if (!is.null(getv("tc1_alpha"))) updateNumericInput(session, "tc1_alpha", value = as.numeric(getv("tc1_alpha")))
     if (!is.null(getv("tc1_alpha_opacity"))) updateSliderInput(session, "tc1_alpha_opacity", value = as.numeric(getv("tc1_alpha_opacity")))
     if (!is.null(getv("tc1_alpha_min_pts"))) updateNumericInput(session, "tc1_alpha_min_pts", value = as.integer(getv("tc1_alpha_min_pts")))
@@ -1354,7 +1360,17 @@ smlm_server <- function(input, output, session) {
     # analysis silently ran with the default radius. minpts / exclude_unclustered
     # are deliberately absent: minPts now derives from tid_length_range, and
     # exclude_unclustered no longer exists (de-blinking never removes molecules).
-    if (!is.null(getv("eps"))) updateNumericInput(session, "eps", value = as.numeric(getv("eps")))
+    for (nmv in c("vote_frac", "vote_rho"))
+      if (!is.null(getv(nmv))) updateNumericInput(session, nmv, value = as.numeric(getv(nmv)))
+    if (!is.null(getv("vote_link")))
+      updateRadioButtons(session, "vote_link", selected = as.character(getv("vote_link")))
+    if (!is.null(getv("eps_centroid")))
+      updateNumericInput(session, "eps_centroid", value = as.numeric(getv("eps_centroid")))
+    if (!is.null(getv("centroid_k")))
+      updateNumericInput(session, "centroid_k", value = as.numeric(getv("centroid_k")))
+    # Restored before enable_clustering, so the criterion is in place when it fires.
+    if (!is.null(getv("deblink_method")))
+      updateRadioButtons(session, "deblink_method", selected = as.character(getv("deblink_method")))
     if (!is.null(getv("deblink_anisotropic")))
       updateCheckboxInput(session, "deblink_anisotropic", value = isTRUE(getv("deblink_anisotropic")))
     # Restored last so the parameters above are in place before it takes effect.
@@ -1792,140 +1808,329 @@ smlm_server <- function(input, output, session) {
     }
   })
 
-  # ── Data-driven de-blink radius (primary DBSCAN eps) ──────────────────────
-  # Brackets eps between the scale at which a trace holds itself together and
-  # the scale at which distinct traces chain. See suggest_deblink_eps() in
-  # helpers_smlm.R for the method and its assumptions.
-  # The suggestion is written into input$eps only on an explicit click: eps is
-  # persisted in saved settings, so a silently self-adjusting value would make
-  # a reloaded analysis irreproducible.
-  deblink_suggestion <- reactiveVal(NULL)
 
-  # GOAL: run the estimator against the data the primary DBSCAN will actually
-  # see (post-filter), with the same minPts and dimensionality.
-  compute_deblink_suggestion <- function() {
+  # ── Centroid merge: threshold suggestion + diagnostic ─────────────────────
+  # Same shape as the raw-point pair, but measured on CENTROID distances, which
+  # is what that criterion actually compares.
+  centroid_suggestion <- reactiveVal(NULL)
+  # Last measured trace spread, in whatever metric is active. Cached so that
+  # editing k can convert to nanometres without re-measuring on every keystroke.
+  centroid_sigma_rv <- reactiveVal(NA_real_)
+
+  compute_centroid_suggestion <- function() {
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    suggest_deblink_eps(
+    w <- if (isTRUE(input$deblink_anisotropic))
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      else NULL
+    r <- suggest_centroid_threshold(
       df,
-      minpts = deblink_minpts(input),
-      min_n  = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
-      # use_z is deliberately NOT tied to input$mode3d: the primary DBSCAN always
-      # clusters in x/y/z, so viewing a 3D dataset as a 2D projection must not
-      # change the suggested radius. suggest_deblink_eps() decides 3D-ness from
-      # the data (a real 2D file carries z = 0 and is detected as 2D).
-      use_z       = TRUE,
-      anisotropic = isTRUE(input$deblink_anisotropic)
-    )
+      min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
+      use_z = TRUE,          # decided from the data, never from the plot mode
+      w     = w,
+      k     = { kk <- suppressWarnings(as.numeric(input$centroid_k))
+                if (!length(kk) || !is.finite(kk) || kk <= 0) 2.0 else kk })
+    if (!is.null(r) && is.finite(r$sigma)) centroid_sigma_rv(r$sigma)
+    r
   }
 
-  observeEvent(input$suggest_eps, {
-    est <- compute_deblink_suggestion()
-    if (is.null(est)) {
-      deblink_suggestion(NULL)
-      showNotification("Not enough traces with enough localizations to measure a de-blink radius. Lower 'Min localizations per trace for spread' or relax the filters.",
-                       type = "warning", duration = 6)
-      return()
+  # ── k drives the distance ────────────────────────────────────────────────
+  # The merge itself only ever reads the DISTANCE. k is a convenience for
+  # expressing that distance in units of the measured trace spread, so it has to
+  # actually move the distance - otherwise editing k changes nothing and the
+  # control is decorative. Debounced so typing does not re-measure per keystroke.
+  centroid_k_d <- debounce(reactive(input$centroid_k), 600)
+  observeEvent(centroid_k_d(), {
+    req(isTRUE(input$enable_clustering),
+        identical(input$deblink_method %||% "centroid", "centroid"))
+    kk <- suppressWarnings(as.numeric(centroid_k_d()))
+    if (!length(kk) || !is.finite(kk) || kk <= 0) return()
+    sg <- centroid_sigma_rv()
+    if (!is.finite(sg)) {                     # never measured yet - measure now
+      r <- tryCatch(compute_centroid_suggestion(), error = function(e) NULL)
+      if (is.null(r)) return()
+      sg <- r$sigma
     }
-    deblink_suggestion(est)
-    updateNumericInput(session, "eps", value = est$suggested)
-    showNotification(
-      sprintf("De-blink radius set to %.1f nm (%s).", est$suggested,
-              if (isTRUE(est$gap_ok)) "within measured bounds"
-              else "lower bound only - no separable ceiling"),
-      type = if (isTRUE(est$gap_ok)) "message" else "warning", duration = 6
+    newd <- round(kk * sg, 1)
+    cur  <- suppressWarnings(as.numeric(input$eps_centroid))
+    if (length(cur) == 1 && is.finite(cur) && isTRUE(all.equal(cur, newd))) return()
+    updateNumericInput(session, "eps_centroid", value = newd)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$suggest_eps_centroid, {
+    r <- compute_centroid_suggestion()
+    if (is.null(r)) {
+      centroid_suggestion(NULL)
+      showNotification("Not enough traces with enough localizations to measure the spread.",
+                       type = "warning", duration = 6); return()
+    }
+    df <- tryCatch(filtered_df(), error = function(e) NULL)
+    w  <- if (isTRUE(input$deblink_anisotropic))
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      else NULL
+    # Raw per-axis spread, UNWHITENED. The whitened numbers are identical on
+    # every axis by construction, so quoting them three times says nothing.
+    r$sigma_ax_raw <- tryCatch(
+      suggest_centroid_threshold(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
+                                 use_z = TRUE, w = NULL, k = r$k)$sigma_ax,
+      error = function(e) NULL)
+    r$axis_w <- w
+
+    # k measured from the data: smallest multiplier leaving no unmerged
+    # re-blinks. Replaces the simulation-calibrated default where it can.
+    ex <- tryCatch(deblink_reblink_excess(df, r$sigma, w), error = function(e) NULL)
+    r$excess <- ex
+    if (!is.null(ex) && is.finite(ex$k_clear)) {
+      r$k <- ex$k_clear
+      r$suggested <- round(ex$k_clear * r$sigma, 1)
+      updateNumericInput(session, "centroid_k", value = ex$k_clear)
+    }
+    centroid_suggestion(r)
+    updateNumericInput(session, "eps_centroid", value = r$suggested)
+    showNotification(sprintf("Centroid threshold %.1f nm (k = %.2f, σ = %.2f nm)%s.",
+                             r$suggested, r$k, r$sigma,
+                             if (!is.null(ex) && is.finite(ex$k_clear))
+                               " - k measured from residual re-blinking" else
+                               " - k from the default (residual test inconclusive)"),
+                     type = "message", duration = 7)
+  })
+
+  output$centroid_suggest_summary <- renderUI({
+    r <- centroid_suggestion(); if (is.null(r)) return(NULL)
+    axr <- r$sigma_ax_raw %||% r$sigma_ax
+    # Derived from the LIVE input, not from the value the suggestor proposed:
+    # if the user has since typed a distance by hand, this must say so.
+    cur_thr <- suppressWarnings(as.numeric(input$eps_centroid))
+    if (!length(cur_thr) || !is.finite(cur_thr)) cur_thr <- r$suggested
+    shape <- if (isTRUE(input$deblink_anisotropic) && !is.null(r$axis_w))
+      # Whitened per-axis spreads are equal by construction, so the useful
+      # number is the real-space merge volume, which is an ellipsoid.
+      sprintf("ellipsoid %s nm", paste(sprintf("%.1f", cur_thr / r$axis_w[seq_len(r$dims)]),
+                                       collapse = " / "))
+      else sprintf("sphere r = %.1f nm", cur_thr)
+    tagList(
+      helpText(sprintf("Trace spread %s nm  |  threshold %.1f nm = %.2f x spread (%s)  |  %s traces, %.0f%% merge.",
+                       paste(sprintf("%.1f", axr), collapse = " / "),
+                       cur_thr, if (is.finite(r$sigma) && r$sigma > 0) cur_thr / r$sigma else NA_real_,
+                       shape, format(r$n_traces, big.mark = ","),
+                       100 * (r$frac_merged %||% NA))),
+      if (!is.null(r$excess) && is.finite(r$excess$k_clear))
+        helpText(sprintf("k = %.2f, measured from your data. Lower values leave re-blinks unmerged.",
+                         r$excess$k_clear))
+      else if (!is.null(r$excess))
+        helpText("Could not measure k from this data - too crowded to tell re-blinks from neighbours. Using the default.")
+      else NULL
     )
   })
 
-  # minPts is shown, not edited: it follows the Trace ID Length filter so the two
-  # cannot contradict each other. See deblink_minpts() in helpers_smlm.R.
-  output$deblink_minpts_note <- renderUI({
-    helpText(sprintf(
-      "Minimum points: %d — follows the Trace ID Length filter's lower bound, so any trace long enough to pass filtering can form a molecule on its own.",
-      deblink_minpts(input)))
+  centroid_gap_data <- reactive({
+    req(isTRUE(input$view_centroid_gap), isTRUE(input$enable_clustering))
+    compute_centroid_suggestion()
   })
 
-  output$deblink_eps_summary <- renderUI({
-    est <- deblink_suggestion()
-    if (is.null(est)) return(NULL)
+  # Drawn by BOTH the single-colour and two-colour panels. Factored so the two
+  # can never drift apart visually or in what the lines mean.
+  .draw_centroid_gap <- function(r, cur_thr) {
+    wi <- r$within[is.finite(r$within) & r$within > 0]
+    bw <- r$between[is.finite(r$between) & r$between > 0]
+    validate(need(length(wi) >= 2, "Not enough within-trace distances to plot."))
 
-    fmt <- function(v, unit = " nm") if (is.finite(v)) paste0(round(v, 2), unit) else "not resolved"
-    els <- list(
-      helpText(sprintf("Measured on %d traces (%d used, %dD)%s.",
-                       est$n_traces, est$n_used, est$dims,
-                       if (is.finite(est$n_mol))
-                         sprintf(", collapsing to %d molecules", est$n_mol) else "")),
-      helpText(sprintf("Trace holds together above: %s. Traces begin to chain above: %s.",
-                       fmt(est$eps_lo), fmt(est$eps_hi))),
-      helpText(sprintf("Median trace spread σ: %s. Suggested radius = %sσ.",
-                       fmt(est$sigma),
-                       if (is.finite(est$ratio)) format(est$ratio) else "-"))
-    )
-    if (isTRUE(est$aniso)) {
-      els <- append(els, list(helpText(sprintf(
-        "Per-axis σ: x %s, y %s, z %s → axis weights %s. Radius applies in this weighted metric.",
-        fmt(est$sigma_ax[1], ""), fmt(est$sigma_ax[2], ""), fmt(est$sigma_ax[3], ""),
-        paste(round(est$weights, 2), collapse = " / ")))))
-    }
-    if (!isTRUE(est$gap_ok)) {
-      els <- append(els, list(helpText(tags$b("No separable ceiling: "), est$note)))
-    }
-    do.call(tagList, els)
-  })
-
-  # Diagnostic: the two distance populations the bounds come from. Gated on the
-  # checkbox so the per-trace loop does not run on every filter change.
-  deblink_gap_data <- reactive({
-    req(isTRUE(input$view_deblink_gap), isTRUE(input$enable_clustering))
-    compute_deblink_suggestion()
-  })
-
-  output$deblink_gap_plot <- renderPlot({
-    est <- deblink_gap_data()
-    validate(need(!is.null(est), "Not enough traces to measure a de-blink radius."))
-
-    w <- c(est$within, est$linkage); w <- w[is.finite(w) & w > 0]
-    b <- est$between;               b <- b[is.finite(b) & b > 0]
-    validate(need(length(w) >= 2, "Not enough within-trace distances to plot."))
-
-    xmax <- stats::quantile(c(w, b), 0.99, names = FALSE)
-    if (!is.finite(xmax) || xmax <= 0) xmax <- max(w, na.rm = TRUE)
-
-    # Both densities scaled to their own peak: the interest is where the two
-    # populations sit relative to each other, not their relative counts.
+    COL_W <- "#1f78b4"; COL_B <- "#e08214"; COL_S <- "#1a9850"; COL_E <- "#d7191c"
+    # LOG x-axis. The re-blink hump sits at a few nm and the distinct-molecule
+    # hump at hundreds; on a linear axis clipped to a quantile of the pooled
+    # distances the second hump fell off the plot entirely, which defeats the
+    # point — the threshold is supposed to be placed in the GAP between them.
+    xhi <- max(stats::quantile(bw, 0.99, names = FALSE), stats::quantile(wi, 0.99, names = FALSE),
+               3 * r$suggested, na.rm = TRUE)
+    xlo <- max(0.5, min(stats::quantile(c(wi, bw), 0.005, names = FALSE), r$sigma / 4))
     scal <- function(v) {
-      d <- stats::density(v, n = 512L, from = 0, to = xmax)
-      d$y <- d$y / max(d$y); d
+      v <- v[v > 0]
+      d <- stats::density(log10(v), n = 512L, from = log10(xlo), to = log10(xhi))
+      d$x <- 10^d$x; d$y <- d$y / max(d$y); d
     }
-    # Each curve and its derived bound share a hue but differ in line type, and
-    # the two hues are far apart — so curve-vs-bound and within-vs-between stay
-    # distinguishable, including for red/green colour blindness.
-    COL_W <- "#1f78b4"   # blue   — within trace
-    COL_B <- "#e08214"   # orange — between molecules
-    COL_E <- "#d7191c"   # red    — current radius
+    # Legend goes in the BOTTOM margin. Note xpd is NOT set in par(): doing so
+    # let abline() draw its vertical markers out through the margins too, which
+    # is what made the lines run past the plot box.
+    op <- graphics::par(mar = c(8.2, 4.5, 3.0, 1.2))
+    on.exit(graphics::par(op), add = TRUE)
+    dw <- scal(wi)
+    graphics::plot(dw$x, dw$y, type = "l", col = COL_W, lwd = 2.5, ylim = c(0, 1.05),
+                   xlim = c(xlo, xhi), log = "x",
+                   xlab = "distance (nm, log scale)", ylab = "density (scaled to peak)",
+                   main = "Within-trace scatter vs between-trace centroid spacing")
+    if (length(bw) >= 2) { db <- scal(bw); graphics::lines(db$x, db$y, col = COL_B, lwd = 2.5) }
+    graphics::abline(v = r$sigma,     col = COL_W, lwd = 2, lty = 3)
+    graphics::abline(v = r$suggested, col = COL_S, lwd = 2, lty = 4)
+    if (length(cur_thr) == 1 && is.finite(cur_thr))
+      graphics::abline(v = cur_thr, col = COL_E, lwd = 2.5, lty = 2)
+    # Placed in device coords so the log x-axis cannot distort it; xpd = NA is
+    # scoped to this call alone.
+    graphics::legend(x = graphics::grconvertX(0.02, "ndc", "user"),
+                     y = graphics::grconvertY(0.14, "ndc", "user"),
+      bty = "n", cex = 0.85, ncol = 2, xpd = NA,
+      legend = c("within trace (loc to its centroid)", "between traces (centroid NN)",
+                 "sigma", "suggested", "current threshold"),
+      col = c(COL_W, COL_B, COL_W, COL_S, COL_E),
+      lty = c(1, 1, 3, 4, 2), lwd = c(2.5, 2.5, 2, 2, 2.5))
+    invisible(NULL)
+  }
 
-    dw <- scal(w)
-    graphics::plot(dw$x, dw$y, type = "l", col = COL_W, lwd = 2.5,
-                   ylim = c(0, 1.15), xlab = "distance (nm)",
-                   ylab = "density (scaled to peak)",
-                   main = "De-blink radius: within-trace vs between-molecule distances")
-    if (length(b) >= 2) {
-      db <- scal(b)
-      graphics::lines(db$x, db$y, col = COL_B, lwd = 2.5)
-    }
-    # bounds: dotted / dot-dash, distinct from the dashed current radius
-    graphics::abline(v = est$eps_lo, col = COL_W, lwd = 2, lty = 3)
-    if (is.finite(est$eps_hi)) graphics::abline(v = est$eps_hi, col = COL_B, lwd = 2, lty = 4)
-    e_cur <- suppressWarnings(as.numeric(input$eps))
-    if (length(e_cur) == 1 && is.finite(e_cur))
-      graphics::abline(v = e_cur, col = COL_E, lwd = 2.5, lty = 2)
-
-    graphics::legend("topright", bty = "n", cex = 0.9,
-                     legend = c("within trace", "between de-blinked molecules",
-                                "lower bound", "chaining ceiling", "current radius"),
-                     col = c(COL_W, COL_B, COL_W, COL_B, COL_E),
-                     lty = c(1, 1, 3, 4, 2), lwd = c(2.5, 2.5, 2, 2, 2.5))
+  output$centroid_gap_plot <- renderPlot({
+    r <- centroid_gap_data()
+    validate(need(!is.null(r), "Not enough traces to measure the spread."))
+    validate(need(sum(is.finite(r$within) & r$within > 0) >= 2,
+                  "Not enough within-trace distances to plot."))
+    .draw_centroid_gap(r, suppressWarnings(as.numeric(input$eps_centroid)))
   })
+
+  # ── Two-colour: same estimator, POOLED across both channels ───────────────
+  # The spread is measured on all traces together, so both fluorophores share
+  # one sigma. That is a deliberate simplification: two dyes can genuinely
+  # differ in precision, and if they do this under-serves the tighter channel.
+  # The MERGE is still strictly per-channel (the +10000 offset), so a shared
+  # threshold can never merge across colours.
+  tc1_suggestion <- reactiveVal(NULL)
+
+  observeEvent(input$suggest_eps_tc1, {
+    r <- tryCatch(compute_centroid_suggestion(), error = function(e) NULL)
+    if (is.null(r)) {
+      tc1_suggestion(NULL)
+      showNotification("Not enough traces with enough localizations to measure the spread.",
+                       type = "warning", duration = 6); return()
+    }
+    df <- tryCatch(filtered_df(), error = function(e) NULL)
+    w  <- if (isTRUE(input$deblink_anisotropic))
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      else NULL
+    r$sigma_ax_raw <- tryCatch(
+      suggest_centroid_threshold(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
+                                 use_z = TRUE, w = NULL, k = r$k)$sigma_ax,
+      error = function(e) NULL)
+    r$axis_w <- w
+    ex <- tryCatch(deblink_reblink_excess(df, r$sigma, w), error = function(e) NULL)
+    r$excess <- ex
+    if (!is.null(ex) && is.finite(ex$k_clear)) {
+      r$k <- ex$k_clear
+      r$suggested <- round(ex$k_clear * r$sigma, 1)
+    }
+    tc1_suggestion(r)
+    updateNumericInput(session, "eps_tc1", value = r$suggested)
+    showNotification(sprintf("2-color threshold %.1f nm (k = %.2f, pooled sigma %.2f nm).",
+                             r$suggested, r$k, r$sigma), type = "message", duration = 6)
+  })
+
+  output$tc1_suggest_summary <- renderUI({
+    r <- tc1_suggestion(); if (is.null(r)) return(NULL)
+    axr <- r$sigma_ax_raw %||% r$sigma_ax
+    cur <- suppressWarnings(as.numeric(input$eps_tc1))
+    if (!length(cur) || !is.finite(cur)) cur <- r$suggested
+    tagList(
+      helpText(sprintf("Pooled trace spread %s nm  |  threshold %.1f nm = %.2f x spread  |  %s traces.",
+                       paste(sprintf("%.1f", axr), collapse = " / "), cur,
+                       if (is.finite(r$sigma) && r$sigma > 0) cur / r$sigma else NA_real_,
+                       format(r$n_traces, big.mark = ","))),
+      if (!is.null(r$excess) && is.finite(r$excess$k_clear))
+        helpText(sprintf("k = %.2f, measured from your data. Spread is pooled over both channels.",
+                         r$excess$k_clear))
+      else helpText("Spread is pooled over both channels.")
+    )
+  })
+
+  tc1_gap_data <- reactive({
+    req(isTRUE(input$view_tc1_gap), isTRUE(input$enable_two_color_cluster1))
+    compute_centroid_suggestion()
+  })
+
+  output$tc1_gap_plot <- renderPlot({
+    r <- tc1_gap_data()
+    validate(need(!is.null(r), "Not enough traces to measure the spread."))
+    validate(need(sum(is.finite(r$within) & r$within > 0) >= 2,
+                  "Not enough within-trace distances to plot."))
+    .draw_centroid_gap(r, suppressWarnings(as.numeric(input$eps_tc1)))
+  })
+
+  # ── EXPLORATORY: molecule count vs radius ─────────────────────────────────
+  # Gated on its own checkbox: the sweep runs one DBSCAN per radius, so it must
+  # not fire on every filter change.
+  deblink_knee_data <- reactive({
+    req(isTRUE(input$view_deblink_knee), isTRUE(input$enable_clustering))
+    df <- tryCatch(filtered_df(), error = function(e) NULL)
+    req(!is.null(df), nrow(df) > 0)
+    # Same metric the clustering uses, or the radii on the x-axis mean nothing.
+    w <- if (isTRUE(input$deblink_anisotropic))
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      else NULL
+    # Sweep whatever criterion is ACTIVE — a curve over raw-point eps says
+    # nothing about a centroid threshold, and vice versa.
+    # Sweep range follows the DATA, not a hard-coded 40 nm: on the centroid
+    # criterion the interesting structure runs well past that.
+    # Centroid criterion only — see deblink_count_curve().
+    req(identical(input$deblink_method %||% "centroid", "centroid"))
+    cs  <- tryCatch(compute_centroid_suggestion(), error = function(e) NULL)
+    top <- if (!is.null(cs))
+      max(40, ceiling(stats::quantile(cs$between, 0.75, names = FALSE)), 4 * cs$suggested)
+      else 40
+    deblink_count_curve(df, minpts = deblink_minpts(input),
+                        eps_seq = seq(1, min(top, 400), length.out = 60),
+                        w = w, method = "centroid")
+  })
+
+  output$deblink_knee_plot <- renderPlot({
+    r <- deblink_knee_data()
+    validate(need(!is.null(r), "Not enough data to sweep the radius."))
+    cv <- r$curve
+    graphics::plot(cv$eps, cv$n_molecules, type = "l", lwd = 2.5, col = "#1f78b4",
+                   xlab = if (identical(input$deblink_method %||% "centroid", "vote"))
+                            "vote fraction f" else "centroid distance threshold (nm)",
+                   ylab = "de-blinked molecules",
+                   main = "Molecule count vs merge threshold")
+    graphics::points(cv$eps, cv$n_molecules, pch = 16, cex = 0.5, col = "#1f78b4")
+    graphics::abline(h = r$n_traces, col = "#969696", lty = 3, lwd = 2)   # no merging at all
+    if (is.finite(r$knee)) graphics::abline(v = r$knee, col = "#e08214", lwd = 2, lty = 4)
+    e_cur <- suppressWarnings(as.numeric(
+      if (identical(input$deblink_method %||% "centroid", "vote")) input$vote_frac
+      else input$eps_centroid))
+    if (length(e_cur) == 1 && is.finite(e_cur))
+      graphics::abline(v = e_cur, col = "#d7191c", lwd = 2.5, lty = 2)
+    graphics::legend("topright", bty = "n", cex = 0.9,
+      legend = c("molecules", "traces (no merging)", "knee", "current threshold"),
+      col = c("#1f78b4", "#969696", "#e08214", "#d7191c"),
+      lty = c(1, 3, 4, 2), lwd = c(2.5, 2, 2, 2.5))
+  })
+
+  output$deblink_knee_summary <- renderUI({
+    r <- tryCatch(deblink_knee_data(), error = function(e) NULL)
+    if (is.null(r)) return(NULL)
+    cv <- r$curve
+    at <- function(e) { i <- which.min(abs(cv$eps - e)); cv$n_molecules[i] }
+    e_cur <- suppressWarnings(as.numeric(
+      if (identical(input$deblink_method %||% "centroid", "vote")) input$vote_frac
+      else input$eps_centroid))
+    tagList(
+      helpText(sprintf("%s traces → %s molecules at the knee (%.0f nm)%s.",
+                       format(r$n_traces, big.mark = ","),
+                       if (is.finite(r$knee)) format(at(r$knee), big.mark = ",") else "-",
+                       r$knee,
+                       if (length(e_cur) == 1 && is.finite(e_cur))
+                         sprintf("; %s at your current %.0f nm",
+                                 format(at(e_cur), big.mark = ","), e_cur) else "")),
+      if (r$n_locs < 60000L) NULL else
+        helpText("Curve computed on a 60,000-localization subsample."),
+      # Measured: the knee detector is calibrated for the raw-point curve, whose
+      # steep initial drop comes from traces FRAGMENTING at small eps. The
+      # centroid curve has no such regime — it simply starts at "no merging" and
+      # declines — so the curvature maximum lands mid-slope and reads far too
+      # low (synthetic: knee 5 nm -> 422 molecules, against 360 truth and 360 at
+      # the σ-based suggestion). Do not tune the centroid threshold from it.
+      if (identical(input$deblink_method %||% "centroid", "centroid"))
+        helpText(tags$b("Unreliable for this criterion: "),
+                 "the knee is calibrated for the raw-point curve shape and reads too low ",
+                 "on centroid distances. Use 'Suggest threshold from trace spread' instead; ",
+                 "the curve itself is still worth reading.")
+      else NULL
+    )
+  })
+
 
   output$download_two_color_settings <- downloadHandler(
     filename = function() {
@@ -1954,12 +2159,13 @@ smlm_server <- function(input, output, session) {
         
         enable_two_color_cluster1 = isTRUE(input$enable_two_color_cluster1),
         eps_tc1 = input$eps_tc1,
-        minpts_tc1 = input$minpts_tc1,
+        deblink_method_tc1 = input$deblink_method_tc1,
+        vote_frac_tc1 = input$vote_frac_tc1,
+        vote_rho_tc1 = input$vote_rho_tc1,
         show_tc1_alpha = isTRUE(input$show_tc1_alpha),
         tc1_alpha = input$tc1_alpha,
         tc1_alpha_opacity = input$tc1_alpha_opacity,
         tc1_alpha_min_pts = input$tc1_alpha_min_pts,
-        exclude_unclustered_tc1 = isTRUE(input$exclude_unclustered_tc1),
         
         enable_two_color_cluster2 = isTRUE(input$enable_two_color_cluster2),
         cluster2_method_tc2 = input$cluster2_method_tc2 %||% "dbscan",
@@ -2010,7 +2216,10 @@ smlm_server <- function(input, output, session) {
       # Core MINFLUX columns — always included when present
       core_cols <- c("x", "y", "z", "tid", "efo", "cfr", "eco", "fbg", "dcr")
       # Optional columns included only when they exist and carry real data
-      optional_cols <- c("fluo", "tim", "itr", "dwell",
+      # dcr_pooled is exported so the pooled value SURVIVES a round-trip: it is
+      # derived from the per-iteration dcr1, which a CSV does not carry, so
+      # without this it could never be recomputed after re-import.
+      optional_cols <- c("fluo", "tim", "itr", "dwell", "dcr_pooled",
                          "pcid", "scid", "n_in_cluster2",
                          ".dataset_tag", "analysis_group")
 
@@ -2855,7 +3064,7 @@ smlm_server <- function(input, output, session) {
           # has already been through their pipeline, so there is nothing to pool here.
           if (!pooled && has_pooled_col)
             paste0(" <b>This file has a pooled DCR column you are not using</b> — tick ",
-                   "<i>Use pooled DCR</i> and re-run; pooled DCR usually separates the dyes better.")
+                   "<i>Use pooled DCR</i> and re-upload; pooled DCR usually separates the dyes better.")
           else if (!pooled)
             paste0(" Splitting on raw DCR. If this came from <b>.npy/.json</b>, re-uploading with ",
                    "<i>Pool DCR</i> enabled (photon-weighted across the iteration sequence) usually ",
@@ -2867,12 +3076,9 @@ smlm_server <- function(input, output, session) {
       # two dyes existing — the experiment design is.
       tags$div(style = "margin-top:5px; padding:5px 8px; border-left:3px solid #b26a00; background:rgba(178,106,0,0.06); font-size:0.8em; color:#7f8c8d; line-height:1.45;",
         HTML(paste0(
-          "<b>d' measures separation, not whether two dyes exist.</b> Asking for two components ",
-          "always returns two — a single-dye DCR distribution is skewed, and two Gaussians fit ",
-          "skewed data better than one (a confirmed single-colour file here still scored ",
-          "d' = 2.65). So use these numbers to judge <i>how good</i> a two-colour split is, once ",
-          "you already know from the experiment that there are two dyes."))))
-  })
+          "<b>d' measures separation, not whether two dyes exist.</b>",
+          " A two-component GMM will always produce 2 groups, even if there is only one dye."))))
+    })
 
   # ------ HISTOGRAM for filters
   output$metadata_histogram <- renderPlotly({
@@ -4797,6 +5003,19 @@ smlm_server <- function(input, output, session) {
       # see deblink_minpts() in helpers_smlm.R.
       mp1 <- deblink_minpts(input)
 
+      # Merge criterion. Mirrors apply_clustering_pipeline() exactly — the two
+      # must agree or the plot and the batch tools disagree about what a
+      # molecule is. See deblink_merge_centroids() for the comparison.
+      method1 <- input$deblink_method %||% "centroid"
+      thr1    <- input$eps_centroid   %||% 10
+      run_primary <- function(idx) {
+        if (identical(method1, "vote"))
+          return(deblink_merge_majority_vote(df[idx, , drop = FALSE],
+                   f = input$vote_frac %||% 0.2, rho = input$vote_rho %||% 1.2,
+                   mutual = !identical(input$vote_link %||% "mutual", "either"), w = aw1))
+        deblink_merge_centroids(df[idx, , drop = FALSE], thr1, aw1)
+      }
+
       mplex_on <- "mplex_channel" %in% names(df) && any(!is.na(df$mplex_channel))
       if (mplex_on) {
         # Multiplex: clusters are confined to a single channel (run DBSCAN per
@@ -4805,16 +5024,13 @@ smlm_server <- function(input, output, session) {
         for (chv in sort(unique(df$mplex_channel[!is.na(df$mplex_channel)]))) {
           idx <- which(df$mplex_channel == chv)
           if (!length(idx)) next
-          cl  <- dbscan::dbscan(dbs_pts(idx), eps = input$eps, minPts = mp1)
-          cid <- cl$cluster
+          cid <- run_primary(idx)
           cid[cid > 0] <- cid[cid > 0] + (next_id - 1L)
           df$cluster[idx] <- cid
           if (any(cid > 0)) next_id <- max(cid, na.rm = TRUE) + 1L
         }
       } else if (scope == "all" || mode == "none") {
-        cl  <- dbscan::dbscan(dbs_pts(seq_len(nrow(df))),
-                              eps = input$eps, minPts = mp1)
-        df$cluster <- cl$cluster
+        df$cluster <- run_primary(seq_len(nrow(df)))
       } else {
         # run DBSCAN per requested group subset
         groups_to_run <- switch(scope,
@@ -4824,8 +5040,7 @@ smlm_server <- function(input, output, session) {
         for (g in groups_to_run) {
           idx <- which(df$analysis_group == g)
           if (length(idx) >= 1) {
-            cl  <- dbscan::dbscan(dbs_pts(idx), eps = input$eps, minPts = mp1)
-            cid <- cl$cluster
+            cid <- run_primary(idx)
             # offset to keep unique IDs across groups
             cid[cid > 0] <- cid[cid > 0] + (next_id - 1L)
             df$cluster[idx] <- cid
@@ -5025,41 +5240,33 @@ smlm_server <- function(input, output, session) {
       # --- 2-color primary clustering (raw points within each group, TIDs kept atomic) ---
       if (isTRUE(input$enable_two_color_cluster1)) {
 
+        # Centroid de-blinking, per channel. Replaces raw-point DBSCAN, which
+        # merged whenever any two localizations touched and measured ~3x more
+        # errors on ground truth. Channels are offset so they never merge.
         df$cluster_tc1 <- 0L
+        aw_tc <- if (isTRUE(input$deblink_anisotropic))
+          deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+          else NULL
+        thr_tc <- suppressWarnings(as.numeric(input$eps_tc1))
+        if (!length(thr_tc) || !is.finite(thr_tc) || thr_tc <= 0) thr_tc <- 12
+        meth_tc <- input$deblink_method_tc1 %||% "centroid"
 
         for (g in c(1L, 2L)) {
           idx <- which(df$two_color_group == g & is.finite(df$x) & is.finite(df$y) & is.finite(df$z))
-          if (length(idx) < (input$minpts_tc1 %||% 5L)) next
-
-          pts <- if (isTRUE(input$mode3d == "3D")) {
-            as.matrix(df[idx, c("x","y","z")])
-          } else {
-            as.matrix(df[idx, c("x","y")])
-          }
-
-          cl  <- dbscan::dbscan(pts, eps = input$eps_tc1 %||% 20, minPts = input$minpts_tc1 %||% 5L)
-          cid <- cl$cluster
-          if (g == 2L) cid[cid > 0] <- cid[cid > 0] + 10000L
+          if (!length(idx)) next
+          cid <- if (identical(meth_tc, "vote"))
+            deblink_merge_majority_vote(df[idx, , drop = FALSE],
+              f = input$vote_frac_tc1 %||% 0.2, rho = input$vote_rho_tc1 %||% 1.2,
+              w = aw_tc)
+            else deblink_merge_centroids(df[idx, , drop = FALSE], thr_tc, aw_tc)
+          # Channel offset: A stays 1..n, B becomes 10001.. — this is what makes
+          # cross-colour merging structurally impossible, not merely unlikely.
+          if (g == 2L) cid <- cid + 10000L
           df$cluster_tc1[idx] <- cid
         }
+        # No TID-plurality pass needed: the centroid rule assigns whole traces,
+        # so a trace can never be split across two de-blinked molecules.
 
-        # Lock TIDs: every localization of a TID moves to the cluster its majority belongs to
-        tid_plurality <- df %>%
-          dplyr::filter(cluster_tc1 != 0L) %>%
-          dplyr::group_by(tid, cluster_tc1) %>%
-          dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
-          dplyr::group_by(tid) %>%
-          dplyr::slice_max(n, n = 1L, with_ties = FALSE) %>%
-          dplyr::ungroup() %>%
-          dplyr::select(tid, cluster_tc1_new = cluster_tc1)
-        df <- df %>%
-          dplyr::left_join(tid_plurality, by = "tid") %>%
-          dplyr::mutate(cluster_tc1 = dplyr::coalesce(cluster_tc1_new, 0L)) %>%
-          dplyr::select(-cluster_tc1_new)
-
-        if (isTRUE(input$exclude_unclustered_tc1)) {
-          df <- df %>% dplyr::filter(!is.na(cluster_tc1) & cluster_tc1 != 0)
-        }
       }
       
       # --- 2-color secondary clustering (tc1 cluster medians if tc1 on, else TID medians) ---
@@ -5185,7 +5392,7 @@ smlm_server <- function(input, output, session) {
         "<br>X: ", round(x, 2),
         "<br>Y: ", round(y, 2),
         if ("z" %in% names(.)) paste0("<br>Z: ", round(z, 2)) else "",
-        if (!all(is.na(cluster)))  paste0("<br>Cluster: ", cluster) else "",
+        if (!all(is.na(cluster)))  paste0("<br>De-blinked ID: ", cluster) else "",
         if (!all(is.na(cluster2))) paste0(
           "<br>Median Cluster: ", cluster2,
           ifelse(!is.na(n_in_cluster2), paste0(" (n=", n_in_cluster2, ")"), "")
@@ -5210,11 +5417,11 @@ smlm_server <- function(input, output, session) {
         else "",
         ifelse(
           isTRUE(input$enable_two_color) & !is.na(tc1_lbl),
-          paste0("<br>2-color cluster1: ", tc1_lbl),
+          paste0("<br>Tc-De-blinked ID: ", tc1_lbl),
           ""),
         ifelse(
           isTRUE(input$enable_two_color) & !is.na(tc2_lbl),
-          paste0("<br>2-color Median cluster: ", tc2_lbl),
+          paste0("<br>Tc-Median Cluster: ", tc2_lbl),
           ""
         )
         )
@@ -8001,6 +8208,9 @@ smlm_server <- function(input, output, session) {
     use_z   <- isTRUE(input$prec_cloud_use_z)
     dxall <- dyall <- dzall <- numeric(0)          # pooled residuals (length-weighted)
     sxt <- syt <- szt <- numeric(0)                # per-TRACE SDs (one vote each, robust)
+    # Per-TRACE covariances. Needed because a cloud tilted off the x/y axes has
+    # its elongation entirely in the cross term — per-axis SDs cannot see it.
+    cxyt <- cxzt <- cyzt <- numeric(0)
     per_file <- list()
     pooled   <- list()                             # per-loc residuals (dx/dy/dz) for the plot
     withProgress(message = "Computing precision cloud...", value = 0, {
@@ -8029,13 +8239,23 @@ smlm_server <- function(input, output, session) {
         if (hasz) dzall <- c(dzall, dd$dz[is.finite(dd$dz)])
         # One robust σ per trace (each trace counts once, so a 2000-loc fiducial
         # doesn't dominate the precision estimate the way the pooled cloud does).
+        safe_cov <- function(u, v) {
+          ok <- is.finite(u) & is.finite(v)
+          if (sum(ok) < 3L) return(NA_real_)
+          stats::cov(u[ok], v[ok])
+        }
         pts <- dd %>% dplyr::group_by(tid) %>%
           dplyr::summarise(sdx = stats::sd(dx, na.rm = TRUE),
                            sdy = stats::sd(dy, na.rm = TRUE),
                            sdz = if (hasz) stats::sd(dz, na.rm = TRUE) else NA_real_,
+                           cxy = safe_cov(dx, dy),
+                           cxz = if (hasz) safe_cov(dx, dz) else NA_real_,
+                           cyz = if (hasz) safe_cov(dy, dz) else NA_real_,
                            .groups = "drop")
         sxt <- c(sxt, pts$sdx); syt <- c(syt, pts$sdy)
         if (hasz) szt <- c(szt, pts$sdz[is.finite(pts$sdz)])
+        cxyt <- c(cxyt, pts$cxy)
+        if (hasz) { cxzt <- c(cxzt, pts$cxz); cyzt <- c(cyzt, pts$cyz) }
         per_file[[fname]] <- data.frame(
           dataset  = fname,
           sigma_x  = stats::sd(dd$dx, na.rm = TRUE),
@@ -8057,6 +8277,31 @@ smlm_server <- function(input, output, session) {
     sz_med <- if (length(szt)) stats::median(szt, na.rm = TRUE) else NA_real_
     # subsample rows for the plot (dx/dy/dz/is_fid kept aligned); σ computed from all
     P <- do.call(rbind, pooled)
+
+    # ── Covariance matrices: the shape of the cloud, tilt included ────────────
+    # POOLED describes exactly the population the heatmap draws (every
+    # localization, so long traces weigh more). ROBUST gives each trace one vote.
+    # Both are kept and both are drawn: when they disagree the gap IS the
+    # "a few long/wide traces dominate" diagnostic, made visible.
+    pair_cov <- function(u, v) {
+      ok <- is.finite(u) & is.finite(v)
+      if (sum(ok) < 3L) return(NULL)
+      stats::cov(cbind(u[ok], v[ok]))
+    }
+    cov_pooled <- list(
+      xy = pair_cov(P$dx, P$dy),
+      xz = if (length(dzall)) pair_cov(P$dx, P$dz) else NULL,
+      yz = if (length(dzall)) pair_cov(P$dy, P$dz) else NULL)
+    cov_trace <- list(
+      xy = robust_median_cov(sxt^2, syt^2, cxyt),
+      xz = if (length(szt)) robust_median_cov(sxt^2, szt^2, cxzt) else NULL,
+      yz = if (length(szt)) robust_median_cov(syt^2, szt^2, cyzt) else NULL)
+
+    # Headline anisotropy comes from the ROBUST matrix and is the eigenvalue
+    # ratio, not max(σx,σy)/min(σx,σy) — the latter reads ~1.0 on a 45°-tilted
+    # cloud and would report drifted data as "isotropic".
+    ell_r <- cov_ellipse_params(cov_trace$xy)
+
     keep <- if (nrow(P) > 40000L) sort(sample.int(nrow(P), 40000L)) else seq_len(nrow(P))
     Pp <- P[keep, , drop = FALSE]
     prec_cloud_results(list(
@@ -8066,6 +8311,13 @@ smlm_server <- function(input, output, session) {
       sigma_xy   = sqrt((sx^2 + sy^2) / 2),
       # robust, one-vote-per-trace precision (immune to fiducials / long traces)
       sigma_xy_med = sqrt((sx_med^2 + sy_med^2) / 2),
+      cov_pooled = cov_pooled, cov_trace = cov_trace,
+      # Rotation-invariant shape of the robust cloud, and WHICH WAY it leans.
+      aniso_ev  = if (!is.null(ell_r)) ell_r$ratio     else NA_real_,
+      tilt_deg  = if (!is.null(ell_r)) ell_r$angle_deg else NA_real_,
+      rho_xy    = if (!is.null(ell_r)) ell_r$rho       else NA_real_,
+      # Kept for the per-axis read-out; NOT used for the warning any more, since
+      # it cannot see elongation that runs diagonally.
       anisotropy = max(sx, sy) / max(1e-9, min(sx, sy)),
       skew_x = mom(dxall, 3), skew_y = mom(dyall, 3),
       kurt_x = mom(dxall, 4), kurt_y = mom(dyall, 4),
@@ -8087,15 +8339,18 @@ smlm_server <- function(input, output, session) {
     # scaleanchor, which cross-linked the zoom across panels. Here each y_i is scale-
     # anchored to its own x_i, so aspect is equal (1 nm x == 1 nm y) AND zooming one
     # panel leaves the others untouched. Ellipse semi-axes are the per-axis robust σ.
-    c_1s <- "#c03030"; c_2s <- "#2c7fb8"   # 1σ = red, 2σ = blue
+    c_1s <- "#c03030"; c_2s <- "#2c7fb8"   # 1σ = red, 2σ = blue (pooled)
+    c_rb <- "#1a9850"                      # robust per-trace 1σ = green
     L <- 30                                # fixed half-range (nm), all axes
     has_z <- isTRUE(r$has_z) && any(is.finite(r$dz))
+    # Sp = pooled covariance (the population the heatmap shows)
+    # Sr = robust per-trace covariance (the headline σ)
     panels <- if (has_z) list(
-      list(a = r$dx, b = r$dy, sa = r$sigma_x_med, sb = r$sigma_y_med, la = "Δx (nm)", lb = "Δy (nm)"),
-      list(a = r$dx, b = r$dz, sa = r$sigma_x_med, sb = r$sigma_z_med, la = "Δx (nm)", lb = "Δz (nm)"),
-      list(a = r$dy, b = r$dz, sa = r$sigma_y_med, sb = r$sigma_z_med, la = "Δy (nm)", lb = "Δz (nm)")
+      list(a = r$dx, b = r$dy, Sp = r$cov_pooled$xy, Sr = r$cov_trace$xy, la = "Δx (nm)", lb = "Δy (nm)"),
+      list(a = r$dx, b = r$dz, Sp = r$cov_pooled$xz, Sr = r$cov_trace$xz, la = "Δx (nm)", lb = "Δz (nm)"),
+      list(a = r$dy, b = r$dz, Sp = r$cov_pooled$yz, Sr = r$cov_trace$yz, la = "Δy (nm)", lb = "Δz (nm)")
     ) else list(
-      list(a = r$dx, b = r$dy, sa = r$sigma_x_med, sb = r$sigma_y_med,
+      list(a = r$dx, b = r$dy, Sp = r$cov_pooled$xy, Sr = r$cov_trace$xy,
            la = "Δx from trace centroid (nm)", lb = "Δy from trace centroid (nm)"))
     np  <- length(panels)
     gap <- if (np > 1) 0.06 else 0          # horizontal gap between panels (paper frac)
@@ -8111,13 +8366,24 @@ smlm_server <- function(input, output, session) {
       fig <- fig %>% plotly::add_histogram2dcontour(x = P$a[keep], y = P$b[keep],
         xaxis = xid, yaxis = yid, colorscale = "Hot", reversescale = TRUE, showscale = FALSE,
         nbinsx = 60, nbinsy = 60, ncontours = 14, hoverinfo = "skip", showlegend = FALSE)
-      sa <- max(1e-6, P$sa); sb <- max(1e-6, P$sb)
-      ell <- function(ra, rb, colr) list(type = "circle", xref = xid, yref = yid,
-        x0 = -ra, x1 = ra, y0 = -rb, y1 = rb, line = list(color = colr, width = 2, dash = "dot"))
+      # Rotated ellipses as SVG paths: plotly's "circle" shape is defined by a
+      # bounding box and therefore can only ever be axis-aligned, which is what
+      # made a diagonally elongated cloud look circular.
+      ell <- function(S, k, colr, dsh) {
+        e <- cov_ellipse_params(S, k = k)
+        if (is.null(e)) return(NULL)
+        pth <- ellipse_svg_path(e$ra, e$rb, e$theta)
+        if (is.null(pth)) return(NULL)
+        list(type = "path", path = pth, xref = xid, yref = yid,
+             line = list(color = colr, width = 2, dash = dsh))
+      }
       axl <- function(x0, x1, y0, y1) list(type = "line", xref = xid, yref = yid,
         x0 = x0, x1 = x1, y0 = y0, y1 = y1, line = list(color = "rgba(0,0,0,0.4)", width = 1))
-      shapes <- c(shapes, list(ell(sa, sb, c_1s), ell(2 * sa, 2 * sb, c_2s),
-                               axl(0, 0, -L, L), axl(-L, L, 0, 0)))
+      shapes <- c(shapes, Filter(Negate(is.null), list(
+        ell(P$Sp, 1, c_1s, "dot"),      # 1σ pooled — matches the heatmap
+        ell(P$Sp, 2, c_2s, "dot"),      # 2σ pooled
+        ell(P$Sr, 1, c_rb, "dash"),     # 1σ robust, one vote per trace
+        axl(0, 0, -L, L), axl(-L, L, 0, 0))))
       dom <- c((i - 1) * (w + gap), (i - 1) * (w + gap) + w)
       axis_args[[if (i == 1) "xaxis" else paste0("xaxis", i)]] <- list(
         title = P$la, range = c(-L, L), zeroline = FALSE, showgrid = FALSE,
@@ -8129,14 +8395,25 @@ smlm_server <- function(input, output, session) {
         title = P$lb, range = c(-L, L), zeroline = FALSE, showgrid = FALSE,
         domain = c(0, 1), anchor = xid, scaleanchor = xid, scaleratio = 1, constrain = "domain")
     }
-    # 1σ / 2σ legend swatches (once): zero-length invisible segments on panel 1.
+    # Legend swatches (once): zero-length invisible segments on panel 1. Named so
+    # the two POPULATIONS are distinguishable — the dotted rings describe the same
+    # localizations the heatmap draws, the dashed one gives each trace one vote.
     fig <- fig %>%
-      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "1σ",
+      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "1σ pooled",
         showlegend = TRUE, hoverinfo = "skip", line = list(color = c_1s, width = 2, dash = "dot")) %>%
-      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "2σ",
-        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_2s, width = 2, dash = "dot"))
+      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "2σ pooled",
+        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_2s, width = 2, dash = "dot")) %>%
+      plotly::add_lines(x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = "1σ per trace (robust)",
+        showlegend = TRUE, hoverinfo = "skip", line = list(color = c_rb, width = 2, dash = "dash"))
+    # Legend below the x-axis title, and NOT clickable: the entries are dummy
+    # zero-length traces used purely as colour swatches. The rings are layout
+    # shapes, so clicking a legend item could never toggle them - it only looked
+    # broken.
     p <- do.call(plotly::layout, c(list(fig, shapes = shapes,
-      legend = list(orientation = "h"), margin = list(t = 10, b = 40)), axis_args))
+      legend = list(orientation = "h", x = 0.5, xanchor = "center",
+                    y = -0.24, yanchor = "top",
+                    itemclick = FALSE, itemdoubleclick = FALSE),
+      margin = list(t = 10, b = 100)), axis_args))
     # Autoscale-to-data interacts with scaleanchor to blow the ranges up (±100) and
     # desync the panel sizes. Make double-click / reset return to the fixed ±L frame
     # instead, and drop the autoscale button so the only "fit" action is that reset —
@@ -8148,8 +8425,12 @@ smlm_server <- function(input, output, session) {
   output$prec_cloud_stats <- renderUI({
     r <- prec_cloud_results(); if (is.null(r)) return(NULL)
     warn <- character(0)
-    if (is.finite(r$anisotropy) && r$anisotropy > 1.3)
-      warn <- c(warn, sprintf("anisotropy %.2f (elongated — drift within traces or an anisotropic PSF)", r$anisotropy))
+    # Keyed off the EIGENVALUE ratio, not max(σx,σy)/min(σx,σy): the latter scores
+    # ~1.0 on a 45°-tilted cloud and would call drifted data isotropic. The angle
+    # is reported because drift has a direction and that is the useful clue.
+    if (is.finite(r$aniso_ev) && r$aniso_ev > 1.3)
+      warn <- c(warn, sprintf("elongated %.2f:1 along %.0f° (drift within traces, or an anisotropic PSF)",
+                              r$aniso_ev, r$tilt_deg))
     if (is.finite(r$kurt_x) && max(r$kurt_x, r$kurt_y, na.rm = TRUE) > 5)
       warn <- c(warn, "heavy tails (kurtosis ≫ 3 — possible mislinks / double events)")
     # If the length-weighted pooled σ is much larger than the per-trace median, a
@@ -8159,7 +8440,8 @@ smlm_server <- function(input, output, session) {
     htmltools::div(style = "font-size:0.9em; margin-top:4px;",
       htmltools::tags$b(sprintf("σ_xy = %.2f nm (median per trace, robust)", r$sigma_xy_med)),
       if (r$has_z && is.finite(r$sigma_z_med)) sprintf(" · σ_z %.2f nm", r$sigma_z_med) else "",
-      sprintf("  |  pooled σ_xy %.2f (σ_x %.2f · σ_y %.2f · anisotropy %.2f)  |  skew x/y %.2f/%.2f  ·  kurtosis x/y %.1f/%.1f  |  %s locs, %s traces",
+      sprintf("  |  elongation %.2f:1 at %.0f° (ρ %.2f)  |  pooled σ_xy %.2f (σ_x %.2f · σ_y %.2f · axis ratio %.2f)  |  skew x/y %.2f/%.2f  ·  kurtosis x/y %.1f/%.1f  |  %s locs, %s traces",
+              r$aniso_ev, r$tilt_deg, r$rho_xy,
               r$sigma_xy, r$sigma_x, r$sigma_y, r$anisotropy, r$skew_x, r$skew_y,
               r$kurt_x, r$kurt_y, format(r$n_locs, big.mark = ","),
               format(r$n_traces, big.mark = ",")),
@@ -8167,6 +8449,7 @@ smlm_server <- function(input, output, session) {
         "⚠ ", paste(warn, collapse = "; "), ".") else
         htmltools::div(style = "color:#2a6; margin-top:2px;", "Cloud is compact and near-isotropic."))
   })
+
 
   output$download_prec_cloud <- downloadHandler(
     filename = function() paste0("precision_cloud_perfile_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
