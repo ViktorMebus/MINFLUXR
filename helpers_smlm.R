@@ -4397,12 +4397,8 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
 #   1.09*sigma, while the nearest DIFFERENT molecule's centroid sits ~8*sigma
 #   away. A threshold of ~1.5*sigma therefore collects essentially every
 #   re-blink while still sitting far below the distinct-molecule population, and
-<<<<<<< HEAD
 #   the simulated error count bottoms out there (10 errors at k = 1.54, 11 at
 #   the k = 2.0 default this function ships with).
-=======
-#   1.5 is where the simulated error count bottomed out (10 errors at 1.54).
->>>>>>> c4383f3519c4268414a76a4243a2691a25c5543b
 #
 #   THAT COEFFICIENT ASSUMES THE LABEL DOES NOT MOVE BETWEEN BLINKS, and it is
 #   the weakest assumption in this whole panel. Re-running the calibration with
@@ -4429,11 +4425,7 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
 #   min_n : minimum localizations for a trace to contribute a spread estimate
 #   use_z : include z when the data is genuinely 3D
 #   w     : optional per-axis de-blink weights (same metric as the clustering)
-<<<<<<< HEAD
 #   k     : multiplier on sigma (default 2.0, see above)
-=======
-#   k     : multiplier on sigma (default 1.5, see above)
->>>>>>> c4383f3519c4268414a76a4243a2691a25c5543b
 #
 # RETURNS
 #   list(sigma_ax, sigma, suggested, within, between, frac_merged, n_traces,
@@ -4950,15 +4942,10 @@ apply_clustering_pipeline <- function(df, input) {
     # Two merge criteria, both trace-level. "centroid" compares where the traces
     # ARE; "vote" asks whether most of a trace's localizations think they belong
     # to a neighbouring trace. Raw-point DBSCAN was removed: one stray
-<<<<<<< HEAD
     # localization could bridge two molecules. Ground-truth errors at each
     # method's own best threshold: raw-point 35, vote 29, centroid 10.
     # (Centroid scores 11 at the k = 2.0 default and 10 at its optimum 1.54 —
     #  quote the basis, not a bare number.)
-=======
-    # localization could bridge two molecules (35 errors on ground truth, vs 11
-    # for centroid and 29 for vote).
->>>>>>> c4383f3519c4268414a76a4243a2691a25c5543b
     method1 <- input$deblink_method %||% "centroid"
     thr1    <- input$eps_centroid   %||% 10
 
