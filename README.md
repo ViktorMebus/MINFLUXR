@@ -38,6 +38,7 @@ An interactive R/Shiny application for visualization and analysis of **Abberior 
 - [Plugin System](#plugin-system)
 - [Further Documentation](#further-documentation)
 - [Notes & Tips](#notes--tips)
+- [References](#references)
 
 ## Overview
 
@@ -1543,3 +1544,107 @@ MINFLUXR/
 - **MSD fit range**: the linear fit uses Michalet & Berglund optimal-point selection for you. If you
   override it, keep to the early lags — later points rest on fewer pairs, have higher variance, and
   deviate from the linear model through confinement or undersampling.
+
+---
+
+## References
+
+The published literature each implemented method follows. Numbers link to the bibliography below.
+`docs/MINFLUX_analysis_methods.md` Part II additionally rates every method for **appropriateness on
+MINFLUX data specifically** (green / amber / red) — the more important read before trusting a number.
+
+### Method → literature
+
+| Method | Follows |
+|---|---|
+| [CVE — σ_loc and D](#cve-covariance-based-estimator) | Vestergaard 2014 [12] |
+| [TSA & cycle time](#time-signature-analysis-tsa--cycle-time) | Vogler 2025 [7] (MFX-TSA / MinSpt) |
+| [MSD computation](#msd-computation) | Qian 1991 [22]; Michalet 2010 [10] |
+| [MSD fit-range selection](#diffusion-coefficient-fitting) | Michalet & Berglund 2012 [11] |
+| [Anomalous exponent α](#diffusion-coefficient-fitting) | Metzler & Klafter 2000 [26]; Metzler 2014 [19]; Kepten 2015 [20] |
+| [Confinement](#confinement-index) | Simson 1995 [17]; Kusumi 1993 [23]; Saxton 1993/1995 [24][25]; Destainville & Salomé 2006 [27] |
+| [Jump distance distribution](#jump-distance-distribution-jdd) | Schütz 1997 [13]; Weimann 2013 [14] |
+| [Diffusive-state HMM](#diffusive-state-hmm) | Das, Cairo & Coombs 2009 [15]; Persson 2013 [16] (vbSPT) |
+| [Directionality / turn angles](#directionality--autocorrelation) | Burov 2013 [18] |
+| [Spatially resolved D-map](#spatially-resolved-d-map) | Vestergaard 2014 [12] (short-lag CVE limit) |
+| [Fast-diffusion ceiling](#fast-diffusion-ceiling) | Vogler 2025 [7] |
+| [Track segmentation (change points)](#track-segmentation--change-point--gmm) | Killick, Fearnhead & Eckley 2012 [21] (PELT) |
+| [Nearest-neighbour distances](#nearest-neighbour-distances) | Clark & Evans 1954 [28] |
+| [Median Clustering](#median-clustering) | Ester 1996 [29] (DBSCAN); Ankerst 1999 [30] (OPTICS); Campello 2013 [31] (HDBSCAN) |
+| [Ripley's L(r)](#ripleys-lr) | Ripley 1977 [32]; Besag 1977 [33]; Dixon 2002 [35] |
+| [Bivariate Ripley's L₁₂(r)](#bivariate-ripleys-l₁₂r) | Lotwick & Silverman 1982 [34] |
+| [Pair cross-correlation g₁₂(r)](#pair-cross-correlation-g₁₂r) | Sengupta 2011 [36]; Veatch 2012 [37] |
+| [Cross-channel NN & co-localization](#cross-channel-nearest-neighbor--co-localization-curve) | Lachmanovich 2003 [40] |
+| [KDE density map & Pearson r](#2d-kde-density-map--co-localization) | Silverman 1986 [38] (bandwidth); Dunn 2011 [41]; Costes 2004 [42] |
+| [Radius of gyration & anisotropy](#radius-of-gyration) | Rudnick & Gaspari 1986 [43]; Westin 1997 [44] |
+| [Cluster shape fitting / PCA axes](#fitting--metrics-3d-only) | Pearson 1901 [45]; Barber 1996 [47] (Qhull) |
+| [Reference surface (LOESS)](#global-reference-plane-and-surface) | Cleveland 1979 [46] |
+| Blinking / over-counting caveat | Annibale 2011 [39] |
+| MINFLUX platform & tracking context | Balzarotti 2017 [1]; Gwosch 2020 [2]; Schmidt 2021 [3]; Ostersehlt 2022 [6]; Scheiderer 2025 [8] |
+| MINFLUX tracking applications (what the data can resolve) | Wolff 2023 [4]; Deguchi 2023 [5] |
+| Simulator validation context | Marin & Ries 2025 [9] (SimuFLUX) |
+| General SPT background | Saxton & Jacobson 1997 [48]; Manzo & Garcia-Parajo 2015 [49]; Shen 2017 [50] |
+
+### Bibliography
+
+**MINFLUX microscopy & tracking**
+
+1. Balzarotti F, Eilers Y, Gwosch KC, Gynnå AH, Westphal V, Stefani FD, Elf J, Hell SW (2017). *Nanometer resolution imaging and tracking of fluorescent molecules with minimal photon fluxes.* Science 355(6325):606–612. doi:10.1126/science.aak9913
+2. Gwosch KC, Pape JK, Balzarotti F, Hoess P, Ellenberg J, Ries J, Hell SW (2020). *MINFLUX nanoscopy delivers 3D multicolor nanometer resolution in cells.* Nature Methods 17:217–224. doi:10.1038/s41592-019-0688-0
+3. Schmidt R, Weihs T, Wurm CA, Jansen I, Rehman J, Sahl SJ, Hell SW (2021). *MINFLUX nanometer-scale 3D imaging and microsecond-range tracking on a common fluorescence microscope.* Nature Communications 12:1478. doi:10.1038/s41467-021-21652-z
+4. Wolff JO, Scheiderer L, Engelhardt T, Engelhardt J, Matthias J, Hell SW (2023). *MINFLUX dissects the unimpeded walking of kinesin-1.* Science 379(6636):1004–1010. doi:10.1126/science.ade2650
+5. Deguchi T, Iwanski MK, Schentarra EM, et al. (2023). *Direct observation of motor protein stepping in living cells using MINFLUX.* Science 379(6636):1010–1015. doi:10.1126/science.ade2676
+6. Ostersehlt LM, Jans DC, Wittek A, et al. (2022). *DNA-PAINT MINFLUX nanoscopy.* Nature Methods 19:1072–1075. doi:10.1038/s41592-022-01577-1
+7. Vogler BTL, De Angelis G, Zhao Z, Eggeling C, Reina F (2025). *Parameter optimization for MINFLUX microscopy enabled single-particle tracking.* Communications Biology 8:1573. doi:10.1038/s42003-025-09060-1 — reference implementation *Toolbox_for_MINFLUX_SPT* (MinSpt), the source of the Time-Signature Analysis and the cycle-based MSD workflow ported here.
+8. Scheiderer L, Marin Z, Ries J (2025). *MINFLUX achieves molecular resolution with minimal photons.* Nature Photonics 19(3):238–247. doi:10.1038/s41566-025-01625-0
+9. Marin Z, Ries J (2025). *Evaluating MINFLUX experimental performance in silico* (SimuFLUX). Nature Communications 17:246. doi:10.1038/s41467-025-66952-w
+
+**Single-particle-tracking methods**
+
+10. Michalet X (2010). *Mean square displacement analysis of single-particle trajectories with localization error.* Phys. Rev. E 82:041914. doi:10.1103/PhysRevE.82.041914
+11. Michalet X, Berglund AJ (2012). *Optimal diffusion coefficient estimation in single-particle tracking.* Phys. Rev. E 85:061916. doi:10.1103/PhysRevE.85.061916
+12. Vestergaard CL, Blainey PC, Flyvbjerg H (2014). *Optimal estimation of diffusion coefficients from single-particle trajectories.* Phys. Rev. E 89:022726. doi:10.1103/PhysRevE.89.022726
+13. Schütz GJ, Schindler H, Schmidt T (1997). *Single-molecule microscopy on model membranes reveals anomalous diffusion.* Biophys. J. 73:1073–1080.
+14. Weimann L, Ganzinger KA, McColl J, et al. (2013). *A quantitative comparison of single-dye tracking analysis tools using Monte Carlo simulations.* PLOS ONE 8:e64287. doi:10.1371/journal.pone.0064287
+15. Das R, Cairo CW, Coombs D (2009). *A hidden Markov model for single particle tracks quantifies dynamic interactions between LFA-1 and the actin cytoskeleton.* PLoS Comput. Biol. 5:e1000556.
+16. Persson F, Lindén M, Unoson C, Elf J (2013). *Extracting intracellular diffusive states and transition rates from single-molecule tracking data* (vbSPT). Nature Methods 10:265–269.
+17. Simson R, Sheets ED, Jacobson K (1995). *Detection of temporary lateral confinement of membrane proteins using single-particle tracking analysis.* Biophys. J. 69:989–993.
+18. Burov S, Tabei SMA, Huynh T, et al. (2013). *Distribution of directional change as a signature of complex dynamics.* PNAS 110(49):19689–19694. doi:10.1073/pnas.1319473110
+19. Metzler R, Jeon JH, Cherstvy AG, Barkai E (2014). *Anomalous diffusion models and their properties.* Phys. Chem. Chem. Phys. 16:24128–24164. doi:10.1039/c4cp03465a
+20. Kepten E, Weron A, Sikora G, Burnecki K, Garini Y (2015). *Guidelines for the fitting of anomalous diffusion mean square displacement graphs.* PLOS ONE 10:e0117722. doi:10.1371/journal.pone.0117722
+21. Killick R, Fearnhead P, Eckley IA (2012). *Optimal detection of changepoints with a linear computational cost* (PELT). J. Am. Stat. Assoc. 107(500):1590–1598. doi:10.1080/01621459.2012.737745
+22. Qian H, Sheetz MP, Elson EL (1991). *Single particle tracking. Analysis of diffusion and flow in two-dimensional systems.* Biophys. J. 60:910–921. doi:10.1016/S0006-3495(91)82125-7
+23. Kusumi A, Sako Y, Yamamoto M (1993). *Confined lateral diffusion of membrane receptors as studied by single particle tracking.* Biophys. J. 65:2021–2040. doi:10.1016/S0006-3495(93)81253-0
+24. Saxton MJ (1993). *Lateral diffusion in an archipelago. Single-particle diffusion.* Biophys. J. 64:1766–1780.
+25. Saxton MJ (1995). *Single-particle tracking: effects of corrals.* Biophys. J. 69:389–398. doi:10.1016/S0006-3495(95)79911-8
+26. Metzler R, Klafter J (2000). *The random walk's guide to anomalous diffusion: a fractional dynamics approach.* Phys. Rep. 339:1–77. doi:10.1016/S0370-1573(00)00070-3
+27. Destainville N, Salomé L (2006). *Quantification and correction of systematic errors due to detector time-averaging in single-molecule tracking experiments.* Biophys. J. 90:L17–L19. doi:10.1529/biophysj.105.075176
+
+**SMLM & spatial statistics**
+
+28. Clark PJ, Evans FC (1954). *Distance to nearest neighbor as a measure of spatial relationships in populations.* Ecology 35:445–453. doi:10.2307/1931034
+29. Ester M, Kriegel HP, Sander J, Xu X (1996). *A density-based algorithm for discovering clusters in large spatial databases with noise* (DBSCAN). KDD-96:226–231.
+30. Ankerst M, Breunig MM, Kriegel HP, Sander J (1999). *OPTICS: ordering points to identify the clustering structure.* ACM SIGMOD Record 28(2):49–60. doi:10.1145/304181.304187
+31. Campello RJGB, Moulavi D, Sander J (2013). *Density-based clustering based on hierarchical density estimates* (HDBSCAN). PAKDD 2013, LNCS 7819:160–172. doi:10.1007/978-3-642-37456-2_14
+32. Ripley BD (1977). *Modelling spatial patterns.* J. R. Stat. Soc. B 39(2):172–212.
+33. Besag J (1977). *Contribution to the discussion of Dr Ripley's paper* (the L-transform of K). J. R. Stat. Soc. B 39:193–195.
+34. Lotwick HW, Silverman BW (1982). *Methods for analysing spatial processes of several types of points.* J. R. Stat. Soc. B 44(3):406–413.
+35. Dixon PM (2002). *Ripley's K function.* In: Encyclopedia of Environmetrics, Wiley. doi:10.1002/9780470057339.var046
+36. Sengupta P, Jovanovic-Talisman T, Skoko D, et al. (2011). *Probing protein heterogeneity in the plasma membrane using PALM and pair correlation analysis.* Nature Methods 8:969–975. doi:10.1038/nmeth.1704
+37. Veatch SL, Machta BB, Shelby SA, et al. (2012). *Correlation functions quantify super-resolution images and estimate apparent clustering due to over-counting.* PLoS ONE 7:e31457. doi:10.1371/journal.pone.0031457
+38. Silverman BW (1986). *Density Estimation for Statistics and Data Analysis.* Chapman & Hall.
+39. Annibale P, Vanni S, Scarselli M, Rothlisberger U, Radenovic A (2011). *Identification of clustering artifacts in photoactivated localization microscopy.* Nature Methods 8:527–528. doi:10.1038/nmeth.1627
+40. Lachmanovich E, Shvartsman DE, Malka Y, Botvin C, Henis YI, Weiss AM (2003). *Co-localization analysis of complex formation among membrane proteins by computerized fluorescence microscopy.* J. Microsc. 212(Pt 2):122–131. doi:10.1046/j.1365-2818.2003.01239.x
+41. Dunn KW, Kamocka MM, McDonald JH (2011). *A practical guide to evaluating colocalization in biological microscopy.* Am. J. Physiol. Cell Physiol. 300:C723–C742. doi:10.1152/ajpcell.00462.2010
+42. Costes SV, Daelemans D, Cho EH, Dobbin Z, Pavlakis G, Lockett S (2004). *Automatic and quantitative measurement of protein-protein colocalization in live cells.* Biophys. J. 86(6):3993–4003. doi:10.1529/biophysj.103.038422
+43. Rudnick J, Gaspari G (1986). *The asphericity of random walks.* J. Phys. A: Math. Gen. 19:L191–L193. doi:10.1088/0305-4470/19/4/004
+44. Westin CF, Peled S, Gudbjartsson H, Kikinis R, Jolesz FA (1997). *Geometrical diffusion measures for MRI from tensor basis analysis.* ISMRM 1997. See also Westin et al. (2002), Med. Image Anal. 6:93–108.
+45. Pearson K (1901). *On lines and planes of closest fit to systems of points in space* (PCA). Philosophical Magazine 2(11):559–572. doi:10.1080/14786440109462720
+46. Cleveland WS (1979). *Robust locally weighted regression and smoothing scatterplots* (loess). J. Am. Stat. Assoc. 74(368):829–836. doi:10.1080/01621459.1979.10481038
+47. Barber CB, Dobkin DP, Huhdanpaa H (1996). *The quickhull algorithm for convex hulls.* ACM Trans. Math. Softw. 22(4):469–483. doi:10.1145/235815.235821
+
+**Reviews**
+
+48. Saxton MJ, Jacobson K (1997). *Single-particle tracking: applications to membrane dynamics.* Annu. Rev. Biophys. Biomol. Struct. 26:373–399. doi:10.1146/annurev.biophys.26.1.373
+49. Manzo C, Garcia-Parajo MF (2015). *A review of progress in single particle tracking: from methods to biophysical insights.* Rep. Prog. Phys. 78:124601. doi:10.1088/0034-4885/78/12/124601
+50. Shen H, Tauzin LJ, Baiyasi R, et al. (2017). *Single particle tracking: from theory to biophysical applications.* Chem. Rev. 117(11):7331–7376. doi:10.1021/acs.chemrev.6b00815
