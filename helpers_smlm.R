@@ -1105,8 +1105,8 @@ safe_update_sd_range <- function(session, inputId, value) {
   shinyWidgets::updateNumericRangeInput(session, inputId, value = value)
 }
 # median summary, built on the table above
-compute_sd_medians <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT) {
-  tbl <- trace_spread_table(df, min_n = min_n)
+compute_sd_medians <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = TRUE) {
+  tbl <- trace_spread_table(df, min_n = min_n, robust = robust)
   if (!nrow(tbl)) {
     # Return a consistent empty result so the callers don't crash
     return(list(x = NA_real_, y = NA_real_, z = if ("sd_z" %in% names(tbl)) NA_real_ else NULL))
@@ -1118,7 +1118,7 @@ compute_sd_medians <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT) {
   if ("sd_z" %in% names(tbl)) res$z <- stats::median(tbl$sd_z, na.rm = TRUE)
   res
 }
-trace_spread_table <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT) {
+trace_spread_table <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = TRUE) {
   stopifnot(is.data.frame(df))
   if (!nrow(df)) {
     return(data.frame(
@@ -1131,7 +1131,29 @@ trace_spread_table <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT) {
   min_n <- max(2L, as.integer(min_n %||% MIN_LOCS_FOR_SPREAD_DEFAULT))
 
   has_z <- "z" %in% names(df) && any(is.finite(df$z))
-  base  <- df %>% dplyr::group_by(tid)
+
+  if (isTRUE(robust)) {
+    # Robust branch: per-axis spread comes from sd_by_tid (corrected MAD), and
+    # the overall spread is rebuilt from those axes rather than measured as an
+    # RMSD. RMSD squares the residuals, so one stray localization would dominate
+    # spread_rmsd even though every sd_ column had shrugged it off — the table
+    # would then contradict itself. For Gaussian residuals sqrt(sum of per-axis
+    # sigma^2) has the same expectation as the RMSD it replaces (sqrt(d)*sigma),
+    # so the column keeps its meaning and its scale.
+    out <- sd_by_tid(df, min_n = min_n, robust = TRUE)
+    if (!nrow(out)) return(data.frame(
+      tid = character(), sd_x = numeric(), sd_y = numeric(), sd_z = numeric(),
+      spread_rmsd = numeric(), sd_max = numeric()))
+    if (!has_z) out$sd_z <- NA_real_
+    sq <- out$sd_x^2 + out$sd_y^2 + if (has_z) out$sd_z^2 else 0
+    out$spread_rmsd <- sqrt(sq)
+    return(out %>%
+      dplyr::filter(.data$n_locs >= min_n) %>%
+      dplyr::mutate(sd_max = pmax(sd_x, sd_y, sd_z, na.rm = TRUE)) %>%
+      dplyr::select(-dplyr::any_of("n_locs")))
+  }
+
+  base <- df %>% dplyr::group_by(tid)
 
   if (has_z) {
     out <- base %>% dplyr::summarise(
@@ -1207,27 +1229,341 @@ sd_breaks_0max_from_raw <- function(raw_vals, bins) {
   if (!is.finite(mx) || mx <= 0) mx <- 1
   seq(0, mx, length.out = max(2, as.integer(bins) + 1L))
 }
-sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT) {
+# =============================================================================
+# grp_median() / grp_mad() — PER-GROUP MEDIAN AND MAD IN ONE RADIX SORT
+# =============================================================================
+#
+# GOAL
+#   Per-trace median and MAD fast enough to sit in a reactive that refires on
+#   every filter change.
+#
+# WHY NOT stats::mad() UNDER group_by()
+#   Measured on 600k localizations / 60k traces, three axes:
+#     dplyr + stats::sd    1.5 s
+#     dplyr + stats::mad   8.6 s     <- 5.9x, unusable in a reactive
+#     this                 0.7 s     <- 0.5x, i.e. FASTER than the sd it replaces
+#   stats::mad is a generic that re-sorts for each of its two medians and pays
+#   full argument dispatch per group. Sorting ONCE by (group, value) makes every
+#   group's values both contiguous and ordered, so the median is an index
+#   lookup, not a search. Same trick as the cleaning-pipeline radix fix.
+#
+#   Verified identical to stats::mad on 60k traces (max abs difference 0).
+#
+# ARGUMENTS
+#   g  : integer group code, 1..ng (NOT character — that is the slow path)
+#   v  : values, NAs allowed (dropped per group, like na.rm = TRUE)
+#   ng : number of groups
+#
+# RETURNS  numeric(ng), NA for groups with no non-NA value.
+# =============================================================================
+grp_median <- function(g, v, ng) {
+  ok <- !is.na(v)
+  if (!all(ok)) { g <- g[ok]; v <- v[ok] }
+  o  <- order(g, v, method = "radix")
+  gs <- g[o]; vs <- v[o]
+
+  cnt   <- tabulate(gs, nbins = ng)
+  end   <- cumsum(cnt)
+  start <- end - cnt + 1L
+
+  res <- rep(NA_real_, ng)
+  hit <- cnt > 0L
+  # even n -> mean of the two central values; odd n -> lo and hi coincide
+  lo  <- start[hit] + (cnt[hit] - 1L) %/% 2L
+  hi  <- start[hit] + cnt[hit] %/% 2L
+  res[hit] <- (vs[lo] + vs[hi]) / 2
+  res
+}
+
+grp_mad <- function(g, v, ng) {
+  m <- grp_median(g, v, ng)
+  1.4826 * grp_median(g, abs(v - m[g]), ng)
+}
+
+# =============================================================================
+# mad_finite_sample_factor() — MAKE MAD AN UNBIASED sigma AT SHORT TRACE LENGTHS
+# =============================================================================
+#
+# GOAL
+#   Remove MAD's small-sample downward bias so a spread threshold in nm means
+#   the same thing for a 6-localization trace as for a 40-localization one.
+#
+# WHY THIS IS NOT OPTIONAL HERE
+#   The 1.4826 constant makes MAD consistent for sigma only ASYMPTOTICALLY. At
+#   the trace lengths this app actually sees, E[MAD]/sigma is:
+#     n = 4  0.735      n = 8  0.887      n = 14 0.940
+#     n = 6  0.841      n = 12 0.931      n = 20 0.959
+#   Uncorrected, the same nm threshold is therefore far more permissive for
+#   SHORT traces — a length-dependent bias applied invisibly inside the filter,
+#   which is exactly the failure mode deblink_minpts() documents for minPts.
+#
+# THE FACTORS
+#   1 / E[MAD] under a Gaussian, simulated at 2e5 replicates per n. These
+#   reproduce the published Croux & Rousseeuw (1992) correction table to within
+#   0.5% (their n = 8: 1.129, here 1.1269), which is the standard reference for
+#   this correction. Above n = 20 the usual n / (n - 0.8) form takes over; it is
+#   continuous with the table at the join (1.0417 vs 1.0427).
+#
+# ARGUMENTS  n : integer vector of per-trace localization counts
+# RETURNS    numeric multiplier, 1 where n is not usable
+# =============================================================================
+.MAD_SMALL_N_FACTOR <- c(
+  1.1948, 1.4862, 1.3596, 1.2181, 1.1889, 1.1373, 1.1269, 1.0992, 1.0956,
+  1.0798, 1.0769, 1.0662, 1.0633, 1.0558, 1.0552, 1.0486, 1.0482, 1.0426,
+  1.0427)                                            # n = 2 .. 20
+
+mad_finite_sample_factor <- function(n) {
+  n   <- as.integer(n)
+  out <- rep(1, length(n))
+  small <- !is.na(n) & n >= 2L & n <= 20L
+  out[small] <- .MAD_SMALL_N_FACTOR[n[small] - 1L]
+  big <- !is.na(n) & n > 20L
+  out[big] <- n[big] / (n[big] - 0.8)
+  out
+}
+
+# =============================================================================
+# sd_by_tid() — PER-TRACE, PER-AXIS SPREAD
+# =============================================================================
+#
+# GOAL
+#   One spread number per trace per axis, for the Stage-2 spread filter, the
+#   spread histograms and the de-blink axis weights.
+#
+# WHY THE DEFAULT IS THE PLAIN SD
+#   This is the number the app REPORTS, and it is the one quantity here that has
+#   an outside reference: pyMINFLUX computes exactly this per trace ID
+#   (processor/_processor.py, calculate_statistics_on):
+#       sx = df_grouped["x"].std()   # pandas, ddof = 1
+#   Keeping it identical is what makes MINFLUXR's precision numbers comparable
+#   with pyMINFLUX's. pyMINFLUX has NO spread-based trace filter and NO
+#   per-localization outlier removal, so nothing downstream of this number is
+#   constrained by that comparison — only the number itself.
+#
+# WHY sd's ZERO BREAKDOWN POINT IS NOT A PROBLEM HERE ANY MORE
+#   One stray localization sets an sd. That used to delete whole traces over two
+#   bad points. The fix is trace_point_outliers(), which removes the stray
+#   localizations BEFORE this runs, rather than swapping the estimator: the
+#   contamination is dealt with where it lives instead of being averaged over.
+#   With trimming on there is one spread statistic in the whole app.
+#
+# ARGUMENTS
+#   df     : localization table (tid, x, y, optionally z)
+#   min_n  : below this, spread is left NA (undefined) rather than guessed
+#   robust : FALSE = pyMINFLUX-matching stats::sd (default and user-facing).
+#            TRUE  = finite-sample-corrected MAD. INTERNAL machinery only —
+#            trace_point_outliers() uses it to set the trimming scale, where a
+#            breakdown-resistant sigma is required and comparability is
+#            irrelevant. Not exposed as a user choice: two competing readings of
+#            "trace spread" in the UI is exactly the confusion to avoid.
+#
+# RETURNS  data.frame(tid, n_locs, sd_x, sd_y, sd_z), tid in its input type.
+# =============================================================================
+sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
   need_cols <- intersect(c("tid","x","y","z"), names(df))
   if (!all(c("tid","x","y") %in% need_cols)) return(data.frame())
 
   min_n <- max(2L, as.integer(min_n %||% MIN_LOCS_FOR_SPREAD_DEFAULT))
+  has_z <- "z" %in% need_cols
 
-  d <- df[, need_cols, drop = FALSE]
-  d$x <- as.numeric(d$x); d$y <- as.numeric(d$y)
-  has_z <- "z" %in% names(d)
-  if (has_z) d$z <- as.numeric(d$z)
+  if (!isTRUE(robust)) {
+    d <- df[, need_cols, drop = FALSE]
+    d$x <- as.numeric(d$x); d$y <- as.numeric(d$y)
+    if (has_z) d$z <- as.numeric(d$z)
+    return(d %>%
+      dplyr::group_by(tid) %>%
+      dplyr::summarise(
+        n_locs = dplyr::n(),
+        sd_x = if (dplyr::n() >= min_n) stats::sd(x, na.rm = TRUE) else NA_real_,
+        sd_y = if (dplyr::n() >= min_n) stats::sd(y, na.rm = TRUE) else NA_real_,
+        sd_z = if (has_z && dplyr::n() >= min_n) stats::sd(z, na.rm = TRUE) else NA_real_,
+        .groups = "drop"
+      ))
+  }
 
-  d %>%
-    dplyr::group_by(tid) %>%
-    dplyr::summarise(
-      n_locs = dplyr::n(),
-      sd_x = if (dplyr::n() >= min_n) stats::sd(x, na.rm = TRUE) else NA_real_,
-      sd_y = if (dplyr::n() >= min_n) stats::sd(y, na.rm = TRUE) else NA_real_,
-      sd_z = if (has_z && dplyr::n() >= min_n) stats::sd(z, na.rm = TRUE) else NA_real_,
-      .groups = "drop"
-    )
+  # Integer trace codes: grp_median sorts on them, and a character sort here is
+  # the ~25x penalty the cleaning pipeline already had to remove once.
+  f  <- factor(as.character(df$tid))
+  gi <- as.integer(f)
+  ng <- nlevels(f)
+  if (!ng) return(data.frame())
+
+  n_locs <- tabulate(gi, nbins = ng)
+  # The correction is per trace, because it depends on that trace's own n.
+  fac <- mad_finite_sample_factor(n_locs)
+
+  ax <- function(nm) {
+    if (!nm %in% need_cols) return(rep(NA_real_, ng))
+    grp_mad(gi, as.numeric(df[[nm]]), ng) * fac
+  }
+
+  # tid must come back in the type it went in as. factor() stringifies it, and
+  # returning character where the classic branch returns integer breaks every
+  # downstream join on tid ("can't join <integer> with <character>"). The
+  # level -> value mapping survives the conversion because as.integer(f) indexes
+  # into levels(f), so the pairing is positional, not alphabetical.
+  tid_out <- levels(f)
+  proto   <- df$tid
+  if (is.factor(proto))       tid_out <- factor(tid_out, levels = levels(proto))
+  else if (is.integer(proto)) tid_out <- as.integer(tid_out)
+  else if (is.numeric(proto)) tid_out <- as.numeric(tid_out)
+
+  out <- data.frame(tid = tid_out, n_locs = n_locs,
+                    sd_x = ax("x"), sd_y = ax("y"), sd_z = ax("z"),
+                    stringsAsFactors = FALSE)
+
+  # Short traces get NA, not a guess — an unreliable spread must not drive the
+  # filter. Matches the non-robust branch above.
+  short <- out$n_locs < min_n
+  out$sd_x[short] <- NA_real_
+  out$sd_y[short] <- NA_real_
+  out$sd_z[short] <- NA_real_
+  out
 }
+# =============================================================================
+# trace_point_outliers() — FLAG SINGLE LOCALIZATIONS THAT DO NOT FIT THEIR TRACE
+# =============================================================================
+#
+# GOAL
+#   Find the individual localizations that sit far from the rest of their OWN
+#   trace, so a 12-point trace is not deleted over 2 stray points. Flags rows;
+#   it never deletes and never touches whole traces.
+#
+# THE QUESTION IT ASKS, AND WHY THAT CHOICE MATTERS
+#   "Is this point unlike the REST OF THIS TRACE" — not "unlike the dataset".
+#   A uniformly broad trace (drift, two molecules, a fiducial) then loses
+#   NOTHING here, because all of its points agree with each other; deciding its
+#   fate stays with the spread filter and the rogue rules. Only a trace that is
+#   tight apart from a few strays loses those strays. Measured on real data
+#   (collaborator-cond02-B2, k = 4): a dataset-wide sigma flags 7.6% of all
+#   localizations, this rule flags 3.4%, and the difference is almost entirely
+#   points inside legitimately broad traces.
+#
+# THE SCALE: PER-TRACE SIGMA SHRUNK TOWARD THE DATASET
+#   A trace's own robust sigma is the right scale but is noisy at n ~ 10: used
+#   raw it flags 2.4% of points in CLEAN simulated data, because a trace that
+#   happens to draw a small MAD then rejects its own good points. The dataset
+#   sigma is stable but wrong for broad traces. So they are blended,
+#       sigma_eff = w * sigma_trace + (1 - w) * sigma_pooled,   w = n / (n + 6)
+#   which is the usual shrinkage form: short traces borrow the dataset's
+#   stability, long traces trust themselves. Measured on clean simulation this
+#   costs 0.88% false flags (vs 2.43% per-trace, 0.22% pooled) while still
+#   catching 100% of injected contaminants at k = 4.
+#
+#   sigma is robust (corrected MAD) at BOTH levels on purpose. An sd-based scale
+#   would be inflated by the very outliers it is meant to find, so the test
+#   would hide them — the estimator is internal machinery, not the reported
+#   number (see sd_by_tid).
+#
+# THE DISTANCE
+#   Per-axis whitened, r^2 = sum over axes of ((v - median) / sigma_eff)^2, so
+#   the anisotropy of MINFLUX precision (z is not x) does not leak into the
+#   threshold. Same metric as apply_deblink_weights.
+#
+# WHY THE GAUSSIAN k DOES NOT PREDICT THE REJECTION RATE
+#   Under a Gaussian null, k = 4 rejects essentially nothing. On real data it
+#   flags ~3%. The residuals are genuinely heavier-tailed than Gaussian, so the
+#   only honest rejection estimate is the one MEASURED on the loaded data —
+#   which is what trim_summary() reports rather than a theoretical number.
+#
+# PROTECTING SHORT TRACES
+#   Below min_trim_n a trace is never trimmed: at n = 5 a single point is 20% of
+#   the evidence and the trace median that defines "far" is itself barely
+#   determined. Trimming also never takes a trace below keep_n retained points.
+#
+# ARGUMENTS
+#   df         : localization table (tid, x, y, optionally z)
+#   k          : reject beyond this many sigma (user-set, default 4)
+#   min_trim_n : traces shorter than this are left untouched
+#   keep_n     : never trim a trace below this many retained localizations
+#   w0         : shrinkage half-weight; n = w0 splits trace and pooled evenly
+#
+# RETURNS  logical vector, one per ROW of df. TRUE = outlier.
+# =============================================================================
+trace_point_outliers <- function(df, k = 4, min_trim_n = 6L,
+                                 keep_n = MIN_LOCS_FOR_SPREAD_DEFAULT, w0 = 6) {
+  n <- nrow(df)
+  if (!is.data.frame(df) || !n || !all(c("tid", "x", "y") %in% names(df)))
+    return(rep(FALSE, max(0L, n)))
+  k <- suppressWarnings(as.numeric(k))
+  if (!length(k) || !is.finite(k) || k <= 0) return(rep(FALSE, n))
+
+  axes <- intersect(c("x", "y", "z"), names(df))
+  f  <- factor(as.character(df$tid))
+  gi <- as.integer(f); ng <- nlevels(f)
+  n_tr <- tabulate(gi, nbins = ng)
+
+  # Robust scale at both levels: per trace, and pooled over traces long enough
+  # for their own estimate to mean anything.
+  sg  <- sd_by_tid(df, min_n = 2L, robust = TRUE)
+  sg  <- sg[match(levels(f), as.character(sg$tid)), , drop = FALSE]
+  fac <- n_tr / (n_tr + w0)
+
+  r2 <- numeric(n)
+  for (ax in axes) {
+    v   <- as.numeric(df[[ax]])
+    col <- paste0("sd_", ax)
+    per <- if (col %in% names(sg)) sg[[col]] else rep(NA_real_, ng)
+    pooled <- stats::median(per[n_tr >= max(4L, min_trim_n)], na.rm = TRUE)
+    if (!is.finite(pooled) || pooled <= 0) pooled <- stats::median(per, na.rm = TRUE)
+    if (!is.finite(pooled) || pooled <= 0) next          # axis carries no spread
+    use <- ifelse(is.finite(per) & per > 0, per, pooled)
+    sig <- fac * use + (1 - fac) * pooled
+    sig[!is.finite(sig) | sig <= 0] <- pooled
+    ctr <- grp_median(gi, v, ng)
+    r2  <- r2 + ((v - ctr[gi]) / sig[gi])^2
+  }
+  flag <- sqrt(r2) > k
+  flag[is.na(flag)] <- FALSE
+
+  # Short traces are exempt entirely.
+  flag[n_tr[gi] < as.integer(min_trim_n)] <- FALSE
+
+  # Never trim a trace below keep_n retained points. A trace that would breach
+  # that is not "a good trace with a few strays" — it is a trace this rule
+  # cannot describe, so it is left whole for the trace-level filters to judge.
+  n_flag <- tabulate(gi[flag], nbins = ng)
+  breach <- which(n_tr - n_flag < as.integer(keep_n))
+  if (length(breach)) flag[gi %in% breach] <- FALSE
+
+  flag
+}
+
+# =============================================================================
+# trim_summary() — WHAT THE TRIM ACTUALLY DID, FOR THE INFO BOX
+# =============================================================================
+# GOAL
+#   Report the trim as a measured outcome on THIS dataset, not as a theoretical
+#   rejection rate — see trace_point_outliers() on why the Gaussian number is
+#   wrong here by a factor of ten.
+#
+#   The per-trace trimmed FRACTION is the composite-trace diagnostic: a few
+#   percent means stray localizations, a large fraction means the trace was
+#   never one molecule (simulated, a second molecule contributing 1/12 of the
+#   points trims 9%, 2/12 trims 18%, 4/12 trims 36%, 6/12 trims 86%). Reported
+#   as a count of traces past a fraction, not applied as a rule, because the
+#   fraction is n-dependent and the threshold would be arbitrary.
+#
+# ARGUMENTS  df : the table the flags were computed on;  flag : that logical
+# RETURNS    list of scalars for renderUI
+# =============================================================================
+trim_summary <- function(df, flag) {
+  n <- length(flag)
+  if (!n) return(list(n_pts = 0L, n_flag = 0L, pct = 0, n_tr_touched = 0L,
+                      pct_tr = 0, n_tr_heavy = 0L, n_tr = 0L))
+  tid  <- as.character(df$tid)
+  per  <- tapply(flag, tid, mean)
+  list(
+    n_pts        = n,
+    n_flag       = sum(flag),
+    pct          = 100 * mean(flag),
+    n_tr         = length(per),
+    n_tr_touched = sum(per > 0),
+    pct_tr       = 100 * mean(per > 0),
+    n_tr_heavy   = sum(per >= 0.30)
+  )
+}
+
 # =============================================================================
 # cov_ellipse_params() — THE ERROR ELLIPSE OF A 2x2 COVARIANCE MATRIX
 # =============================================================================
@@ -1636,15 +1972,15 @@ remove_unstable_traces <- function(df, input) {
   min_n <- max(2L, as.integer(input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT))
 
   # Per-trace spread is only defined for traces with >= min_n localizations;
-  # shorter traces get NA (undefined spread) so their noisy SD never drives the
-  # filter — they are kept rather than judged on an unreliable spread.
-  spread_df <- df %>%
-    dplyr::group_by(tid) %>%
-    dplyr::summarise(
-      sd_x = if (dplyr::n() >= min_n) stats::sd(x, na.rm = TRUE) else NA_real_,
-      sd_y = if (dplyr::n() >= min_n) stats::sd(y, na.rm = TRUE) else NA_real_,
-      .groups = "drop"
-    )
+  # shorter traces get NA (undefined spread) so their noisy estimate never
+  # drives the filter — they are kept rather than judged on an unreliable
+  # spread. Same SD as the Stage-2 filter, on the same trimmed point set.
+  if (isTRUE(input$trim_outliers)) {
+    fl <- tryCatch(trace_point_outliers(df, k = input$trim_k %||% 4, keep_n = min_n),
+                   error = function(e) NULL)
+    if (!is.null(fl) && length(fl) == nrow(df)) df <- df[!fl, , drop = FALSE]
+  }
+  spread_df <- sd_by_tid(df, min_n = min_n)
 
   # Compute fallback thresholds from traces with a defined spread only.
   fallback <- spread_df %>%
@@ -1685,6 +2021,16 @@ apply_meta_filters_batch <- function(df, input) {
     hard_filter("tim",   input$tim_range)   %>%
     hard_filter("dwell", input$dwell_range) %>%
     hard_filter("fluo",  input$fluo_range)
+  # Outlier localizations — Stage 1b, and it MUST come before the length filter
+  # below, exactly as in the interactive pipeline: a trimmed point is not a
+  # localization of that trace, so it must not count toward its length either.
+  if (isTRUE(input$trim_outliers) && "tid" %in% names(df) && nrow(df)) {
+    fl <- tryCatch(trace_point_outliers(
+            df, k = input$trim_k %||% 4,
+            keep_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT),
+          error = function(e) NULL)
+    if (!is.null(fl) && length(fl) == nrow(df)) df <- df[!fl, , drop = FALSE]
+  }
   # TID length filter
   tlr <- input$tid_length_range
   if ("tid" %in% names(df) && !is.null(tlr) && length(tlr) == 2 && all(is.finite(tlr))) {
@@ -1697,12 +2043,10 @@ apply_meta_filters_batch <- function(df, input) {
     tx <- input$target_sd_x; ty <- input$target_sd_y
     if (!is.null(tx) && !is.null(ty) && is.finite(tx) && is.finite(ty) && tx > 0 && ty > 0) {
       min_n <- max(2L, as.integer(input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT))
-      spread <- df %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(
-          sd_x = if (dplyr::n() >= min_n) stats::sd(x, na.rm = TRUE) else NA_real_,
-          sd_y = if (dplyr::n() >= min_n) stats::sd(y, na.rm = TRUE) else NA_real_,
-          .groups = "drop")
+      # Same estimator as the interactive Stage-2 filter, on the same trimmed
+      # point set, or batch and interactive report different trace counts from
+      # one setting. Trimming already happened above.
+      spread <- sd_by_tid(df, min_n = min_n)
       # Traces with undefined spread (NA, too short) are kept, not filtered.
       valid <- spread$tid[dplyr::coalesce(spread$sd_x, 0) <= tx &
                           dplyr::coalesce(spread$sd_y, 0) <= ty]
@@ -1972,19 +2316,21 @@ flag_rogue_tids <- function(spread_df, rule = "factor_median", factor = 2.5) {
   bad
 }
 
-remove_rogue_traces <- function(df, rule = c("factor_median","mad_rule","axis_sd"), factor = 2.5, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT) {
+remove_rogue_traces <- function(df, rule = c("factor_median","mad_rule","axis_sd"),
+                                factor = 2.5, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
+                                robust = TRUE) {
   rule <- match.arg(rule)
-  
-  spread <- df %>%
-    dplyr::group_by(tid) %>%
-    dplyr::summarise(
-      sd_x = stats::sd(x, na.rm = TRUE),
-      sd_y = stats::sd(y, na.rm = TRUE),
-      sd_z = if ("z" %in% names(df)) stats::sd(z, na.rm = TRUE) else NA_real_,
-      n    = dplyr::n(),
-      .groups = "drop"
-    )
-  
+
+  # The per-trace spread MUST use the same estimator as the Stage-2 filter.
+  # These rules were robust ACROSS traces (median/MAD of the per-trace values)
+  # but the per-trace value itself was a plain sd, so a trace with 2 stray
+  # localizations that the spread filter deliberately kept would be deleted here
+  # instead — the two stages would silently disagree about what a rogue is.
+  spread <- sd_by_tid(df, min_n = 2L, robust = robust)
+  if (!nrow(spread)) return(list(df = df, removed_tids = character(0),
+                                 removed_n = 0L, note = "no traces"))
+  names(spread)[names(spread) == "n_locs"] <- "n"
+
   keep <- rep(TRUE, nrow(spread))
   note <- ""
   
@@ -4562,8 +4908,36 @@ deblink_axis_weights <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, use_z 
 # Kept as one function so every primary-DBSCAN call site transforms identically
 # — the suggestion and the clustering must share a metric or eps is meaningless.
 apply_deblink_weights <- function(pts, w) {
-  if (is.null(w) || all(w == 1)) return(pts)
-  sweep(pts, 2L, w[seq_len(ncol(pts))], "*")
+  if (is.null(w)) return(pts)
+  # A weight vector shorter than the coordinate matrix used to pad with NA
+  # (w[seq_len(3)] on a length-2 w), which poisons every centroid downstream and
+  # silently switched de-blinking off. Anything missing or non-finite means
+  # "leave that axis alone", which is the isotropic default.
+  ww <- rep(1, ncol(pts))
+  n  <- min(length(w), ncol(pts))
+  if (n) ww[seq_len(n)] <- as.numeric(w)[seq_len(n)]
+  ww[!is.finite(ww)] <- 1
+  if (all(ww == 1)) return(pts)
+  sweep(pts, 2L, ww, "*")
+}
+
+# GOAL: the coordinate columns actually present, in canonical order.
+# The de-blink family must agree on this: suggest_centroid_threshold() and
+# deblink_count_curve() already tolerated 2D input while the two merge functions
+# hard-coded c("x","y","z") and errored with "undefined columns selected".
+deblink_coord_cols <- function(df) intersect(c("x", "y", "z"), names(df))
+
+# GOAL: per-column median of a coordinate matrix -> one numeric vector.
+# Base R only (no matrixStats dependency); the matrices here are 2-3 columns and
+# a handful of rows per trace, so a column loop costs nothing. Kept as its own
+# function because every de-blink call site must collapse a trace to a centroid
+# the same way — median, NA-tolerant, always length ncol even for empty input.
+matrixStats_colMedian <- function(m) {
+  if (!is.matrix(m)) m <- as.matrix(m)
+  storage.mode(m) <- "double"
+  if (!nrow(m)) return(rep(NA_real_, ncol(m)))
+  vapply(seq_len(ncol(m)), function(j) stats::median(m[, j], na.rm = TRUE),
+         numeric(1))
 }
 
 # =============================================================================
@@ -4612,16 +4986,38 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
   thr <- suppressWarnings(as.numeric(thr))
   if (!length(thr) || !is.finite(thr) || thr <= 0) thr <- 1e-9
 
+  cols <- deblink_coord_cols(sub_df)
+  if (length(cols) < 2L) return(rep(1L, n))
   tid <- as.character(sub_df$tid)
-  P   <- apply_deblink_weights(as.matrix(sub_df[, c("x", "y", "z"), drop = FALSE]), w)
+  P   <- apply_deblink_weights(as.matrix(sub_df[, cols, drop = FALSE]), w)
 
   g <- split(seq_len(n), tid)
   M <- t(vapply(g, function(ix) matrixStats_colMedian(P[ix, , drop = FALSE]),
                 numeric(ncol(P))))
-  # Single linkage at `thr`: DBSCAN with minPts = 1 is exactly that, and it
-  # cannot emit noise.
-  cl <- tryCatch(dbscan::dbscan(M, eps = thr, minPts = 1L)$cluster,
-                 error = function(e) seq_len(nrow(M)))
+
+  # A trace whose centroid is non-finite (e.g. its z is entirely NA) makes
+  # dbscan throw. That used to hit the blanket tryCatch below and return
+  # "every trace is its own molecule" for the WHOLE dataset — de-blinking
+  # silently disabled, with an inflated molecule count and no warning. Instead,
+  # cluster the traces that do have a usable centroid and give each unusable one
+  # its own id, which is the merge-only rule applied to a trace we cannot place.
+  # An axis that is unmeasured across the WHOLE dataset (a z column that is all
+  # NA rather than the synthesised 0) is dropped rather than allowed to
+  # invalidate every centroid — de-blinking then proceeds in the axes that exist.
+  keep_ax <- apply(is.finite(M), 2L, any)
+  if (any(keep_ax) && !all(keep_ax)) M <- M[, keep_ax, drop = FALSE]
+
+  ok <- is.finite(rowSums(M))
+  cl <- integer(nrow(M))
+  if (any(ok)) {
+    # Single linkage at `thr`: DBSCAN with minPts = 1 is exactly that, and it
+    # cannot emit noise.
+    cl[ok] <- tryCatch(dbscan::dbscan(M[ok, , drop = FALSE], eps = thr,
+                                      minPts = 1L)$cluster,
+                       error = function(e) seq_len(sum(ok)))
+  }
+  if (any(!ok)) cl[!ok] <- max(0L, max(cl[ok], 0L)) + seq_len(sum(!ok))
+
   lab <- stats::setNames(as.integer(cl), names(g))
   unname(lab[tid])
 }
@@ -4860,8 +5256,10 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRU
   f   <- min(max(as.numeric(f   %||% 0.5), 0.01), 1)
   rho <- max(as.numeric(rho %||% 1), 0.01)
 
+  cols <- deblink_coord_cols(sub_df)
+  if (length(cols) < 2L) return(rep(1L, n))
   tid  <- as.character(sub_df$tid)
-  P    <- apply_deblink_weights(as.matrix(sub_df[, c("x","y","z"), drop = FALSE]), w)
+  P    <- apply_deblink_weights(as.matrix(sub_df[, cols, drop = FALSE]), w)
   g    <- split(seq_len(n), tid)
   tn   <- names(g); nT <- length(g)
   if (nT < 2L) return(rep(1L, n))

@@ -952,6 +952,11 @@ smlm_server <- function(input, output, session) {
       sd_y_range       = sd_filt$y,
       sd_z_range       = sd_filt$z,
       sd_min_locs      = input$sd_min_locs,
+      # Outlier trimming REMOVES LOCALIZATIONS, so it changes every per-trace
+      # statistic downstream. Omitting it would make a reloaded file silently
+      # analyse a different point set than the one the ranges were set on.
+      trim_outliers    = isTRUE(input$trim_outliers),
+      trim_k           = input$trim_k,
       make_positive    = input$make_positive,
 
       # ── Rogue-trace removal — THIS CHANGES THE DATA ────────────────────────
@@ -971,6 +976,8 @@ smlm_server <- function(input, output, session) {
       hist_show_raw           = isTRUE(input$hist_show_raw),
       view_SD                 = isTRUE(input$view_SD),
       sd_bins                 = input$sd_bins,
+      sd_hist_shared          = isTRUE(input$sd_hist_shared),
+      sd_hist_range           = input$sd_hist_range,
       sd_overlay_all          = isTRUE(input$sd_overlay_all),
       sd_show_mean_sd         = isTRUE(input$sd_show_mean_sd),
       sd_show_overall_mean_sd = isTRUE(input$sd_show_overall_mean_sd),
@@ -1306,6 +1313,10 @@ smlm_server <- function(input, output, session) {
     updateNumericInput(session,"target_sd_y", value=vals$target_sd_y)
     updateNumericInput(session,"target_sd_z", value=vals$target_sd_z)
     updateSliderInput(session, "sd_bins", value = vals$sd_bins)
+    updateCheckboxInput(session, "sd_hist_shared", value = isTRUE(vals$sd_hist_shared))
+    if (!is.null(vals$sd_hist_range))
+      shinyWidgets::updateNumericRangeInput(session, "sd_hist_range",
+                                            value = rng(vals$sd_hist_range))
     updateCheckboxInput(session, "sd_overlay_all", value = vals$sd_overlay_all)
     updateCheckboxInput(session, "sd_show_mean_sd", value = vals$sd_show_mean_sd %||% TRUE)
     updateCheckboxInput(session, "sd_show_overall_mean_sd", value = vals$sd_show_overall_mean_sd %||% FALSE)
@@ -1556,9 +1567,94 @@ smlm_server <- function(input, output, session) {
   #
   # INPUT : metadata_filtered_df()   OUTPUT: whole traces removed
   # ==========================================================================
+  # ==========================================================================
+  # FILTER PIPELINE — Stage 1b of 3: outlier LOCALIZATIONS inside a trace
+  # ==========================================================================
+  # GOAL: drop the individual localizations that do not belong to their trace,
+  # BEFORE any per-trace statistic is computed from them.
+  #
+  # WHY IT SITS HERE. Every later stage measures a trace: its spread (Stage 2),
+  # its length (Stage 3), its median position (clustering). All of those are
+  # computed from the surviving points, so a stray localization has to be gone
+  # before them or it corrupts each one in turn. Placing it after the metadata
+  # filters is deliberate for the same reason those come first — a point already
+  # rejected on quality should not get a vote on whether its neighbours are
+  # outliers.
+  #
+  # This is the ONLY place localizations are removed for spatial reasons.
+  # Trace-level judgement stays in Stage 2 and the rogue rules; the two are kept
+  # apart so that trimming can never quietly rescue a trace that is not one
+  # molecule — the trim FRACTION is reported precisely so that case stays visible.
+  #
+  # OFF by default: opening the spread panel shows the untrimmed data first, and
+  # resetting the filters returns to it.
+  #
+  # INPUT : metadata_filtered_df()   OUTPUT: outlier localizations removed
+  # ==========================================================================
+  trim_flags <- reactive({
+    df <- metadata_filtered_df()
+    if (!isTRUE(input$trim_outliers) || !is.data.frame(df) || !nrow(df))
+      return(NULL)
+    tryCatch(
+      trace_point_outliers(df, k = input$trim_k %||% 4,
+                           keep_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT),
+      error = function(e) NULL)
+  })
+
+  trimmed_df <- reactive({
+    df <- metadata_filtered_df()
+    fl <- trim_flags()
+    if (is.null(fl) || !is.data.frame(df) || length(fl) != nrow(df)) return(df)
+    df[!fl, , drop = FALSE]
+  })
+
+  # Measured, not theoretical — the Gaussian rejection rate for a given k is
+  # wrong by about a factor of ten on real MINFLUX residuals.
+  output$trim_summary_ui <- renderUI({
+    fl <- trim_flags()
+    df <- metadata_filtered_df()
+    if (is.null(fl) || !is.data.frame(df) || length(fl) != nrow(df))
+      return(helpText("No data to trim yet."))
+    s <- trim_summary(df, fl)
+
+    # Trimming shortens traces, so a trace can drop below the Trace-ID-Length
+    # minimum and be removed by Stage 3 even though it passed before. That is
+    # the correct reading — a trace with 4 valid localizations IS a 4-point
+    # trace — but it must not happen silently, so it is counted here rather
+    # than prevented. Raising the trim guard to the length minimum instead
+    # would make WHICH POINTS ARE OUTLIERS depend on how long traces are
+    # required to be, and would keep known-bad localizations purely to satisfy
+    # a count — corrupting the very median and spread the length filter exists
+    # to protect.
+    lo <- suppressWarnings(as.numeric((input$tid_length_range %||% c(0, Inf))[1]))
+    demoted <- NA_integer_
+    if (is.finite(lo) && lo > 0) {
+      nb <- table(as.character(df$tid))
+      na <- table(as.character(df$tid[!fl]))
+      na <- na[match(names(nb), names(na))]; na[is.na(na)] <- 0
+      demoted <- sum(nb >= lo & na < lo)
+    }
+
+    helpText(HTML(paste0(sprintf(
+      "Rejected <b>%s</b> of %s localizations (<b>%.2f%%</b>) in %s of %s traces (%.0f%%).<br/>%s",
+      format(s$n_flag, big.mark = ","), format(s$n_pts, big.mark = ","), s$pct,
+      format(s$n_tr_touched, big.mark = ","), format(s$n_tr, big.mark = ","), s$pct_tr,
+      if (s$n_tr_heavy > 0)
+        sprintf(paste0("<b>%s trace(s) lost ≥ 30%% of their localizations</b> — that is ",
+                       "not a clean trace with a few strays, and is worth inspecting before ",
+                       "trusting its position."), format(s$n_tr_heavy, big.mark = ","))
+      else "No trace lost 30% or more of its localizations."),
+      if (!is.na(demoted) && demoted > 0)
+        sprintf(paste0("<br/><b>%s trace(s) fell below the trace-length minimum of %g</b> ",
+                       "because of trimming and are now removed by that filter."),
+                format(demoted, big.mark = ","), lo)
+      else ""
+    )))
+  })
+
   # Stage 2: spread filter — per-trace SD applied after metadata row filters
   spread_filtered_df <- reactive({
-    df <- metadata_filtered_df()
+    df <- trimmed_df()
     if (!is.data.frame(df) || !nrow(df) || !"tid" %in% names(df)) return(df)
 
     # sd_filt holds the committed filter bounds set by the user.
@@ -2275,6 +2371,16 @@ smlm_server <- function(input, output, session) {
         if (length(v) == 1 && is.finite(v)) updateNumericInput(session, "sd_min_locs", value = v)
       }
 
+      # Restore trimming BEFORE the ranges below: it changes which localizations
+      # exist, so the nm bounds have to land on the same point set they were set
+      # on. Files written before this setting existed carry no field and were
+      # saved with no trimming.
+      updateCheckboxInput(session, "trim_outliers", value = isTRUE(fil$trim_outliers))
+      if (!is.null(fil$trim_k)) {
+        v <- suppressWarnings(as.numeric(fil$trim_k))
+        if (length(v) == 1 && is.finite(v)) updateNumericInput(session, "trim_k", value = v)
+      }
+
       # Update sd_filt so the actual spread filter reflects the loaded settings.
       # NA in the upper bound means the filter was at full range when saved
       # (Inf serialises to null/NA in JSON); restore it as Inf.
@@ -2367,6 +2473,9 @@ smlm_server <- function(input, output, session) {
     vals <- filters_defaults_from_data(uploaded_df())
     # Reset SD filter synchronously — Inf upper bound means "pass all".
     sd_filt$x <- c(0, Inf); sd_filt$y <- c(0, Inf); sd_filt$z <- c(0, Inf)
+    # Trimming removes localizations, so "reset filters" has to put them back —
+    # otherwise the spread the user returns to is not the raw spread.
+    updateCheckboxInput(session, "trim_outliers", value = FALSE)
     shinyjs::reset("filters_form")
     session$onFlushed(function() {
       sd_skip_arming(TRUE)
@@ -2633,15 +2742,101 @@ smlm_server <- function(input, output, session) {
     do.call(tagList, els)
   })
   
+  # ==========================================================================
+  # Shared histogram ranges across sigma X / Y / Z — OPT IN
+  # ==========================================================================
+  # GOAL: put the three spread histograms on ONE set of bin edges and ONE count
+  # axis, so the panels can be read against each other and dropped into a figure
+  # as a set.
+  #
+  # WHY IT IS NOT THE DEFAULT. Per-axis ranges are the better view for reading a
+  # single axis: MINFLUX z precision is genuinely different from xy, so a shared
+  # range spends most of the x panel's width on empty space. Sharing is a
+  # presentation choice, so it is opt-in and changes nothing else.
+  #
+  # The bin EDGES are shared too, not just the axis limits — histograms on
+  # different edges are not comparable however the axes are labelled, because
+  # the bar heights answer different questions.
+  #
+  # RETURNS NULL when off, so each renderer falls back to its own range.
+  # ==========================================================================
+  # Values outside a MANUAL range must be dropped, not drawn. sd_counts() clamps
+  # anything beyond the outermost break into the edge bin, which is right for an
+  # auto range (nothing is outside it) but would put every broad trace into one
+  # tall bar at the right edge of a user-set range — a spike that is pure
+  # artifact and would be read as a real population in a figure.
+  sd_hist_clip <- function(v, sh) {
+    if (is.null(sh) || !isTRUE(sh$manual)) return(v)
+    v <- as.numeric(v)
+    v[is.finite(v) & v >= sh$xrange[1] & v <= sh$xrange[2]]
+  }
+
+  sd_hist_common <- reactive({
+    if (!isTRUE(input$sd_hist_shared)) return(NULL)
+    all <- tryCatch(sd_all_tbl(),      error = function(e) NULL)
+    cur <- tryCatch(sd_filtered_tbl(), error = function(e) NULL)
+    if (!is.data.frame(all) || !nrow(all)) return(NULL)
+
+    cols <- c("sd_x", "sd_y")
+    if (isTRUE(has_sd_z()) && "sd_z" %in% names(all)) cols <- c(cols, "sd_z")
+    cols <- intersect(cols, names(all))
+    if (!length(cols)) return(NULL)
+
+    bins <- as.integer(input$sd_bins %||% 60)
+
+    # A user range wins when it is usable; otherwise fall back to the data's own
+    # shared span, so clearing the boxes cannot leave the panels blank.
+    ur     <- suppressWarnings(as.numeric(input$sd_hist_range))
+    manual <- length(ur) == 2 && all(is.finite(ur)) && ur[2] > ur[1]
+
+    brk <- if (manual) seq(ur[1], ur[2], length.out = max(2L, bins + 1L))
+           else        sd_breaks(unlist(all[cols], use.names = FALSE), bins)
+    if (is.null(brk) || length(brk) < 2) return(NULL)
+    sh0 <- list(manual = manual, xrange = range(brk, na.rm = TRUE))
+
+    # Counts have to be recomputed on the SHARED edges to find the common
+    # ceiling — the per-axis maxima are on different edges and would not
+    # transfer. Raw counts are included whether or not the grey overlay is on,
+    # so toggling the overlay cannot rescale the shared axis under the user.
+    ymax <- 0
+    n_out <- 0L; n_tot <- 0L
+    for (cc in cols) {
+      v <- all[[cc]]; v <- v[is.finite(v)]
+      n_tot <- n_tot + length(v)
+      n_out <- n_out + sum(v < sh0$xrange[1] | v > sh0$xrange[2])
+      ymax <- max(ymax, sd_counts(sd_hist_clip(all[[cc]], sh0), brk)$counts, na.rm = TRUE)
+      if (is.data.frame(cur) && cc %in% names(cur))
+        ymax <- max(ymax, sd_counts(sd_hist_clip(cur[[cc]], sh0), brk)$counts, na.rm = TRUE)
+    }
+    list(brk    = brk,
+         manual = manual,
+         xrange = sh0$xrange,
+         yrange = c(0, if (is.finite(ymax) && ymax > 0) ymax * 1.05 else 1),
+         n_out  = n_out, n_tot = n_tot)
+  })
+
+  # A figure must not hide data silently — say how much the chosen range leaves out.
+  output$sd_hist_range_note <- renderUI({
+    sh <- sd_hist_common()
+    if (is.null(sh) || !isTRUE(sh$manual)) return(NULL)
+    if (sh$n_out <= 0)
+      return(helpText("All per-trace spreads fall inside this range."))
+    helpText(HTML(sprintf(
+      "<b>%s of %s per-trace spread values (%.1f%%) fall outside this range</b> and are not drawn. They are still in the data — this is a display range only, and it does not filter anything.",
+      format(sh$n_out, big.mark = ","), format(sh$n_tot, big.mark = ","),
+      100 * sh$n_out / max(1L, sh$n_tot))))
+  })
+
   output$sd_hist_x <- renderPlotly({
     req(input$view_SD)
     all <- sd_all_tbl(); cur <- sd_filtered_tbl()
     shiny::validate(shiny::need(nrow(all) > 0, "No SD data"))
-    
+
     bins <- as.integer(input$sd_bins %||% 60)
-    brk  <- sd_breaks(all$sd_x, bins)
-    A    <- sd_counts(all$sd_x, brk)
-    B    <- sd_counts(cur$sd_x, brk)
+    sh   <- sd_hist_common()
+    brk  <- if (!is.null(sh)) sh$brk else sd_breaks(all$sd_x, bins)
+    A    <- sd_counts(sd_hist_clip(all$sd_x, sh), brk)
+    B    <- sd_counts(sd_hist_clip(cur$sd_x, sh), brk)
     
     # active filter range
     r <- input$sd_x_range %||% c(-Inf, Inf)
@@ -2667,7 +2862,10 @@ smlm_server <- function(input, output, session) {
       name = "Filtered", hoverinfo = "skip"
     )
     ymax  <- max(c(A$counts, B$counts), na.rm = TRUE)
-    y_top <- if (is.finite(ymax) && ymax > 0) ymax * 1.05 else 1
+    # Under a shared axis the median label has to sit inside the SHARED
+    # ceiling, or it is drawn off the top of the panel.
+    y_top <- if (!is.null(sh)) sh$yrange[2]
+             else if (is.finite(ymax) && ymax > 0) ymax * 1.05 else 1
     
     # Filtered median ± nMAD (BLUE)
     if (isTRUE(input$sd_show_mean_sd)) {
@@ -2686,8 +2884,8 @@ smlm_server <- function(input, output, session) {
     fig %>% plotly::layout(
       barmode = "overlay",
       title = "Trace spread \u03C3 X (nm)",
-      xaxis = list(title = "\u03C3 X (nm)"),
-      yaxis = list(title = "Count")
+      xaxis = c(list(title = "\u03C3 X (nm)"), if (!is.null(sh)) list(range = sh$xrange)),
+      yaxis = c(list(title = "Count"),         if (!is.null(sh)) list(range = sh$yrange))
     )
   })
   
@@ -2698,9 +2896,10 @@ smlm_server <- function(input, output, session) {
     shiny::validate(shiny::need(nrow(all) > 0, "No SD data"))
     
     bins <- as.integer(input$sd_bins %||% 60)
-    brk  <- sd_breaks(all$sd_y, bins)
-    A    <- sd_counts(all$sd_y, brk)
-    B    <- sd_counts(cur$sd_y, brk)
+    sh   <- sd_hist_common()
+    brk  <- if (!is.null(sh)) sh$brk else sd_breaks(all$sd_y, bins)
+    A    <- sd_counts(sd_hist_clip(all$sd_y, sh), brk)
+    B    <- sd_counts(sd_hist_clip(cur$sd_y, sh), brk)
     
     r <- input$sd_y_range %||% c(-Inf, Inf)
     in_rng <- A$centers >= r[1] & A$centers <= r[2]
@@ -2724,7 +2923,10 @@ smlm_server <- function(input, output, session) {
     )
     
     ymax  <- max(c(A$counts, B$counts), na.rm = TRUE)
-    y_top <- if (is.finite(ymax) && ymax > 0) ymax * 1.05 else 1
+    # Under a shared axis the median label has to sit inside the SHARED
+    # ceiling, or it is drawn off the top of the panel.
+    y_top <- if (!is.null(sh)) sh$yrange[2]
+             else if (is.finite(ymax) && ymax > 0) ymax * 1.05 else 1
     
     # Filtered median ± nMAD (BLUE)
     if (isTRUE(input$sd_show_mean_sd)) {
@@ -2743,8 +2945,8 @@ smlm_server <- function(input, output, session) {
     fig %>% plotly::layout(
       barmode = "overlay",
       title = "Trace spread \u03C3 Y (nm)",
-      xaxis = list(title = "\u03C3 Y (nm)"),
-      yaxis = list(title = "Count")
+      xaxis = c(list(title = "\u03C3 Y (nm)"), if (!is.null(sh)) list(range = sh$xrange)),
+      yaxis = c(list(title = "Count"),         if (!is.null(sh)) list(range = sh$yrange))
     )
   })
   
@@ -2755,9 +2957,10 @@ smlm_server <- function(input, output, session) {
     shiny::validate(shiny::need("sd_z" %in% names(all) && any(is.finite(all$sd_z)), "No Z in dataset"))
     
     bins <- as.integer(input$sd_bins %||% 60)
-    brk  <- sd_breaks(all$sd_z, bins)
-    A    <- sd_counts(all$sd_z, brk)
-    B    <- sd_counts(cur$sd_z, brk)
+    sh   <- sd_hist_common()
+    brk  <- if (!is.null(sh)) sh$brk else sd_breaks(all$sd_z, bins)
+    A    <- sd_counts(sd_hist_clip(all$sd_z, sh), brk)
+    B    <- sd_counts(sd_hist_clip(cur$sd_z, sh), brk)
     
     r <- input$sd_z_range %||% c(-Inf, Inf)
     in_rng <- A$centers >= r[1] & A$centers <= r[2]
@@ -2781,7 +2984,10 @@ smlm_server <- function(input, output, session) {
     )
     
     ymax  <- max(c(A$counts, B$counts), na.rm = TRUE)
-    y_top <- if (is.finite(ymax) && ymax > 0) ymax * 1.05 else 1
+    # Under a shared axis the median label has to sit inside the SHARED
+    # ceiling, or it is drawn off the top of the panel.
+    y_top <- if (!is.null(sh)) sh$yrange[2]
+             else if (is.finite(ymax) && ymax > 0) ymax * 1.05 else 1
     
     # Filtered median ± nMAD (BLUE)
     if (isTRUE(input$sd_show_mean_sd)) {
@@ -2800,8 +3006,8 @@ smlm_server <- function(input, output, session) {
     fig %>% plotly::layout(
       barmode = "overlay",
       title = "Trace spread \u03C3 Z (nm)",
-      xaxis = list(title = "\u03C3 Z (nm)"),
-      yaxis = list(title = "Count")
+      xaxis = c(list(title = "\u03C3 Z (nm)"), if (!is.null(sh)) list(range = sh$xrange)),
+      yaxis = c(list(title = "Count"),         if (!is.null(sh)) list(range = sh$yrange))
     )
   })
 
@@ -4951,7 +5157,7 @@ smlm_server <- function(input, output, session) {
         df,
         rule   = input$rogue_rule %||% "factor_median",
         factor = input$rogue_factor %||% 2.5,
-        min_n  = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT
+        min_n  = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
       )
       df <- rr$df
       #log text

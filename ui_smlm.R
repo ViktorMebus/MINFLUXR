@@ -266,19 +266,48 @@ smlm_ui <- fluidPage(
                  helpText("Traces shorter than this are excluded from the spread histogram, ",
                           "the median-spread labels, the allowable-spread ranges, and the σ filters. ",
                           "Literature typically uses ≥ 5 (a SD needs ≥ 2 points to exist)."),
+                 # ── Outlier localization trimming ──────────────────────────
+                 checkboxInput("trim_outliers",
+                               "Trim outlier localizations within traces", value = FALSE),
+                 conditionalPanel(
+                   condition = "input.trim_outliers == true",
+                   numericInput("trim_k", "Reject beyond k × σ of the trace",
+                                value = 4, min = 2, max = 10, step = 0.5),
+                   uiOutput("trim_summary_ui")
+                 ),
+                 helpText("Flags single localizations sitting far from the rest of their own trace ",
+                          "and excludes them from the spread, the trace length and every downstream ",
+                          "analysis. The distance is measured per axis in units of that trace's own ",
+                          "spread, so a uniformly broad trace loses nothing — judging whole traces ",
+                          "stays the job of the σ ranges and the rogue rules below."),
                  uiOutput("sd_summary_ui"),
                  uiOutput("sd_hist_ui"),
                  sliderInput("sd_bins", "Histogram bins", min = 5, max = 500, value = 100, step = 1),
+                 checkboxInput("sd_hist_shared",
+                               "Shared axes across σ X / Y / Z", value = FALSE),
+                 helpText("Puts the three histograms on one set of bin edges and one count ",
+                          "axis, so they can be read against each other and used as a figure ",
+                          "set. Off by default because axial precision differs from lateral, ",
+                          "so per-axis ranges show each panel at full width."),
+                 conditionalPanel(
+                   condition = "input.sd_hist_shared == true",
+                   shinyWidgets::numericRangeInput(
+                     "sd_hist_range", "Shared σ axis range (nm)", value = c(0, 30)),
+                   helpText("Display range only — it does not filter any trace. Clear either ",
+                            "box to fall back to the full range of the data."),
+                   uiOutput("sd_hist_range_note")
+                 ),
                  checkboxInput("sd_overlay_all", "Show raw trace spreads (grey bars)", value = FALSE),
                  checkboxInput("sd_show_mean_sd", "Show median trace spread (post filtering)", value = FALSE),
                  checkboxInput("sd_show_overall_mean_sd", "Show median trace spread (raw data)", value = FALSE),
                  tags$span(
                    " (What is \u03C3\u0303 \u00b1 nMAD?)",
                    title = paste(
-                     "\u03c3\u0303 = per-trace localization spread (SD of x/y/z within each trace).",
+                     "\u03c3\u0303 = per-trace localization spread: the standard deviation of x/y/z within each trace, normalised by n\u22121. This matches the sx/sy/sz that pyMINFLUX computes per trace ID.",
                      "Line label: median(\u03c3\u0303) \u00b1 nMAD across all traces.",
                      "nMAD = 1.4826 \u00d7 median(|\u03c3\u0303_i \u2212 median(\u03c3\u0303)|).",
-                     "Factor 1.4826 \u2248 1/\u03a6\u207b\u00b9(3/4): makes nMAD a consistent estimator of \u03c3 for normal data (same as pyMINFLUX).",
+                     "Factor 1.4826 \u2248 1/\u03a6\u207b\u00b9(3/4): makes nMAD a consistent estimator of \u03c3 for normal data.",
+                     "The \u00b1 nMAD band is this app's choice for summarising the spread ACROSS traces; pyMINFLUX draws median + interquartile range on the same distribution. The per-trace \u03c3\u0303 itself is the quantity that matches.",
                      "Traces shorter than the 'Min localizations per trace' setting are excluded."
                    )
                  ),

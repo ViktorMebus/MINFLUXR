@@ -33,7 +33,7 @@ An interactive R/Shiny application for visualization and analysis of **Abberior 
 - [Tracking Analysis Tab](#tracking-analysis-tab)
 - [MINFLUX Simulator Tab](#minflux-simulator-tab)
 - [Key Calculations](#key-calculations)
-  - SMLM: [unit conversions](#unit-conversions--import), [dwell](#dwell-time), [trace spread](#trace-spread-sd-filter), [DCR split](#dcr-based-2-color-separation), [density](#spatial-density), [NN](#nearest-neighbour-distances), [Ripley L(r)](#ripleys-lr), [RoG](#radius-of-gyration)
+  - SMLM: [unit conversions](#unit-conversions--import), [dwell](#dwell-time), [trace spread](#trace-spread-sd-filter), [outlier trimming](#outlier-localization-trimming), [DCR split](#dcr-based-2-color-separation), [density](#spatial-density), [NN](#nearest-neighbour-distances), [Ripley L(r)](#ripleys-lr), [RoG](#radius-of-gyration)
   - Tracking: [TSA & cycle time](#time-signature-analysis-tsa--cycle-time), [MSD](#msd-computation), [D fitting](#diffusion-coefficient-fitting), [CVE](#cve-covariance-based-estimator), [confinement](#confinement-index), [JDD](#jump-distance-distribution-jdd), [HMM](#diffusive-state-hmm), [displacement](#displacement-vs-diffusion), [directionality](#directionality--autocorrelation), [speed & transport](#speed--transport), [D-map](#spatially-resolved-d-map), [D ceiling](#fast-diffusion-ceiling)
 - [Plugin System](#plugin-system)
 - [Further Documentation](#further-documentation)
@@ -173,10 +173,16 @@ Filters are applied sequentially in the order listed in the sidebar. All filters
 
 ```
 Raw data
- └── [1] Metadata filters  (EFO, CFR, DCR, TIM, ECO, dwell, fluo)
-      └── [2] TID length filter  (number of points per trace)
-           └── [3] TID spread filter  (per-trace spread of localizations)
+ └── [1] Metadata filters      (EFO, CFR, DCR, TIM, ECO, dwell, fluo)  → removes POINTS
+      └── [2] Outlier trimming (localizations far from their own trace) → removes POINTS
+           └── [3] TID length filter  (number of points per trace)      → removes TRACES
+                └── [4] TID spread filter  (per-trace spread)           → removes TRACES
 ```
+
+Stages [1] and [2] remove individual localizations; [3] and [4] remove whole traces. Because the two
+trace-level stages are both evaluated on the same trimmed point set, their relative order does not
+change the result. Trimming, when enabled, runs before both — so a trimmed localization counts
+neither toward a trace's length nor toward its spread.
 
 **Metadata filters.** Pick a variable, see its histogram (with the unfiltered data behind it in grey
 if *Show raw data* is on), and set a numeric range:
@@ -202,9 +208,20 @@ moving emitters).
 - *Min localizations per trace* — traces shorter than this are excluded from the spread histogram,
   the median-spread labels, the allowable ranges and the σ filters. Literature typically uses ≥ 5
   (an SD needs ≥ 2 points to exist at all).
+- **Trim outlier localizations within traces** (off by default) — flags and excludes single
+  localizations sitting far from the rest of *their own* trace, so a long trace is not discarded
+  over two stray points. *Reject beyond k × σ of the trace* sets the cutoff (default `k = 4`). An
+  info box reports the outcome measured on the loaded data: how many localizations and traces were
+  affected, how many traces lost ≥ 30 % of their points, and how many fell below the trace-length
+  minimum as a result. See [Outlier trimming](#outlier-localization-trimming).
 - The histogram shows per-TID spreads, optionally overlaying the raw distribution and the median
-  spread before/after filtering. Labels report median(σ̃) ± nMAD (nMAD = 1.4826 × MAD, matching
-  pyMINFLUX).
+  spread before/after filtering. Labels report median(σ̃) ± nMAD (nMAD = 1.4826 × MAD); the ± nMAD
+  band is this app's summary across traces, while the per-trace σ̃ itself matches pyMINFLUX.
+- **Shared axes across σ X / Y / Z** (off by default) — puts the three histograms on one set of bin
+  edges and one count axis so they can be read against each other and used as a figure set. When
+  enabled, *Shared σ axis range (nm)* sets the displayed span (default 0–30); clearing it falls back
+  to the full data range. This is a display range only and filters nothing — values outside it are
+  omitted from the plot rather than piled into the edge bin, and a note reports how many.
 - *Set spread ranges to the 95th percentile* seeds the σ filter ranges from the data.
 - **TID spread filter**: per-axis x/y/z bounds. Setting the upper bound low retains only spatially
   tight traces — useful for removing gold beads or freely diffusing molecules. See
@@ -260,7 +277,8 @@ Two criteria:
 
 **De-blinking only merges — it never deletes.** A trace that cannot be merged becomes its own
 single-blink molecule, so every trace that survived filtering is still counted. Removing data is the
-job of the metadata and spread filters, where it is visible and reversible.
+job of the metadata filters, the optional outlier trimming and the spread filters, where it is
+visible and reversible.
 
 **Choosing the threshold.** *Measure threshold from data* sets it from your own file: it measures the
 per-axis trace spread and finds the smallest k at which no unmerged re-blinks remain. Two diagnostics
@@ -968,15 +986,73 @@ For each TID, the per-axis standard deviation of all localizations is computed:
 
 and analogously for $\sigma_y$ and $\sigma_z$.
 
+This is the plain standard deviation, normalised by $n-1$, and it is deliberately identical to what
+pyMINFLUX computes per trace ID (`processor/_processor.py`, `calculate_statistics_on`:
+`sx = df_grouped["x"].std()`), so precision numbers are directly comparable between the two tools.
+pyMINFLUX itself applies no spread-based trace filter and no per-localization outlier removal, so
+that comparability constrains this number only — not what the app does with it.
+
 The SD filter ranges set bounds $[\sigma_\text{min}, \sigma_\text{max}]$; a TID is kept only if its
 $\sigma$ falls within those bounds on every active axis. Setting the upper bound to a small value
 retains only spatially tight traces (useful for removing freely diffusing molecules), while a broad
 range passes all traces. Traces below the *Min localizations per trace* setting are excluded from the
-statistic entirely.
+statistic entirely. When outlier trimming is enabled, $\sigma$ is computed on the retained
+localizations.
 
 The **spread panel** histogram shows the distribution of per-TID spreads and overlays the current
 filter range. The median spread is reported as median(σ̃) ± nMAD, with nMAD = 1.4826 × MAD — the
-1.4826 makes nMAD a consistent estimator of σ for normal data (same convention as pyMINFLUX).
+1.4826 makes nMAD a consistent estimator of σ for normal data. (pyMINFLUX draws median +
+interquartile range on this distribution; the ± nMAD band is this app's choice.)
+
+---
+
+### Outlier Localization Trimming
+
+Optional, off by default. Flags individual localizations that do not fit their own trace, so a trace
+is not discarded whole because of a few stray points. It removes points only — deciding the fate of a
+whole trace stays with the spread filter and the rogue-trace rules.
+
+For trace $t$ with $n_t$ localizations, the per-axis centre is the median and the distance is
+whitened per axis, so the anisotropy of MINFLUX precision does not leak into one threshold:
+
+```math
+r_i^2 \;=\; \sum_{a \in \{x,y,z\}} \left( \frac{a_i - \mathrm{median}_t(a)}{\hat{\sigma}_{a,t}} \right)^{2},
+\qquad \text{flag } i \text{ if } r_i > k
+```
+
+**The scale.** $\hat{\sigma}_{a,t}$ is a robust (MAD-based) spread, shrunk from the trace's own
+estimate toward the dataset-wide one:
+
+```math
+\hat{\sigma}_{a,t} \;=\; w_t\,\sigma^{\text{trace}}_{a,t} \;+\; (1-w_t)\,\sigma^{\text{pooled}}_{a},
+\qquad w_t = \frac{n_t}{n_t + 6}
+```
+
+Short traces borrow the dataset's stability; long traces trust their own estimate. Both levels use a
+robust estimator because an SD-based scale would be inflated by the very outliers the test is meant
+to find. This is internal machinery — the reported σ̃ remains the plain SD above.
+
+Asking whether a point is unlike *its own trace*, rather than unlike the dataset, is what makes a
+uniformly broad trace (drift, a fiducial, two merged molecules) lose nothing here: all of its points
+agree with each other, and judging it is the trace-level filters' job.
+
+**Guards.** Traces shorter than 6 localizations are never trimmed — at that length a single point is
+a large share of the evidence and the median defining "far" is itself poorly determined. Trimming
+also never reduces a trace below the *Min localizations per trace* setting.
+
+**Choosing $k$.** Gaussian theory is not a useful guide here: real MINFLUX within-trace residuals are
+heavier-tailed than Gaussian, so a $k$ that rejects almost nothing in theory rejects a few percent in
+practice. The info box therefore reports the rejection rate **measured on the loaded data** rather
+than a theoretical figure. Note that trimming lowers the reported σ̃ partly by genuinely removing
+outliers and partly by selection, since the retained points are those closest to the median; a
+conservative $k$ keeps the selection component small.
+
+**Interaction with the length filter.** Trimming shortens traces, so a trace can drop below the TID
+length minimum and be removed by that filter even though it passed before. This is the correct
+reading — a trace with four valid localizations is a four-point trace — and it is reported rather
+than prevented, because tying the trim guard to the length minimum would retain known-bad
+localizations purely to satisfy a count, corrupting the median position and spread that the length
+filter exists to protect.
 
 ---
 
@@ -1553,6 +1629,10 @@ MINFLUXR/
   blinking events, so a raw TID count is a count of **blinking events**, not molecules. Enable de-blink
   correction before interpreting per-cluster occupancy. Experiments with irreversible photoactivation
   (e.g. PALM) are less affected.
+- **Outlier trimming shortens traces**: it removes localizations, so a trace can drop below the TID
+  length minimum and be removed by that filter. The info box in the spread panel counts this when it
+  happens. Trimming also lowers the reported σ̃ partly by selection, so prefer a conservative *k* and
+  quote the setting alongside any precision figure.
 - **Multiple datasets**: in the SMLM tab several files can be loaded simultaneously and compared with
   the Active file selector. Lock filters when switching to prevent accidental resets, and use Dataset
   Groups in the Analysis tab to pool and compare conditions.
