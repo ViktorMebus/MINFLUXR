@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## helpers_tracking.R  —  tracking-mode-only helper functions
+## helpers_tracking.R  -  tracking-mode-only helper functions
 ## ─────────────────────────────────────────────────────────────────────────────
 ##
 ## PURPOSE
@@ -22,7 +22,7 @@
 ##   records them in manifest.csv, and the server reads chunks back on demand.
 ##
 ## CONVENTIONS USED THROUGHOUT
-##   - jsonlite is NOT library()'d — always call jsonlite:: explicitly, because
+##   - jsonlite is NOT library()'d - always call jsonlite:: explicitly, because
 ##     its `validate` would otherwise shadow shiny::validate.
 ##   - Every input/output ID in the tracking tab is prefixed `trk_`, to avoid
 ##     collisions with the SMLM tab's IDs.
@@ -34,7 +34,7 @@
 ## REMOVED CODE
 ##   convert_to_qs(), split_by_tid(), na_lines() and even_idx() used to live here
 ##   but had no caller anywhere in the app. They were moved verbatim to
-##   deadcode_tracking.R (2026-07-20) — see that file to restore them.
+##   deadcode_tracking.R (2026-07-20) - see that file to restore them.
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -45,7 +45,7 @@
 # re-renders, filter changes and playback frames. Otherwise tracks appear to
 # swap identity mid-animation. That is the whole reason the shuffle is seeded.
 #
-# tids    : vector of trace IDs (any type — coerced to character)
+# tids    : vector of trace IDs (any type - coerced to character)
 # palette : an RColorBrewer palette name; silently falls back to "Set3"
 # seed    : fixes the colour shuffle so the mapping is reproducible
 # returns : named character vector, tid -> "#RRGGBB"
@@ -59,7 +59,7 @@ tid_color_map <- function(tids, palette = "Set3", seed = 123) {
   info    <- RColorBrewer::brewer.pal.info  # lookup table: palette -> max colours
   if (!palette %in% rownames(info)) palette <- "Set3"   # unknown name -> safe default
   maxcols <- info[palette, "maxcolors"]     # largest size this palette supports
-  # brewer.pal() errors below 3 colours, and errors above the palette's max —
+  # brewer.pal() errors below 3 colours, and errors above the palette's max -
   # so clamp the request into [3, maxcols].
   base    <- RColorBrewer::brewer.pal(max(3, min(maxcols, n)), palette)
   # If we need MORE colours than the palette holds, interpolate a continuous
@@ -106,11 +106,11 @@ prep_tracking <- function(df, normalize_per_tid = TRUE) {
 # ── .geom_ops() ───────────────────────────────────────────────────────────────
 # Shared geometry engine for the free-diffusion nulls. Returns the operators for one
 # shape so that every null (net displacement, MSD, ...) steps molecules through the
-# SAME physics — if these ever diverged the two nulls would disagree for reasons that
+# SAME physics - if these ever diverged the two nulls would disagree for reasons that
 # had nothing to do with the data.
 #
 # geom  : "sphere" | "rod" | "ellipsoid" | "membrane" | "free"
-# params: list(R, r, Lcyl, a, b, c, mtilt) — only the relevant entries are read
+# params: list(R, r, Lcyl, a, b, c, mtilt) - only the relevant entries are read
 # mode  : "surface" = confined to the boundary (2 DOF on a curved sheet)
 #         "volume"  = free 3D motion inside, reflecting off the boundary
 # returns list(one_step(P, sd), rand_start(m), is_flat, is_vol)
@@ -216,7 +216,7 @@ prep_tracking <- function(df, normalize_per_tid = TRUE) {
 # ── sim_free_geom_rnet() ──────────────────────────────────────────────────────
 # GOAL: the GEOMETRY-AWARE free-diffusion null for the displacement test (Step 2), for
 # ANY of the simulator geometries. Simulate FREE Brownian diffusion on the chosen shape
-# and return each track's NET start→end displacement in the 2D image projection — so
+# and return each track's NET start→end displacement in the 2D image projection - so
 # "how far a molecule gets" is judged against free diffusion ON THAT GEOMETRY, not an
 # infinite plane. Closed surfaces (sphere/rod/ellipsoid) cap displacement at ~their size;
 # an unbounded plane (membrane/free) does not, so those reproduce the infinite-plane null.
@@ -228,14 +228,14 @@ prep_tracking <- function(df, normalize_per_tid = TRUE) {
 # PROJECTION MATCHING (match_projection = TRUE): a measured 2D D from a curved surface is
 # the PROJECTED D, which is < the true surface D (the azimuthal component is foreshortened;
 # e.g. exactly 3/4 for a cylinder). So we EMPIRICALLY calibrate that factor for the chosen
-# geometry — one short single-step pass — and drive the null at D_surf = D_meas / factor,
+# geometry - one short single-step pass - and drive the null at D_surf = D_meas / factor,
 # so both nulls agree at short T and the closed-surface band diverges only where finite
 # size + curvature bite. Set FALSE to feed D straight through.
 #
 # dur_ms  : track durations (ms) to match (resample from real data)
 # D_nm2ms : measured per-axis diffusion coefficient (nm²/ms)
 # geom    : "sphere" | "rod" | "ellipsoid" | "membrane" | "free"
-# params  : list(R, r, Lcyl, a, b, c, mtilt) — only the relevant ones are read
+# params  : list(R, r, Lcyl, a, b, c, mtilt) - only the relevant ones are read
 # returns : numeric vector (length M) of net displacements R_net (nm), + attr "D_surf"
 sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
                                cyc_ms = 0.5, proj2d = TRUE, match_projection = TRUE,
@@ -284,7 +284,7 @@ sim_free_geom_rnet <- function(dur_ms, D_nm2ms, geom = "rod", params = list(),
 # closest to the query time `t`. Used to map a playback scrub position onto an
 # actual localization.
 #
-# tt      : sorted numeric vector of times (ASSUMED sorted — not checked)
+# tt      : sorted numeric vector of times (ASSUMED sorted - not checked)
 # t       : the query time
 # returns : integer index into tt, or NA_integer_ if tt is empty
 nearest_idx <- function(tt, t) {
@@ -311,13 +311,13 @@ nearest_idx <- function(tt, t) {
 # thinned path still traces the original trajectory.
 #
 # NOTE: this is for DISPLAY only. Never feed a decimated frame into MSD/CVE or
-# any other quantitative estimator — dropping points changes the step statistics.
+# any other quantitative estimator - dropping points changes the step statistics.
 #
 # df         : data.frame with tid, x, y, [z], and the time column `tcol`
 # max_pts    : maximum points to keep per track
 # tcol       : name of the time column to sort/keep (default "tim0")
 # extra_cols : extra columns to carry through untouched (e.g. per-point colour)
-# returns    : data.frame(tid, x, y, t, [z], <extra_cols>) — note the time
+# returns    : data.frame(tid, x, y, t, [z], <extra_cols>) - note the time
 #              column is RENAMED to `t` in the output
 decimate_per_tid <- function(df, max_pts = 400, tcol = "tim0", extra_cols = character()) {
   has_z <- "z" %in% names(df)                        # 3D data is optional
@@ -419,7 +419,7 @@ split_by_tid_to_dir <- function(df, out_dir,
 # For ideal free Brownian motion CI = 1, but the OBSERVED free value is NOT 1: the
 # localization-noise term 2*d*sigma^2 sits on every MSD point and inflates the EARLY
 # window more than the late one, pushing CI below 1. How far below depends on
-# sigma_loc, D, the cycle time, the fit window and the track length — so there is no
+# sigma_loc, D, the cycle time, the fit window and the track length - so there is no
 # universal threshold and the null has to be simulated at the data's own conditions.
 #
 # Free tracks are generated with the SAME irregular sampling as the data: each step
@@ -427,7 +427,7 @@ split_by_tid_to_dir <- function(df, out_dir,
 # inherits the real integrated/dark mix rather than assuming an even clock.
 #
 # WHY THE NULL IS ALSO MATCHED ON D. The free CI is governed by the dimensionless
-# ratio  x = sigma^2 / (D * t_c) — how large the localization noise is relative to the
+# ratio  x = sigma^2 / (D * t_c) - how large the localization noise is relative to the
 # motion in one cycle. A SLOW track has a bigger x, so the noise intercept lifts its
 # early lags more and its free CI sits lower. Measured at N=200, sigma = 10 nm: the
 # free median runs 0.325 at D = 20 nm^2/ms and 0.922 at D = 2000, i.e. a factor of
@@ -444,7 +444,7 @@ split_by_tid_to_dir <- function(df, out_dir,
 # ndim     : 2 or 3
 # gap_p    : probabilities of a step spanning 1,2,3,... cycles (measured from the data)
 # min_lag/max_lag : the SAME cycle-lag fit window the real CI uses
-# returns  : data.frame(n, D, lo05, med, hi95) — CI quantiles at each (n, D) pair
+# returns  : data.frame(n, D, lo05, med, hi95) - CI quantiles at each (n, D) pair
 sim_free_ci_null <- function(n_grid, D_grid = 100, n_sim = 200L, t_c = 0.2, sigma = 10,
                              ndim = 2L, gap_p = c(0.55, 0.22, 0.09, 0.05, 0.04, 0.05),
                              min_lag = 4L, max_lag = 50L, progress = NULL) {
@@ -507,7 +507,7 @@ sim_free_ci_null <- function(n_grid, D_grid = 100, n_sim = 200L, t_c = 0.2, sigm
 
 
 # ── sim_free_geom_msd() ───────────────────────────────────────────────────────
-# GOAL: the free-diffusion MSD curve ON a given cell geometry — the reference the
+# GOAL: the free-diffusion MSD curve ON a given cell geometry - the reference the
 # measured MSD should be read against when the cell is small enough to matter.
 #
 # WHY IT IS NEEDED. On a closed surface the MSD cannot grow forever: once a molecule
@@ -515,7 +515,7 @@ sim_free_ci_null <- function(n_grid, D_grid = 100, n_sim = 200L, t_c = 0.2, sigm
 # produces a bending, plateauing MSD. Fit a straight line across that bend and D comes
 # out low; fit the confined model and it reports a "confinement size" that is really
 # the cell. The distortion is negligible while the fit window is short and grows with
-# it — on a rod (r 400, L 2000 nm, D 200 nm^2/ms) the fitted D runs 0.995 of truth over
+# it - on a rod (r 400, L 2000 nm, D 200 nm^2/ms) the fitted D runs 0.995 of truth over
 # a 50-cycle window, 0.965 at 500 cycles and 0.893 at 2000. This curve makes that
 # visible instead of leaving it to be discovered as a fake plateau.
 #
@@ -523,7 +523,7 @@ sim_free_ci_null <- function(n_grid, D_grid = 100, n_sim = 200L, t_c = 0.2, sigm
 # curve against it separates "the cell is small" from "the molecule is trapped".
 #
 # lag_cycles : integer cycle lags to evaluate (the MSD panel's own lag grid)
-# D_surf     : the TRUE motion D (nm^2/ms) — i.e. the d_eff-corrected D the MSD panel
+# D_surf     : the TRUE motion D (nm^2/ms) - i.e. the d_eff-corrected D the MSD panel
 #              now reports, NOT a raw per-axis value; no projection re-calibration is
 #              applied here, unlike sim_free_geom_rnet which is fed a measured per-axis D
 # geom/params/mode : as .geom_ops()

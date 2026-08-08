@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## sim_ui.R  —  Simulation tab UI  (MINFLUX-only; style mirrors SMLM tab)
+## sim_ui.R  -  Simulation tab UI  (MINFLUX-only; style mirrors SMLM tab)
 ## Phase 1: Synthetic localizations  |  Phase 2: Diffusion tracks
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ sim_ui <- fluidPage(
     id = "sim_phase_tabs",
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  Phase 1 — Localizations
+    #  Phase 1 - Localizations
     # ══════════════════════════════════════════════════════════════════════════
     tabPanel("SMLM",
       # ── Sticky action bar ─────────────────────────────────────────────────
@@ -398,7 +398,7 @@ sim_ui <- fluidPage(
                    "from the side); rings/spheres displace radially outward."),
 
           numericInput("sim_protein_mw",
-                       "Target protein MW (kDa)  — 0 = not modelled",
+                       "Target protein MW (kDa)  - 0 = not modelled",
                        value = 0, min = 0, max = 5000, step = 1),
           helpText("Displaces the epitope from the protein centroid by the",
                    "protein surface radius (r ≈ 0.66 × MW¹³ nm).",
@@ -416,7 +416,7 @@ sim_ui <- fluidPage(
                         "Model dye re-activation (TID splitting)",
                         value = FALSE),
           helpText("Each fluorophore can re-activate after bleaching, generating",
-                   "additional TIDs from the same physical dye — apparent over-counting."),
+                   "additional TIDs from the same physical dye - apparent over-counting."),
           conditionalPanel("input.sim_blink_model == true",
             sliderInput("sim_blink_mean",
                         "Mean extra TIDs per fluorophore (λ)",
@@ -465,7 +465,7 @@ sim_ui <- fluidPage(
           checkboxInput("sim_hide_grid", "Hide gridlines", FALSE),
 
           tags$hr(style = "margin:6px 0;"),
-          # Field of view / ROI window — pins the plot axes to a real-camera-style
+          # Field of view / ROI window - pins the plot axes to a real-camera-style
           # FOV. Always on in Acquisition mode (it also lays out the structures);
           # optional in Normal mode to preview the structure inside an ROI.
           conditionalPanel("input.sim_mode == 'normal'",
@@ -626,7 +626,7 @@ sim_ui <- fluidPage(
                         value = FALSE),
           helpText("On the Acquisition plot, break the predicted detection rate",
                    "into its structure (decaying + bleaching) and background",
-                   "(flat) parts — solid lines. If a real run is loaded, also",
+                   "(flat) parts - solid lines. If a real run is loaded, also",
                    "overlays the measured spatial split (dotted)."),
 
           tags$hr(style = "margin:6px 0;"),
@@ -645,7 +645,7 @@ sim_ui <- fluidPage(
                        value = 5, min = 1, max = 1000, step = 1),
           helpText(tags$b("Acquisition-mode TID over-counting:"),
                    "the detection rate generates repeat TIDs over time, capped",
-                   "by this photon budget — the time-resolved equivalent of",
+                   "by this photon budget - the time-resolved equivalent of",
                    "the Normal-mode blink split above."),
           helpText("Total structure traces = rate × duration, capped by the",
                    "photon budget (fluorophores × detections-before-bleaching).",
@@ -898,7 +898,7 @@ sim_ui <- fluidPage(
     ), # end SMLM (Localizations)
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  Phase 2 — Diffusion / Tracking (ground-truth simulator, own sidebar)
+    #  Phase 2 - Diffusion / Tracking (ground-truth simulator, own sidebar)
     #  Free surface Brownian on a cell shape, sampled the MINFLUX way (cycle clock +
     #  dark cycles + heteroscedastic σ_loc + photobleaching) → MINFLUX-format tracks
     #  with a ground-truth D, for validating CVE / MSD / confinement estimators.
@@ -951,15 +951,15 @@ sim_ui <- fluidPage(
               "No curvature → no projection bias, unlike the curved cell wall.")),
           conditionalPanel("input.sim_trk_geom == 'free'",
             helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
-              "Unbounded 3D Brownian motion — the simplest null (no geometry, no walls).")),
+              "Unbounded 3D Brownian motion - the simplest null (no geometry, no walls).")),
           conditionalPanel("input.sim_trk_geom == 'rod'",
             fluidRow(
               column(6, numericInput("sim_trk_r", "Radius (nm)", value = 400, min = 50, step = 25)),
               column(6, numericInput("sim_trk_Lcyl", "Cyl. length (nm)", value = 2000, min = 100, step = 100))),
             selectInput("sim_trk_rod_axis", "Long axis (cell orientation)",
-              choices = c("X — lying in image plane" = "x",
-                          "Y — lying in image plane" = "y",
-                          "Z — standing (vertical)"  = "z"),
+              choices = c("X - lying in image plane" = "x",
+                          "Y - lying in image plane" = "y",
+                          "Z - standing (vertical)"  = "z"),
               selected = "x"),
             helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
               "E. coli on a coverslip usually lie flat → long axis in XY. Z = end-on / vertical.")),
@@ -1002,7 +1002,7 @@ sim_ui <- fluidPage(
           conditionalPanel("input.sim_trk_surv == true",
             numericInput("sim_trk_rreacq", "Re-acquisition radius (nm)", value = 300, min = 20, step = 20),
             helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
-              "If the TRUE displacement across a dark gap exceeds this, the track ends — the ",
+              "If the TRUE displacement across a dark gap exceeds this, the track ends - the ",
               "dark-cycle bias that manufactures apparent confinement.")),
           tags$hr(style = "margin:6px 0;"),
           numericInput("sim_trk_D", "Diffusion D (µm²/s)", value = 0.1, min = 0, step = 0.01),
@@ -1024,7 +1024,7 @@ sim_ui <- fluidPage(
             column(6, numericInput("sim_trk_Ltcp", "Eff. TCP L (nm) → σ_loc", value = 40, min = 10, step = 5))),
           helpText(style = "font-size:0.8em; color:#666; margin-top:-4px;",
             "σ_loc = L / (2·√N_photons) per localization. L is the EFFECTIVE (final-iteration) TCP ",
-            "diameter — much smaller than the initial scan pattern (≈30–60 nm gives MINFLUX's ~2–5 nm σ_loc)."),
+            "diameter - much smaller than the initial scan pattern (≈30–60 nm gives MINFLUX's ~2–5 nm σ_loc)."),
           tags$hr(style = "margin:6px 0;"),
           checkboxInput("sim_trk_project2d", "Project to 2D (drop z)", FALSE),
           numericInput("sim_trk_seed", "Random seed", value = 1, min = 1, step = 1),

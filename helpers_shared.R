@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## helpers_shared.R  —  helpers used by BOTH the SMLM and Tracking tabs
+## helpers_shared.R  -  helpers used by BOTH the SMLM and Tracking tabs
 ## ─────────────────────────────────────────────────────────────────────────────
 ##
 ## PURPOSE
@@ -9,7 +9,7 @@
 ##   wrong everywhere in the app, the bug is probably in here.
 ##
 ## THE CANONICAL DATA.FRAME (the contract everything downstream assumes)
-##   x, y, z ... position in NANOMETRES (files store metres — converted on read)
+##   x, y, z ... position in NANOMETRES (files store metres - converted on read)
 ##   tid ....... trace ID: one tracked molecule / one blinking event. Character.
 ##   tim ....... timestamp. SECONDS on disk; the tracking tab multiplies by 1000
 ##               and works in ms from then on. The SMLM tab keeps seconds.
@@ -43,7 +43,7 @@
 ##   NumPy container directly. It handles the structured (record) dtypes those
 ##   exports use, including the float16 fields R's readBin cannot read natively.
 ##
-## CONVENTION: jsonlite is NOT attached — always call jsonlite:: explicitly, or
+## CONVENTION: jsonlite is NOT attached - always call jsonlite:: explicitly, or
 ## its `validate` shadows shiny::validate.
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -88,7 +88,7 @@ get_ext <- function(filename) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Labeling-method presets — SINGLE SOURCE OF TRUTH.
+# Labeling-method presets - SINGLE SOURCE OF TRUTH.
 # Used by the Simulator (forward model: GT -> traces) and by the SMLM tab's
 # inverse GT-estimator (traces -> candidate GT). Keeping one table means the
 # estimator inverts exactly the numbers the simulator generated with.
@@ -96,7 +96,7 @@ get_ext <- function(filename) {
 #   n_fluor       mean fluorophores per labeled molecule (Poisson-drawn, min 1)
 #   link_nm       mean distance label-complex centre -> molecule centre (nm).
 #                 This is the COMMON-MODE, per-molecule offset shared by every
-#                 fluorophore/blink/localization of that molecule — the
+#                 fluorophore/blink/localization of that molecule - the
 #                 irreducible position floor for single-molecule GT estimation.
 #   dye_spread_nm Gaussian SD of individual dye positions within the complex
 #   footprint_nm  approximate excluded-zone diameter around each labeled protein
@@ -108,52 +108,52 @@ minflux_label_presets <- function() {
     "Direct tag (SNAP / Halo / Click, DOL=1)" = list(
       n_fluor = 1L, link_nm = 3.5, dye_spread_nm = 0,
       footprint_nm = 2,  blink_lambda = 0.2,
-      note    = "1 fluorophore / molecule — ~3.5 nm linkage (SNAP/Halo tag domain)"
+      note    = "1 fluorophore / molecule - ~3.5 nm linkage (SNAP/Halo tag domain)"
     ),
     "Nanobody (DOL ≈1)" = list(
       n_fluor = 1L, link_nm = 2.5, dye_spread_nm = 0,
       footprint_nm = 3,  blink_lambda = 0.2,
-      note    = "1 fluorophore / molecule — ~2.5 nm (nanobody VHH domain)"
+      note    = "1 fluorophore / molecule - ~2.5 nm (nanobody VHH domain)"
     ),
     # -- Primary monoclonal (1 antibody / epitope) ----------------------------
     "Primary monoclonal IgG (DOL ≈1)" = list(
       n_fluor = 1L, link_nm = 8, dye_spread_nm = 0,
       footprint_nm = 10, blink_lambda = 0.3,
-      note    = "1 fluorophore / molecule — ~8 nm (IgG Fab arm to epitope)"
+      note    = "1 fluorophore / molecule - ~8 nm (IgG Fab arm to epitope)"
     ),
     "Primary monoclonal IgG (NHS, DOL ≈2–4)" = list(
       n_fluor = 3L, link_nm = 8, dye_spread_nm = 4,
       footprint_nm = 10, blink_lambda = 0.5,
-      note    = "~3 fluorophores on one IgG body (~4 nm spread) — ~8 nm from target"
+      note    = "~3 fluorophores on one IgG body (~4 nm spread) - ~8 nm from target"
     ),
     # -- Primary polyclonal (3-5 antibodies / antigen) ------------------------
     "Primary polyclonal IgG (NHS, DOL ≈2–4)" = list(
       n_fluor = 9L, link_nm = 8, dye_spread_nm = 9,
       footprint_nm = 12, blink_lambda = 0.5,
-      note    = "~9 fluorophores across 3–5 Ab bodies (~9 nm spread) — ~8 nm from target"
+      note    = "~9 fluorophores across 3–5 Ab bodies (~9 nm spread) - ~8 nm from target"
     ),
     # -- Monoclonal + secondary -----------------------------------------------
     "Primary monoclonal IgG + secondary nanobody" = list(
       n_fluor = 2L, link_nm = 10.5, dye_spread_nm = 3,
       footprint_nm = 10, blink_lambda = 0.4,
-      note    = "~2 fluorophores, nanobody on primary IgG — ~10.5 nm from target"
+      note    = "~2 fluorophores, nanobody on primary IgG - ~10.5 nm from target"
     ),
     "Primary monoclonal IgG + secondary IgG" = list(
       n_fluor = 8L, link_nm = 20, dye_spread_nm = 12,
       footprint_nm = 16, blink_lambda = 0.6,
-      note    = "~8 fluorophores across ~3 secondary IgG bodies (~12 nm spread) — ~20 nm from target"
+      note    = "~8 fluorophores across ~3 secondary IgG bodies (~12 nm spread) - ~20 nm from target"
     ),
     # -- Polyclonal + secondary -----------------------------------------------
     "Primary polyclonal IgG + secondary IgG" = list(
       n_fluor = 18L, link_nm = 20, dye_spread_nm = 18,
       footprint_nm = 20, blink_lambda = 0.8,
-      note    = "~18 fluorophores, large complex (~18 nm spread) — ~20 nm from target"
+      note    = "~18 fluorophores, large complex (~18 nm spread) - ~20 nm from target"
     ),
     # -- Biotin-streptavidin --------------------------------------------------
     "Streptavidin (biotinylated Ab + SA-dye)" = list(
       n_fluor = 3L, link_nm = 15, dye_spread_nm = 3,
       footprint_nm = 8,  blink_lambda = 0.4,
-      note    = "~3 fluorophores on SA tetramer (~3 nm spread) — ~15 nm from target"
+      note    = "~3 fluorophores on SA tetramer (~3 nm spread) - ~15 nm from target"
     ),
     "Custom" = list(
       n_fluor = NA_integer_, link_nm = NA_real_,
@@ -174,10 +174,10 @@ read_minflux_csv <- function(path) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pure-R NumPy (.npy) reader — no Python/reticulate dependency.
+# Pure-R NumPy (.npy) reader - no Python/reticulate dependency.
 # Supports v1/v2/v3 headers and C-order (fortran_order = FALSE) arrays, including
 # *structured* (record) dtypes with named fields and fixed-shape sub-arrays
-# (e.g. loc = (3,) f8, dcr = (2,) f8) — exactly the layout Abberior MINFLUX
+# (e.g. loc = (3,) f8, dcr = (2,) f8) - exactly the layout Abberior MINFLUX
 # "tabular" exports use. Nested struct fields (legacy m2205 itr blocks) are not
 # supported and raise an informative error.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,7 +340,7 @@ read_npy <- function(path) {
 # Canonical JSON reader for Abberior MINFLUX exports.
 # Returns a data.frame with x/y/z (nm), tid, itr, tim, efo, eco, cfr, ecc, efc,
 # fbg, gri, sta, bot, eot, fnl, sqi, thi, dcr1, dcr2, dcr, dwell.
-# The tracking tab only uses x/y/tid/tim/efo/cfr/dcr — extra columns are ignored.
+# The tracking tab only uses x/y/tid/tim/efo/cfr/dcr - extra columns are ignored.
 read_minflux_json_as_df <- function(path,
                                     keep_final_only = TRUE,
                                     keep_valid_only = TRUE,
@@ -357,7 +357,7 @@ read_minflux_json_as_df <- function(path,
     invisible(NULL)
   }
 
-  # ---- 1. Read file (single bulk read — much faster than readLines+paste) ----
+  # ---- 1. Read file (single bulk read - much faster than readLines+paste) ----
   safe_inc(0.04, "Reading JSON file")
   txt <- tryCatch({
     raw <- readBin(path, "raw", n = file.info(path)$size)
@@ -385,12 +385,12 @@ read_minflux_json_as_df <- function(path,
     txt <- gsub("\\bNaN\\b",      "null", txt)
   }
 
-  # ---- 3. Parse — try simplifyVector = TRUE, fall back without re-reading ----
+  # ---- 3. Parse - try simplifyVector = TRUE, fall back without re-reading ----
   safe_inc(0.22, "Parsing JSON")
   parsed <- tryCatch(
     jsonlite::fromJSON(txt, simplifyVector = TRUE),
     error = function(e) {
-      message("[MINFLUXR] simplifyVector=TRUE failed (", conditionMessage(e), ") — using list parse")
+      message("[MINFLUXR] simplifyVector=TRUE failed (", conditionMessage(e), ") - using list parse")
       NULL
     }
   )
@@ -415,11 +415,11 @@ read_minflux_json_as_df <- function(path,
 
   # Determine whether the simplified parse produced a usable data frame.
   # Note: is.list(data.frame) is TRUE in R, so we cannot use !is.list() to
-  # detect matrix/data.frame columns — we must check both explicitly.
+  # detect matrix/data.frame columns - we must check both explicitly.
   coord_col     <- if ("loc" %in% names(parsed)) "loc" else
                    if ("lnc" %in% names(parsed)) "lnc" else NULL
   # Gate: only require a data.frame with core columns and a coord column.
-  # dcr being a list column is fine — we handle both forms in extraction below.
+  # dcr being a list column is fine - we handle both forms in extraction below.
   use_simplified <- is.data.frame(parsed) &&
     all(c("tid", "tim") %in% names(parsed)) &&
     !is.null(coord_col)
@@ -437,7 +437,7 @@ read_minflux_json_as_df <- function(path,
     }
     if (!n) return(data.frame())
 
-    # Coordinates — handle matrix/data.frame or list column
+    # Coordinates - handle matrix/data.frame or list column
     col_coord <- src[[coord_col]]
     if (is.matrix(col_coord) || is.data.frame(col_coord)) {
       cm <- as.matrix(col_coord)
@@ -455,9 +455,9 @@ read_minflux_json_as_df <- function(path,
     }
     rm(col_coord)
 
-    # DCR — handle matrix/data.frame or list column (jsonlite produces list for
+    # DCR - handle matrix/data.frame or list column (jsonlite produces list for
     # fixed-length inner arrays in some versions).
-    # dcr[:, 1] == 1 - dcr[:, 0] in Abberior files — redundant, so only dcr1 is kept.
+    # dcr[:, 1] == 1 - dcr[:, 0] in Abberior files - redundant, so only dcr1 is kept.
     col_dcr <- src[["dcr"]]
     if (is.matrix(col_dcr) || is.data.frame(col_dcr)) {
       dm   <- as.matrix(col_dcr)
@@ -498,7 +498,7 @@ read_minflux_json_as_df <- function(path,
     safe_inc(0.00, "List parse fallback: building data frame from list of records...")
     if (!is.null(parsed)) rm(parsed)
 
-    # txt is still in scope — reuse the already-read-and-patched string.
+    # txt is still in scope - reuse the already-read-and-patched string.
     dat <- jsonlite::fromJSON(txt, simplifyVector = FALSE)
     rm(txt)
     if (!length(dat)) return(data.frame())
@@ -788,7 +788,7 @@ read_minflux_npy_as_df <- function(path,
 #
 # MINFLUX does not measure a position in one shot. It ITERATES: each iteration
 # (`itr`) tightens the doughnut pattern around the molecule, so a single
-# localization event appears in the raw file as several rows — one per
+# localization event appears in the raw file as several rows - one per
 # iteration, progressively more precise. Downstream we want the final answer,
 # not the refinement history.
 #
@@ -796,7 +796,7 @@ read_minflux_npy_as_df <- function(path,
 #
 # Two different rules are needed, which is the subtlety here:
 #   pick_itr()       take the value from the TARGET iteration (the last, most
-#                    refined one). Used for position and most metrics — an
+#                    refined one). Used for position and most metrics - an
 #                    earlier, coarser iteration would simply be wrong.
 #   latest_finite()  take the value from the highest iteration that actually
 #                    has one. Used for `cfr`, which is not reported at every
@@ -848,7 +848,7 @@ collapse_minflux_iterations <- function(df, keep_itr = 9L) {
 # downstream ever has to guess.
 #
 # The same quantity is spelled differently by different exporters and software
-# versions — "x", "X", "x_nm", "x [nm]", "pos_x", "xPosition" are all the same
+# versions - "x", "X", "x_nm", "x [nm]", "pos_x", "xPosition" are all the same
 # column. `map` lists the accepted aliases for each canonical name, in priority
 # order, and `pick()` takes the first one actually present.
 #
@@ -861,27 +861,27 @@ collapse_minflux_iterations <- function(df, keep_itr = 9L) {
 # df      : a data.frame from any reader / any MINFLUX export vintage
 # returns : the same data with canonical column names and types
 # =============================================================================
-# detect_csv_z_calibration() — WHAT AXIAL FACTOR IS ALREADY BAKED INTO A CSV?
+# detect_csv_z_calibration() - WHAT AXIAL FACTOR IS ALREADY BAKED INTO A CSV?
 # =============================================================================
 #
 # GOAL
 #   A CSV never contains raw instrument z. Something upstream already applied an
 #   axial (refractive-index) correction, and applying ours on top would square
 #   the factor. This identifies what was already applied so the caller can
-#   divide it out and re-apply the app-wide value — making every source respond
+#   divide it out and re-apply the app-wide value - making every source respond
 #   identically to the axial calibration control.
 #
 # THE THREE CSV PROVENANCES
-#   1. OUR export, current   — carries a `z_scale_applied` column. Exact: the
+#   1. OUR export, current   - carries a `z_scale_applied` column. Exact: the
 #                              factor is read from the file, never guessed.
-#   2. OUR export, older     — has `dataset_tag` but no `z_scale_applied`. Every
+#   2. OUR export, older     - has `dataset_tag` but no `z_scale_applied`. Every
 #                              such export was written at 0.7.
-#   3. pyMINFLUX export      — neither column; header is
+#   3. pyMINFLUX export      - neither column; header is
 #                              tid,tim,x,y,z,efo,cfr,eco,dcr,dwell,fluo.
 #                              pyMINFLUX applies its 0.7 default before writing.
 #
 # THE ASSUMPTION, STATED PLAINLY
-#   Cases 2 and 3 are inferred, not measured — nothing in those files records
+#   Cases 2 and 3 are inferred, not measured - nothing in those files records
 #   the factor. Both are assumed to be 0.7 because every known producer of a
 #   MINFLUX CSV ships that default. A CSV written with pyMINFLUX's z-scaling
 #   turned off, or by some other tool, would be misread, and there is no way to
@@ -890,14 +890,14 @@ collapse_minflux_iterations <- function(df, keep_itr = 9L) {
 #
 # ARGUMENTS  df : the freshly read CSV (before canonicalization)
 # RETURNS
-#   list(factor, source, certain) — `factor` is what is already applied to z.
+#   list(factor, source, certain) - `factor` is what is already applied to z.
 # =============================================================================
 PYMINFLUX_Z_SCALE_DEFAULT <- 0.7
 
 detect_csv_z_calibration <- function(df) {
   nms <- names(df)
 
-  # 1. Explicit provenance — the only non-guessing branch.
+  # 1. Explicit provenance - the only non-guessing branch.
   if ("z_scale_applied" %in% nms) {
     v <- suppressWarnings(as.numeric(df$z_scale_applied))
     v <- v[is.finite(v) & v > 0]
@@ -908,14 +908,14 @@ detect_csv_z_calibration <- function(df) {
     }
   }
 
-  # 2. Our own older export — tagged, but predates the provenance column.
+  # 2. Our own older export - tagged, but predates the provenance column.
   if (any(c("dataset_tag", ".dataset_tag") %in% nms)) {
     return(list(factor = PYMINFLUX_Z_SCALE_DEFAULT,
                 source = "this app (older export, no recorded factor)",
                 certain = FALSE))
   }
 
-  # 3. Anything else — pyMINFLUX or an unknown producer.
+  # 3. Anything else - pyMINFLUX or an unknown producer.
   py_cols <- c("tid", "tim", "x", "y", "z", "efo", "cfr", "eco", "dcr", "dwell", "fluo")
   looks_py <- all(py_cols %in% nms)
   list(factor = PYMINFLUX_Z_SCALE_DEFAULT,
@@ -924,19 +924,19 @@ detect_csv_z_calibration <- function(df) {
 }
 
 # =============================================================================
-# has_axial_data() — DOES THIS DATASET CARRY REAL z AT ALL?
+# has_axial_data() - DOES THIS DATASET CARRY REAL z AT ALL?
 # =============================================================================
 #
 # GOAL
 #   One predicate both tabs consult BEFORE doing, or saying, anything about the
 #   axial calibration. A 2D acquisition should never see a message about z being
-#   detected, removed, rescaled or adopted — those are answers to a question the
+#   detected, removed, rescaled or adopted - those are answers to a question the
 #   data does not pose.
 #
 # WHY A COLUMN CHECK IS NOT ENOUGH
 #   A planar dataset usually still has a z column: MINFLUX 2D exports write
 #   z = 0, and the loaders synthesise `z <- 0` when it is missing entirely. So
-#   presence proves nothing — only VARIATION does. A constant z (whatever its
+#   presence proves nothing - only VARIATION does. A constant z (whatever its
 #   value) carries no axial structure and cannot be calibrated.
 #
 # ARGUMENTS
@@ -958,7 +958,7 @@ has_axial_data <- function(df, min_sd = 1e-6, min_n = 1L) {
 }
 
 # =============================================================================
-# strip_csv_z_calibration() — RETURN A CSV'S z TO RAW, UNCORRECTED nm
+# strip_csv_z_calibration() - RETURN A CSV'S z TO RAW, UNCORRECTED nm
 # =============================================================================
 # GOAL
 #   Undo whatever axial factor a CSV arrived with, so the caller can apply the
@@ -978,7 +978,7 @@ strip_csv_z_calibration <- function(df) {
   if ("z" %in% names(df) && is.finite(cal$factor) && cal$factor > 0 && cal$factor != 1) {
     df$z <- suppressWarnings(as.numeric(df$z)) / cal$factor
   }
-  # Consumed here — a stale value must not survive into the analysis frame and
+  # Consumed here - a stale value must not survive into the analysis frame and
   # be re-read on a later round-trip.
   df$z_scale_applied <- NULL
   attr(df, "z_cal") <- cal
@@ -1116,7 +1116,7 @@ lut_overlay_colors <- c(
 # intensity before tinting, and also apply in "original" mode (adjusting the Fire
 # image in place), so the two sliders behave the same whatever the LUT.
 #
-# NB: grayscale luminance is only an approximate inverse of the Fire LUT — it
+# NB: grayscale luminance is only an approximate inverse of the Fire LUT - it
 # recovers relative intensity for *display*, not the exact raw photon counts. For
 # an exact recolour the user would need to re-export the raw grayscale image.
 #
@@ -1175,9 +1175,9 @@ apply_background_lut <- function(img, lut = "original", custom_color = NULL,
 # img      : magick image object (already rotated/flipped as displayed)
 # df_xy    : data.frame with finite x, y columns (nm)
 # px_size  : nm per pixel
-# mode     : "foci"     — multi-peak voting: top N bright spots vs top N dense
+# mode     : "foci"     - multi-peak voting: top N bright spots vs top N dense
 #                         MINFLUX regions; offset with most consensus wins
-#            "boundary" — centroid of bright image region to centroid of data
+#            "boundary" - centroid of bright image region to centroid of data
 # invert_y : TRUE (default) = image origin top-left, row 0 → high data y
 # n_peaks  : number of candidate peaks to extract for foci mode (default 4)
 #
@@ -1335,7 +1335,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
       mx16     <- max(v16); if (mx16 == 0L) mx16 <- 1L
       data_v   <- as.integer(round(v16 / mx16 * 255L))
     } else {
-      # Unexpected size — try image_data as last resort
+      # Unexpected size - try image_data as last resort
       bit_mode <- paste0("fallback(", fsz, "!=", n_px, ")")
       raw_arr  <- magick::image_data(img_c, channels = "gray")
       data_v   <- as.integer(raw_arr)[seq_len(n_px)]
@@ -1347,7 +1347,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
       data_v <- as.integer(round((data_v - mn_v) / (mx_v - mn_v) * 255L))
     mat_c <- matrix(data_v, nrow = Hc, ncol = Wc, byrow = TRUE)
 
-    # Border mask — fraction set by caller
+    # Border mask - fraction set by caller
     brd <- max(1L, round(min(Hc, Wc) * border_pct))
     mat_c[seq_len(brd), ]            <- 0L
     mat_c[seq(Hc - brd + 1L, Hc), ] <- 0L
@@ -1443,7 +1443,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
     # Generate every ordered k-length selection of data peaks assigned to the
     # top-k image peaks (image peak rank 1..k always stays in position).
     # For each assignment compute the mean translation (optimal rigid offset for
-    # that pairing) and score it by sum-of-squared residuals — how consistently
+    # that pairing) and score it by sum-of-squared residuals - how consistently
     # all k pairs agree on the same offset.  A perfect match scores 0; a poor
     # one scores large.  Among valid candidates (MINFLUX extent inside the image
     # with 10 % margin) we keep the lowest-score assignment.
@@ -1495,7 +1495,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
     }
 
     if (is.null(best_x0)) {
-      # No selection satisfied bounds — fall back to rank-weighted Hough voting
+      # No selection satisfied bounds - fall back to rank-weighted Hough voting
       all_ox <- all_oy <- all_wt <- numeric(k_i * k_d)
       idx <- 0L
       for (i in seq_len(k_i)) {

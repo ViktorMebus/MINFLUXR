@@ -1,10 +1,10 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## helpers_smlm.R  —  SMLM-only helper functions
+## helpers_smlm.R  -  SMLM-only helper functions
 ## ─────────────────────────────────────────────────────────────────────────────
 ##
 ## PURPOSE
-##   All the computation behind the SMLM (imaging) tab. Unlike the Tracking tab —
-##   which asks how molecules MOVE — this tab asks where molecules ARE and how
+##   All the computation behind the SMLM (imaging) tab. Unlike the Tracking tab -
+##   which asks how molecules MOVE - this tab asks where molecules ARE and how
 ##   they are ARRANGED: clustering, shape fitting, spatial statistics and
 ##   two-colour comparison. Nothing here is reactive; every function is a plain
 ##   input -> output transform testable in the console.
@@ -57,7 +57,7 @@
 ##      build_nn_edges, pair_passes_scope, compute_batch_nn, compute_cross_nn
 ##      safe_nn2, safe_k
 ##
-##   6. SHAPE FITTING (the biggest block — see its own banner below)
+##   6. SHAPE FITTING (the biggest block - see its own banner below)
 ##      For each shape S in {sphere, ellipsoid, helix, ring, arc}:
 ##          fit_S_geometry / mle_fit_S ... fit the shape to the points
 ##          mle_project_S ................ nearest point ON the shape (residuals)
@@ -93,7 +93,7 @@
 # GOAL: return x/y axis limits that span the SAME distance, so a nanometre on
 # screen is the same length on both axes.
 # This is not cosmetic: with unequal limits plotly stretches one axis, and a
-# round cluster renders as an ellipse — which would corrupt every visual shape
+# round cluster renders as an ellipse - which would corrupt every visual shape
 # judgement the user makes. Padding adds a small margin so points do not sit on
 # the frame.
 get_equal_limits_2d <- function(x, y, padding = 0.05) {
@@ -165,13 +165,13 @@ assign_two_color_group <- function(df, input) {
 # split is.
 #
 # WHY THE UNCERTAINTY MATTERS (and why it is not symmetric with a registration
-# error): ratiometric MINFLUX has no inter-channel offset — both dyes are excited
+# error): ratiometric MINFLUX has no inter-channel offset - both dyes are excited
 # by the same laser through the same beam path, so the two channels share one
 # coordinate frame. The residual two-colour error is therefore NOT a shift, it is
 # MIS-ASSIGNMENT: the DCR distributions of the two dyes overlap, so a fraction of
 # traces lands on the wrong side of the threshold. A mis-assigned molecule sits by
 # construction right next to its true neighbours, so crosstalk pushes every
-# cross-channel statistic (NN, L12, g12) UP at short r — toward FALSE
+# cross-channel statistic (NN, L12, g12) UP at short r - toward FALSE
 # co-localization, exactly where a real interaction would appear. Quantifying it is
 # what lets a user judge whether a co-localization result is real.
 #
@@ -208,11 +208,11 @@ auto_detect_dcr_split <- function(dcr_meds, col_used = NA_character_) {
     return(list(success = FALSE,
                 reason = paste0("GMM found two components with nearly identical means (",
                                 round(mu1, 3), " and ", round(mu2, 3),
-                                "). DCR distribution appears unimodal — is this 2-color data?")))
+                                "). DCR distribution appears unimodal - is this 2-color data?")))
   pi1  <- fit$parameters$pro[ord[1]]
   pi2  <- fit$parameters$pro[ord[2]]
 
-  # Extract SDs — mclust stores variance differently depending on model type
+  # Extract SDs - mclust stores variance differently depending on model type
   vp <- fit$parameters$variance
   if (!is.null(vp$sigmasq)) {
     # "E" (equal) → scalar; "V" (variable) → 2-vector
@@ -239,7 +239,7 @@ auto_detect_dcr_split <- function(dcr_meds, col_used = NA_character_) {
   #   traces from comp 1 wrongly called "group 2" = pi1 * P(X1 > s)
   #   traces from comp 2 wrongly called "group 1" = pi2 * P(X2 <= s)
   # err_rate is the total expected wrong-channel fraction; contam1/contam2 are the
-  # more useful per-channel numbers — what proportion of everything you CALL
+  # more useful per-channel numbers - what proportion of everything you CALL
   # group k actually came from the other dye. Those are the values that propagate
   # into a cross-channel co-localization claim.
   p1_up   <- pi1 * stats::pnorm(split_val, mu1, sd1, lower.tail = FALSE)  # comp1 -> grp2
@@ -259,7 +259,7 @@ auto_detect_dcr_split <- function(dcr_meds, col_used = NA_character_) {
   # a 2-component Gaussian mixture fits a skewed unimodal distribution better than one
   # Gaussian. Measured here: on a confirmed SINGLE-colour file this routine still
   # returned a "workable" split (d' = 2.65, 3.6% apparent crosstalk), and a BIC
-  # comparison of G=1 vs G=2 does NOT fix it — it also preferred two components on
+  # comparison of G=1 vs G=2 does NOT fix it - it also preferred two components on
   # that file (dBIC +16.9) and on a synthetic skewed-unimodal control (+21.1), while
   # missing a genuine two-colour pair at d' = 1 (-9.6). BIC is picking up skewness,
   # not bimodality, so it is deliberately NOT used as a gate here. The only valid
@@ -267,7 +267,7 @@ auto_detect_dcr_split <- function(dcr_meds, col_used = NA_character_) {
   dprime <- abs(mu2 - mu1) / sqrt((sd1^2 + sd2^2) / 2)
 
   # Per-trace posterior of the assigned component. Traces whose best posterior is
-  # below `post_cut` are genuinely ambiguous — they are the ones that would move if
+  # below `post_cut` are genuinely ambiguous - they are the ones that would move if
   # the threshold shifted slightly, and the natural candidates for a strict gate.
   post_cut <- 0.95
   d1 <- pi1 * stats::dnorm(x, mu1, sd1)
@@ -317,13 +317,13 @@ auto_detect_dcr_split <- function(dcr_meds, col_used = NA_character_) {
 #   post_k(v) = pi_k * N(v | mu_k, sd_k) / sum_j pi_j * N(v | mu_j, sd_j)
 #
 # Returns, per input DCR value:
-#   group     1 or 2 — the component with the higher posterior (matches the split
+#   group     1 or 2 - the component with the higher posterior (matches the split
 #             threshold by construction, since the threshold IS the crossing point)
 #   post      posterior of the assigned component, in [0.5, 1]. 0.5 = the molecule
 #             sits exactly on the split and is a coin flip; ~1 = unambiguous.
 #   edge      TRUE when post < post_cut, i.e. the molecule is in the overlap band
 #             and would switch channel under a small shift of the threshold.
-#   log_odds  log(post_assigned / post_other) — the same information on an additive
+#   log_odds  log(post_assigned / post_other) - the same information on an additive
 #             scale, which is easier to threshold consistently across datasets.
 #
 # `gmm` is the list returned by auto_detect_dcr_split().
@@ -345,7 +345,7 @@ dcr_split_confidence <- function(v, gmm, post_cut = NULL) {
   tot <- d1 + d2
 
   # Underflow guard: far out in the tails both densities can be exactly 0, which
-  # would give 0/0. Fall back to the side of the threshold there — the assignment
+  # would give 0/0. Fall back to the side of the threshold there - the assignment
   # is certain, it is only the arithmetic that degenerates.
   bad <- !is.finite(tot) | tot <= 0
   p1  <- ifelse(bad, ifelse(v <= pr$split, 1, 0), d1 / tot)
@@ -1136,7 +1136,7 @@ trace_spread_table <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust =
     # Robust branch: per-axis spread comes from sd_by_tid (corrected MAD), and
     # the overall spread is rebuilt from those axes rather than measured as an
     # RMSD. RMSD squares the residuals, so one stray localization would dominate
-    # spread_rmsd even though every sd_ column had shrugged it off — the table
+    # spread_rmsd even though every sd_ column had shrugged it off - the table
     # would then contradict itself. For Gaussian residuals sqrt(sum of per-axis
     # sigma^2) has the same expectation as the RMSD it replaces (sqrt(d)*sigma),
     # so the column keeps its meaning and its scale.
@@ -1230,7 +1230,7 @@ sd_breaks_0max_from_raw <- function(raw_vals, bins) {
   seq(0, mx, length.out = max(2, as.integer(bins) + 1L))
 }
 # =============================================================================
-# grp_median() / grp_mad() — PER-GROUP MEDIAN AND MAD IN ONE RADIX SORT
+# grp_median() / grp_mad() - PER-GROUP MEDIAN AND MAD IN ONE RADIX SORT
 # =============================================================================
 #
 # GOAL
@@ -1250,7 +1250,7 @@ sd_breaks_0max_from_raw <- function(raw_vals, bins) {
 #   Verified identical to stats::mad on 60k traces (max abs difference 0).
 #
 # ARGUMENTS
-#   g  : integer group code, 1..ng (NOT character — that is the slow path)
+#   g  : integer group code, 1..ng (NOT character - that is the slow path)
 #   v  : values, NAs allowed (dropped per group, like na.rm = TRUE)
 #   ng : number of groups
 #
@@ -1281,7 +1281,7 @@ grp_mad <- function(g, v, ng) {
 }
 
 # =============================================================================
-# mad_finite_sample_factor() — MAKE MAD AN UNBIASED sigma AT SHORT TRACE LENGTHS
+# mad_finite_sample_factor() - MAKE MAD AN UNBIASED sigma AT SHORT TRACE LENGTHS
 # =============================================================================
 #
 # GOAL
@@ -1294,7 +1294,7 @@ grp_mad <- function(g, v, ng) {
 #     n = 4  0.735      n = 8  0.887      n = 14 0.940
 #     n = 6  0.841      n = 12 0.931      n = 20 0.959
 #   Uncorrected, the same nm threshold is therefore far more permissive for
-#   SHORT traces — a length-dependent bias applied invisibly inside the filter,
+#   SHORT traces - a length-dependent bias applied invisibly inside the filter,
 #   which is exactly the failure mode deblink_minpts() documents for minPts.
 #
 # THE FACTORS
@@ -1323,7 +1323,7 @@ mad_finite_sample_factor <- function(n) {
 }
 
 # =============================================================================
-# sd_by_tid() — PER-TRACE, PER-AXIS SPREAD
+# sd_by_tid() - PER-TRACE, PER-AXIS SPREAD
 # =============================================================================
 #
 # GOAL
@@ -1338,7 +1338,7 @@ mad_finite_sample_factor <- function(n) {
 #   Keeping it identical is what makes MINFLUXR's precision numbers comparable
 #   with pyMINFLUX's. pyMINFLUX has NO spread-based trace filter and NO
 #   per-localization outlier removal, so nothing downstream of this number is
-#   constrained by that comparison — only the number itself.
+#   constrained by that comparison - only the number itself.
 #
 # WHY sd's ZERO BREAKDOWN POINT IS NOT A PROBLEM HERE ANY MORE
 #   One stray localization sets an sd. That used to delete whole traces over two
@@ -1351,7 +1351,7 @@ mad_finite_sample_factor <- function(n) {
 #   df     : localization table (tid, x, y, optionally z)
 #   min_n  : below this, spread is left NA (undefined) rather than guessed
 #   robust : FALSE = pyMINFLUX-matching stats::sd (default and user-facing).
-#            TRUE  = finite-sample-corrected MAD. INTERNAL machinery only —
+#            TRUE  = finite-sample-corrected MAD. INTERNAL machinery only -
 #            trace_point_outliers() uses it to set the trimming scale, where a
 #            breakdown-resistant sigma is required and comparability is
 #            irrelevant. Not exposed as a user choice: two competing readings of
@@ -1412,7 +1412,7 @@ sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
                     sd_x = ax("x"), sd_y = ax("y"), sd_z = ax("z"),
                     stringsAsFactors = FALSE)
 
-  # Short traces get NA, not a guess — an unreliable spread must not drive the
+  # Short traces get NA, not a guess - an unreliable spread must not drive the
   # filter. Matches the non-robust branch above.
   short <- out$n_locs < min_n
   out$sd_x[short] <- NA_real_
@@ -1421,7 +1421,7 @@ sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
   out
 }
 # =============================================================================
-# trace_point_outliers() — FLAG SINGLE LOCALIZATIONS THAT DO NOT FIT THEIR TRACE
+# trace_point_outliers() - FLAG SINGLE LOCALIZATIONS THAT DO NOT FIT THEIR TRACE
 # =============================================================================
 #
 # GOAL
@@ -1430,7 +1430,7 @@ sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
 #   it never deletes and never touches whole traces.
 #
 # THE QUESTION IT ASKS, AND WHY THAT CHOICE MATTERS
-#   "Is this point unlike the REST OF THIS TRACE" — not "unlike the dataset".
+#   "Is this point unlike the REST OF THIS TRACE" - not "unlike the dataset".
 #   A uniformly broad trace (drift, two molecules, a fiducial) then loses
 #   NOTHING here, because all of its points agree with each other; deciding its
 #   fate stays with the spread filter and the rogue rules. Only a trace that is
@@ -1452,7 +1452,7 @@ sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
 #
 #   sigma is robust (corrected MAD) at BOTH levels on purpose. An sd-based scale
 #   would be inflated by the very outliers it is meant to find, so the test
-#   would hide them — the estimator is internal machinery, not the reported
+#   would hide them - the estimator is internal machinery, not the reported
 #   number (see sd_by_tid).
 #
 # THE DISTANCE
@@ -1463,7 +1463,7 @@ sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
 # WHY THE GAUSSIAN k DOES NOT PREDICT THE REJECTION RATE
 #   Under a Gaussian null, k = 4 rejects essentially nothing. On real data it
 #   flags ~3%. The residuals are genuinely heavier-tailed than Gaussian, so the
-#   only honest rejection estimate is the one MEASURED on the loaded data —
+#   only honest rejection estimate is the one MEASURED on the loaded data -
 #   which is what trim_summary() reports rather than a theoretical number.
 #
 # PROTECTING SHORT TRACES
@@ -1520,7 +1520,7 @@ trace_point_outliers <- function(df, k = 4, min_trim_n = 6L,
   flag[n_tr[gi] < as.integer(min_trim_n)] <- FALSE
 
   # Never trim a trace below keep_n retained points. A trace that would breach
-  # that is not "a good trace with a few strays" — it is a trace this rule
+  # that is not "a good trace with a few strays" - it is a trace this rule
   # cannot describe, so it is left whole for the trace-level filters to judge.
   n_flag <- tabulate(gi[flag], nbins = ng)
   breach <- which(n_tr - n_flag < as.integer(keep_n))
@@ -1530,11 +1530,11 @@ trace_point_outliers <- function(df, k = 4, min_trim_n = 6L,
 }
 
 # =============================================================================
-# trim_summary() — WHAT THE TRIM ACTUALLY DID, FOR THE INFO BOX
+# trim_summary() - WHAT THE TRIM ACTUALLY DID, FOR THE INFO BOX
 # =============================================================================
 # GOAL
 #   Report the trim as a measured outcome on THIS dataset, not as a theoretical
-#   rejection rate — see trace_point_outliers() on why the Gaussian number is
+#   rejection rate - see trace_point_outliers() on why the Gaussian number is
 #   wrong here by a factor of ten.
 #
 #   The per-trace trimmed FRACTION is the composite-trace diagnostic: a few
@@ -1565,7 +1565,7 @@ trim_summary <- function(df, flag) {
 }
 
 # =============================================================================
-# cov_ellipse_params() — THE ERROR ELLIPSE OF A 2x2 COVARIANCE MATRIX
+# cov_ellipse_params() - THE ERROR ELLIPSE OF A 2x2 COVARIANCE MATRIX
 # =============================================================================
 #
 # GOAL
@@ -1575,12 +1575,12 @@ trim_summary <- function(df, flag) {
 # WHY ROTATION MATTERS (the thing σx / σy alone cannot express)
 #   An axis-aligned ellipse has two parameters and cannot represent a TILTED
 #   cloud. Elongation along a diagonal inflates σx and σy by the SAME amount, so
-#   σx ≈ σy and the ellipse renders as a circle over a visibly stretched cloud —
+#   σx ≈ σy and the ellipse renders as a circle over a visibly stretched cloud -
 #   all the elongation lives in cov(x,y), which an axis-aligned drawing discards.
 #
 #   The same blind spot afflicts max(σx,σy)/min(σx,σy) as an anisotropy metric:
 #   a 45° cloud scores ~1.0, i.e. "isotropic". Since drift within a trace is
-#   DIRECTIONAL, a tilted cloud is the expected signature of drift — precisely
+#   DIRECTIONAL, a tilted cloud is the expected signature of drift - precisely
 #   the artifact the precision panel exists to catch.
 #
 #   The eigen-decomposition is the fix: eigenvectors give the true major/minor
@@ -1589,7 +1589,7 @@ trim_summary <- function(df, flag) {
 #
 # ARGUMENTS  S : symmetric 2x2 covariance matrix;  k : how many σ to scale to
 # RETURNS
-#   list(ra, rb, theta, ratio, rho, angle_deg) — ra/rb are semi-major/minor in
+#   list(ra, rb, theta, ratio, rho, angle_deg) - ra/rb are semi-major/minor in
 #   the data's units, theta the major-axis angle in radians. NULL if unusable.
 # =============================================================================
 cov_ellipse_params <- function(S, k = 1) {
@@ -1623,7 +1623,7 @@ ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
 }
 
 # =============================================================================
-# density_hdr_2d() — SMOOTH DENSITY + HIGHEST-DENSITY-REGION CONTOURS
+# density_hdr_2d() - SMOOTH DENSITY + HIGHEST-DENSITY-REGION CONTOURS
 # =============================================================================
 #
 # GOAL
@@ -1634,7 +1634,7 @@ ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
 # WHY NOT A BINNED HISTOGRAM-CONTOUR (what the precision cloud used to draw)
 #   A 2D histogram estimates each bin independently, so every bin carries full
 #   Poisson noise. For the precision cloud (~40k points, 60x60 bins) that is
-#   ~9% noise at the peak but ~26% at the 2-sigma radius and ~90% at 3 sigma —
+#   ~9% noise at the peak but ~26% at the 2-sigma radius and ~90% at 3 sigma -
 #   i.e. exactly the outer contours the eye reads as "the shape of the cloud"
 #   are almost pure shot noise, which is what makes the plot look ragged and
 #   under-smoothed. Re-binning cannot fix it: coarser bins blur the core,
@@ -1651,7 +1651,7 @@ ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
 #   whole diagnostic, and it is unavailable with count-based levels.
 #
 # BANDWIDTH
-#   Scott's rule for 2D (sigma * n^(-1/6)) with a floor at the grid pitch —
+#   Scott's rule for 2D (sigma * n^(-1/6)) with a floor at the grid pitch -
 #   below the pitch a kernel cannot smooth anything, it just re-creates the
 #   binning artefact. sigma is passed in (use a ROBUST sigma) rather than taken
 #   from the data, so a fiducial tail cannot inflate the bandwidth.
@@ -1698,7 +1698,7 @@ density_hdr_2d <- function(a, b, lim, sigma, n_grid = 160L,
   paths <- list()
   for (p in probs) {
     # If the frame does not even contain p of the cloud, no honest contour for p
-    # exists here — skip it rather than draw the frame edge and imply otherwise.
+    # exists here - skip it rather than draw the frame edge and imply otherwise.
     if (!is.finite(in_frame) || in_frame < p) next
     idx <- which(cm >= p)[1]
     lev <- srt[idx]
@@ -1716,7 +1716,7 @@ density_hdr_2d <- function(a, b, lim, sigma, n_grid = 160L,
 }
 
 # =============================================================================
-# robust_median_cov() — ONE VOTE PER TRACE, BUT STILL TILT-AWARE
+# robust_median_cov() - ONE VOTE PER TRACE, BUT STILL TILT-AWARE
 # =============================================================================
 # GOAL
 #   Combine many per-trace covariance matrices into one robust matrix by taking
@@ -1724,7 +1724,7 @@ density_hdr_2d <- function(a, b, lim, sigma, n_grid = 160L,
 #   dominate the shape the way it dominates a pooled estimate.
 #
 #   Element-wise medians are not guaranteed to stay positive semi-definite, so
-#   the off-diagonal is shrunk if it would exceed what the diagonal supports —
+#   the off-diagonal is shrunk if it would exceed what the diagonal supports -
 #   without that, eigen() can return a negative eigenvalue and the ellipse
 #   collapses or inverts.
 #
@@ -1973,7 +1973,7 @@ remove_unstable_traces <- function(df, input) {
 
   # Per-trace spread is only defined for traces with >= min_n localizations;
   # shorter traces get NA (undefined spread) so their noisy estimate never
-  # drives the filter — they are kept rather than judged on an unreliable
+  # drives the filter - they are kept rather than judged on an unreliable
   # spread. Same SD as the Stage-2 filter, on the same trimmed point set.
   if (isTRUE(input$trim_outliers)) {
     fl <- tryCatch(trace_point_outliers(df, k = input$trim_k %||% 4, keep_n = min_n),
@@ -2003,7 +2003,7 @@ remove_unstable_traces <- function(df, input) {
 
 # ---- Batch NN helpers -------------------------------------------------------
 
-# Apply current metadata filter inputs to a raw stored df (no bypass logic —
+# Apply current metadata filter inputs to a raw stored df (no bypass logic -
 # the ranges are applied as-is so that the same thresholds work across all
 # loaded files in batch mode).
 apply_meta_filters_batch <- function(df, input) {
@@ -2021,7 +2021,7 @@ apply_meta_filters_batch <- function(df, input) {
     hard_filter("tim",   input$tim_range)   %>%
     hard_filter("dwell", input$dwell_range) %>%
     hard_filter("fluo",  input$fluo_range)
-  # Outlier localizations — Stage 1b, and it MUST come before the length filter
+  # Outlier localizations - Stage 1b, and it MUST come before the length filter
   # below, exactly as in the interactive pipeline: a trimmed point is not a
   # localization of that trace, so it must not count toward its length either.
   if (isTRUE(input$trim_outliers) && "tid" %in% names(df) && nrow(df)) {
@@ -2038,7 +2038,7 @@ apply_meta_filters_batch <- function(df, input) {
     keep <- names(tl)[tl >= tlr[1] & tl <= tlr[2]]
     df   <- dplyr::filter(df, tid %in% keep)
   }
-  # Trace spread (σ) filter — mirrors remove_unstable_traces() from Display tab
+  # Trace spread (σ) filter - mirrors remove_unstable_traces() from Display tab
   if (isTRUE(input$view_SD %||% FALSE) && "tid" %in% names(df)) {
     tx <- input$target_sd_x; ty <- input$target_sd_y
     if (!is.null(tx) && !is.null(ty) && is.finite(tx) && is.finite(ty) && tx > 0 && ty > 0) {
@@ -2057,10 +2057,10 @@ apply_meta_filters_batch <- function(df, input) {
 }
 
 # Compute k-NN distances between unit centroids.
-# unit:         "tid"           — one centroid per TID (global)
-#               "pcid"          — one centroid per primary cluster (global)
-#               "cluster2_tid"  — TID centroids within each cluster2
-#               "cluster2_pcid" — primary cluster centroids within each cluster2
+# unit:         "tid"           - one centroid per TID (global)
+#               "pcid"          - one centroid per primary cluster (global)
+#               "cluster2_tid"  - TID centroids within each cluster2
+#               "cluster2_pcid" - primary cluster centroids within each cluster2
 # group_filter: NA (all), 1L, or 2L to restrict to an analysis_group
 # Returns a data.frame with column `distance`.
 compute_batch_nn <- function(df, unit = "tid", k = 1L, group_filter = NA_integer_,
@@ -2325,7 +2325,7 @@ remove_rogue_traces <- function(df, rule = c("factor_median","mad_rule","axis_sd
   # These rules were robust ACROSS traces (median/MAD of the per-trace values)
   # but the per-trace value itself was a plain sd, so a trace with 2 stray
   # localizations that the spread filter deliberately kept would be deleted here
-  # instead — the two stages would silently disagree about what a rogue is.
+  # instead - the two stages would silently disagree about what a rogue is.
   spread <- sd_by_tid(df, min_n = 2L, robust = robust)
   if (!nrow(spread)) return(list(df = df, removed_tids = character(0),
                                  removed_n = 0L, note = "no traces"))
@@ -2578,7 +2578,7 @@ robust_center <- function(X) {
   )
 }
 # =============================================================================
-# SHAPE FITTING — fit a geometric primitive to a cluster of localizations
+# SHAPE FITTING - fit a geometric primitive to a cluster of localizations
 # =============================================================================
 #
 # GOAL OF THIS WHOLE BLOCK
@@ -2586,14 +2586,14 @@ robust_center <- function(X) {
 #   the best sphere / ellipsoid / helix / ring / arc to it. That turns a cloud of
 #   localizations into interpretable numbers: a radius, a pitch, an axis length.
 #
-# THE FITTING PRINCIPLE — ORTHOGONAL-DISTANCE (total least squares)
+# THE FITTING PRINCIPLE - ORTHOGONAL-DISTANCE (total least squares)
 #   For a shape S with parameters θ, minimise the sum of squared PERPENDICULAR
 #   distances from each point to the SURFACE:
 #
 #        θ* = argmin_θ  Σ_i  || x_i − P_S(x_i; θ) ||²
 #
 #   where P_S(x) is the nearest point on the shape. This is the right criterion
-#   here because localization error is isotropic in space — there is no
+#   here because localization error is isotropic in space - there is no
 #   privileged "vertical" axis to measure residuals along, as ordinary least
 #   squares would assume. It is the same reason these are called MLE fits: for
 #   isotropic Gaussian error, minimising orthogonal distance IS the maximum
@@ -2623,21 +2623,21 @@ robust_center <- function(X) {
 #   So: to change how a shape is FITTED edit mle_fit_S; to change how it LOOKS
 #   edit mle_sample_S / make_S_*_mesh. They are deliberately independent.
 #
-# MODEL SELECTION — which shape wins?
+# MODEL SELECTION - which shape wins?
 #   RMSD always favours the most flexible shape (more parameters always fit
 #   better), so ranking uses AICc/BIC, which penalise parameter count. AICc is
 #   preferred for the small point counts typical of one cluster, and is left
 #   blank when a cluster has too few points to justify that model (n <= params+2).
 #
 # HONEST CAVEAT (mirrored by the EXPLORATORY badge in the UI)
-#   The shape dictionary is IMPOSED by this tool — a cluster is scored only
+#   The shape dictionary is IMPOSED by this tool - a cluster is scored only
 #   against the five shapes offered, so "best" means best OF THESE, never proof
 #   of biological geometry. With few, blinking-inflated localizations several
 #   shapes are often statistically indistinguishable. Treat the ranking as a
 #   hypothesis, and check the residuals rather than the label.
 # =============================================================================
 
-# Triangle index list for a parametric (nu x nv) surface grid — the connectivity
+# Triangle index list for a parametric (nu x nv) surface grid - the connectivity
 # plotly's mesh3d needs. Splits every grid quad into two triangles. Shared by all
 # the surface meshes below, which differ only in their vertex coordinates.
 .make_triangles <- function(nu, nv) {
@@ -2744,7 +2744,7 @@ mle_fit_sphere <- function(X, w = NULL,
   # Bound center to an expanded data bounding box and r to [0, r_max].
   # Without centre bounds, the joint (c, r) objective is non-convex: the
   # optimizer can drift c outside the data cloud and inflate r to compensate
-  # while keeping all residuals small — a geometrically meaningless solution.
+  # while keeping all residuals small - a geometrically meaningless solution.
   X_range    <- apply(X, 2, range)
   box_expand <- pmax((X_range[2,] - X_range[1,]) * 0.5, 10)  # ≥10 nm margin
   c_lo <- X_range[1,] - box_expand
@@ -2792,7 +2792,7 @@ mle_sample_sphere <- function(center, radius, n = 4000) {
 }
 # ========= Ellipsoid (free / fixed / regularized center) =========
 # Objective: sum of squared Euclidean distances from each localization to the
-# nearest point on the ellipsoid surface — identical units (nm²) to the sphere
+# nearest point on the ellipsoid surface - identical units (nm²) to the sphere
 # fitter and to the reported RMSD, making fits directly comparable.
 #
 # Previous version minimized the dimensionless radial ratio sum((s-1)^2) where
@@ -2839,7 +2839,7 @@ mle_fit_ellipsoid <- function(X, w = NULL,
       axes_now <- exp(par[1:3])
       R  <- .eul2R(par[4], par[5], par[6])
       pr <- mle_project_ellipsoid(X, cc, axes_now, R)
-      sum(w * pr$dist^2) / n   # mean squared distance — scale-independent of n
+      sum(w * pr$dist^2) / n   # mean squared distance - scale-independent of n
     }
     fit <- optim(par0, obj, method = "L-BFGS-B",
                  lower = c(rep(ini$ax_lo, 3), -Inf, -Inf, -Inf),
@@ -2859,7 +2859,7 @@ mle_fit_ellipsoid <- function(X, w = NULL,
     axes_now <- exp(par[4:6])
     R        <- .eul2R(par[7], par[8], par[9])
     pr  <- mle_project_ellipsoid(X, cc, axes_now, R)
-    val <- sum(w * pr$dist^2) / n   # mean squared distance — scale-independent of n
+    val <- sum(w * pr$dist^2) / n   # mean squared distance - scale-independent of n
     if (!is.null(center_prior) && lambda > 0)
       val <- val + lambda * sum((cc - center_prior)^2)
     val
@@ -3103,7 +3103,7 @@ mle_fit_helix <- function(X, w = NULL, turns_hint = 3, max_outer = 20,
       u <- .ang_to_u(pv[4],pv[5]); r <- abs(pv[6]); p <- pv[7]; phi0 <- pv[8]
       H <- t(vapply(t, .helix_point, numeric(3), c=c, u=u, r=r, p=p, phi0=phi0))
       res2 <- rowSums((X - H)^2)
-      val <- sum(w * res2) / n   # mean squared distance — scale-independent of n
+      val <- sum(w * res2) / n   # mean squared distance - scale-independent of n
       if (is.null(center_fixed) && !is.null(center_prior) && lambda > 0) {
         val <- val + lambda * sum((c - center_prior)^2)
       }
@@ -3142,7 +3142,7 @@ mle_sample_helix <- function(fit, n = 3000, pad_turns = 0.25) {
 # where r_plane = in-plane distance from the ring axis, d_ax = axial offset.
 
 .ring_basis <- function(normal) {
-  # Return [u | v] — two orthonormal vectors spanning the plane ⊥ to normal.
+  # Return [u | v] - two orthonormal vectors spanning the plane ⊥ to normal.
   n   <- as.numeric(normal) / sqrt(sum(normal^2))
   ref <- if (abs(n[3]) < 0.9) c(0, 0, 1) else c(1, 0, 0)
   u   <- pracma::cross(ref, n); u <- u / sqrt(sum(u^2))
@@ -3290,7 +3290,7 @@ mle_fit_arc <- function(X, w = NULL,
   r_max <- max(sqrt(rowSums(sweep(X, 2, c0)^2))) * 2
 
   # ── Orientation grid search: best normal direction before L-BFGS-B ────────
-  # Uses the arc projection with tc0/ah0 fixed — only orientation is swept.
+  # Uses the arc projection with tc0/ah0 fixed - only orientation is swept.
   c_gs <- if (!is.null(center_fixed)) as.numeric(center_fixed) else c0
   gs_a <- .grid_search_orient(
     obj_fn  = function(th, ph)
@@ -3385,7 +3385,7 @@ mle_sample_arc <- function(fit, n = 300) {
 ## ── Tube mesh helpers for helix, ring, and arc ─────────────────────────────
 # Internal: given centerline positions and two cross-section frame vectors
 # (frame1, frame2, each n_along × 3), build an n_along × n_tube vertex grid
-# and return a mesh3d-compatible list (x, y, z, i, j, k — 0-indexed for plotly).
+# and return a mesh3d-compatible list (x, y, z, i, j, k - 0-indexed for plotly).
 .tube_mesh_from_frames <- function(positions, frame1, frame2, tube_r,
                                    n_tube = 16, wrap_along = FALSE) {
   n_along <- nrow(positions)
@@ -3542,7 +3542,7 @@ add_distance_lines_to_plot <- function(fig, medians, max_dist = Inf) {
     inherit = FALSE
   )
 
-  # Text labels at midpoints — one trace for all labels
+  # Text labels at midpoints - one trace for all labels
   fig <- fig %>% add_trace(
     x = (medians$x + medians$nearest_x) / 2,
     y = (medians$y + medians$nearest_y) / 2,
@@ -3741,7 +3741,7 @@ generate_arc_from_cluster2 <- function(cluster_data, n_points = 300,
 }
 
 # =============================================================================
-# alpha_surface_3d() — WRAP ONE GROUP OF LOCALIZATIONS IN AN ALPHA SHAPE,
+# alpha_surface_3d() - WRAP ONE GROUP OF LOCALIZATIONS IN AN ALPHA SHAPE,
 #                      RADIUS CHOSEN FROM THE DATA
 # =============================================================================
 #
@@ -3754,7 +3754,7 @@ generate_arc_from_cluster2 <- function(cluster_data, n_points = 300,
 # WHY THERE IS NO ALPHA RADIUS CONTROL ANY MORE (this was a real bug)
 #   `alphashape3d::ashape3d()` computes ONE Delaunay tetrahedralization and then,
 #   for each requested alpha, adds a COLUMN classifying every triangle. The
-#   triangle list in `$triang[, 1:3]` is therefore identical for every alpha —
+#   triangle list in `$triang[, 1:3]` is therefore identical for every alpha -
 #   alpha lives only in the classification columns. The old code drew
 #   `$triang[, 1:3]` wholesale, i.e. the entire tetrahedralization, so the mesh
 #   was byte-for-byte the same at every slider position. That is why moving the
@@ -3766,16 +3766,16 @@ generate_arc_from_cluster2 <- function(cluster_data, n_points = 300,
 #          0 = exterior, 1 = singular, 2 = REGULAR, 3 = interior
 #   Only REGULAR triangles form the closed boundary surface. (Check: as alpha
 #   grows the regular set converges exactly onto the convex-hull faces, while
-#   the singular count explodes — singular triangles are dangling slivers and
+#   the singular count explodes - singular triangles are dangling slivers and
 #   drawing them is what produced the old opaque blob.)
 #
 # HOW THE RADIUS IS PICKED
 #   A ladder of candidate radii is built from the group's OWN spacing (multiples
 #   of its median nearest-neighbour distance) and classified in a SINGLE
-#   ashape3d call — extra alphas cost one column each, not another
+#   ashape3d call - extra alphas cost one column each, not another
 #   tetrahedralization. We then take the SMALLEST radius that passes two tests:
 #     (1) every point sits in ONE connected component (nothing shed), and
-#     (2) the regular triangles form a CLOSED surface — each edge used by
+#     (2) the regular triangles form a CLOSED surface - each edge used by
 #         exactly two of them. Test (2) matters because connectivity alone still
 #         admits radii whose boundary has holes, and plotly renders a holed mesh
 #         as a torn, see-through shell.
@@ -3890,7 +3890,7 @@ alpha_surface_3d <- function(pts_mat, max_pts = 2000L) {
 
 # NOTE: `virtual_points` is a dense uniform sampling of the fitted SPHERE, not
 # data. Its triangulation is the convex hull by construction, so no alpha shape
-# is built here — the caller hulls it. (An `ashape` element used to be returned
+# is built here - the caller hulls it. (An `ashape` element used to be returned
 # alongside; it was never actually drawn.)
 generate_sphere_from_cluster2 <- function(cluster_data, n_points = 4000,
                                           use_cluster1 = FALSE) {
@@ -4270,7 +4270,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     ecc1 <- if (is.finite(d) && d > 1e-6) sqrt(max(0, 1 - (e/d)^2)) else NA_real_
     ecc2 <- if (is.finite(d) && d > 1e-6) sqrt(max(0, 1 - (f/d)^2)) else NA_real_
     ecc3 <- if (is.finite(e) && e > 1e-6) sqrt(max(0, 1 - (f/e)^2)) else NA_real_
-    # Bending (perceived) radius — ASSUMPTION: the cluster represents a curved arc
+    # Bending (perceived) radius - ASSUMPTION: the cluster represents a curved arc
     # where PC1 spans the chord half-length and PC2 is the sagitta (bow height).
     # Formula: R = (chord²/2 + sagitta²) / (2 * sagitta).
     # Valid for ring segments (e.g. S. aureus division ring viewed on edge) but
@@ -4837,11 +4837,11 @@ run_cluster2_grouping <- function(pts, method = "dbscan", eps = 200, minPts = 15
 
 
 # =============================================================================
-# deblink_axis_weights() — PUT X, Y AND Z ON A COMMON PRECISION SCALE
+# deblink_axis_weights() - PUT X, Y AND Z ON A COMMON PRECISION SCALE
 # =============================================================================
 #
 # GOAL
-#   DBSCAN uses a spherical eps, but MINFLUX trace spread is not isotropic — in
+#   DBSCAN uses a spherical eps, but MINFLUX trace spread is not isotropic - in
 #   this app z is additionally multiplied by the axial calibration (default 0.7,
 #   a refractive-index mismatch correction, user-set per dataset). A single
 #   radius therefore cannot fit all three axes: set it for xy and traces
@@ -4853,7 +4853,7 @@ run_cluster2_grouping <- function(pts, method = "dbscan", eps = 200, minPts = 15
 #   displacement in z is MORE evidence of two distinct molecules than in xy.
 #   Weighting each axis by its own spread is the Mahalanobis form of that test.
 #
-#   This is emphatically NOT valid for measuring physical size — cluster radii,
+#   This is emphatically NOT valid for measuring physical size - cluster radii,
 #   Rg, nearest-neighbour distances must stay in true nm. The weights are for
 #   the merge decision only.
 #
@@ -4872,7 +4872,7 @@ run_cluster2_grouping <- function(pts, method = "dbscan", eps = 200, minPts = 15
 #   list(w = c(wx, wy, wz), sigma = c(sx, sy, sz), has_z, ok)
 #   `w` is ALWAYS length 3 so callers can apply it to an (x,y,z) matrix
 #   unconditionally. ok = FALSE means the spreads were unusable and w is
-#   c(1,1,1) — the caller then behaves exactly as it did before.
+#   c(1,1,1) - the caller then behaves exactly as it did before.
 # =============================================================================
 deblink_axis_weights <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, use_z = TRUE) {
   flat <- list(w = c(1, 1, 1), sigma = c(NA_real_, NA_real_, NA_real_),
@@ -4906,7 +4906,7 @@ deblink_axis_weights <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, use_z 
 
 # GOAL: apply per-axis de-blink weights to an (x,y,z) coordinate matrix.
 # Kept as one function so every primary-DBSCAN call site transforms identically
-# — the suggestion and the clustering must share a metric or eps is meaningless.
+# - the suggestion and the clustering must share a metric or eps is meaningless.
 apply_deblink_weights <- function(pts, w) {
   if (is.null(w)) return(pts)
   # A weight vector shorter than the coordinate matrix used to pad with NA
@@ -4931,7 +4931,7 @@ deblink_coord_cols <- function(df) intersect(c("x", "y", "z"), names(df))
 # Base R only (no matrixStats dependency); the matrices here are 2-3 columns and
 # a handful of rows per trace, so a column loop costs nothing. Kept as its own
 # function because every de-blink call site must collapse a trace to a centroid
-# the same way — median, NA-tolerant, always length ncol even for empty input.
+# the same way - median, NA-tolerant, always length ncol even for empty input.
 matrixStats_colMedian <- function(m) {
   if (!is.matrix(m)) m <- as.matrix(m)
   storage.mode(m) <- "double"
@@ -4941,7 +4941,7 @@ matrixStats_colMedian <- function(m) {
 }
 
 # =============================================================================
-# deblink_merge_centroids() — MERGE TRACES ON CENTROID AGREEMENT
+# deblink_merge_centroids() - MERGE TRACES ON CENTROID AGREEMENT
 # =============================================================================
 #
 # GOAL
@@ -4953,7 +4953,7 @@ matrixStats_colMedian <- function(m) {
 #   Raw-point single-linkage merges when ANY localization of one cloud comes
 #   within eps of ANY localization of another, so the outlying tails do the
 #   chaining and the effective resolution degrades as ~eps + 2*sigma*sqrt(2 ln n)
-#   — it gets WORSE as traces get longer. Centroids have no tails.
+#   - it gets WORSE as traces get longer. Centroids have no tails.
 #
 #   On ground-truth simulation (360 molecules, 923 traces, sigma 6.5 nm):
 #     raw-point DBSCAN   best at 0.62*sigma -> 35 errors (splits + merges)
@@ -4965,7 +4965,7 @@ matrixStats_colMedian <- function(m) {
 #
 # THRESHOLD SCALE
 #   ~1.5x the median per-axis trace spread. Note this is NOT the same number as
-#   the raw-point eps (~0.6 sigma) — the two methods measure different distances,
+#   the raw-point eps (~0.6 sigma) - the two methods measure different distances,
 #   which is why they have separate inputs rather than sharing one.
 #
 # NO NOISE BY CONSTRUCTION
@@ -4997,13 +4997,13 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
 
   # A trace whose centroid is non-finite (e.g. its z is entirely NA) makes
   # dbscan throw. That used to hit the blanket tryCatch below and return
-  # "every trace is its own molecule" for the WHOLE dataset — de-blinking
+  # "every trace is its own molecule" for the WHOLE dataset - de-blinking
   # silently disabled, with an inflated molecule count and no warning. Instead,
   # cluster the traces that do have a usable centroid and give each unusable one
   # its own id, which is the merge-only rule applied to a trace we cannot place.
   # An axis that is unmeasured across the WHOLE dataset (a z column that is all
   # NA rather than the synthesised 0) is dropped rather than allowed to
-  # invalidate every centroid — de-blinking then proceeds in the axes that exist.
+  # invalidate every centroid - de-blinking then proceeds in the axes that exist.
   keep_ax <- apply(is.finite(M), 2L, any)
   if (any(keep_ax) && !all(keep_ax)) M <- M[, keep_ax, drop = FALSE]
 
@@ -5023,7 +5023,7 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
 }
 
 # =============================================================================
-# suggest_centroid_threshold() — THE MERGE DISTANCE FROM THE TRACE SPREAD
+# suggest_centroid_threshold() - THE MERGE DISTANCE FROM THE TRACE SPREAD
 # =============================================================================
 #
 # GOAL
@@ -5051,7 +5051,7 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
 #   Split-half measurement on real files puts the centroid's own motion at ~4.4
 #   nm against a 1.5 nm random floor, so a real dataset is NOT in the k = 1.4
 #   column. k is therefore a visible control, defaulting to 2.0 rather than 1.5,
-#   and the app cannot measure the between-blink term for you — doing so would
+#   and the app cannot measure the between-blink term for you - doing so would
 #   require knowing which traces are the same molecule, which is the question
 #   being asked. Use the count-vs-threshold curve and the diagnostic to judge it.
 #
@@ -5070,7 +5070,7 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
 #
 # RETURNS
 #   list(sigma_ax, sigma, suggested, within, between, frac_merged, n_traces,
-#        dims) — `within` and `between` are the raw distances the plot draws.
+#        dims) - `within` and `between` are the raw distances the plot draws.
 #   NULL when the spread cannot be estimated.
 # =============================================================================
 suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
@@ -5107,7 +5107,7 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 
   # between-trace: nearest-neighbour distance between trace centroids. The near
   # population is re-blinks of one fluorophore, the far population is distinct
-  # molecules — the threshold has to land between them.
+  # molecules - the threshold has to land between them.
   M  <- t(vapply(g, function(ix) matrixStats_colMedian(P[ix, , drop = FALSE]), numeric(ncol(P))))
   nn <- tryCatch(dbscan::kNN(M, k = 1L)$dist[, 1L], error = function(e) numeric(0))
   nn <- nn[is.finite(nn)]
@@ -5126,7 +5126,7 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 }
 
 # =============================================================================
-# deblink_reblink_excess() — MEASURE k FROM THE DATA, NOT FROM SIMULATION
+# deblink_reblink_excess() - MEASURE k FROM THE DATA, NOT FROM SIMULATION
 # =============================================================================
 #
 # GOAL
@@ -5135,7 +5135,7 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 #
 # THE IDEA
 #   If merging is incomplete, the leftovers are unmerged re-blinks of the same
-#   fluorophore — and those sit ON TOP of each other, a few nm apart. So after
+#   fluorophore - and those sit ON TOP of each other, a few nm apart. So after
 #   merging, look at the molecule nearest-neighbour distances: an excess of
 #   pairs closer than ~2 sigma, far above the local density at ordinary
 #   separations, means re-blinks are still being counted twice. Raise k until
@@ -5150,20 +5150,20 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 # WHAT IT CAN AND CANNOT SEE
 #   It detects UNDER-merging sharply. It cannot detect OVER-merging: once the
 #   excess is gone, raising k further only fuses genuine neighbours and the test
-#   stays silent. So the value it returns is a LOWER BOUND — the smallest safe k
-#   — and the count-vs-threshold curve shows what going higher costs.
+#   stays silent. So the value it returns is a LOWER BOUND - the smallest safe k
+#   - and the count-vs-threshold curve shows what going higher costs.
 #
 #   Another route was tried and has no power here: two traces overlapping in
 #   TIME cannot be the same fluorophore, which would certify wrong merges. On
-#   real data, 0 of 239 trace pairs within 60 nm overlapped in time — the
-#   instrument does not track two molecules at once — so that test is dead.
+#   real data, 0 of 239 trace pairs within 60 nm overlapped in time - the
+#   instrument does not track two molecules at once - so that test is dead.
 #
 # ARGUMENTS
 #   df, sigma, w : as for suggest_centroid_threshold(); sigma in the same metric
 #   ks           : multipliers to try
 #   ref_lo/ref_hi: the shell (nm) used as the "ordinary density" reference
 #
-# RETURNS  list(table, k_clear) — k_clear is NA when the excess never clears.
+# RETURNS  list(table, k_clear) - k_clear is NA when the excess never clears.
 # =============================================================================
 deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25),
                                    ref_lo = 30, ref_hi = 60) {
@@ -5192,14 +5192,14 @@ deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25
   if (is.null(tb) || !nrow(tb)) return(NULL)
 
   # First k where the short-range pile-up is indistinguishable from ordinary
-  # density (excess <= 1) — i.e. nothing looks like a leftover re-blink.
+  # density (excess <= 1) - i.e. nothing looks like a leftover re-blink.
   ok <- which(is.finite(tb$excess) & tb$excess <= 1)
   list(table = tb, k_clear = if (length(ok)) tb$k[ok[1]] else NA_real_,
        near_nm = round(near, 2))
 }
 
 # =============================================================================
-# deblink_merge_majority_vote() — LET THE LOCALIZATIONS VOTE
+# deblink_merge_majority_vote() - LET THE LOCALIZATIONS VOTE
 # =============================================================================
 #
 # GOAL
@@ -5215,7 +5215,7 @@ deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25
 #
 # WHY LEAVE-ONE-OUT IS NOT OPTIONAL
 #   The centroid of X is fitted TO X's own points, so d_own is systematically
-#   too small — every point is unfairly close to its own centre. The effect goes
+#   too small - every point is unfairly close to its own centre. The effect goes
 #   as ~1/n, so it hits the short traces hardest, which are exactly the ones
 #   most in need of merging. Excluding p from its own centroid removes the bias
 #   exactly, and is cheap for a mean: c^(-p) = (n*c - p) / (n - 1). That is why
@@ -5232,7 +5232,7 @@ deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25
 #   data (mixed labels, varying photon counts) needs no global sigma.
 #
 # SYMMETRY AND TRANSITIVITY
-#   Votes are asymmetric — a short diffuse trace may vote for a long tight one
+#   Votes are asymmetric - a short diffuse trace may vote for a long tight one
 #   without the reverse. `mutual = TRUE` requires both directions, which is the
 #   conservative reading. Accepted pairs then form a graph and connected
 #   components become molecules; chaining is still possible but through a far
@@ -5291,7 +5291,7 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRU
   #
   # Each point names only its single nearest other centroid, so a fluorophore
   # that blinked three times has its votes SPLIT across the two siblings and no
-  # individual candidate clears f — the trace stays unmerged even though nearly
+  # individual candidate clears f - the trace stays unmerged even though nearly
   # every point voted to merge with something. So the decision uses the total
   # vote fraction, and edges then go to each candidate holding a real share.
   vt <- data.frame(x = tix[vote], y = best_id[vote])
@@ -5306,7 +5306,7 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRU
                    nv = as.integer(cnt))
   ed <- ed[ed$x %in% keep_x, , drop = FALSE]
   # a candidate counts if it holds a real share of the votes cast, not of all
-  # points — otherwise siblings cancel each other out again
+  # points - otherwise siblings cancel each other out again
   ed$share <- ed$nv / pmax(tabulate(vt$x, nbins = nT)[ed$x], 1L)
   ed <- ed[ed$share >= 0.25, , drop = FALSE]
 
@@ -5318,7 +5318,7 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRU
   # NOTE on f: the vote fraction for two traces of the SAME molecule is ~0.5 by
   # construction (leave-one-out makes d_own and d_alt identically distributed,
   # since both centroids estimate the same position). It falls to ~0.23 at 10 nm
-  # and ~0.07 at 20 nm separation. So f must sit well BELOW 0.5 — thresholding
+  # and ~0.07 at 20 nm separation. So f must sit well BELOW 0.5 - thresholding
   # at 0.5 tests against the null value and rejects half of all true merges.
 
   if (!nrow(ed)) return(as.integer(tix))
@@ -5335,7 +5335,7 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRU
 }
 
 # =============================================================================
-# deblink_minpts() — minPts IS THE TRACE-LENGTH FILTER, NOT A FREE KNOB
+# deblink_minpts() - minPts IS THE TRACE-LENGTH FILTER, NOT A FREE KNOB
 # =============================================================================
 # GOAL
 #   Derive the primary DBSCAN minPts from the Trace ID Length filter's lower
@@ -5349,7 +5349,7 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRU
 #
 #   Tying them makes the rule self-consistent: any trace that survives the
 #   length filter carries enough localizations to seed a molecule on its own,
-#   so the only thing that can still leave it unmerged is its own spread —
+#   so the only thing that can still leave it unmerged is its own spread -
 #   which is exactly what the spread filter governs.
 #
 # ARGUMENTS  input : the Shiny input list (reads tid_length_range)
@@ -5363,7 +5363,7 @@ deblink_minpts <- function(input) {
 }
 
 # =============================================================================
-# deblink_assign_singletons() — DE-BLINKING MERGES, IT NEVER REMOVES
+# deblink_assign_singletons() - DE-BLINKING MERGES, IT NEVER REMOVES
 # =============================================================================
 # GOAL
 #   Give every trace DBSCAN labelled noise (cluster 0) its own cluster ID, so
@@ -5374,7 +5374,7 @@ deblink_minpts <- function(input) {
 #   to link, is still a molecule. Dropping it here would delete molecules on a
 #   spatial criterion applied outside the metadata and spread filters, and would
 #   bias every count toward multi-blink species. Downstream code universally
-#   filters `cluster != 0`, so leaving traces at 0 would remove them silently —
+#   filters `cluster != 0`, so leaving traces at 0 would remove them silently -
 #   promoting them to singletons is what actually keeps them.
 #
 #   The cost is explicit and preferable: with a too-small radius, counts inflate
@@ -5391,7 +5391,7 @@ deblink_assign_singletons <- function(df) {
   nxt <- suppressWarnings(max(df$cluster, na.rm = TRUE))
   if (!is.finite(nxt) || nxt < 0) nxt <- 0L
 
-  # one new ID per TRACE (not per point) — a noise trace stays one molecule
+  # one new ID per TRACE (not per point) - a noise trace stays one molecule
   df$cluster[noise] <- as.integer(nxt) +
     as.integer(factor(as.character(df$tid[noise])))
   df
@@ -5399,7 +5399,7 @@ deblink_assign_singletons <- function(df) {
 
 
 # =============================================================================
-# deblink_count_curve() — MOLECULE COUNT vs RADIUS, AND ITS KNEE   [EXPLORATORY]
+# deblink_count_curve() - MOLECULE COUNT vs RADIUS, AND ITS KNEE   [EXPLORATORY]
 # =============================================================================
 #
 # GOAL
@@ -5408,12 +5408,12 @@ deblink_assign_singletons <- function(df) {
 #   many molecules come out.
 #
 # THE SHAPE OF THE CURVE AND WHY THE KNEE IS THE ANSWER
-#   small eps  count is inflated — re-blinks of one fluorophore stay separate
+#   small eps  count is inflated - re-blinks of one fluorophore stay separate
 #              and long traces fragment. The count falls STEEPLY as eps grows
 #              and genuine re-blinks start to merge.
 #   the knee   the point where that steep fall stops: the re-blinks have been
 #              collected and nothing much is left to merge correctly.
-#   large eps  a slow, steady decline — this is DISTINCT molecules being fused.
+#   large eps  a slow, steady decline - this is DISTINCT molecules being fused.
 #              It never plateaus perfectly, because there is always another
 #              neighbour to swallow.
 #   So the knee is the largest radius that is still merging mostly re-blinks.
@@ -5426,7 +5426,7 @@ deblink_assign_singletons <- function(df) {
 #
 # WHY IT IS MARKED EXPLORATORY
 #   The knee is a curvature maximum on a noisy, subsampled curve. It is stable
-#   when the two regimes are well separated and unreliable when they are not —
+#   when the two regimes are well separated and unreliable when they are not -
 #   which is the same crowding condition that makes de-blinking ambiguous in the
 #   first place. Treat it as evidence, not as an answer, and look at the curve.
 #
@@ -5436,7 +5436,7 @@ deblink_assign_singletons <- function(df) {
 #   eps_seq  : radii to try (nm)
 #   w        : optional per-axis de-blink weights, so the curve is measured in
 #              the same metric the clustering will use
-#   max_pts  : subsample cap — the sweep runs DBSCAN once per eps
+#   max_pts  : subsample cap - the sweep runs DBSCAN once per eps
 #
 # RETURNS  list(curve = data.frame(eps, n_molecules), knee, n_locs, n_traces)
 # =============================================================================
@@ -5461,7 +5461,7 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
   # then TID-plurality, then unmerged traces become their own molecule.
   # Both criteria put every trace in a cluster, so the count is just the number
   # of distinct labels. For "vote" the swept quantity is the vote FRACTION, not
-  # a distance — the caller supplies the right sequence.
+  # a distance - the caller supplies the right sequence.
   Mc <- NULL
   if (identical(method, "centroid")) {
     gg <- split(seq_len(nrow(P)), tid)
@@ -5470,7 +5470,7 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
   }
   # CENTROID ONLY. A vote sweep was tried and withdrawn: it did not return in a
   # usable time, and an unresponsive diagnostic is worse than an absent one.
-  # The vote criterion has no distance to sweep anyway — its parameter is a
+  # The vote criterion has no distance to sweep anyway - its parameter is a
   # dimensionless fraction whose useful range is already documented on the input.
   if (is.null(Mc)) return(NULL)
   count_at <- function(e) {
@@ -5498,36 +5498,36 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 }
 
 # =============================================================================
-# apply_clustering_pipeline() — THE TWO-TIER CLUSTERING ENTRY POINT
+# apply_clustering_pipeline() - THE TWO-TIER CLUSTERING ENTRY POINT
 # =============================================================================
 #
 # GOAL
 #   Turn raw localizations into the two grouping levels the whole SMLM tab is
 #   built on. This mirrors exactly what the interactive plot does
 #   (`plottable_data()` in server_smlm.R), so batch tools and the on-screen plot
-#   can never disagree — that duplication is the reason this function exists.
+#   can never disagree - that duplication is the reason this function exists.
 #
 # THE TWO TIERS AND WHY THERE ARE TWO
-#   PRIMARY clustering (`cluster`) — DE-BLINKING.
+#   PRIMARY clustering (`cluster`) - DE-BLINKING.
 #     Runs DBSCAN over RAW localizations with a SMALL eps (~10-30 nm, i.e. a few
 #     times the localization precision). A single fluorophore blinking on and off
 #     produces many localizations within a few nm of each other; this collapses
 #     them into one object. Without it, one molecule is counted many times and
 #     every downstream count and spatial statistic is inflated.
 #
-#   SECONDARY / "median" clustering (`cluster2`) — STRUCTURE.
+#   SECONDARY / "median" clustering (`cluster2`) - STRUCTURE.
 #     Runs over the MEDIAN position of each unit from the level above, with a
 #     LARGE eps (~100-300 nm). Its job is biological: group molecules into the
 #     structure they form (a filament, a ring, a complex).
 #
-#   The two eps values are doing completely different jobs — primary eps is set
+#   The two eps values are doing completely different jobs - primary eps is set
 #   by the MICROSCOPE (precision + label size), secondary eps by the BIOLOGY
 #   (how far apart molecules in one structure sit). Tuning them together is the
 #   most common source of confusion.
 #
 # WHY DBSCAN (and its alternatives here)
 #   DBSCAN needs no pre-set cluster count, finds arbitrary shapes, and labels
-#   sparse points as noise (cluster 0) rather than forcing them into a group —
+#   sparse points as noise (cluster 0) rather than forcing them into a group -
 #   all three matter for SMLM data. It does assume roughly uniform density, so
 #   the secondary level also offers:
 #     HDBSCAN ... adaptive density; only a minimum cluster size, no eps
@@ -5536,7 +5536,7 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 # MULTIPLEX RULE (enforced, not optional)
 #   When a multiplex dataset is active, clustering runs SEPARATELY PER CHANNEL
 #   and the IDs are offset. Molecules imaged in different exchange rounds must
-#   never be merged into one cluster — that would invent structures that were
+#   never be merged into one cluster - that would invent structures that were
 #   never simultaneously present.
 #
 # DE-BLINKING MERGES, IT NEVER REMOVES
@@ -5546,11 +5546,11 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 #     - traces DBSCAN cannot merge become their own single-blink molecule (see
 #       deblink_assign_singletons), so `cluster` is > 0 everywhere.
 #   Removing molecules is the job of the metadata and spread filters, where it
-#   is visible and reversible — not a side effect of a clustering radius.
+#   is visible and reversible - not a side effect of a clustering radius.
 #
 # ARGUMENTS
 #   df    : an ALREADY-FILTERED data.frame (x, y, z, tid [, mplex_channel])
-#   input : the Shiny input list — read directly so batch tools use exactly the
+#   input : the Shiny input list - read directly so batch tools use exactly the
 #           settings the user sees. Relevant: enable_clustering, eps,
 #           deblink_anisotropic, tid_length_range (-> minPts), enable_cluster2,
 #           eps2/minpts2, cluster2_method, grouping_mode, cluster_group_scope
@@ -5558,7 +5558,7 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 # RETURNS
 #   the same df with `cluster` and/or `cluster2` integer columns appended.
 #   For `cluster2`, ID 0 still means "noise / unassigned" and consumers must
-#   exclude it before counting. For `cluster`, 0 no longer occurs — the existing
+#   exclude it before counting. For `cluster`, 0 no longer occurs - the existing
 #   `cluster != 0` filters downstream are harmless no-ops that now keep every
 #   trace which survived filtering.
 # =============================================================================
@@ -5587,7 +5587,7 @@ apply_clustering_pipeline <- function(df, input) {
     # to a neighbouring trace. Raw-point DBSCAN was removed: one stray
     # localization could bridge two molecules. Ground-truth errors at each
     # method's own best threshold: raw-point 35, vote 29, centroid 10.
-    # (Centroid scores 11 at the k = 2.0 default and 10 at its optimum 1.54 —
+    # (Centroid scores 11 at the k = 2.0 default and 10 at its optimum 1.54 -
     #  quote the basis, not a bare number.)
     method1 <- input$deblink_method %||% "centroid"
     thr1    <- input$eps_centroid   %||% 10
@@ -5761,14 +5761,14 @@ apply_clustering_pipeline <- function(df, input) {
 # the preferred unit when present ("auto").
 #
 # KEY LIMIT: the link_nm offset is COMMON-MODE within a molecule (all its
-# localizations share the one draw), so it never averages out — it is the
+# localizations share the one draw), so it never averages out - it is the
 # irreducible position-uncertainty floor. Reported as `pos_sd_nm`.
 #
 # Args:
 #   df       clustered SMLM frame (needs x,y[,z],tid; uses `cluster`/`cluster2`)
 #   preset   a preset list from minflux_label_presets(), OR its name, OR a list
 #            with n_fluor/link_nm/dye_spread_nm/footprint_nm/blink_lambda
-#   eff_pct  labeling/detection efficiency (%) — folds into the multiplicity
+#   eff_pct  labeling/detection efficiency (%) - folds into the multiplicity
 #   level    "auto" (primary clusters when available else TIDs), "primary", "tid"
 #   fuse_k   a unit whose per-axis spread exceeds fuse_k x the single-molecule
 #            expectation is flagged as fused (multiple GTs merged)
@@ -5776,7 +5776,7 @@ apply_clustering_pipeline <- function(df, input) {
 #   sigma_loc_nm  per-localization precision; estimated from data when NULL
 #   scope_cluster2 restrict to points inside a secondary structure (cluster2>0)
 #
-# Returns list(points, summary, meta) — see field construction below. Empty
+# Returns list(points, summary, meta) - see field construction below. Empty
 # data.frames (never NULL) when nothing is estimable, so callers stay simple.
 estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
                                       level = c("auto", "primary", "tid"),
@@ -5866,7 +5866,7 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   # ── build candidate units ──
   if (!"z" %in% names(work)) work$z <- 0    # ensure column exists; zeroed later if 2D
   work$z[!is.finite(work$z)] <- 0
-  # NOTE: compute the SDs BEFORE the median columns overwrite x/y/z — dplyr
+  # NOTE: compute the SDs BEFORE the median columns overwrite x/y/z - dplyr
   # summarise evaluates sequentially, so `sd_x` must reference the raw x, not the
   # just-created scalar median (which would give NA).
   units <- work %>%
@@ -5899,14 +5899,14 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   # A multivalent label (n_fluor>1, dye_spread>0) scatters several fluorophores,
   # hence several primary clusters / TIDs, around ONE molecule. Pool unit
   # centroids that fall within `complex_r` (the label-complex radius) so those
-  # contributors collapse into a single candidate GT — this is what makes
+  # contributors collapse into a single candidate GT - this is what makes
   # "many traces -> one molecule" happen, and it produces the contribution
   # fan-out lines. Merging is confined within each cluster2 so distinct
   # structures never pool together.
   #
   # AUTO radius is PRESET-SPECIFIC: max(footprint, 2.5 x dye_spread). Both terms
   # come from the labeling preset, so a big polyclonal+secondary complex pools
-  # over ~45 nm while a nanobody pools over ~3 nm — i.e. the labeling strategy
+  # over ~45 nm while a nanobody pools over ~3 nm - i.e. the labeling strategy
   # itself sets how many traces collapse into one molecule, as expected.
   if (is.null(complex_r) || !is.finite(complex_r) || complex_r < 0)
     complex_r <- max(footprint, 2.5 * dye_spread)
@@ -5932,7 +5932,7 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
     # ── stoichiometry-guided merge (opt-in, MODEL-DRIVEN) ──
     # If the spatial merge left MORE groups than the labeling stoichiometry
     # predicts (N_TID / m_tid), collapse further to that target via hierarchical
-    # clustering. Only ever REDUCES the count toward stoichiometry — it never
+    # clustering. Only ever REDUCES the count toward stoichiometry - it never
     # splits (that would fabricate molecules). Confined to real structures.
     if (isTRUE(guided_merge) && sid > 0L) {
       n_grp    <- length(unique(g))
@@ -5999,7 +5999,7 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   # sits ~link_nm OUTSIDE the true structure. Push each (non-fused) molecule back
   # toward its structure by `displace_nm` (auto = link_nm). Geometry-aware: for
   # an elongated structure (a filament) "inward" is PERPENDICULAR toward the axis
-  # (the axial component is dropped — there is no inside along the length); for a
+  # (the axial component is dropped - there is no inside along the length); for a
   # compact / ring structure it points straight at the centroid. FUSED molecules
   # are skipped: their centroid geometry is already corrupted by merging, so the
   # clean outward-offset assumption doesn't hold. Applied only within a defined
@@ -6049,7 +6049,7 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
 
   # ── position uncertainty (this drives the green->red colour) ──────────────
   # Independent contributions added in quadrature (all in nm):
-  #  s_link    linker floor — irreducible, common-mode per molecule (dominant)
+  #  s_link    linker floor - irreducible, common-mode per molecule (dominant)
   #  s_sample  how well the label centroid is pinned = fan-out spread averaged
   #            over the contributing units, plus localization precision / #locs
   #  s_support RELIABILITY penalty for few independent labels: a GT from 1 TID
@@ -6216,7 +6216,7 @@ mst_contour_length <- function(P) {
 
 # Classify each cluster2's shape and report neutral geometric descriptors.
 # EXPLORATORY. Shape from the covariance (gyration-tensor) eigenvalues; contour
-# length from the backbone's minimum spanning tree. Not tied to any biology —
+# length from the backbone's minimum spanning tree. Not tied to any biology -
 # the caller supplies an optional generic subunit spacing if a count is wanted.
 #
 #   df              clustered SMLM frame (x,y[,z], tid, cluster2)
@@ -6289,7 +6289,7 @@ analyze_cluster2_morphology <- function(df, backbone_pts = NULL,
     contour <- mst_contour_length(thinned)
     contour <- max(contour, extent)                # never below the straight span
 
-    # Shape class — dimension-aware. In 2D there is no sheet/sphericity axis, so
+    # Shape class - dimension-aware. In 2D there is no sheet/sphericity axis, so
     # sphericity (l3/l1) is always 0; classify by linearity + ring only.
     shape <- if (is_ring) "ring"
              else if (linearity > 0.6) "filament"
@@ -6337,7 +6337,7 @@ analyze_cluster2_morphology <- function(df, backbone_pts = NULL,
 ## ── Radius of Gyration ───────────────────────────────────────────────────────
 # Returns a data.frame with one row per cluster: cluster_id, n_traces, rog (nm)
 # ── compute_cluster_rog() ─────────────────────────────────────────────────────
-# GOAL: radius of gyration  Rg = sqrt(<|p - centroid|^2>)  per cluster — the RMS
+# GOAL: radius of gyration  Rg = sqrt(<|p - centroid|^2>)  per cluster - the RMS
 # size of a point cloud about its centre.
 #
 # TWO PARAMETERS, TWO QUESTIONS:
@@ -6355,13 +6355,13 @@ analyze_cluster2_morphology <- function(df, backbone_pts = NULL,
 # MINFLUX adaptation: points are MEDIAN member positions, never raw localizations.
 # A median of N localizations has SD ~ sigma_loc/sqrt(N), so localization noise is
 # already suppressed and Rg reflects real geometry, not measurement scatter. (What
-# remains is the label footprint — real between-trace spread — which is exactly the
+# remains is the label footprint - real between-trace spread - which is exactly the
 # thing the "cluster" grouping is meant to report and the "cluster2" grouping is
 # meant to look past by de-blinking to one point per molecule.)
 #
 # SMALL-N BIAS (bias_correct): the centroid is estimated from the SAME points whose
 # spread is being measured, so it sits inside the cloud and E[Rg²_obs] = Rg²·(N−1)/N.
-# That is a 29% underestimate at N=2, 11% at N=5, 1% at N=50 — i.e. an N-DEPENDENT
+# That is a 29% underestimate at N=2, 11% at N=5, 1% at N=50 - i.e. an N-DEPENDENT
 # bias, which manufactures a spurious "bigger clusters have bigger Rg" trend whenever
 # clusters of different member counts are pooled or plotted against size. Multiplying
 # the mean squared distance by N/(N−1) (Bessel, exactly as for a sample variance)
@@ -6796,7 +6796,7 @@ compute_pcf12 <- function(x1, y1, z1 = NULL, x2, y2, z2 = NULL,
 ##
 ## Because the sims share the observed window, the (uncorrected) edge bias that
 ## drags L(r)−r negative at large r is present in the envelope too and cancels
-## when the observed curve is read against the band — this envelope is the
+## when the observed curve is read against the band - this envelope is the
 ## interpretive tool, superseding an explicit edge correction.
 compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
                                      nsim = 99L, estimator = c("L", "L12", "pcf"),
@@ -6882,7 +6882,7 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
 ##                 placement. It is NOT the Costes et al. 2004 test (theirs preserves
 ##                 the randomized channel's autocorrelation by block randomization).
 ##
-## ⚠ CALIBRATION — measured, not assumed (2026-07-30). Simulated 30× per scenario,
+## ⚠ CALIBRATION - measured, not assumed (2026-07-30). Simulated 30× per scenario,
 ## independent placement (truth = NOT co-localized), so a calibrated test should
 ## reject at p<0.05 about 5% of the time:
 ##   • Channels clustered but spread over the WHOLE window:
@@ -6972,7 +6972,7 @@ compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L,
 
 ## ── Grid-based density correlation (multi-scale) ─────────────────────────────
 ## For each cell size in `cell_sizes`, bins Ch1 and Ch2 molecules into a 2D
-## grid and returns Pearson r between per-cell counts — a multi-scale
+## grid and returns Pearson r between per-cell counts - a multi-scale
 ## co-localization measure.
 
 make_helpers <- function(mode) {
