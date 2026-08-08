@@ -274,10 +274,8 @@ De-blinked molecules are labelled **De-blinked ID** in hover text, and their med
 TID medians) become the representative points for downstream analysis including Median Clustering.
 
 
-> **Naming in the code.** The build originally had two DBSCAN levels, named `cluster` and `cluster2`
-> to tell them apart. Those names are still used in the source even though the first level is now
-> de-blinking and the second is Median Clustering — so `cluster` in the code means de-blinking, and
-> `cluster2` means Median Clustering.
+> **Naming in the code.** The source calls these two stages `cluster` and `cluster2`: `cluster` is
+> de-blinking, `cluster2` is Median Clustering.
 
 ### Nearest Neighbor Analysis
 
@@ -378,15 +376,17 @@ a global PCA-fitted reference surface, e.g. the plasma membrane:
 - *Angle to plane* — angle between the cluster's primary PCA axis and the reference plane normal;
   0° = perpendicular to membrane, 90° = lying flat
 - *Distance to plane* — signed distance from the cluster centroid to the reference plane
-- *Bending radius* — curvature radius of an arc-like cluster:
+- *Bending radius* — curvature radius of an arc-like cluster
 
-  ```math
-  R_\text{bend} = \frac{\ell^2 + s^2}{2s}
-  ```
+The bending radius is:
 
-  where $\ell$ is the PC1 half-extent (chord half-length) and $s$ is the PC2 extent (sagitta).
-  **Only valid for arc-like clusters viewed roughly edge-on** — not meaningful for complete rings,
-  spheres, or helices.
+```math
+R_\text{bend} = \frac{\ell^2 + s^2}{2s}
+```
+
+where $\ell$ is the PC1 half-extent (chord half-length) and $s$ is the PC2 extent (sagitta).
+**Only valid for arc-like clusters viewed roughly edge-on** — not meaningful for complete rings,
+spheres, or helices.
 
 #### NN distances within Median Clusters
 
@@ -1137,35 +1137,27 @@ Method (3) deliberately uses the **spacing between clusters**, not the mode. Thi
 > ⚠ **The modal Δt is not the cycle time** — it is $1 \cdot t_c + \text{SW}$. Mistaking one for the
 > other biases every D by about **−5.5%**.
 
-#### What the real data shows
+#### What the interval structure looks like
 
-Measured on 650,042 within-track steps of a real acquisition (`tim` stored as float64, so this is
-genuine structure and not a storage artifact):
-
-| Quantity | Result |
-|---|---|
-| Regressed interval law | $t_c$ = 0.19161 ms, SW = 0.01153 ms, **R² = 0.9999978** |
-| App's own estimator | $t_c$ = 0.191483 ms — agrees to **0.065%** |
-| $(\Delta t - \text{SW})/t_c$ within 1% of an integer | **97.6%** of steps (99.98% within 5%) |
-| Dividing by the *mode* instead | succeeds for only **52%** |
-| Jitter within one cycle | CV = **0.0425%**, 46% of steps on a single identical value |
-
-So the comb is essentially exact, and each peak is a near-delta spike rather than a broadened
-distribution. Two consequences are baked into the panel:
+The comb is essentially exact: on real data the interval law regresses at R² > 0.999997, and each
+cycle-count peak is a near-delta spike rather than a broadened distribution — the within-cycle spread
+is a few hundredths of a percent. Two properties of the panel follow from that:
 
 - **Binning is one bar per cycle count**, with edges on the classification boundaries
-  $\text{SW} + (k \pm \tfrac{1}{2}) t_c$. Fixed-width bins alias against the comb — at 80 bins the grid
-  ran 1.63 bins per cycle and bar centres drifted 5–25% of a cycle away from the true peaks, which is
-  what used to make the plot look misaligned. The histogram is now literally a picture of the
-  $n_\text{cyc}$ the analysis computes.
-- **The KDE overlay was removed.** Since each peak is a near-delta spike, 100% of that curve's width
-  was kernel bandwidth rather than timing jitter, and at higher smoothing it merged the comb into an
-  invented unimodal blob. The real distribution is the **discrete** one over cycle counts, shown by the
-  cycle-classification plot.
+  $\text{SW} + (k \pm \tfrac{1}{2}) t_c$. Fixed-width bins alias against the comb and put bar centres
+  off the true peaks; one-bar-per-cycle makes the histogram literally a picture of the
+  $n_\text{cyc}$ the analysis computes. Fixed-width binning is used only as a fallback when no cycle
+  time is available. A log count axis is offered, since counts span ~100× from the 1-cycle peak into
+  the dark tail.
+- **The Δt distribution is shown as a discrete distribution over cycle counts**, via the histogram plus
+  optional cycle-multiple markers. There is no kernel-density overlay: with near-delta peaks its width
+  would be pure bandwidth rather than timing jitter.
 
-This is also what validates the cycle-index design elsewhere: because intervals are exact integer
-cycles plus a constant offset, cumulative-cycle-index binning is not an approximation to noisy timing —
-it recovers the true elapsed time.
+Because intervals are exact integer cycles plus a constant offset, cumulative-cycle-index binning is
+not an approximation to noisy timing — it recovers the true elapsed time. This is what the cycle-index
+design elsewhere in the tab rests on.
+
+> Full measurement, on 650k within-track steps: `docs/MINFLUX_analysis_methods.md` §I-B.0.
 
 #### Continuity score
 
@@ -1329,16 +1321,14 @@ since changing it silently would move every existing result.
   95% CI, plus a σ–EFO Spearman ρ (precision should improve with photons, so negative ρ validates the
   model).
 
-> **Photon-quality weighting was removed.** An inverse-variance CVE weighted by a fitted
-> $\log\sigma \sim \log\text{EFO}$ model was briefly the default, then withdrawn: because photons are
-> coupled to mobility, it up-weighted slow molecules and biased D downward — the estimator was measuring
-> the very thing it was meant to correct for. The pooled σ_loc and D_CVE never used it and are
-> unaffected.
+The estimate is deliberately **unweighted by photons**. Weighting by brightness would up-weight slow
+molecules — for the coupling reason above — and bias D downward, so the pooled σ_loc and D_CVE treat
+every qualifying step equally.
 
-> **Watch the z column.** 2D exports routinely carry an all-zero `z`, and `0` is finite — so a naive
-> presence test made the estimator treat 2D data as 3D and pool a zero-variance axis, measured at
-> σ_loc −18.4% and D_CVE −33.3%. A shared predicate (>10 finite z values **and** sd > 1 nm) now gates
-> the 3D path for CVE, MSD, JDD, confinement and displacement-vs-D alike.
+> **Detecting real z.** 2D exports routinely carry an all-zero `z` column, and `0` is finite, so a bare
+> presence test would treat 2D data as 3D and pool a zero-variance axis into the maths. A shared
+> predicate — more than 10 finite z values **and** sd > 1 nm — gates the 3D path for CVE, MSD, JDD,
+> confinement and displacement-vs-D alike, so the dimension decision cannot drift between tools.
 
 ---
 
@@ -1390,8 +1380,9 @@ cancels. Steps are pooled as $r/\sqrt{\Delta t}$ by default so different cycle c
 A noise-floor jump distance $\sqrt{2d} \sigma_\text{loc}/\sqrt{\Delta t_0}$ marks where peaks are
 noise-dominated.
 
-> Using the 2D Rayleigh shape on 3D data biases D by roughly +32%. See `docs/MINFLUX_analysis_methods.md`
-> §I-B.4 for the in-silico verification.
+> The dimension $d$ must match the data: fitting the 2D Rayleigh shape to 3D distances inflates the
+> fitted σ, so the σ_loc term subtracts only part of the true noise floor and the PDF shape is wrong.
+> $d$ follows the same real-z predicate used by CVE and MSD.
 
 ---
 
