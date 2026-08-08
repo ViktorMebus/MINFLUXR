@@ -773,10 +773,11 @@ membrane work or every D and confinement call below inherits the bias.
 ### MSD (diffusion)
 
 Mean-squared displacement, binned by **integer cycle-count lag** rather than wall-clock time
-(MINFLUX cycle-skipping makes Δt non-uniform). Fits free, confined and anomalous models. The linear
-fit uses Michalet & Berglund optimal-point selection rather than a fixed lag range; the confined and
-anomalous fits deliberately use the whole window, because that optimality theory is derived for free
-diffusion only. A **cycle-binning diagnostic** shows how steps distribute across cycle counts.
+(MINFLUX cycle-skipping makes Δt non-uniform), following the cycle-based workflow of Vogler et al.
+2025. Fits free, confined and anomalous models. The linear fit uses Michalet & Berglund optimal-point
+selection rather than a fixed lag range; the confined and anomalous fits deliberately use the whole
+window, because that optimality theory is derived for free diffusion only. A **cycle-binning
+diagnostic** shows how steps distribute across cycle counts.
 
 ### Confinement (MSD index)
 
@@ -1201,7 +1202,19 @@ which downweights bins with few observations:
 or the **track-unweighted mean**, a simple average of per-track MSD values that treats each track
 equally regardless of how many pairs it contributes.
 
-Bins where fewer than a user-specified fraction of tracks contribute are masked as NA.
+Bins where fewer than a user-specified fraction of tracks contribute are masked as NA. An optional
+D > 0 filter drops tracks whose MSD has a negative OLS slope.
+
+The MINFLUX adaptation here follows **Vogler 2025** [7] and its MinSpt reference implementation: pairs
+are grouped by **cumulative cycle index** rather than wall-clock lag,
+
+```math
+d_\text{cyc} = \mathrm{round}\!\left(\frac{\Delta t - \text{SW}}{t_c}\right), \qquad \text{cycidx} = \mathrm{cumsum}(d_\text{cyc})
+```
+
+so a bin holds pairs separated by the same number of *elapsed cycles*. Binning on
+$\mathrm{round}(\text{total}/t_c)$ instead introduces a sawtooth; the cumulative index removes it. The
+track-unweighted ensemble and the D > 0 filter are that work's conventions too.
 
 ---
 
@@ -1223,8 +1236,10 @@ Fitting is two-pass weighted least squares:
 2. Weighted regression with $w_k \propto N_{\tau,k} / \widehat{\text{MSD}}(\tau_k)^2$, which minimizes
    variance for Poisson-like pair-count noise
 
-The linear fit range comes from **Michalet & Berglund optimal-point selection** rather than a fixed
-percentage of the curve.
+The linear fit range comes from **Michalet & Berglund optimal-point selection** (OLSF) rather than a
+fixed percentage of the curve, with separate optimal point counts for the slope (→ D) and the intercept
+(→ σ²). Its adaptation to MINFLUX cycle lags — the iterative variant that converges onto the lowest,
+least-noisy lags, and the default 5–50 cycle fit window — follows **Vogler 2025** [7].
 
 **Anomalous diffusion** model:
 
@@ -1483,14 +1498,17 @@ MSD fit in small cells such as a bacterium.
 
 ### Fast-Diffusion Ceiling
 
-The trackable-D limit, before the localization loop loses lock:
+The trackable-D limit, before the localization loop loses lock, in the form given by **Vogler 2025**
+[7]:
 
 ```math
-D_\text{max} = \frac{L^2}{16} \cdot \frac{\psi}{N_\text{PL} + \psi \, t_\text{hw}}
+D_\text{max} = \frac{L_\text{TCP}^2}{16} \cdot \frac{\psi}{N_\text{PL} + \psi \, t_\text{hw}}
 ```
 
-surfaced as a green/amber/red flag. It is a theoretical form, so it may under-warn near the
-demonstrated practical ceiling of roughly 2.5–3 µm²/s.
+where $L_\text{TCP}$ is the targeted-coordinate-pattern diameter, $\psi$ the photon rate, $N_\text{PL}$
+the photons per localization and $t_\text{hw}$ the hardware overhead. Surfaced as a green/amber/red
+flag. It is a theoretical form, so it may under-warn near the demonstrated practical ceiling of roughly
+2.5–3 µm²/s.
 
 ---
 
@@ -1559,8 +1577,8 @@ MINFLUX data specifically** (green / amber / red) — the more important read be
 |---|---|
 | [CVE — σ_loc and D](#cve-covariance-based-estimator) | Vestergaard 2014 [12] |
 | [TSA & cycle time](#time-signature-analysis-tsa--cycle-time) | Vogler 2025 [7] (MFX-TSA / MinSpt) |
-| [MSD computation](#msd-computation) | Qian 1991 [22]; Michalet 2010 [10] |
-| [MSD fit-range selection](#diffusion-coefficient-fitting) | Michalet & Berglund 2012 [11] |
+| [MSD computation](#msd-computation) | Qian 1991 [22]; Michalet 2010 [10]; **Vogler 2025 [7]** — cycle-index binning and ensemble convention |
+| [MSD fit-range selection](#diffusion-coefficient-fitting) | Michalet & Berglund 2012 [11]; **Vogler 2025 [7]** — OLSF as adapted to MINFLUX cycle lags |
 | [Anomalous exponent α](#diffusion-coefficient-fitting) | Metzler & Klafter 2000 [26]; Metzler 2014 [19]; Kepten 2015 [20] |
 | [Confinement](#confinement-index) | Simson 1995 [17]; Kusumi 1993 [23]; Saxton 1993/1995 [24][25]; Destainville & Salomé 2006 [27] |
 | [Jump distance distribution](#jump-distance-distribution-jdd) | Schütz 1997 [13]; Weimann 2013 [14] |
