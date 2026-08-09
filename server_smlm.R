@@ -234,7 +234,7 @@ smlm_server <- function(input, output, session) {
         loaded <- canonicalize_minflux_df(loaded)
         if (!"z" %in% names(loaded)) loaded$z <- 0
 
-        # ── Normalise the axial calibration across all three sources ──────────
+        # ── Normalize the axial calibration across all three sources ──────────
         # Everything reaching this point is reduced to RAW (uncorrected) z, then
         # the single app-wide factor is applied. Without this, .npy/.json would
         # follow the calibration control while CSVs stayed frozen at whatever
@@ -1665,7 +1665,12 @@ smlm_server <- function(input, output, session) {
     ry <- c(sd_filt$y[1], sd_filt$y[2])
     rz <- c(sd_filt$z[1], sd_filt$z[2])
 
-    if (is.infinite(rx[2]) && is.infinite(ry[2]) && is.infinite(rz[2])) return(df)
+    # "No filter on this axis" needs BOTH ends open, not just the upper one. An
+    # upper bound of Inf with a lower bound still set means "at least this much,
+    # no ceiling" - treating Inf alone as no-filter would silently discard the
+    # lower bound the user typed.
+    open <- function(r) is.infinite(r[2]) && r[1] <= 0
+    if (open(rx) && open(ry) && open(rz)) return(df)
 
     # per-tid SDs computed from CURRENT df (after metadata filters)
     sda <- sd_by_tid(df, min_n = input$sd_min_locs)
@@ -1673,9 +1678,12 @@ smlm_server <- function(input, output, session) {
 
     if (!"sd_z" %in% names(sda)) sda$sd_z <- NA_real_
 
-    pass_x <- is.infinite(rx[2]) | is.na(sda$sd_x) | (sda$sd_x >= rx[1] & sda$sd_x <= rx[2])
-    pass_y <- is.infinite(ry[2]) | is.na(sda$sd_y) | (sda$sd_y >= ry[1] & sda$sd_y <= ry[2])
-    pass_z <- is.infinite(rz[2]) | is.na(sda$sd_z) | (sda$sd_z >= rz[1] & sda$sd_z <= rz[2])
+    # A trace whose spread is undefined on an axis (too few localizations) is
+    # never judged on that axis - unchanged behaviour.
+    in_rng <- function(v, r) is.na(v) | (v >= r[1] & (is.infinite(r[2]) | v <= r[2]))
+    pass_x <- open(rx) | in_rng(sda$sd_x, rx)
+    pass_y <- open(ry) | in_rng(sda$sd_y, ry)
+    pass_z <- open(rz) | in_rng(sda$sd_z, rz)
 
     keep_tids <- sda$tid[ pass_x & pass_y & pass_z ]
 
@@ -2538,10 +2546,24 @@ smlm_server <- function(input, output, session) {
     # cause rx[2] to come back as mx * (1 - ~1e-15), making the strict >= check fail and
     # setting sd_filt to a finite value that then excludes the highest-spread traces.
     at_max <- function(val, mx) is.infinite(val) || (is.finite(mx) && val >= mx - 1e-9 * max(1, abs(mx)))
+    # Clearing a box makes numericRangeInput report NA, not NULL, so `%||%` never
+    # sees it and the NA propagates through at_max() into `if`, which stops the
+    # session with "missing value where TRUE/FALSE is required". An empty box is
+    # read as "no bound on that side": blank lower = 0, blank upper = no upper
+    # limit, which is the same thing the widget means when it sits at the data
+    # maximum. A reversed pair is swapped rather than refused, so dragging the
+    # upper below the lower cannot wedge the panel either.
+    san <- function(v) {
+      v  <- suppressWarnings(as.numeric(v))
+      lo <- if (length(v) >= 1L && is.finite(v[1])) max(0, v[1]) else 0
+      hi <- if (length(v) >= 2L && !is.na(v[2]))    v[2]         else Inf
+      if (is.finite(hi) && hi < lo) { tmp <- lo; lo <- hi; hi <- tmp }
+      c(lo, hi)
+    }
     mx_x  <- get_mx("sd_x"); mx_y <- get_mx("sd_y")
-    rx <- input$sd_x_range %||% c(0, Inf)
-    ry <- input$sd_y_range %||% c(0, Inf)
-    rz <- input$sd_z_range %||% c(0, Inf)
+    rx <- san(input$sd_x_range)
+    ry <- san(input$sd_y_range)
+    rz <- san(input$sd_z_range)
     sd_filt$x <- if (rx[1] <= 0 && at_max(rx[2], mx_x)) c(0, Inf) else rx
     sd_filt$y <- if (ry[1] <= 0 && at_max(ry[2], mx_y)) c(0, Inf) else ry
     if ("sd_z" %in% names(sdr)) {
@@ -2676,7 +2698,9 @@ smlm_server <- function(input, output, session) {
         vz   <- init_val(cur$z, mx_z)
         shinyWidgets::numericRangeInput("sd_z_range", "Allowable trace spread in Z",
           value = vz, min = 0, max = eff_max(mx_z, vz[2]))
-      }
+      },
+      helpText("An empty box means no bound on that side: blank lower reads as 0, ",
+               "blank upper as no upper limit.")
     )
   })
   observeEvent(input$view_SD, {
@@ -8501,7 +8525,12 @@ smlm_server <- function(input, output, session) {
         # is de-biased.
         mf <- med_fac(pts$nl)
         vxt <- c(vxt, pts$vx / mf); vyt <- c(vyt, pts$vy / mf)
-        if (hasz) vzt <- c(vzt, (pts$vz / mf)[is.finite(pts$vz)])
+        # Keep vzt the SAME LENGTH as vxt/vyt/cxzt by carrying NA through rather
+        # than dropping non-finite entries here. robust_median_cov() drops them
+        # itself; filtering only this one vector meant var_z and cov_xz were
+        # medians over different subsets of traces, so the robust xz/yz matrices
+        # mixed two populations.
+        if (hasz) vzt <- c(vzt, pts$vz / mf)
         cxyt <- c(cxyt, pts$cxy / mf)
         if (hasz) { cxzt <- c(cxzt, pts$cxz / mf); cyzt <- c(cyzt, pts$cyz / mf) }
         nlt <- c(nlt, pts$nl)
@@ -8637,9 +8666,28 @@ smlm_server <- function(input, output, session) {
     # solid = where that fraction of the localizations actually is, dotted =
     # where it would be if the cloud were Gaussian. The two coincide on clean
     # data and separate where the model fails, which is the entire diagnostic.
-    c_1s <- "#c03030"; c_2s <- "#2c7fb8"   # 39.3% (=1σ) red, 86.5% (=2σ) blue
-    c_rb <- "#1a9850"                      # robust per-trace 1σ = green
-    P_IN <- c(0.393, 0.865)                # the masses a 2D Gaussian 1σ/2σ hold
+    c_50 <- "#c03030"; c_90 <- "#2c7fb8"   # 50% red, 90% blue
+    c_rb <- "#1a9850"                      # per-trace robust fit = green
+    # TWO KINDS OF RING, EACH LABELLED AS WHAT IT IS
+    #   SOLID  = where the localizations actually are: the contours enclosing
+    #            50% and 90% of them. Round masses because a reader can act on
+    #            them.
+    #   DOTTED = the fitted Gaussian at 1 and 2 sigma. Semi-axes come from the
+    #            eigen-decomposition of the covariance, so each axis gets its own
+    #            sigma and the ring is a rotated ELLIPSE, not a circle - which is
+    #            what makes its tilt readable as drift.
+    #
+    #   The two families are NOT the same probability mass: a 2D Gaussian holds
+    #   1 - exp(-k^2/2) inside k sigma, i.e. 39.3% at 1 sigma and 86.5% at 2. So
+    #   on a perfectly Gaussian cloud the solid 50% ring sits ~18% outside the
+    #   dotted 1 sigma ring, and the solid 90% ~7% outside the dotted 2 sigma.
+    #   Judge SHAPE and TILT by these rings, not a millimetre-exact overlap; the
+    #   tail comparison is carried numerically by the kurtosis in the stats line.
+    P_IN <- c(0.50, 0.90)
+    # Legend names, also used as legendgroup keys - keep them short and literal.
+    NM_50  <- "50 % of locs";  NM_1S <- "1σ (Gaussian fit)"
+    NM_90  <- "90 % of locs";  NM_2S <- "2σ (Gaussian fit)"
+    NM_TR  <- "1σ per trace"
     has_z <- isTRUE(r$has_z) && any(is.finite(r$dz))
     # Sp = pooled covariance (the population the heatmap shows)
     # Sr = robust per-trace covariance (the headline σ)
@@ -8662,10 +8710,10 @@ smlm_server <- function(input, output, session) {
     # minority of wide traces and sizing the frame to it leaves the visible
     # cloud small in the middle with only the zero crosshair reaching the edges.
     # A clean Gaussian therefore lands at exactly ±3σ and fills the panel; the
-    # 39.3%/86.5% contours sit at 1σ/2σ, comfortably inside.
-    # The second term is the safety valve: the radius that actually contains
-    # 86.5% of the localizations, so a genuinely wide or heavy-tailed cloud
-    # still gets its 86.5% contour inside the frame instead of having it
+    # 50%/90% contours sit at 1.18σ/2.15σ, comfortably inside.
+    # The second term is the safety valve: the radius that actually contains the
+    # outer mass, so a genuinely wide or heavy-tailed cloud still gets its outer
+    # contour inside the frame instead of having it
     # silently dropped. It is a quantile, not a moment, so outliers cannot run
     # away with it. ONE L is shared by all panels so they stay comparable.
     # Each panel is framed on ITS OWN pair, not on a single shared L. In 3D
@@ -8682,10 +8730,21 @@ smlm_server <- function(input, output, session) {
     }
     panel_lim <- function(P) {
       need <- c(3.0 * ring_reach(P$Sr, 1),
-                1.15 * stats::quantile(sqrt(P$a^2 + P$b^2), 0.865,
+                1.15 * stats::quantile(sqrt(P$a^2 + P$b^2), P_IN[2],
                                        na.rm = TRUE, names = FALSE))
       need <- need[is.finite(need)]
-      max(if (length(need)) signif(max(need), 3) else 30, 5)  # floor: never over-zoom
+      core <- max(if (length(need)) signif(max(need), 3) else 30, 5)  # never over-zoom
+      # The 2σ model ring may reach past a frame sized to the CORE, and when it
+      # does it was being dropped and the panel silently lost a legend entry.
+      # Let the frame grow to admit it, but CAP that growth: sizing the frame to
+      # the pooled fit without a cap is what once collapsed the cloud to a dot
+      # and washed the heatmap out, because a minority of wide traces can
+      # inflate the pooled covariance without limit. Beyond the cap the ring is
+      # still dropped - a ring that far out cannot be shown without wrecking the
+      # view of the data it is meant to describe.
+      r2 <- ring_reach(P$Sp, 2)
+      if (is.finite(r2) && r2 > core) core <- min(1.05 * r2, 1.4 * core)
+      core
     }
     Lv <- vapply(panels, panel_lim, numeric(1))
 
@@ -8718,16 +8777,34 @@ smlm_server <- function(input, output, session) {
           xaxis = xid, yaxis = yid, colorscale = "Hot", reversescale = TRUE,
           showscale = FALSE, zsmooth = "best", hoverinfo = "skip", showlegend = FALSE)
       }
-      # Rotated ellipses as SVG paths: plotly's "circle" shape is defined by a
-      # bounding box and therefore can only ever be axis-aligned, which is what
-      # made a diagonally elongated cloud look circular.
-      ell <- function(S, k, colr, dsh) {
+      # Ellipses are drawn from explicit outline coordinates: plotly's "circle"
+      # shape is defined by a bounding box and can only ever be axis-aligned,
+      # which made a diagonally elongated cloud look circular.
+      # Rings are TRACES, not layout shapes, so the legend can switch them off.
+      # legendgroup ties the three panels together (one click hides a ring
+      # everywhere) and only panel 1 contributes the legend entry.
+      # add_PATHS, never add_lines: add_lines() SORTS the points by x before
+      # connecting them. These are closed curves, so sorting turns every ring
+      # into a zigzag that fills its own interior - the rings render as solid
+      # blobs and the dashed ones as scattered stipple. add_paths() keeps the
+      # order the points were traced in.
+      ring <- function(x, y, colr, dsh, nm) {
+        fig <<- plotly::add_paths(fig, x = x, y = y, xaxis = xid, yaxis = yid,
+          name = nm, legendgroup = nm, showlegend = (i == 1L),
+          hoverinfo = "skip", inherit = FALSE,
+          line = c(list(color = colr, width = 2), if (nzchar(dsh)) list(dash = dsh)))
+      }
+      # A ring whose major axis leaves the frame is DROPPED, not drawn. Drawn, it
+      # appears only as arcs cutting the corners with no visible centre, which
+      # reads as a broken plot; and the frame must stay sized to the core, so
+      # growing it to fit is not the alternative. The stats line under the plot
+      # already names this case ("pooled σ >> per-trace σ").
+      ell <- function(S, k, colr, dsh, nm) {
         e <- cov_ellipse_params(S, k = k)
-        if (is.null(e)) return(NULL)
-        pth <- ellipse_svg_path(e$ra, e$rb, e$theta)
-        if (is.null(pth)) return(NULL)
-        list(type = "path", path = pth, xref = xid, yref = yid,
-             line = list(color = colr, width = 2, dash = dsh))
+        if (is.null(e) || !is.finite(e$ra) || e$ra > L) return(invisible(NULL))
+        xy <- ellipse_xy(e$ra, e$rb, e$theta)
+        if (is.null(xy)) return(invisible(NULL))
+        ring(xy$x, xy$y, colr, dsh, nm)
       }
       axl <- function(x0, x1, y0, y1) list(type = "line", xref = xid, yref = yid,
         x0 = x0, x1 = x1, y0 = y0, y1 = y1, line = list(color = "rgba(0,0,0,0.4)", width = 1))
@@ -8737,47 +8814,57 @@ smlm_server <- function(input, output, session) {
       # dotted partner, the cloud has more localizations out there than a
       # Gaussian of the fitted width would put there. A count-level contour
       # could not be compared to anything.
-      hdr <- lapply(dh$paths %||% list(), function(q) list(
-        type = "path", path = q$path, xref = xid, yref = yid,
-        line = list(color = if (q$prob < 0.5) c_1s else c_2s, width = 2)))
-      shapes <- c(shapes, hdr, Filter(Negate(is.null), list(
-        ell(P$Sp, 1, c_1s, "dot"),      # Gaussian 1σ (39.3%), pooled fit
-        ell(P$Sp, 2, c_2s, "dot"),      # Gaussian 2σ (86.5%), pooled fit
-        ell(P$Sr, 1, c_rb, "dash"),     # 1σ robust, one vote per trace
-        axl(0, 0, -L, L), axl(-L, L, 0, 0))))
+      # Match each empirical contour to its mass by VALUE, not by a hard-coded
+      # midpoint - with the inner mass at 0.50 a "prob < 0.5" test would colour
+      # it as the outer one. A mass can yield several disjoint contours; they
+      # share one legendgroup so they toggle together, and only the first
+      # carries the legend entry.
+      seen <- character(0)
+      for (q in dh$paths %||% list()) {
+        inner <- q$prob <= P_IN[1] + 1e-9
+        nm <- if (inner) NM_50 else NM_90
+        show <- (i == 1L) && !(nm %in% seen); seen <- c(seen, nm)
+        fig <- plotly::add_paths(fig, x = q$x, y = q$y, xaxis = xid, yaxis = yid,
+          name = nm, legendgroup = nm, showlegend = show, hoverinfo = "skip",
+          inherit = FALSE,
+          line = list(color = if (inner) c_50 else c_90, width = 2))
+      }
+      ell(P$Sp, 1, c_50, "dot",  NM_1S)   # 1σ ellipse, pooled fit
+      ell(P$Sp, 2, c_90, "dot",  NM_2S)   # 2σ ellipse, pooled fit
+      # Same 1σ, but fitted with one vote per trace instead of one per
+      # localization: where the green sits well inside the dotted red, the
+      # pooled width is being carried by a minority of wide or long traces.
+      ell(P$Sr, 1, c_rb, "dash", NM_TR)
+      shapes <- c(shapes, list(axl(0, 0, -L, L), axl(-L, L, 0, 0)))
       dom <- c((i - 1) * (w + gap), (i - 1) * (w + gap) + w)
+      # Anchor the X axis to Y and let X give up DOMAIN (width) to satisfy the
+      # 1:1 scale. Anchoring the other way round let plotly satisfy the ratio by
+      # widening X's RANGE instead, which produced panels spanning x -20..40
+      # against y -20..20: asymmetric, off-centre, and 1.5x wider than tall. An
+      # ellipse read against axes like that looks rotated even when it is not.
+      # Both axes now show exactly -L..L, so the data window really is square
+      # and a tilt on screen is a tilt in the data.
       axis_args[[if (i == 1) "xaxis" else paste0("xaxis", i)]] <- list(
         title = P$la, range = c(-L, L), zeroline = FALSE, showgrid = FALSE,
-        domain = dom, anchor = yid)
-      # Constrain ONLY the anchored (y) axis: keep its −L..L range and shrink its
-      # domain to make the panel square. All panels share the same x-domain width, so
-      # they end up as identical squares (constraining both axes fights itself).
+        domain = dom, anchor = yid, scaleanchor = yid, scaleratio = 1,
+        constrain = "domain")
+      # Y carries the range and the full height; X is the axis that yields (above).
+      # Only ONE of the pair may declare scaleanchor - declaring it on both makes
+      # the constraint circular and plotly resolves it by widening a range.
       axis_args[[if (i == 1) "yaxis" else paste0("yaxis", i)]] <- list(
         title = P$lb, range = c(-L, L), zeroline = FALSE, showgrid = FALSE,
-        domain = c(0, 1), anchor = xid, scaleanchor = xid, scaleratio = 1, constrain = "domain")
+        domain = c(0, 1), anchor = xid)
     }
-    # Legend swatches (once): zero-length invisible segments on panel 1. Paired
-    # so the comparison reads itself - solid is where the localizations are,
-    # dotted is where a Gaussian of the fitted width would put the same
-    # fraction, dashed gives every trace one vote instead of every localization.
-    sw <- function(f, nm, colr, dsh) plotly::add_lines(f,
-      x = c(0, 0), y = c(0, 0), xaxis = "x", yaxis = "y", name = nm,
-      showlegend = TRUE, hoverinfo = "skip",
-      line = c(list(color = colr, width = 2), if (nzchar(dsh)) list(dash = dsh)))
-    fig <- fig %>%
-      sw("39.3% of locs (data)",     c_1s, "")    %>%
-      sw("39.3% if Gaussian (1σ)", c_1s, "dot") %>%
-      sw("86.5% of locs (data)",     c_2s, "")    %>%
-      sw("86.5% if Gaussian (2σ)", c_2s, "dot") %>%
-      sw("1σ per trace (robust)",  c_rb, "dash")
-    # Legend below the x-axis title, and NOT clickable: the entries are dummy
-    # zero-length traces used purely as colour swatches. The rings are layout
-    # shapes, so clicking a legend item could never toggle them - it only looked
-    # broken.
+    # The rings are real traces now, so the legend entries are the rings
+    # themselves: clicking one hides it across every panel (they share a
+    # legendgroup), and double-click isolates it. Solid is where the
+    # localizations are, dotted is where a Gaussian of the fitted width would
+    # put the same fraction, dashed gives every trace one vote instead of every
+    # localization.
     p <- do.call(plotly::layout, c(list(fig, shapes = shapes,
       legend = list(orientation = "h", x = 0.5, xanchor = "center",
                     y = -0.24, yanchor = "top",
-                    itemclick = FALSE, itemdoubleclick = FALSE),
+                    itemclick = "toggle", itemdoubleclick = "toggleothers"),
       margin = list(t = 10, b = 100)), axis_args))
     # Autoscale-to-data interacts with scaleanchor to blow the ranges up (±100) and
     # desync the panel sizes. Make double-click / reset return to the fixed ±L frame

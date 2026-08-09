@@ -225,8 +225,9 @@ moving emitters).
   omitted from the plot rather than piled into the edge bin, and a note reports how many.
 - *Set spread ranges to the 95th percentile* seeds the σ filter ranges from the data.
 - **TID spread filter**: per-axis x/y/z bounds. Setting the upper bound low retains only spatially
-  tight traces - useful for removing gold beads or freely diffusing molecules. See
-  [Trace Spread](#trace-spread-sd-filter).
+  tight traces - useful for removing gold beads or freely diffusing molecules. An empty box means no
+  bound on that side (blank lower reads as 0, blank upper as no upper limit), so clearing both leaves
+  that axis unfiltered. See [Trace Spread](#trace-spread-sd-filter).
 - **Remove rogue traces by rule** - an alternative to hand-set bounds. Three rules, each with a
   multiplier *k*: spread > k × dataset median, spread > median + k × MAD (robust), or any single axis
   spread > k × that axis's median. Dropped traces are removed **before** grouping, clustering, fits
@@ -601,7 +602,7 @@ coordinates - pooling would mix observation windows and invent structure.
 
 | Panel | What it answers |
 |-------|-----------------|
-| Localization Precision Cloud | Every localization minus its own trace centroid - the empirical precision σ_loc, with 1σ/2σ covariance ellipses whose tilt exposes drift |
+| Localization Precision Cloud | Every localization minus its own trace centroid - the empirical precision σ_loc. Solid rings enclose 50% and 90% of the localizations; dotted rings are the fitted Gaussian at 1σ and 2σ, with per-axis semi-axes so the ring is a rotated ellipse whose tilt exposes drift; the dashed ring is 1σ refitted with one vote per trace, and sits well inside the dotted 1σ when a minority of wide traces is inflating the pooled width. Click a legend entry to hide that ring, double-click to isolate it |
 | Fiducial / Contaminant Scan | Flags traces behaving like gold beads or aggregates rather than single molecules (report only) |
 | Trace Detection over Time | Detection rate across the acquisition - photobleaching and drop-off |
 

@@ -1653,17 +1653,17 @@ cov_ellipse_params <- function(S, k = 1) {
   )
 }
 
-# GOAL: an SVG path tracing a rotated ellipse, for plotly shapes.
-# plotly's type = "circle" shape can only ever be AXIS-ALIGNED (it is defined by
-# a bounding box), so a rotated ellipse has to be drawn as an explicit path.
-ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
+# GOAL: the outline of a rotated ellipse as plain x/y vectors.
+# Drawn as a TRACE rather than a layout shape: a shape cannot be switched off
+# from the legend, and these rings are exactly what a reader wants to toggle.
+ellipse_xy <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
   if (!all(is.finite(c(ra, rb, theta, cx, cy))) || ra <= 0 || rb <= 0) return(NULL)
   t  <- seq(0, 2 * pi, length.out = n)
   ct <- cos(theta); st <- sin(theta)
-  x  <- cx + ra * cos(t) * ct - rb * sin(t) * st
-  y  <- cy + ra * cos(t) * st + rb * sin(t) * ct
-  paste0("M ", paste(sprintf("%.4f,%.4f", x, y), collapse = " L "), " Z")
+  list(x = cx + ra * cos(t) * ct - rb * sin(t) * st,
+       y = cy + ra * cos(t) * st + rb * sin(t) * ct)
 }
+
 
 # =============================================================================
 # density_hdr_2d() - SMOOTH DENSITY + HIGHEST-DENSITY-REGION CONTOURS
@@ -1686,12 +1686,18 @@ ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
 #
 # WHY HDR LEVELS
 #   A contour at "density = 0.004" means nothing on its own. A contour holding
-#   39.3% / 86.5% of the points means a lot, because those are EXACTLY the
-#   masses a Gaussian 1-sigma and 2-sigma ellipse contain in 2D. Drawn together
-#   with the fitted ellipses, the empirical contour and the theoretical ring
-#   describe the same probability mass, so they coincide when the cloud really
-#   is Gaussian and separate visibly where it is not. That comparison is the
-#   whole diagnostic, and it is unavailable with count-based levels.
+#   half the points means something a reader can act on. Drawn together with a
+#   fitted ellipse enclosing the SAME mass, the empirical contour and the
+#   theoretical ring coincide when the cloud really is Gaussian and separate
+#   visibly where it is not. That comparison is the whole diagnostic, and it is
+#   unavailable with count-based levels.
+#
+#   The masses are round numbers on purpose. Any pair works, so they are chosen
+#   to be readable (50%, 90%) and the sigma multiple is derived from them - for
+#   a 2D Gaussian the k-sigma ellipse holds 1 - exp(-k^2/2), so 50% sits at
+#   1.177 sigma and 90% at 2.146 sigma. Choosing the masses the other way round
+#   (0.393, 0.865, i.e. exactly 1 and 2 sigma) makes the model ring easier to
+#   label and the plot harder to read; the reader is the one to optimise for.
 #
 # BANDWIDTH
 #   Scott's rule for 2D (sigma * n^(-1/6)) with a floor at the grid pitch -
@@ -1707,13 +1713,14 @@ ellipse_svg_path <- function(ra, rb, theta, cx = 0, cy = 0, n = 181L) {
 #   probs   : probability masses to contour
 #   max_pts : subsample cap for the kernel sum (cost is O(n * n_grid))
 # RETURNS
-#   list(x, y, z, levels, paths) where paths is a list of
-#   list(prob=, d=, path=) SVG paths ready to use as plotly layout shapes, or
-#   NULL if the cloud is unusable. A requested mass that extends beyond the
-#   frame is skipped rather than drawn wrong.
+#   list(x, y, z, bw_sd, mass_in_frame, paths) where paths is a list of
+#   list(prob=, d=, x=, y=) contour outlines, or NULL if the cloud is unusable.
+#   A requested mass that extends beyond the frame is skipped rather than drawn
+#   wrong. Draw the outlines with plotly::add_paths(), NOT add_lines() -
+#   add_lines() sorts by x and turns a closed contour into a filled zigzag.
 # =============================================================================
 density_hdr_2d <- function(a, b, lim, sigma, n_grid = 160L,
-                           probs = c(0.393, 0.865), max_pts = 20000L) {
+                           probs = c(0.50, 0.90), max_pts = 20000L) {
   ok <- is.finite(a) & is.finite(b)
   a <- a[ok]; b <- b[ok]
   if (length(a) < 20L || !is.finite(lim) || lim <= 0) return(NULL)
@@ -1750,9 +1757,9 @@ density_hdr_2d <- function(a, b, lim, sigma, n_grid = 160L,
                     error = function(e) NULL)
     for (cl in cls) {
       if (length(cl$x) < 3L) next
-      paths[[length(paths) + 1L]] <- list(
-        prob = p, d = lev,
-        path = paste0("M ", paste(sprintf("%.4f,%.4f", cl$x, cl$y), collapse = " L "), " Z"))
+      # Plain coordinates: the caller draws these as a TRACE (so the legend can
+      # toggle them), which needs x/y, not an SVG path string.
+      paths[[length(paths) + 1L]] <- list(prob = p, d = lev, x = cl$x, y = cl$y)
     }
   }
   list(x = k$x, y = k$y, z = k$z, bw_sd = bw_sd, mass_in_frame = in_frame, paths = paths)
