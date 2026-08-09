@@ -301,14 +301,13 @@ smlm_ui <- fluidPage(
                  checkboxInput("sd_show_mean_sd", "Show median trace spread (post filtering)", value = FALSE),
                  checkboxInput("sd_show_overall_mean_sd", "Show median trace spread (raw data)", value = FALSE),
                  tags$span(
-                   " (What is \u03C3\u0303 \u00b1 nMAD?)",
+                   " (What is \u03c3\u0303 \u00b1 nMAD?)",
                    title = paste(
-                     "\u03c3\u0303 = per-trace localization spread: the standard deviation of x/y/z within each trace, normalised by n\u22121. This matches the sx/sy/sz that pyMINFLUX computes per trace ID.",
-                     "Line label: median(\u03c3\u0303) \u00b1 nMAD across all traces.",
+                     "\u03c3\u0303 = per-trace localization spread: the standard deviation of x/y/z within each trace, normalized by n\u22121.",
+                     "Reported per axis as median(\u03c3\u0303) \u00b1 nMAD, with the interquartile range of \u03c3\u0303 alongside \u2014",
                      "nMAD = 1.4826 \u00d7 median(|\u03c3\u0303_i \u2212 median(\u03c3\u0303)|).",
                      "Factor 1.4826 \u2248 1/\u03a6\u207b\u00b9(3/4): makes nMAD a consistent estimator of \u03c3 for normal data.",
-                     "The \u00b1 nMAD band is this app's choice for summarizing the spread across traces. The per-trace \u03c3\u0303 itself is the quantity that matches.",
-                     "Traces shorter than the 'Min localizations per trace' setting are excluded."
+                     "nMAD and IQR describe how \u03c3\u0303 varies BETWEEN traces."
                    )
                  ),
                  checkboxInput("sd_use_q95", "Set spread ranges to the 95th percentile", value = FALSE),
@@ -493,6 +492,8 @@ smlm_ui <- fluidPage(
                        min = 0.5, max = 6, step = 0.1),
           helpText("Changing k rewrites the distance above. Too low leaves re-blinks counted ",
                    "twice; too high fuses neighbouring molecules."),
+          helpText("Every trace in a molecule is within the threshold of every other, so a ",
+                   "molecule can never be wider than the threshold above."),
           actionButton("suggest_eps_centroid", "Measure threshold from data", class = "btn-sm"),
           helpText("Sets k and the threshold from your own data."),
           uiOutput("centroid_suggest_summary"),
@@ -515,11 +516,13 @@ smlm_ui <- fluidPage(
         conditionalPanel(
           condition = "input.deblink_method == 'vote'",
           numericInput("vote_frac", "Fraction of localizations that must agree (f)",
-                       value = 0.2, min = 0.02, max = 0.9, step = 0.05),
+                       value = 0.3, min = 0.02, max = 0.9, step = 0.05),
           helpText("Two traces of one fluorophore score about 0.5, so useful values are well ",
-                   "below that. Scores fall to ~0.23 at 10 nm apart and ~0.07 at 20 nm."),
-          numericInput("vote_rho", "Distance tolerance (rho)", value = 1.2, min = 0.5, max = 3, step = 0.1),
-          helpText("1.0 = the neighbouring trace must be strictly closer; higher is more willing to merge."),
+                   "below that. Scores fall to ~0.23 at 10 nm apart and ~0.07 at 20 nm. ",
+                   "Below ~0.25 a single localization can decide a short trace."),
+          numericInput("vote_rho", "Distance tolerance (rho)", value = 3.0, min = 0.5, max = 8, step = 0.1),
+          helpText("1.0 = the neighbouring trace must be strictly closer; higher is more willing to merge. ",
+                   "Grouping accuracy rises with rho and then flattens, so erring high costs little."),
           radioButtons("vote_link", "Agreement", inline = TRUE,
                        choices = c("Both traces must agree" = "mutual", "Either is enough" = "either"),
                        selected = "mutual")
@@ -938,9 +941,9 @@ smlm_ui <- fluidPage(
           conditionalPanel(
             condition = "input.deblink_method_tc1 == 'vote'",
             numericInput("vote_frac_tc1", "Fraction of localizations that must agree (f)",
-                         value = 0.2, min = 0.02, max = 0.9, step = 0.05),
+                         value = 0.3, min = 0.02, max = 0.9, step = 0.05),
             numericInput("vote_rho_tc1", "Distance tolerance (rho)",
-                         value = 1.2, min = 0.5, max = 3, step = 0.1)
+                         value = 3.0, min = 0.5, max = 8, step = 0.1)
           ),
           actionButton("suggest_eps_tc1", "Measure threshold from data", class = "btn-sm"),
           helpText("Measures the trace spread pooled over both channels and sets the threshold. ",

@@ -215,8 +215,9 @@ moving emitters).
   affected, how many traces lost ≥ 30 % of their points, and how many fell below the trace-length
   minimum as a result. See [Outlier trimming](#outlier-localization-trimming).
 - The histogram shows per-TID spreads, optionally overlaying the raw distribution and the median
-  spread before/after filtering. Labels report median(σ̃) ± nMAD (nMAD = 1.4826 × MAD); the ± nMAD
-  band is this app's summary across traces, while the per-trace σ̃ itself matches pyMINFLUX.
+  spread before/after filtering. Labels report median(σ̃) ± nMAD (nMAD = 1.4826 × MAD), with dotted
+  lines at the quartiles. The per-trace σ̃, the median ± nMAD label and the interquartile lines all
+  follow pyMINFLUX. The info box reports the same three numbers per axis, alongside the trace count.
 - **Shared axes across σ X / Y / Z** (off by default) - puts the three histograms on one set of bin
   edges and one count axis so they can be read against each other and used as a figure set. When
   enabled, *Shared σ axis range (nm)* sets the displayed span (default 0–30); clearing it falls back
@@ -264,26 +265,63 @@ blinking events.
 
 Works at **trace level** - a whole trace joins a molecule or it does not, so a trace is never split.
 
-Two criteria:
+#### The two criteria
 
-- **Trace centroid distance** (default) - merge when two traces' median positions are closer than the
-  threshold. Set it in nm (`Centroid distance threshold`) or as **k × the measured trace spread**;
-  changing k rewrites the distance.
-- **Majority vote of localizations** - merge when a fraction *f* of a trace's localizations sit closer
-  to a neighbouring trace's centroid than to their own. No distance in nm. Useful values of *f* are
-  well below 0.5 (two traces of the *same* molecule score ≈0.5 by construction). A *distance
-  tolerance* ρ loosens the "strictly closer" test, and **Agreement** decides whether both traces must
-  agree (mutual) or either is enough.
+**Trace centroid distance** (default) - each trace collapses to its median position, and traces are
+grouped when those positions agree. Grouping is *complete*: every trace in a molecule lies within the
+threshold of every other trace in it, so a molecule can never be wider than the threshold. Set the
+threshold in nm (`Centroid distance threshold`) or as **k × the measured trace spread**; changing k
+rewrites the distance.
+
+- *Advantages* - the criterion is a single distance in nanometres, which is easy to state, to compare
+  between datasets and to report in a methods section. Because grouping is complete rather than
+  chained, a stray pair of nearby traces cannot pull a long string of molecules into one group.
+- *Disadvantages* - it needs a distance, so it depends on the measured trace spread being
+  representative of the whole file. Heterogeneous data (mixed labels, widely varying photon counts)
+  is served less well by one global number. The result is sensitive to the value chosen: too low
+  leaves re-blinks counted separately, too high fuses genuinely distinct neighbours.
+
+**Majority vote of localizations** - merge when a fraction *f* of a trace's localizations sit closer
+to a neighbouring trace's centroid than to their own. Each localization is compared against its own
+trace's centroid computed *without* that localization, so a point is not unfairly close to its own
+centre. **Agreement** decides whether both traces must vote for each other (mutual) or either is
+enough.
+
+- *Parameters* - *f*, the fraction that must agree. Two traces of the *same* molecule score ≈0.5 by
+  construction, so useful values sit well below 0.5; below about 0.25 a single localization can decide
+  a short trace. *Distance tolerance* ρ loosens the "strictly closer" test; grouping accuracy rises
+  with ρ and then flattens, so erring high costs little.
+- *Advantages* - no distance in nm and no dependence on the measured spread, so it needs neither a
+  threshold nor a well-behaved σ. It is self-scaling: a diffuse trace automatically demands
+  proportionally more separation than a tight one, which suits heterogeneous data. A stray
+  localization casts one vote and is outvoted.
+- *Disadvantages* - three controls instead of one, and a criterion that is harder to state concisely
+  than "merged within X nm". Because it is relative, there is no single nanometre figure to quote or
+  to compare against another dataset.
 
 **De-blinking only merges - it never deletes.** A trace that cannot be merged becomes its own
 single-blink molecule, so every trace that survived filtering is still counted. Removing data is the
 job of the metadata filters, the optional outlier trimming and the spread filters, where it is
 visible and reversible.
 
-**Choosing the threshold.** *Measure threshold from data* sets it from your own file: it measures the
-per-axis trace spread and finds the smallest k at which no unmerged re-blinks remain. Two diagnostics
-sit beside it - a density plot whose orange curve should show two humps (re-blinks left, separate
-molecules right) with your threshold in the gap, and an exploratory molecule-count-vs-threshold curve.
+#### Choosing the threshold
+
+*Measure threshold from data* sets it from your own file: it measures the per-axis trace spread and
+reports the smallest k at which no unmerged re-blinks remain, together with a more conservative k at
+which that conclusion holds across the confidence interval.
+
+Read the measured value as a **lower bound**, for two reasons. It detects re-blinks that are still
+unmerged, but once they are gone it has nothing left to see, so it cannot tell you when the threshold
+has grown large enough to start fusing distinct molecules. And it looks for leftover pairs at the
+scale of the localization precision, so it does not register any movement of the label between blinks.
+In fixed, fiducial-corrected SMLM that movement is small and the effect is minor, but it always biases
+the suggestion downwards rather than upwards.
+
+Two diagnostics sit beside it - a density plot whose orange curve should show two humps (re-blinks
+left, separate molecules right) with your threshold in the gap, and an exploratory
+molecule-count-vs-threshold curve. If the density plot shows no clear gap, no threshold will cleanly
+separate re-blinks from neighbours in that dataset, and the molecule count should be treated as
+uncertain whichever value is used.
 
 **Anisotropic option** - weights x, y and z by their own measured spread, so one threshold fits all
 three axes (the merge volume becomes an ellipsoid in nm, tighter along the better-resolved axis).
@@ -986,11 +1024,8 @@ For each TID, the per-axis standard deviation of all localizations is computed:
 
 and analogously for $\sigma_y$ and $\sigma_z$.
 
-This is the plain standard deviation, normalised by $n-1$, and it is deliberately identical to what
-pyMINFLUX computes per trace ID (`processor/_processor.py`, `calculate_statistics_on`:
-`sx = df_grouped["x"].std()`), so precision numbers are directly comparable between the two tools.
-pyMINFLUX itself applies no spread-based trace filter and no per-localization outlier removal, so
-that comparability constrains this number only - not what the app does with it.
+This is the plain standard deviation, normalized by $n-1$, and it is set up to match pyMINFLUX conventional computation of per trace ID (`processor/_processor.py`, `calculate_statistics_on`:
+`sx = df_grouped["x"].std()`), so precision numbers should be comparable between the two tools. MINFLUXR allows the user to filter out traces with extreme trace spreads.
 
 The SD filter ranges set bounds $[\sigma_\text{min}, \sigma_\text{max}]$; a TID is kept only if its
 $\sigma$ falls within those bounds on every active axis. Setting the upper bound to a small value
@@ -1001,8 +1036,12 @@ localizations.
 
 The **spread panel** histogram shows the distribution of per-TID spreads and overlays the current
 filter range. The median spread is reported as median(σ̃) ± nMAD, with nMAD = 1.4826 × MAD - the
-1.4826 makes nMAD a consistent estimator of σ for normal data. (pyMINFLUX draws median +
-interquartile range on this distribution; the ± nMAD band is this app's choice.)
+1.4826 makes nMAD a consistent estimator of σ for normal data - and the quartiles are drawn as dotted
+lines beside it. This matches pyMINFLUX convention summarizing the same distribution, which labels its median line with median ± MAD and marks the interquartile range alongside it.
+
+nMAD and the interquartile range both describe how σ̃ varies **between traces**. Axes are reported separately rather than pooled into one isotropic figure,
+because axial and lateral precision differ. σ̃ is a per-localization spread and an upper bound on the
+instrument's precision.
 
 ---
 

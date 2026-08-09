@@ -1104,21 +1104,64 @@ fit_poly_surface <- function(df, degree = 2, grid_n = 50) {
 safe_update_sd_range <- function(session, inputId, value) {
   shinyWidgets::updateNumericRangeInput(session, inputId, value = value)
 }
-# median summary, built on the table above
-compute_sd_medians <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = TRUE) {
+# =============================================================================
+# compute_sd_medians() - THE REPORTED SPREAD SUMMARY
+# =============================================================================
+#
+# GOAL
+#   Collapse the per-trace spreads into the numbers the UI reports: a centre, a
+#   robust width, and the interquartile range, per axis.
+#
+# REPORT vs DECIDE - WHY robust DEFAULTS TO FALSE HERE
+#   The per-trace sigma fed in is the plain n-1 SD (see sd_by_tid), because that
+#   is the one number with an outside reference. Robustness enters ACROSS traces
+#   (median and MAD), which is where pyMINFLUX puts it too, and where it costs
+#   no comparability. The corrected-MAD branch stays reachable for the internal
+#   callers that need a breakdown-resistant per-trace sigma.
+#
+# RETURNS
+#   list(x, y[, z]) medians as before, plus mad_x/mad_y[/mad_z] and
+#   q1_x/q3_x/... quartiles. NA where an axis cannot be measured.
+# =============================================================================
+compute_sd_medians <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
   tbl <- trace_spread_table(df, min_n = min_n, robust = robust)
+  has_z <- "sd_z" %in% names(tbl) && any(is.finite(tbl$sd_z))
   if (!nrow(tbl)) {
-    # Return a consistent empty result so the callers don't crash
-    return(list(x = NA_real_, y = NA_real_, z = if ("sd_z" %in% names(tbl)) NA_real_ else NULL))
+    # Consistent empty result so the callers don't crash
+    return(list(x = NA_real_, y = NA_real_, z = if ("sd_z" %in% names(tbl)) NA_real_ else NULL,
+                mad_x = NA_real_, mad_y = NA_real_, mad_z = NA_real_,
+                q1_x = NA_real_, q3_x = NA_real_, q1_y = NA_real_, q3_y = NA_real_,
+                q1_z = NA_real_, q3_z = NA_real_, n_traces = 0L))
   }
+
+  # One axis -> centre, robust width, quartiles. Every statistic drops NA first
+  # so a trace that is too short on one axis does not blank the whole summary.
+  ax_stats <- function(v) {
+    v <- v[is.finite(v)]
+    if (!length(v)) return(list(med = NA_real_, mad = NA_real_, q1 = NA_real_, q3 = NA_real_))
+    q <- stats::quantile(v, c(0.25, 0.75), na.rm = TRUE, names = FALSE)
+    list(med = stats::median(v),
+         # constant = 1.4826 matches scipy's scale = 0.67449 used by pyMINFLUX
+         mad = stats::mad(v, constant = 1.4826, na.rm = TRUE),
+         q1  = q[1], q3 = q[2])
+  }
+
+  sx <- ax_stats(tbl$sd_x); sy <- ax_stats(tbl$sd_y)
+  sz <- if (has_z) ax_stats(tbl$sd_z) else NULL
+
   res <- list(
-    x = stats::median(tbl$sd_x, na.rm = TRUE),
-    y = stats::median(tbl$sd_y, na.rm = TRUE)
+    x = sx$med, y = sy$med,
+    mad_x = sx$mad, mad_y = sy$mad,
+    q1_x = sx$q1, q3_x = sx$q3,
+    q1_y = sy$q1, q3_y = sy$q3,
+    n_traces = nrow(tbl)
   )
-  if ("sd_z" %in% names(tbl)) res$z <- stats::median(tbl$sd_z, na.rm = TRUE)
+  if (!is.null(sz)) {
+    res$z <- sz$med; res$mad_z <- sz$mad; res$q1_z <- sz$q1; res$q3_z <- sz$q3
+  }
   res
 }
-trace_spread_table <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = TRUE) {
+trace_spread_table <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
   stopifnot(is.data.frame(df))
   if (!nrow(df)) {
     return(data.frame(
@@ -1775,6 +1818,47 @@ sigma_label_med_pm_sd <- function(v, digits = 2) {
   } else {
     sprintf("\u03C3\u0303 %.2f nm", round(med, digits))
   }
+}
+
+# =============================================================================
+# add_sigma_iqr_lines() - THE QUARTILE PAIR THAT FLANKS THE MEDIAN LINE
+# =============================================================================
+#
+# GOAL
+#   Draw thin lines at the 25th and 75th percentile of a spread distribution,
+#   flanking the median line that add_sigma_vline() already draws.
+#
+# WHY
+#   Matches pyMINFLUX's add_median_line(..., add_iqr = True), which puts dashed
+#   quartile lines either side of its median marker on the sx/sy/sz histograms.
+#   It also earns its place independently: median +/- nMAD is symmetric, while
+#   the distribution of per-trace spread is right-skewed (a spread cannot go
+#   below zero but has no ceiling). The quartiles show that asymmetry, which the
+#   +/- label cannot.
+#
+# ARGUMENTS
+#   fig    : plotly figure to add to
+#   v      : the per-trace spread values the median line was drawn from
+#   y_top  : same panel ceiling used for the median line
+#   color  : match the median line this pair belongs to
+#
+# RETURNS  the figure, unchanged when the quartiles are not finite.
+# =============================================================================
+add_sigma_iqr_lines <- function(fig, v, y_top, color) {
+  v <- as.numeric(v); v <- v[is.finite(v)]
+  if (length(v) < 4L || !is.finite(y_top) || y_top <= 0) return(fig)
+  q <- stats::quantile(v, c(0.25, 0.75), na.rm = TRUE, names = FALSE)
+  if (!all(is.finite(q)) || q[1] == q[2]) return(fig)
+
+  for (xq in q) {
+    fig <- fig %>% plotly::add_segments(
+      x = xq, xend = xq,
+      y = 0, yend = y_top,
+      line = list(color = color, width = 1, dash = "dot"),
+      inherit = FALSE, hoverinfo = "skip", showlegend = FALSE
+    )
+  }
+  fig
 }
 
 add_sigma_vline <- function(fig, x, y_top, color, label, dash = NULL) {
@@ -4941,6 +5025,67 @@ matrixStats_colMedian <- function(m) {
 }
 
 # =============================================================================
+# link_complete_threshold() - COMPLETE LINKAGE AT A DISTANCE, AT SCALE
+# =============================================================================
+#
+# GOAL
+#   Group points so that EVERY pair inside a group is within `thr`, not merely
+#   connected through a chain of near neighbours.
+#
+# WHY NOT JUST hclust()
+#   `hclust(dist(M))` needs the full n^2 distance matrix - at 60k traces that is
+#   ~1.8e9 pairs and will not run. The way round it is exact, not an
+#   approximation: two points in different connected components of the
+#   threshold graph are more than `thr` apart, so complete linkage can never
+#   merge them. Cutting the global dendrogram at `thr` therefore gives exactly
+#   the same partition as cutting each component's dendrogram separately. The
+#   components are tiny at de-blinking thresholds, so the n^2 cost is paid only
+#   within each of them.
+#
+# THE GUARD
+#   A pathological threshold (or genuinely dense data) can still produce one
+#   huge component. Above `max_comp` members the component falls back to its
+#   single-linkage answer rather than attempting an allocation that would take
+#   the session down - the result is then locally chain-prone, which is the old
+#   behaviour, and never an error.
+#
+# ARGUMENTS
+#   M        : numeric matrix, one row per object
+#   thr      : distance threshold, same units as M
+#   max_comp : component size above which single linkage is used instead
+#
+# RETURNS  integer group id per ROW of M, all > 0.
+# =============================================================================
+link_complete_threshold <- function(M, thr, max_comp = 2000L) {
+  n <- nrow(M)
+  if (!n) return(integer(0))
+  if (n == 1L) return(1L)
+
+  # Connected components of the threshold graph, by union-find over frNN.
+  fr <- dbscan::frNN(M, eps = thr)
+  parent <- seq_len(n)
+  find <- function(a) { while (parent[a] != a) a <- parent[a]; a }
+  for (i in seq_len(n)) {
+    nb <- fr$id[[i]]
+    if (!length(nb)) next
+    for (j in nb) { ra <- find(i); rb <- find(j); if (ra != rb) parent[rb] <- ra }
+  }
+  comp <- vapply(seq_len(n), find, integer(1))
+
+  out <- integer(n); nxt <- 0L
+  for (ix in split(seq_len(n), comp)) {
+    if (length(ix) == 1L) { nxt <- nxt + 1L; out[ix] <- nxt; next }
+    if (length(ix) > max_comp) {          # too big to resolve - keep the chain
+      nxt <- nxt + 1L; out[ix] <- nxt; next
+    }
+    h <- stats::cutree(stats::hclust(stats::dist(M[ix, , drop = FALSE]),
+                                     method = "complete"), h = thr)
+    out[ix] <- nxt + as.integer(h); nxt <- nxt + max(h)
+  }
+  out
+}
+
+# =============================================================================
 # deblink_merge_centroids() - MERGE TRACES ON CENTROID AGREEMENT
 # =============================================================================
 #
@@ -4973,14 +5118,46 @@ matrixStats_colMedian <- function(m) {
 #   cluster. That matches the merge-only rule: de-blinking never removes a
 #   molecule (see deblink_assign_singletons).
 #
+# COMPLETE LINKAGE IS THE DEFAULT (measured on the collaborator file, 2026-08-09)
+#   Single linkage merges through chains, so a group's diameter is not bounded
+#   by `thr`. That is visible in the real data without any ground truth - on
+#   250218 collaborator-cond02-B2 at k = 2.5 (thr = 15.2 nm) single linkage produces a
+#   group spanning 27.5 nm, 1.8x the threshold and 4.5 sigma across; at k = 5 it
+#   spans 73.2 nm. Complete linkage caps the diameter at `thr` by construction
+#   (15.1 nm and 30.1 nm for the same two settings).
+#
+#   Semi-synthetic ground truth built ON that file's own point cloud (real
+#   per-trace residuals, real molecule positions, 50% of molecules given a
+#   second blink), best F1 over k:
+#
+#     injected motion   1 nm   2 nm   4 nm   6 nm   9 nm
+#     single            0.954  0.944  0.914  0.872  0.786
+#     complete          0.955  0.953  0.946  0.920  0.868
+#
+#   On a fixed, fiducial-corrected sample the motion term is small and the two
+#   are nearly tied - the gain at 1-2 nm is within noise. What complete linkage
+#   buys at EVERY motion level is tolerance to an over-large threshold, which is
+#   the error the suggestor actually makes (k_clear is biased low, but users
+#   correcting for it tend to overshoot). At 2 nm motion, F1 across k = 3.0 to
+#   6.0 falls 0.928 -> 0.715 under single linkage and only 0.952 -> 0.843 under
+#   complete. It never scored WORSE at any motion level tested.
+#
 # ARGUMENTS
-#   sub_df : rows to cluster (needs tid, x, y, z)
-#   thr    : centroid-distance threshold in nm (weighted units if w is given)
-#   w      : optional per-axis de-blink weights, same metric as everything else
+#   sub_df  : rows to cluster (needs tid, x, y, z)
+#   thr     : centroid-distance threshold in nm (weighted units if w is given)
+#   w       : optional per-axis de-blink weights, same metric as everything else
+#   linkage : "complete" - every member within thr of every other. The only
+#             behaviour the app offers; there is no UI control for this.
+#             "single" is the historical chain-through-neighbours rule, kept
+#             REACHABLE FROM CODE ONLY so analyses run before 2026-08-09 can be
+#             reproduced exactly. It lost to complete linkage at every motion
+#             level tested (table above) - do not re-expose it.
 #
 # RETURNS  integer cluster id per ROW of sub_df, all > 0.
 # =============================================================================
-deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
+deblink_merge_centroids <- function(sub_df, thr, w = NULL,
+                                    linkage = c("complete", "single")) {
+  linkage <- match.arg(linkage)
   n <- nrow(sub_df)
   if (!n) return(integer(0))
   thr <- suppressWarnings(as.numeric(thr))
@@ -5010,11 +5187,17 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL) {
   ok <- is.finite(rowSums(M))
   cl <- integer(nrow(M))
   if (any(ok)) {
-    # Single linkage at `thr`: DBSCAN with minPts = 1 is exactly that, and it
-    # cannot emit noise.
-    cl[ok] <- tryCatch(dbscan::dbscan(M[ok, , drop = FALSE], eps = thr,
-                                      minPts = 1L)$cluster,
-                       error = function(e) seq_len(sum(ok)))
+    cl[ok] <- if (identical(linkage, "complete")) {
+      tryCatch(link_complete_threshold(M[ok, , drop = FALSE], thr),
+               error = function(e) tryCatch(
+                 dbscan::dbscan(M[ok, , drop = FALSE], eps = thr, minPts = 1L)$cluster,
+                 error = function(e2) seq_len(sum(ok))))
+    } else {
+      # Single linkage at `thr`: DBSCAN with minPts = 1 is exactly that, and it
+      # cannot emit noise.
+      tryCatch(dbscan::dbscan(M[ok, , drop = FALSE], eps = thr, minPts = 1L)$cluster,
+               error = function(e) seq_len(sum(ok)))
+    }
   }
   if (any(!ok)) cl[!ok] <- max(0L, max(cl[ok], 0L)) + seq_len(sum(!ok))
 
@@ -5147,6 +5330,36 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 #     k = 2.0   0.0%                                0x   <- clears here
 #   That is a direct, per-dataset answer where the 1.5 default was an assumption.
 #
+# THE REFERENCE: A FIXED SHELL, AND WHY THE ALTERNATIVES WERE REJECTED
+#   The reference is the molecule density in a fixed 30-60 nm shell. That is
+#   crude - inside a cluster the density at 30-60 nm sits well above the field
+#   average, so the reference is inflated and the excess ratio deflated. Two
+#   replacements were built and MEASURED against ground-truth simulation
+#   (40 clusters x 8 molecules, 2 blinks each, sigma 5.7 nm, sweeping the
+#   between-blink label motion). Both were worse and neither is in use:
+#
+#     between-blink motion    3     6     9    12    15  nm
+#     k that recovers truth  1.50  2.00  2.25  2.50  2.75
+#     fixed shell (in use)   2.00  2.00  2.00  2.00  2.00
+#     local-density null     2.00  1.75  1.50  1.25  1.25
+#     adaptive test scale      NA    NA  1.00  1.00  1.00
+#
+#   The local-density null (inhomogeneous Poisson, intensity from the k-th
+#   neighbour) is the textbook correction and it does remove the clustering
+#   confound - but it moves k the WRONG WAY, because the kNN intensity probe
+#   absorbs the re-blink pile-up it is meant to be measured against. The fixed
+#   shell survives only because it is insensitive, not because it is right.
+#
+# THE LIMIT THAT NO REFERENCE FIXES
+#   Read the table again: the k that recovers the truth is set by BETWEEN-BLINK
+#   MOTION, and this test cannot see that term at all. It looks for leftover
+#   pairs at ~2 sigma, a scale tied to localization noise. The more the label
+#   moves between blinks, the more the leftovers are spread out, the weaker that
+#   short-range signal becomes - so the test clears EARLIER exactly when a
+#   LARGER k is needed. k_clear is therefore biased low on any sample with real
+#   label motion, and the bias grows with the motion. Treat it as a floor, and
+#   use the count-vs-threshold curve to choose above it.
+#
 # WHAT IT CAN AND CANNOT SEE
 #   It detects UNDER-merging sharply. It cannot detect OVER-merging: once the
 #   excess is gone, raising k further only fuses genuine neighbours and the test
@@ -5158,44 +5371,89 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 #   real data, 0 of 239 trace pairs within 60 nm overlapped in time - the
 #   instrument does not track two molecules at once - so that test is dead.
 #
+# THE STOPPING RULE IS AN INTERVAL, NOT A POINT
+#   `excess` is a ratio of two sampled fractions, so taking the first k where it
+#   dips under 1 is a noisy, biased-low rule. A Wilson interval on the observed
+#   fraction gives excess_lo/excess_hi, and two k values are returned:
+#     k_clear    first k with excess <= 1          (point estimate, as before)
+#     k_clear_hi first k with excess_hi <= 1       (no residual within CI)
+#   k_clear_hi is the conservative end - it keeps merging until the pile-up is
+#   gone beyond sampling noise - and is never smaller than k_clear.
+#
 # ARGUMENTS
 #   df, sigma, w : as for suggest_centroid_threshold(); sigma in the same metric
 #   ks           : multipliers to try
 #   ref_lo/ref_hi: the shell (nm) used as the "ordinary density" reference
+#   conf         : confidence level for the Wilson interval on the excess
 #
-# RETURNS  list(table, k_clear) - k_clear is NA when the excess never clears.
+# RETURNS  list(table, k_clear, k_clear_hi, near_nm); k_clear is NA when the
+#          excess never clears.
 # =============================================================================
 deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25),
-                                   ref_lo = 30, ref_hi = 60) {
+                                   ref_lo = 30, ref_hi = 60, conf = 0.95) {
   if (!is.data.frame(df) || !nrow(df) || !is.finite(sigma) || sigma <= 0) return(NULL)
   cols <- intersect(c("x", "y", "z"), names(df))
   if (length(cols) < 2L) return(NULL)
-  near <- 2 * sigma
+  near  <- 2 * sigma
   shell <- (ref_hi^length(cols) - ref_lo^length(cols))
+
+  # Wilson score interval for a proportion - behaves at the p -> 0 end, where a
+  # normal-approximation interval would run negative and where this test spends
+  # most of its time.
+  wilson <- function(p, n, conf) {
+    if (!is.finite(p) || !is.finite(n) || n <= 0) return(c(NA_real_, NA_real_))
+    z   <- stats::qnorm(1 - (1 - conf) / 2)
+    den <- 1 + z^2 / n
+    ctr <- (p + z^2 / (2 * n)) / den
+    hw  <- z * sqrt(p * (1 - p) / n + z^2 / (4 * n^2)) / den
+    c(max(0, ctr - hw), min(1, ctr + hw))
+  }
+
+  # Molecule positions must live in the SAME metric the clustering used. The
+  # merge runs on whitened coordinates whenever `w` is supplied, and `near` is
+  # derived from a sigma measured in that same whitened metric - so rebuilding
+  # the centroids from raw columns compared a weighted threshold against
+  # unweighted distances and silently mis-scaled the whole test under
+  # anisotropic weighting.
+  Pw <- apply_deblink_weights(as.matrix(df[, cols, drop = FALSE]), w)
 
   rows <- lapply(ks, function(k) {
     th <- k * sigma
     cl <- tryCatch(deblink_merge_centroids(df, th, w), error = function(e) NULL)
     if (is.null(cl)) return(NULL)
-    M <- do.call(rbind, lapply(split(seq_len(nrow(df)), cl), function(ix)
-      matrixStats_colMedian(as.matrix(df[ix, cols, drop = FALSE]))))
+    M <- do.call(rbind, lapply(split(seq_len(nrow(Pw)), cl), function(ix)
+      matrixStats_colMedian(Pw[ix, , drop = FALSE])))
+    M <- M[is.finite(rowSums(M)), , drop = FALSE]
     if (nrow(M) < 5L) return(NULL)
     nn <- tryCatch(dbscan::kNN(M, k = 1L)$dist[, 1L], error = function(e) NULL)
     if (is.null(nn)) return(NULL)
+    nn <- nn[is.finite(nn)]
+    if (length(nn) < 5L) return(NULL)
+
     frac <- mean(nn < near)
     ref  <- mean(nn >= ref_lo & nn < ref_hi) / shell * near^length(cols)
+    ci   <- wilson(frac, length(nn), conf)
+    ex   <- function(p) if (ref > 0) round(p / ref, 2) else NA_real_
+
     data.frame(k = k, threshold = round(th, 2), n_molecules = nrow(M),
                frac_close = round(frac, 4),
-               excess = if (ref > 0) round(frac / ref, 2) else NA_real_)
+               excess = ex(frac), excess_lo = ex(ci[1]), excess_hi = ex(ci[2]))
   })
   tb <- do.call(rbind, Filter(Negate(is.null), rows))
   if (is.null(tb) || !nrow(tb)) return(NULL)
 
   # First k where the short-range pile-up is indistinguishable from ordinary
   # density (excess <= 1) - i.e. nothing looks like a leftover re-blink.
-  ok <- which(is.finite(tb$excess) & tb$excess <= 1)
-  list(table = tb, k_clear = if (length(ok)) tb$k[ok[1]] else NA_real_,
-       near_nm = round(near, 2))
+  # k_clear is the point estimate, which is a noisy first-crossing of a ratio;
+  # k_clear_hi waits until the whole interval has come down and is the value to
+  # prefer when under-merging is the costlier error. Both are floors - see the
+  # motion limit documented above.
+  first_k <- function(v) { i <- which(is.finite(v) & v <= 1); if (length(i)) tb$k[i[1]] else NA_real_ }
+
+  list(table      = tb,
+       k_clear    = first_k(tb$excess),
+       k_clear_hi = first_k(tb$excess_hi),
+       near_nm    = round(near, 2))
 }
 
 # =============================================================================
@@ -5249,12 +5507,12 @@ deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25
 #
 # RETURNS  integer cluster id per ROW of sub_df, all > 0.
 # =============================================================================
-deblink_merge_majority_vote <- function(sub_df, f = 0.5, rho = 1.0, mutual = TRUE,
+deblink_merge_majority_vote <- function(sub_df, f = 0.3, rho = 3.0, mutual = TRUE,
                                         w = NULL, k_cand = 4L) {
   n <- nrow(sub_df)
   if (!n) return(integer(0))
-  f   <- min(max(as.numeric(f   %||% 0.5), 0.01), 1)
-  rho <- max(as.numeric(rho %||% 1), 0.01)
+  f   <- min(max(as.numeric(f   %||% 0.3), 0.01), 1)
+  rho <- max(as.numeric(rho %||% 3.0), 0.01)
 
   cols <- deblink_coord_cols(sub_df)
   if (length(cols) < 2L) return(rep(1L, n))

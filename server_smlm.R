@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## server_smlm.R  —  SMLM analysis server logic
+## server_smlm.R  -  SMLM analysis server logic
 ## Called from server.R inside the combined server function.
 ## ─────────────────────────────────────────────────────────────────────────────
 ##
@@ -13,7 +13,7 @@
 ##   how they are ARRANGED.
 ##
 ## HOW TO READ A SHINY SERVER FILE
-##   Reactives are LAZY — file order is NOT execution order. Follow the CALLS.
+##   Reactives are LAZY - file order is NOT execution order. Follow the CALLS.
 ##   The dependency chain is drawn below.
 ##
 ## ── 1. THE DATA FLOW ─────────────────────────────────────────────────────────
@@ -29,13 +29,13 @@
 ##                                      Drops individual points.
 ##   spread_filtered_df ...... Stage 2  per-TRACE spread (SD) filter.
 ##                                      Drops whole traces that are too diffuse
-##                                      — i.e. a "trace" that is really drift or
+##                                      - i.e. a "trace" that is really drift or
 ##                                      two molecules merged.
 ##   filtered_df ............. Stage 3  per-TRACE localization count.
 ##                                      Drops traces that are too short/long.
 ##        v
 ##   plottable_data() ........ THE analysis-ready dataset. Adds the trimmer, the
-##                             2D crop, and — importantly — runs the CLUSTERING.
+##                             2D crop, and - importantly - runs the CLUSTERING.
 ##                             Almost every analysis starts by calling this.
 ##
 ##   ORDER MATTERS AND IS DELIBERATE: rows are filtered first (Stage 1), then
@@ -46,10 +46,10 @@
 ##   localizations -> tid -> cluster (primary) -> cluster2 (secondary)
 ##
 ##     tid ....... one continuous blink of one fluorophore
-##     cluster ... primary DBSCAN, SMALL eps (~10-30 nm). Job: DE-BLINKING —
+##     cluster ... primary DBSCAN, SMALL eps (~10-30 nm). Job: DE-BLINKING -
 ##                 collapse repeat appearances of one molecule into one object.
 ##     cluster2 .. secondary clustering over the medians above, LARGE eps
-##                 (~100-300 nm). Job: STRUCTURE — group molecules into the
+##                 (~100-300 nm). Job: STRUCTURE - group molecules into the
 ##                 biological object they form.
 ##
 ##   WHY IT EXISTS: a fluorophore blinks many times, and an antibody carries
@@ -74,7 +74,7 @@
 ##   Image overlay ............. confocal_meta, image_overlay
 ##
 ##   The heavy spatial statistics themselves (Ripley L/L12, PCF, KDE
-##   co-localization, RoG, batch NN) live in helpers_smlm.R — this file wires
+##   co-localization, RoG, batch NN) live in helpers_smlm.R - this file wires
 ##   them to inputs and outputs.
 ##
 ## ── 4. CONVENTIONS & GOTCHAS ─────────────────────────────────────────────────
@@ -85,7 +85,7 @@
 ##   * Multiplex: when active, clustering is forced to run PER CHANNEL so
 ##     molecules from different exchange rounds are never merged.
 ##   * Retired code is in deadcode_smlm.R (NOT sourced). Several reactives were
-##     previously defined TWICE at this scope — the later definition silently
+##     previously defined TWICE at this scope - the later definition silently
 ##     shadowed the earlier, so the first never ran. Before adding a reactive,
 ##     check the name is not already used further down the file.
 ##
@@ -170,14 +170,14 @@ smlm_server <- function(input, output, session) {
   # MINFLUX z is multiplied by a scaling factor at import to correct the
   # refractive-index mismatch between immersion medium and sample. pyMINFLUX
   # ships 0.7 as a default; the physically correct value depends on the actual
-  # index pair and imaging depth, and 0.67 is also in use — so it is exposed
+  # index pair and imaging depth, and 0.67 is also in use - so it is exposed
   # rather than hard-coded.
   #
   # It multiplies EVERY axial distance downstream: z trace spread, cluster
   # extent in z, 3D nearest-neighbour distances, Rg. Treat it as a calibration
   # to be measured on a known standard, not a display preference.
   SMLM_Z_SCALE_DEFAULT <- 0.7
-  # The factor currently baked into smlm_file_store() — the single source of
+  # The factor currently baked into smlm_file_store() - the single source of
   # truth. input$z_scale is only a PENDING value until Plot Data commits it, so
   # nothing may read the input directly to decide what the data is scaled by.
   z_scale_applied <- reactiveVal(SMLM_Z_SCALE_DEFAULT)
@@ -187,7 +187,7 @@ smlm_server <- function(input, output, session) {
     ext <- get_ext(fname)
     tryCatch({
       withProgress(message = paste0("Loading ", fname, "…"), value = 0, {
-        incProgress(0.05, detail = "Preparing")
+        incProgress(0.03, detail = "Preparing")
         loaded <- switch(
           ext,
           "csv" = {
@@ -238,7 +238,7 @@ smlm_server <- function(input, output, session) {
         # Everything reaching this point is reduced to RAW (uncorrected) z, then
         # the single app-wide factor is applied. Without this, .npy/.json would
         # follow the calibration control while CSVs stayed frozen at whatever
-        # their producer baked in — and a CSV would get 0.7 applied twice.
+        # their producer baked in - and a CSV would get 0.7 applied twice.
         #
         #   .npy / .json  raw already (read above with z_scale = 1)
         #   .csv          divide out the factor its producer applied
@@ -253,17 +253,17 @@ smlm_server <- function(input, output, session) {
         loaded$z <- loaded$z * z_scale_applied()         # -> app calibration
         attr(loaded, "z_cal") <- src_cal
 
-        # Say nothing about the axial calibration for planar data — a 2D upload
+        # Say nothing about the axial calibration for planar data - a 2D upload
         # should not produce messages about z. has_axial_data() tests VARIATION,
         # not presence: 2D exports still carry a z column, filled with zeros.
         if (identical(ext, "csv") && isTRUE(src_cal$has_z)) {
           showNotification(
             sprintf("%s: axial calibration %.3f detected (%s)%s.",
                     fname, src_cal$factor, src_cal$source,
-                    if (isTRUE(src_cal$certain)) "" else " — assumed, not recorded in the file"),
-            type = if (isTRUE(src_cal$certain)) "message" else "warning", duration = 8)
+                    if (isTRUE(src_cal$certain)) "" else " - assumed"),
+            type = "message", duration = 8)
         }
-        incProgress(0.05, detail = "Finalizing")
+        incProgress(0.07, detail = "Finalizing")
         loaded
       })
     }, error = function(e) {
@@ -282,14 +282,14 @@ smlm_server <- function(input, output, session) {
 
     for (i in seq_len(nrow(input$file))) {
       fname <- input$file$name[i]
-      if (fname %in% names(store)) next   # already loaded — skip duplicate
+      if (fname %in% names(store)) next   # already loaded - skip duplicate
 
       df <- .load_one_file(input$file$datapath[i], fname)
       if (is.null(df)) next
 
       # A file of ours records the factor it was written at. Adopt it so the
       # control reflects the data being loaded and z comes back exactly as
-      # exported. Only `certain` factors are adopted — the 0.7 assumed for
+      # exported. Only `certain` factors are adopted - the 0.7 assumed for
       # pyMINFLUX and legacy exports is a guess and must not silently become
       # the session's calibration.
       # ...and only when the file actually has axial data: adopting a factor for
@@ -307,7 +307,7 @@ smlm_server <- function(input, output, session) {
       if (identical(get_ext(fname), "json")) {
         final_used <- if ("itr" %in% names(df)) max(df$itr, na.rm = TRUE) else NA_integer_
         showNotification(
-          sprintf("%s — JSON import: using final localization (itr=%s); CFR carried over per TID.",
+          sprintf("%s - JSON import: using final localization (itr=%s); CFR carried over per TID.",
                   fname, final_used),
           type = "message", duration = 8)
       }
@@ -351,14 +351,14 @@ smlm_server <- function(input, output, session) {
 
     # Snapshot sd_filt BEFORE the data change so we can restore it after the
     # reactive graph settles.  This is the authoritative lock mechanism for SD
-    # ranges — more reliable than the timing-based sd_skip_arming approach.
+    # ranges - more reliable than the timing-based sd_skip_arming approach.
     snap_sd <- if (isTRUE(isolate(input$lock_filters)))
       isolate(list(x = sd_filt$x, y = sd_filt$y, z = sd_filt$z))
     else NULL
 
     uploaded_df_rv(df)
 
-    # Update histogram variable choices — show dcr_pooled only when present
+    # Update histogram variable choices - show dcr_pooled only when present
     hist_base <- c("efo", "tid", "cfr", "tim", "eco", "dcr", "dwell", "fluo")
     hist_choices <- if ("dcr_pooled" %in% names(df))
       c(hist_base, "dcr_pooled") else hist_base
@@ -729,7 +729,7 @@ smlm_server <- function(input, output, session) {
   })
 
   # =========================================================================
-  # commit_z_scale() — APPLY THE AXIAL CALIBRATION TO DATA ALREADY IN MEMORY
+  # commit_z_scale() - APPLY THE AXIAL CALIBRATION TO DATA ALREADY IN MEMORY
   # =========================================================================
   # GOAL
   #   Rescale every loaded dataset from the currently-applied axial factor to a
@@ -768,7 +768,7 @@ smlm_server <- function(input, output, session) {
 
     if (length(store)) {
       # Tell the reset observer this is a rescale of the SAME data, not a new
-      # dataset — otherwise every metadata filter the user set is wiped.
+      # dataset - otherwise every metadata filter the user set is wiped.
       z_rescale_guard(TRUE)
       store <- lapply(store, function(d) {
         if (is.data.frame(d) && "z" %in% names(d)) d$z <- d$z * ratio
@@ -778,11 +778,11 @@ smlm_server <- function(input, output, session) {
       cur <- isolate(input$active_file)
       if (!is.null(cur) && nzchar(cur) && !is.null(store[[cur]])) uploaded_df_rv(store[[cur]])
       # The z spread filter is expressed in nm, and nm along z just changed
-      # meaning — carrying the old bound over would filter on a stale scale.
+      # meaning - carrying the old bound over would filter on a stale scale.
       sd_filt$z <- c(0, Inf)
     }
     z_scale_applied(new)
-    showNotification(sprintf("%s set to %.3f — z distances rescaled by %.4f. Axial spread filter cleared.",
+    showNotification(sprintf("%s set to %.3f - z distances rescaled by %.4f. Axial spread filter cleared.",
                              reason, new, ratio), type = "message", duration = 6)
     invisible(TRUE)
   }
@@ -814,7 +814,7 @@ smlm_server <- function(input, output, session) {
   # Every axis-bearing control follows the SAME planar test as the calibration
   # panel, so a dataset can never be simultaneously "2D" for one control and
   # "3D" for another. 3D mode and the XZ/YZ side views on planar data do not
-  # error — they render a flat line — which is exactly the kind of quietly wrong
+  # error - they render a flat line - which is exactly the kind of quietly wrong
   # plot worth making unreachable.
   observe({
     planar <- identical(smlm_z_state(), "planar")
@@ -825,7 +825,7 @@ smlm_server <- function(input, output, session) {
 
     # Disabling a radio does not deselect it. Without this, loading planar data
     # while sitting in 3D/XZ would leave the view stuck in a mode whose control
-    # is greyed out — unreachable and unfixable from the UI.
+    # is greyed out - unreachable and unfixable from the UI.
     if (planar) {
       if (!identical(isolate(input$mode3d) %||% "2D", "2D"))
         updateRadioButtons(session, "mode3d", selected = "2D")
@@ -853,14 +853,14 @@ smlm_server <- function(input, output, session) {
       helpText(sprintf("Applied: %.3f.", appl))
     else
       helpText(tags$b(sprintf("Pending: %.3f", pend)),
-               sprintf(" (applied: %.3f) — press Plot Data to apply.", appl))
+               sprintf(" (applied: %.3f) - press Plot Data to apply.", appl))
   })
 
 
   # --------- 2) RESET FILTERS ON NEW DATASET ----------
   observeEvent(uploaded_df(), {
     # An axial rescale replaces the active dataset object but it is the SAME
-    # data — resetting every filter here would discard the user's whole setup
+    # data - resetting every filter here would discard the user's whole setup
     # just because they changed the z factor. commit_z_scale() has already
     # cleared the one filter whose units actually changed (axial spread).
     if (isTRUE(z_rescale_guard())) { z_rescale_guard(FALSE); return() }
@@ -899,7 +899,7 @@ smlm_server <- function(input, output, session) {
     if (!is.null(cur_dwell)) meta_full_rng$dwell <- cur_dwell
     if (!is.null(cur_fluo))  meta_full_rng$fluo  <- cur_fluo
 
-    # Reset SD filter synchronously — no JS round-trip needed.
+    # Reset SD filter synchronously - no JS round-trip needed.
     sd_filt$x <- c(0, Inf); sd_filt$y <- c(0, Inf); sd_filt$z <- c(0, Inf)
     # Signal tid_length_range_ui to reset to the new data's full range instead of
     # carrying forward the previous dataset's range.
@@ -946,7 +946,7 @@ smlm_server <- function(input, output, session) {
       tid_length_range = input$tid_length_range,
       dwell_range      = input$dwell_range,
       fluo_range       = input$fluo_range,
-      # SD filter — save from sd_filt (source of truth), not from input$sd_x_range
+      # SD filter - save from sd_filt (source of truth)
       # which is unreliable when the SD panel is closed (renderUI removes the widgets).
       sd_x_range       = sd_filt$x,
       sd_y_range       = sd_filt$y,
@@ -959,7 +959,7 @@ smlm_server <- function(input, output, session) {
       trim_k           = input$trim_k,
       make_positive    = input$make_positive,
 
-      # ── Rogue-trace removal — THIS CHANGES THE DATA ────────────────────────
+      # ── Rogue-trace removal - THIS CHANGES THE DATA ────────────────────────
       # Dropped traces are removed before grouping, clustering, fits and surfaces,
       # so omitting these from the saved file meant reloading a settings file
       # silently reverted rogue removal to OFF and changed what was analysed.
@@ -998,7 +998,7 @@ smlm_server <- function(input, output, session) {
       # part of the merge metric: eps only means the same thing alongside it
       deblink_anisotropic = input$deblink_anisotropic,
       # minPts is derived from tid_length_range and exclude_unclustered no longer
-      # exists, so neither is saved — both would be stale on reload.
+      # exists, so neither is saved - both would be stale on reload.
       
       enable_cluster2  = input$enable_cluster2,
       eps2             = input$eps2,
@@ -1464,7 +1464,7 @@ smlm_server <- function(input, output, session) {
     efo = NULL, cfr = NULL, tim = NULL, dcr = NULL, eco = NULL, dwell = NULL, fluo = NULL
   )
   # Single source of truth for the SD (spread) filter.
-  # c(0, Inf) = "no filter" — passes all traces regardless of spread.
+  # c(0, Inf) = "no filter" - passes all traces regardless of spread.
   # Set to Inf on upload/reset; set to a finite upper bound only when the user
   # explicitly narrows the slider. Using Inf avoids all floating-point edge cases
   # that arise when comparing widget values against data maxima.
@@ -1478,7 +1478,7 @@ smlm_server <- function(input, output, session) {
   
   
   # ==========================================================================
-  # FILTER PIPELINE — Stage 1 of 3: per-LOCALIZATION quality
+  # FILTER PIPELINE - Stage 1 of 3: per-LOCALIZATION quality
   # ==========================================================================
   # GOAL: drop individual localizations that fail the microscope's own quality
   # metrics, before any trace-level judgement is made.
@@ -1490,7 +1490,7 @@ smlm_server <- function(input, output, session) {
   #     eco  photon count     dcr  channel ratio (the 2-colour axis)
   #     tim  acquisition time -> lets you cut the drifty tail of a long run
   #
-  # KEY DESIGN CHOICE — `rng_filter` only applies a filter when the user's range
+  # KEY DESIGN CHOICE - `rng_filter` only applies a filter when the user's range
   # actually DIFFERS from the dataset's full range. A slider sitting at its
   # default must be a true no-op: comparing floating-point widget values against
   # data maxima otherwise drops boundary points for no reason.
@@ -1499,7 +1499,7 @@ smlm_server <- function(input, output, session) {
   # ==========================================================================
   metadata_filtered_df <- reactive({
     # Drop Fiducial-scan-flagged traces first (only when the exclusion is on;
-    # reversible — see qc_exclude_from). Active file = input$active_file.
+    # reversible - see qc_exclude_from). Active file = input$active_file.
     df <- qc_exclude_from(uploaded_df(), input$active_file)
 
     # Apply range filter ONLY if user range differs from the dataset's full range
@@ -1544,14 +1544,14 @@ smlm_server <- function(input, output, session) {
   # ===========================================================================
 
   # ==========================================================================
-  # FILTER PIPELINE — Stage 2 of 3: per-TRACE spread (the SD filter)
+  # FILTER PIPELINE - Stage 2 of 3: per-TRACE spread (the SD filter)
   # ==========================================================================
   # GOAL: remove whole traces whose localizations are too SCATTERED to be one
   # stationary molecule.
   #
   # THE REASONING. In SMLM a `tid` should be one fluorophore sitting still while
   # blinking, so its localizations should scatter only by the localization
-  # precision — a few nm. A trace with a much larger spread is not a molecule:
+  # precision - a few nm. A trace with a much larger spread is not a molecule:
   # it is usually stage drift during a long blink, or two nearby molecules whose
   # localizations were merged into one trace ID. Either way its median position
   # is meaningless, and the median is exactly what the clustering and every
@@ -1562,13 +1562,13 @@ smlm_server <- function(input, output, session) {
   # points already rejected as low quality).
   #
   # `sd_filt` holds the committed bounds. An upper bound of Inf means "no
-  # filter" — an explicit sentinel, chosen so no floating-point comparison
+  # filter" - an explicit sentinel, chosen so no floating-point comparison
   # against a data maximum is needed to express "keep everything".
   #
   # INPUT : metadata_filtered_df()   OUTPUT: whole traces removed
   # ==========================================================================
   # ==========================================================================
-  # FILTER PIPELINE — Stage 1b of 3: outlier LOCALIZATIONS inside a trace
+  # FILTER PIPELINE - Stage 1b of 3: outlier LOCALIZATIONS inside a trace
   # ==========================================================================
   # GOAL: drop the individual localizations that do not belong to their trace,
   # BEFORE any per-trace statistic is computed from them.
@@ -1577,14 +1577,14 @@ smlm_server <- function(input, output, session) {
   # its length (Stage 3), its median position (clustering). All of those are
   # computed from the surviving points, so a stray localization has to be gone
   # before them or it corrupts each one in turn. Placing it after the metadata
-  # filters is deliberate for the same reason those come first — a point already
+  # filters is deliberate for the same reason those come first - a point already
   # rejected on quality should not get a vote on whether its neighbours are
   # outliers.
   #
   # This is the ONLY place localizations are removed for spatial reasons.
   # Trace-level judgement stays in Stage 2 and the rogue rules; the two are kept
   # apart so that trimming can never quietly rescue a trace that is not one
-  # molecule — the trim FRACTION is reported precisely so that case stays visible.
+  # molecule - the trim FRACTION is reported precisely so that case stays visible.
   #
   # OFF by default: opening the spread panel shows the untrimmed data first, and
   # resetting the filters returns to it.
@@ -1608,7 +1608,7 @@ smlm_server <- function(input, output, session) {
     df[!fl, , drop = FALSE]
   })
 
-  # Measured, not theoretical — the Gaussian rejection rate for a given k is
+  # Measured, not theoretical - the Gaussian rejection rate for a given k is
   # wrong by about a factor of ten on real MINFLUX residuals.
   output$trim_summary_ui <- renderUI({
     fl <- trim_flags()
@@ -1619,12 +1619,12 @@ smlm_server <- function(input, output, session) {
 
     # Trimming shortens traces, so a trace can drop below the Trace-ID-Length
     # minimum and be removed by Stage 3 even though it passed before. That is
-    # the correct reading — a trace with 4 valid localizations IS a 4-point
-    # trace — but it must not happen silently, so it is counted here rather
+    # the correct reading - a trace with 4 valid localizations IS a 4-point
+    # trace - but it must not happen silently, so it is counted here rather
     # than prevented. Raising the trim guard to the length minimum instead
     # would make WHICH POINTS ARE OUTLIERS depend on how long traces are
     # required to be, and would keep known-bad localizations purely to satisfy
-    # a count — corrupting the very median and spread the length filter exists
+    # a count - corrupting the very median and spread the length filter exists
     # to protect.
     lo <- suppressWarnings(as.numeric((input$tid_length_range %||% c(0, Inf))[1]))
     demoted <- NA_integer_
@@ -1640,7 +1640,7 @@ smlm_server <- function(input, output, session) {
       format(s$n_flag, big.mark = ","), format(s$n_pts, big.mark = ","), s$pct,
       format(s$n_tr_touched, big.mark = ","), format(s$n_tr, big.mark = ","), s$pct_tr,
       if (s$n_tr_heavy > 0)
-        sprintf(paste0("<b>%s trace(s) lost ≥ 30%% of their localizations</b> — that is ",
+        sprintf(paste0("<b>%s trace(s) lost ≥ 30%% of their localizations</b> - that is ",
                        "not a clean trace with a few strays, and is worth inspecting before ",
                        "trusting its position."), format(s$n_tr_heavy, big.mark = ","))
       else "No trace lost 30% or more of its localizations."),
@@ -1652,13 +1652,13 @@ smlm_server <- function(input, output, session) {
     )))
   })
 
-  # Stage 2: spread filter — per-trace SD applied after metadata row filters
+  # Stage 2: spread filter - per-trace SD applied after metadata row filters
   spread_filtered_df <- reactive({
     df <- trimmed_df()
     if (!is.data.frame(df) || !nrow(df) || !"tid" %in% names(df)) return(df)
 
     # sd_filt holds the committed filter bounds set by the user.
-    # c(0, Inf) upper bound = "no filter" — all traces pass regardless of spread.
+    # c(0, Inf) upper bound = "no filter" - all traces pass regardless of spread.
     # This avoids every floating-point comparison edge case that arose from
     # matching widget values against data maxima computed from different subsets.
     rx <- c(sd_filt$x[1], sd_filt$x[2])
@@ -1682,7 +1682,7 @@ smlm_server <- function(input, output, session) {
     df %>% dplyr::filter(tid %in% keep_tids)
   })
   # ==========================================================================
-  # FILTER PIPELINE — Stage 3 of 3: per-TRACE localization count
+  # FILTER PIPELINE - Stage 3 of 3: per-TRACE localization count
   # ==========================================================================
   # GOAL: keep only traces with a sensible number of localizations. This is the
   # last stage; its output is what the analyses consume.
@@ -1701,7 +1701,7 @@ smlm_server <- function(input, output, session) {
   #
   # INPUT : spread_filtered_df()   OUTPUT: the analysis-ready trace set
   # ==========================================================================
-  # Stage 3: trace ID length filter — applied after spread filter
+  # Stage 3: trace ID length filter - applied after spread filter
   filtered_df <- reactive({
     df <- spread_filtered_df()
 
@@ -1726,7 +1726,7 @@ smlm_server <- function(input, output, session) {
     df
   })
 
-  # Trace-ID-Length slider UI — range derived from the spread-filtered data
+  # Trace-ID-Length slider UI - range derived from the spread-filtered data
   # (Stage 2 output), so it sits at the end of the pipeline. Stage 3 (filtered_df)
   # reads input$tid_length_range from here.
   output$tid_length_range_ui <- renderUI({
@@ -1743,7 +1743,7 @@ smlm_server <- function(input, output, session) {
     # not the spread-filtered max.  Without this, applying a spread filter (which removes
     # long traces) would silently lower the upper bound here.  On reset the clamped value
     # would be re-used, permanently excluding any trace whose length exceeded the old
-    # spread-filtered maximum — even after the spread filter is cleared.
+    # spread-filtered maximum - even after the spread filter is cleared.
     df_full     <- uploaded_df()
     tl_full     <- if (!is.null(df_full) && "tid" %in% names(df_full)) table(df_full$tid) else tl
     max_len_full <- if (length(tl_full) > 0) max(tl_full) else max_len
@@ -1793,7 +1793,7 @@ smlm_server <- function(input, output, session) {
     },
     content = function(file) {
       s <- list(
-        # Master toggle — without it, loading a Median Cluster settings file left
+        # Master toggle - without it, loading a Median Cluster settings file left
         # clustering switched OFF and none of the restored parameters took effect.
         enable_cluster2 = isTRUE(input$enable_cluster2),
         show_cluster2_knn = isTRUE(input$show_cluster2_knn),
@@ -2010,11 +2010,25 @@ smlm_server <- function(input, output, session) {
                        cur_thr, if (is.finite(r$sigma) && r$sigma > 0) cur_thr / r$sigma else NA_real_,
                        shape, format(r$n_traces, big.mark = ","),
                        100 * (r$frac_merged %||% NA))),
+      # k_clear is where the residual pile-up meets the local-density
+      # expectation; k_clear_hi is where it meets it across the whole confidence
+      # interval. The pair brackets the choice, so both are shown rather than
+      # quoting the point estimate as if it were exact.
       if (!is.null(r$excess) && is.finite(r$excess$k_clear))
-        helpText(sprintf("k = %.2f, measured from your data. Lower values leave re-blinks unmerged.",
-                         r$excess$k_clear))
+        helpText(sprintf("k = %.2f, measured from your data%s. Lower values leave re-blinks unmerged.",
+                         r$excess$k_clear,
+                         if (is.finite(r$excess$k_clear_hi %||% NA_real_) &&
+                             r$excess$k_clear_hi > r$excess$k_clear)
+                           sprintf("; k = %.2f clears it within confidence", r$excess$k_clear_hi)
+                         else ""))
       else if (!is.null(r$excess))
         helpText("Could not measure k from this data - too crowded to tell re-blinks from neighbours. Using the default.")
+      else NULL,
+      # The measured k only sees leftover pairs at ~2 sigma, so it cannot
+      # register label motion between blinks - which is what actually sets how
+      # far apart two blinks of one molecule land. It is a floor, not an answer.
+      if (!is.null(r$excess) && is.finite(r$excess$k_clear))
+        helpText("Measured k is a lower bound: it cannot see label motion between blinks. Check the count-vs-threshold curve before going below it.")
       else NULL
     )
   })
@@ -2035,7 +2049,7 @@ smlm_server <- function(input, output, session) {
     # LOG x-axis. The re-blink hump sits at a few nm and the distinct-molecule
     # hump at hundreds; on a linear axis clipped to a quantile of the pooled
     # distances the second hump fell off the plot entirely, which defeats the
-    # point — the threshold is supposed to be placed in the GAP between them.
+    # point - the threshold is supposed to be placed in the GAP between them.
     xhi <- max(stats::quantile(bw, 0.99, names = FALSE), stats::quantile(wi, 0.99, names = FALSE),
                3 * r$suggested, na.rm = TRUE)
     xlo <- max(0.5, min(stats::quantile(c(wi, bw), 0.005, names = FALSE), r$sigma / 4))
@@ -2156,11 +2170,11 @@ smlm_server <- function(input, output, session) {
     w <- if (isTRUE(input$deblink_anisotropic))
       deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
       else NULL
-    # Sweep whatever criterion is ACTIVE — a curve over raw-point eps says
+    # Sweep whatever criterion is ACTIVE - a curve over raw-point eps says
     # nothing about a centroid threshold, and vice versa.
     # Sweep range follows the DATA, not a hard-coded 40 nm: on the centroid
     # criterion the interesting structure runs well past that.
-    # Centroid criterion only — see deblink_count_curve().
+    # Centroid criterion only - see deblink_count_curve().
     req(identical(input$deblink_method %||% "centroid", "centroid"))
     cs  <- tryCatch(compute_centroid_suggestion(), error = function(e) NULL)
     top <- if (!is.null(cs))
@@ -2214,8 +2228,8 @@ smlm_server <- function(input, output, session) {
         helpText("Curve computed on a 60,000-localization subsample."),
       # Measured: the knee detector is calibrated for the raw-point curve, whose
       # steep initial drop comes from traces FRAGMENTING at small eps. The
-      # centroid curve has no such regime — it simply starts at "no merging" and
-      # declines — so the curvature maximum lands mid-slope and reads far too
+      # centroid curve has no such regime - it simply starts at "no merging" and
+      # declines - so the curvature maximum lands mid-slope and reads far too
       # low (synthetic: knee 5 nm -> 422 molecules, against 360 truth and 360 at
       # the σ-based suggestion). Do not tune the centroid threshold from it.
       if (identical(input$deblink_method %||% "centroid", "centroid"))
@@ -2235,7 +2249,7 @@ smlm_server <- function(input, output, session) {
     },
     content = function(file) {
       s <- list(
-        # Master toggle — as with cluster2, without it the restored 2-color
+        # Master toggle - as with cluster2, without it the restored 2-color
         # parameters had no effect because 2-color stayed switched off.
         enable_two_color = isTRUE(input$enable_two_color),
         color_by_fluo = isTRUE(input$color_by_fluo),
@@ -2309,7 +2323,7 @@ smlm_server <- function(input, output, session) {
         shiny::need(!is.null(df) && nrow(df) > 0, "No data to export.")
       )
 
-      # Core MINFLUX columns — always included when present
+      # Core MINFLUX columns - always included when present
       core_cols <- c("x", "y", "z", "tid", "efo", "cfr", "eco", "fbg", "dcr")
       # Optional columns included only when they exist and carry real data
       # dcr_pooled is exported so the pooled value SURVIVES a round-trip: it is
@@ -2335,9 +2349,9 @@ smlm_server <- function(input, output, session) {
       # Axial provenance: z below is written at this factor. Re-importing divides
       # it out before applying the then-current calibration, so a round-trip is
       # exact instead of relying on the 0.7 assumption in
-      # detect_csv_z_calibration(). Written even for 2D data — it costs one
+      # detect_csv_z_calibration(). Written even for 2D data - it costs one
       # column and removes the guess for every future reader.
-      # The COMMITTED factor — that is what the exported z is actually at. Using
+      # The COMMITTED factor - that is what the exported z is actually at. Using
       # the pending input value would mislabel the file whenever the control has
       # been typed into but not applied.
       df$z_scale_applied <- z_scale_applied()
@@ -2471,9 +2485,9 @@ smlm_server <- function(input, output, session) {
     req(input$file)
     was_view_SD <- isTRUE(isolate(input$view_SD))
     vals <- filters_defaults_from_data(uploaded_df())
-    # Reset SD filter synchronously — Inf upper bound means "pass all".
+    # Reset SD filter synchronously - Inf upper bound means "pass all".
     sd_filt$x <- c(0, Inf); sd_filt$y <- c(0, Inf); sd_filt$z <- c(0, Inf)
-    # Trimming removes localizations, so "reset filters" has to put them back —
+    # Trimming removes localizations, so "reset filters" has to put them back -
     # otherwise the spread the user returns to is not the raw spread.
     updateCheckboxInput(session, "trim_outliers", value = FALSE)
     shinyjs::reset("filters_form")
@@ -2511,7 +2525,7 @@ smlm_server <- function(input, output, session) {
       later::later(function() sd_skip_arming(FALSE), delay = 0.8)
     }
   }, ignoreInit = TRUE)
-  # Commit the user's chosen range into sd_filt — the single source of truth.
+  # Commit the user's chosen range into sd_filt - the single source of truth.
   # Uses Inf for any axis whose widget is at the full-range maximum so that
   # spread_filtered_df always passes those traces without a fragile value comparison.
   observeEvent(list(input$sd_x_range, input$sd_y_range, input$sd_z_range), {
@@ -2588,13 +2602,31 @@ smlm_server <- function(input, output, session) {
     df  <- filtered_df()    
     med <- compute_sd_medians(df, min_n = input$sd_min_locs)
     
+    # One axis per line, in the pyMINFLUX reporting form: median +/- MAD with the
+    # interquartile range after it. The MAD is the width of the trace-to-trace
+    # distribution, NOT an error on the median - the IQR is shown next to it so
+    # the asymmetry of that distribution stays visible rather than being hidden
+    # behind a symmetric +/-.
+    fmt_axis <- function(axis, med_v, mad_v, q1, q3) {
+      if (!is.finite(med_v %||% NA_real_)) return(NULL)
+      txt <- sprintf("Median trace spread %s: %.2f ± %.2f nm", axis, med_v, mad_v %||% NA_real_)
+      if (is.finite(q1 %||% NA_real_) && is.finite(q3 %||% NA_real_))
+        txt <- sprintf("%s  (IQR %.2f–%.2f)", txt, q1, q3)
+      helpText(txt)
+    }
+
     els <- list(
-      helpText(paste("Median Trace spread X:", round(med$x %||% NA_real_, 2))),
-      helpText(paste("Median Trace spread Y:", round(med$y %||% NA_real_, 2)))
+      fmt_axis("X", med$x, med$mad_x, med$q1_x, med$q3_x),
+      fmt_axis("Y", med$y, med$mad_y, med$q1_y, med$q3_y)
     )
     if (!is.null(med$z)) {
-      els <- append(els, list(helpText(paste("Median Trace spread Z:", round(med$z %||% NA_real_, 2)))))
+      els <- append(els, list(fmt_axis("Z", med$z, med$mad_z, med$q1_z, med$q3_z)))
     }
+    els <- Filter(Negate(is.null), els)
+    if (length(els) && is.finite(med$n_traces %||% NA_real_))
+      els <- append(els, list(helpText(sprintf("Across %d traces with ≥ %d localizations.",
+                                               as.integer(med$n_traces),
+                                               as.integer(input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)))))
     do.call(tagList, els)
     })
   output$sd_ranges_ui <- renderUI({
@@ -2611,7 +2643,7 @@ smlm_server <- function(input, output, session) {
     # previously loaded or user-set range is shown when the panel is reopened.
     # Falls back to [0, mx] when the filter is at full range (Inf upper bound).
     # When "lock filters" is active, preserve the locked upper bound exactly and
-    # extend the widget max to fit it — prevents clamping from silently resetting
+    # extend the widget max to fit it - prevents clamping from silently resetting
     # sd_filt via the sd_x_range observer when the new file has a smaller max SD.
     locked <- isTRUE(input$lock_filters)
     init_val <- function(filt_rng, mx) {
@@ -2743,7 +2775,7 @@ smlm_server <- function(input, output, session) {
   })
   
   # ==========================================================================
-  # Shared histogram ranges across sigma X / Y / Z — OPT IN
+  # Shared histogram ranges across sigma X / Y / Z - OPT IN
   # ==========================================================================
   # GOAL: put the three spread histograms on ONE set of bin edges and ONE count
   # axis, so the panels can be read against each other and dropped into a figure
@@ -2754,7 +2786,7 @@ smlm_server <- function(input, output, session) {
   # range spends most of the x panel's width on empty space. Sharing is a
   # presentation choice, so it is opt-in and changes nothing else.
   #
-  # The bin EDGES are shared too, not just the axis limits — histograms on
+  # The bin EDGES are shared too, not just the axis limits - histograms on
   # different edges are not comparable however the axes are labelled, because
   # the bar heights answer different questions.
   #
@@ -2763,7 +2795,7 @@ smlm_server <- function(input, output, session) {
   # Values outside a MANUAL range must be dropped, not drawn. sd_counts() clamps
   # anything beyond the outermost break into the edge bin, which is right for an
   # auto range (nothing is outside it) but would put every broad trace into one
-  # tall bar at the right edge of a user-set range — a spike that is pure
+  # tall bar at the right edge of a user-set range - a spike that is pure
   # artifact and would be read as a real population in a figure.
   sd_hist_clip <- function(v, sh) {
     if (is.null(sh) || !isTRUE(sh$manual)) return(v)
@@ -2795,7 +2827,7 @@ smlm_server <- function(input, output, session) {
     sh0 <- list(manual = manual, xrange = range(brk, na.rm = TRUE))
 
     # Counts have to be recomputed on the SHARED edges to find the common
-    # ceiling — the per-axis maxima are on different edges and would not
+    # ceiling - the per-axis maxima are on different edges and would not
     # transfer. Raw counts are included whether or not the grey overlay is on,
     # so toggling the overlay cannot rescale the shared axis under the user.
     ymax <- 0
@@ -2815,14 +2847,14 @@ smlm_server <- function(input, output, session) {
          n_out  = n_out, n_tot = n_tot)
   })
 
-  # A figure must not hide data silently — say how much the chosen range leaves out.
+  # A figure must not hide data silently - say how much the chosen range leaves out.
   output$sd_hist_range_note <- renderUI({
     sh <- sd_hist_common()
     if (is.null(sh) || !isTRUE(sh$manual)) return(NULL)
     if (sh$n_out <= 0)
       return(helpText("All per-trace spreads fall inside this range."))
     helpText(HTML(sprintf(
-      "<b>%s of %s per-trace spread values (%.1f%%) fall outside this range</b> and are not drawn. They are still in the data — this is a display range only, and it does not filter anything.",
+      "<b>%s of %s per-trace spread values (%.1f%%) fall outside this range</b> and are not drawn. They are still in the data - this is a display range only, and it does not filter anything.",
       format(sh$n_out, big.mark = ","), format(sh$n_tot, big.mark = ","),
       100 * sh$n_out / max(1L, sh$n_tot))))
   })
@@ -2872,6 +2904,9 @@ smlm_server <- function(input, output, session) {
       muF  <- stats::median(cur$sd_x, na.rm = TRUE)
       labF <- sigma_label_med_pm_sd(cur$sd_x)
       fig  <- add_sigma_vline(fig, muF, y_top, "steelblue", labF)
+      # Quartiles flank the median only for the filtered set - drawing them for
+      # the raw overlay too would put four thin lines on one panel.
+      fig  <- add_sigma_iqr_lines(fig, cur$sd_x, y_top, "steelblue")
     }
 
     # Raw median ± nMAD (TEAL, dashed)
@@ -2933,6 +2968,7 @@ smlm_server <- function(input, output, session) {
       muF  <- stats::median(cur$sd_y, na.rm = TRUE)
       labF <- sigma_label_med_pm_sd(cur$sd_y)
       fig  <- add_sigma_vline(fig, muF, y_top, "steelblue", labF)
+      fig  <- add_sigma_iqr_lines(fig, cur$sd_y, y_top, "steelblue")
     }
 
     # Raw median ± nMAD (TEAL, dashed)
@@ -2994,6 +3030,7 @@ smlm_server <- function(input, output, session) {
       muF  <- stats::median(cur$sd_z, na.rm = TRUE)
       labF <- sigma_label_med_pm_sd(cur$sd_z)
       fig  <- add_sigma_vline(fig, muF, y_top, "steelblue", labF)
+      fig  <- add_sigma_iqr_lines(fig, cur$sd_z, y_top, "steelblue")
     }
 
     # Raw median ± nMAD (TEAL, dashed)
@@ -3028,7 +3065,7 @@ smlm_server <- function(input, output, session) {
   smlm_diag      <- reactiveVal(NULL)   # list(data_clusters, img_blobs) in data coords
   smlm_diag_mats <- reactiveVal(NULL)  # list(raw=mat_c, smooth=mat_cs) for debug plot
   cluster2_table_store <- reactiveVal(NULL)
-  # Cache of clustered data per file — populated whenever a file is plotted.
+  # Cache of clustered data per file - populated whenever a file is plotted.
   # Enables batch analysis across all previously-plotted files.
   smlm_plotted_store <- reactiveVal(list())
   shinyjs::hide("scatter2D")
@@ -3044,7 +3081,7 @@ smlm_server <- function(input, output, session) {
   })
 
   # view_plane_2d is now a static input (ui_smlm.R). The old renderUI dropped
-  # XZ/YZ from the choices when `any(is.finite(df$z))` was FALSE — which never
+  # XZ/YZ from the choices when `any(is.finite(df$z))` was FALSE - which never
   # fired for a 2D MINFLUX file, because those carry z = 0 and 0 IS finite. So
   # side views were offered on planar data and produced a flat line. The planar
   # observer below disables them on z VARIATION instead.
@@ -3149,14 +3186,14 @@ smlm_server <- function(input, output, session) {
              "  |  d' = ", res$dprime, " (", res$quality, "), ",
              sprintf("%.1f%% expected crosstalk", 100 * res$err_rate),
              if (!identical(.col, "dcr_pooled"))
-               "  |  using RAW dcr — try pooled DCR for a cleaner split" else ""),
+               "  |  using RAW dcr - try pooled DCR for a cleaner split" else ""),
       type = if (identical(res$quality, "poor")) "warning" else "message", duration = 9
     )
   })
 
   # Per-trace split confidence: which individual molecules sit on the edge of the
   # DCR split. The GMM summary only gives an aggregate ambiguous %, which cannot
-  # tell you WHICH molecules are uncertain — and those are exactly the ones that
+  # tell you WHICH molecules are uncertain - and those are exactly the ones that
   # manufacture false short-range cross-channel pairs.
   dcr_conf_tbl <- reactive({
     gmm <- dcr_gmm_result()
@@ -3199,7 +3236,7 @@ smlm_server <- function(input, output, session) {
       hoverinfo = "text") %>%
       plotly::layout(
         title = list(text = sprintf(
-          "Per-trace split confidence — %d of %d traces on the edge (posterior < %.2f), orange",
+          "Per-trace split confidence - %d of %d traces on the edge (posterior < %.2f), orange",
           sum(tb$on_edge, na.rm = TRUE), nrow(tb), gmm$post_cut), font = list(size = 12)),
         margin = list(t = 46),
         xaxis = list(title = paste0("Trace median ", gmm$col_used)),
@@ -3243,7 +3280,7 @@ smlm_server <- function(input, output, session) {
     qtxt <- switch(res$quality,
       clean    = "clean split",
       workable = "workable split",
-      poor     = "POOR split — channels overlap heavily",
+      poor     = "POOR split - channels overlap heavily",
       "separation unknown")
 
     tagList(
@@ -3254,7 +3291,7 @@ smlm_server <- function(input, output, session) {
         " | G2 mean ", res$mean2, " (SD ", res$sd2, ", ", round(100 * res$pi2), "%)",
         " | n = ", res$n_traces, " traces"),
       tags$div(style = paste0("font-size:0.85em; margin-top:3px; color:", qcol, "; font-weight:600;"),
-        "d' = ", res$dprime, " — ", qtxt),
+        "d' = ", res$dprime, " - ", qtxt),
       tags$div(style = "font-size:0.82em; color:#555; margin-top:2px;",
         tags$b("Expected crosstalk: "),
         sprintf("%.1f%% of traces mis-assigned overall; group 1 is ~%.1f%% contaminated by dye 2, group 2 ~%.1f%% by dye 1. %.1f%% of traces are ambiguous (max posterior < %.2f).",
@@ -3269,7 +3306,7 @@ smlm_server <- function(input, output, session) {
           # .npy/.json readers. A .csv is a pyMINFLUX export of the final iteration and
           # has already been through their pipeline, so there is nothing to pool here.
           if (!pooled && has_pooled_col)
-            paste0(" <b>This file has a pooled DCR column you are not using</b> — tick ",
+            paste0(" <b>This file has a pooled DCR column you are not using</b> - tick ",
                    "<i>Use pooled DCR</i> and re-upload; pooled DCR usually separates the dyes better.")
           else if (!pooled)
             paste0(" Splitting on raw DCR. If this came from <b>.npy/.json</b>, re-uploading with ",
@@ -3279,7 +3316,7 @@ smlm_server <- function(input, output, session) {
           else ""))),
       # Keep this proportionate: the GMM is a reasonable estimator and the split is
       # what the data allows. The point is only that split QUALITY is not evidence of
-      # two dyes existing — the experiment design is.
+      # two dyes existing - the experiment design is.
       tags$div(style = "margin-top:5px; padding:5px 8px; border-left:3px solid #b26a00; background:rgba(178,106,0,0.06); font-size:0.8em; color:#7f8c8d; line-height:1.45;",
         HTML(paste0(
           "<b>d' measures separation, not whether two dyes exist.</b>",
@@ -3939,12 +3976,12 @@ smlm_server <- function(input, output, session) {
                " px, raw bytes: ", dd[5], " (", dd[6], ")")
       else ""
       showNotification(
-        paste0("Confocal detection — gray range: ", mr[1], "–", mr[2],
+        paste0("Confocal detection - gray range: ", mr[1], "–", mr[2],
                " | peaks: ", paste(round(as.numeric(pv), 0), collapse = ", "),
                dim_str),
         type = "message", duration = 20)
     }
-    showNotification("Foci alignment applied — nudge to fine-tune.",
+    showNotification("Foci alignment applied - nudge to fine-tune.",
                      type = "message", duration = 4)
   }, ignoreInit = TRUE)
 
@@ -3970,7 +4007,7 @@ smlm_server <- function(input, output, session) {
     updateCheckboxInput(session, "show_bg", value = TRUE)
     updateNumericInput(session, "img_x0", value = res$x0)
     updateNumericInput(session, "img_y0", value = res$y0)
-    showNotification("Boundary alignment applied — nudge to fine-tune.",
+    showNotification("Boundary alignment applied - nudge to fine-tune.",
                      type = "message", duration = 4)
   }, ignoreInit = TRUE)
 
@@ -4045,7 +4082,7 @@ smlm_server <- function(input, output, session) {
           "Methods: gyration-tensor shape anisotropy (Rudnick &amp; Gaspari, <i>J. Phys. A</i> <b>19</b>, L191, 1986); ",
           "linear/planar/spherical anisotropy coefficients (Westin et&nbsp;al., <i>MICCAI/Med. Image Anal.</i>, 1997/2002); ",
           "minimum-spanning-tree backbone (Prim, 1957). ",
-          "The labeling-displacement inverse (candidate-GT estimation, complex-radius merge, inward linkage displacement, stoichiometric cross-check) is a heuristic developed in this tool and validated in&nbsp;silico against the simulator — treat quantitatively with care and cite as exploratory.")))
+          "The labeling-displacement inverse (candidate-GT estimation, complex-radius merge, inward linkage displacement, stoichiometric cross-check) is a heuristic developed in this tool and validated in&nbsp;silico against the simulator - treat quantitatively with care and cite as exploratory.")))
   }
 
   # ── Inverse GT-position estimate (labeling-aware) ───────────────────────────
@@ -4174,7 +4211,7 @@ smlm_server <- function(input, output, session) {
                   tot_gt, tot_stoich, tot_lo, tot_hi))),
       tags$ul(style = "margin:4px 0 8px 0;padding-left:18px;", rows),
       if (any_mm) div(style = "font-size:12px;color:#c0392b;margin-bottom:6px;",
-          HTML("The two independent counts disagree in ≥1 structure — the merge radius or the labeling assumption is off. Try the stoichiometry-guided merge, adjust the merge radius, or re-check the preset/efficiency.")),
+          HTML("The two independent counts disagree in ≥1 structure - the merge radius or the labeling assumption is off. Try the stoichiometry-guided merge, adjust the merge radius, or re-check the preset/efficiency.")),
       div(style = "font-size:12px;color:#7f8c8d;line-height:1.45;",
           HTML(sprintf(
             "Modeled from %s. Units pooled within <b>%.0f nm</b> (label-complex radius)%s into one molecule%s. Position floor <b>±%.0f nm</b> (linker, irreducible) · ~%.1f TIDs/molecule expected · detection η=%.0f%% · σ<sub>loc</sub>≈%.1f nm.<br>Marker colour = position uncertainty, combining the linker floor, localization sampling (σ<sub>loc</sub>/√n<sub>loc</sub>), a <b>support penalty</b> (fewer TIDs → less certain), inward-displacement direction error, and a fusion penalty.<br><i>Counts are conditional on the labeling calibration; positions cannot be resolved below the linker floor. The two counts bracket the honest range.%s</i>",
@@ -4182,7 +4219,7 @@ smlm_server <- function(input, output, session) {
             if (isTRUE(m$guided_merge)) " (stoichiometry-guided)" else "",
             if ((m$displace_nm %||% 0) > 0) sprintf(", then displaced <b>%.0f nm</b> inward toward the structure", m$displace_nm) else "",
             m$link_nm, m$m_tid, 100 * m$eta, m$sigma_loc_nm,
-            ifelse(any_crowd, " Crowded structures undercount — treat those counts as lower bounds.", ""))),
+            ifelse(any_crowd, " Crowded structures undercount - treat those counts as lower bounds.", ""))),
       gt_exploratory_note())
     )
   })
@@ -4222,7 +4259,7 @@ smlm_server <- function(input, output, session) {
         sprintf("radius <b>%.0f nm</b> (circumference %.0f nm), R<sub>g</sub> %.0f%s", r$ring_r_nm, r$contour_nm, r$rg_nm, spc)
       else
         sprintf("extent <b>%.0f nm</b>, width %.0f, R<sub>g</sub> %.0f%s", r$extent_nm, r$width_nm, r$rg_nm, spc)
-      tags$li(HTML(sprintf("<b>Structure %d</b> — <b>%s</b> %s: %s",
+      tags$li(HTML(sprintf("<b>Structure %d</b> - <b>%s</b> %s: %s",
                            r$cluster2, r$shape, icon_for(r$shape), detail)))
     })
     tagList(
@@ -4242,7 +4279,7 @@ smlm_server <- function(input, output, session) {
     }
 
     df <- plottable_data()
-    shiny::validate(shiny::need(nrow(df) > 0, "No points to display — please check filters or upload a valid file."))
+    shiny::validate(shiny::need(nrow(df) > 0, "No points to display - please check filters or upload a valid file."))
 
     # Remap x/y columns for XZ or YZ viewing planes
     vp <- input$view_plane_2d %||% "XY"
@@ -4619,7 +4656,7 @@ smlm_server <- function(input, output, session) {
     }
 
     # ---- Diagnostic: detected cluster centres (red +) and confocal blobs (green ○) ----
-    # type="scatter" (SVG) — scattergl lacks circle-open / cross symbol support.
+    # type="scatter" (SVG) - scattergl lacks circle-open / cross symbol support.
     diag <- smlm_diag()   # non-isolated: toggling show_diag or new alignment re-renders
     if (isTRUE(input$show_diag) && !is.null(diag)) {
       if (!is.null(diag$data_clusters) && nrow(diag$data_clusters) > 0) {
@@ -5005,7 +5042,7 @@ smlm_server <- function(input, output, session) {
     use_fluo <- isTRUE(input$color_by_fluo) && ("fluo" %in% names(df))
     
     if (use_fluo) {
-      # pyMINFLUX-style: fluo is 1/2 per trace; median + round makes it robust
+      # pyMINFLUX's fluo groups': fluo is 1/2 per trace; median + round makes it
       med$analysis_group <- dplyr::case_when(
         is.finite(med$fluo_med) & round(med$fluo_med) == 1L ~ 1L,
         is.finite(med$fluo_med) & round(med$fluo_med) == 2L ~ 2L,
@@ -5105,7 +5142,7 @@ smlm_server <- function(input, output, session) {
   
   
   # ==========================================================================
-  # plottable_data() — THE ANALYSIS-READY DATASET
+  # plottable_data() - THE ANALYSIS-READY DATASET
   # ==========================================================================
   #
   # GOAL
@@ -5117,7 +5154,7 @@ smlm_server <- function(input, output, session) {
   #   It is the SMLM counterpart of trk() in the tracking tab, but it does more:
   #   as well as delivering the filtered data it performs the CLUSTERING, so
   #   every consumer sees the same cluster / cluster2 assignment. That is
-  #   deliberate — if each analysis clustered independently they could disagree.
+  #   deliberate - if each analysis clustered independently they could disagree.
   #
   # WHAT IT ADDS ON TOP OF filtered_df()
   #   1. apply_trimmer() ..... optional outlier/edge trimming
@@ -5144,7 +5181,7 @@ smlm_server <- function(input, output, session) {
   plottable_data <- eventReactive(plot_trigger(), {
     df <- filtered_df()
     df <- apply_trimmer(df, input)
-    # 2D zoom crop — applied server-side so it works in both 2D and 3D without
+    # 2D zoom crop - applied server-side so it works in both 2D and 3D without
     # relying on the browser round-trip from update* calls.
     crop2d <- isolate(smlm_2d_crop_rv())
     if (!is.null(crop2d) && nrow(df) > 0)
@@ -5205,11 +5242,11 @@ smlm_server <- function(input, output, session) {
       dbs_pts <- function(idx) apply_deblink_weights(
         as.matrix(df[idx, c("x","y","z")]), aw1)
 
-      # minPts is the Trace ID Length filter's lower bound, not a free control —
+      # minPts is the Trace ID Length filter's lower bound, not a free control -
       # see deblink_minpts() in helpers_smlm.R.
       mp1 <- deblink_minpts(input)
 
-      # Merge criterion. Mirrors apply_clustering_pipeline() exactly — the two
+      # Merge criterion. Mirrors apply_clustering_pipeline() exactly - the two
       # must agree or the plot and the batch tools disagree about what a
       # molecule is. See deblink_merge_centroids() for the comparison.
       method1 <- input$deblink_method %||% "centroid"
@@ -5293,7 +5330,7 @@ smlm_server <- function(input, output, session) {
       df$cluster <- NA_integer_
     }
     
-    # Secondary clustering on medians  — group-aware
+    # Secondary clustering on medians  - group-aware
     if (isTRUE(input$enable_cluster2)) {
       scope <- if (is.null(input$cluster_group_scope)) "all" else input$cluster_group_scope
       mode  <- if (is.null(input$grouping_mode)) "none" else input$grouping_mode
@@ -5465,7 +5502,7 @@ smlm_server <- function(input, output, session) {
               f = input$vote_frac_tc1 %||% 0.2, rho = input$vote_rho_tc1 %||% 1.2,
               w = aw_tc)
             else deblink_merge_centroids(df[idx, , drop = FALSE], thr_tc, aw_tc)
-          # Channel offset: A stays 1..n, B becomes 10001.. — this is what makes
+          # Channel offset: A stays 1..n, B becomes 10001.. - this is what makes
           # cross-colour merging structurally impossible, not merely unlikely.
           if (g == 2L) cid <- cid + 10000L
           df$cluster_tc1[idx] <- cid
@@ -5927,7 +5964,7 @@ smlm_server <- function(input, output, session) {
     req(plot_trigger(), input$mode3d == "3D")
     
     df <- plottable_data()
-    shiny::validate(shiny::need(nrow(df) > 0, "No points to display — please check filters or upload a valid file."))
+    shiny::validate(shiny::need(nrow(df) > 0, "No points to display - please check filters or upload a valid file."))
     
     df_raw <- uploaded_df()
     
@@ -6787,7 +6824,7 @@ smlm_server <- function(input, output, session) {
       # GOAL: triangulate the surface of a FIT (sphere / ellipsoid), given the
       # dense uniform point sampling of it that the fit functions return.
       # Those surfaces are convex by construction, so the convex hull IS the
-      # exact triangulation — no alpha shape is needed or wanted here. (This
+      # exact triangulation - no alpha shape is needed or wanted here. (This
       # used to build an ashape3d first and select `triang[, 4] >= 2`; column 4
       # is `on.ch`, a 0/1 flag, so that test never passed and every call fell
       # through to this hull anyway, after paying for a 4000-point
@@ -7455,7 +7492,7 @@ smlm_server <- function(input, output, session) {
       for (cl2 in unique(df$cluster2[df$cluster2 != 0])) {
         group_df <- df %>% dplyr::filter(cluster2 == cl2)
         if (nrow(group_df) >= 4) {
-          # Radius derived per cluster from its own point spacing — see
+          # Radius derived per cluster from its own point spacing - see
           # alpha_surface_3d() in helpers_smlm.R.
           srf <- alpha_surface_3d(as.matrix(group_df[, c("x", "y", "z")]))
           if (!is.null(srf)) {
@@ -7597,7 +7634,7 @@ smlm_server <- function(input, output, session) {
   # ------ Batch NN Distance Histogram ----------------------------------------
   nn_batch_results <- reactiveVal(NULL)
 
-  # Two-color group filter — only visible when two-color is enabled
+  # Two-color group filter - only visible when two-color is enabled
   output$nn_batch_group_ui <- renderUI({
     if (!isTRUE(input$enable_two_color)) return(NULL)
     selectInput("nn_batch_group", "Analysis group",
@@ -7703,7 +7740,7 @@ smlm_server <- function(input, output, session) {
         pcid          = "Check that Primary point DBSCAN Clustering is enabled and eps/minPts produce clusters.",
         cluster2_tid  = "Check that Median Clustering is enabled.",
         cluster2_pcid = "Check that both clustering levels are enabled.",
-        "Check filters — all rows may have been filtered out."
+        "Check filters - all rows may have been filtered out."
       )
       showNotification(paste0("No distances computed. ", hint), type = "warning")
       nn_batch_results(NULL)
@@ -7822,9 +7859,9 @@ smlm_server <- function(input, output, session) {
     }
 
     indicator_note <- switch(error_type,
-      iqr  = "— median  ··· Q25 / Q75",
-      mad  = "— median  ··· ±MAD",
-      "— median"
+      iqr  = "- median  ··· Q25 / Q75",
+      mad  = "- median  ··· ±MAD",
+      "- median"
     )
     unit_lbl <- switch(input$nn_batch_unit %||% "tid",
       tid           = "TID centroid",
@@ -7911,7 +7948,7 @@ smlm_server <- function(input, output, session) {
 
     # The GROUPING is ALWAYS the median cluster (cluster2). The UNIT counted
     # inside each median cluster is either raw trace IDs ("tid") or primary
-    # de-blinked molecules ("pcid" — needs de-blinking enabled).
+    # de-blinked molecules ("pcid" - needs de-blinking enabled).
     unit      <- input$tid_count_unit %||% "tid"
     count_col <- if (unit == "pcid") "cluster" else "tid"
 
@@ -8187,10 +8224,10 @@ smlm_server <- function(input, output, session) {
         fig <- fig %>%
           plotly::add_trace(x = ctr, y = yy$c2, type = "scatter", mode = "lines",
                             line = list(color = pal[g], width = 2),
-                            name = paste0(g, " — In Median Cluster", kslab)) %>%
+                            name = paste0(g, " - In Median Cluster", kslab)) %>%
           plotly::add_trace(x = ctr, y = yy$bg, type = "scatter", mode = "lines",
                             line = list(color = pal[g], width = 2, dash = "dash"),
-                            name = paste0(g, " — Unclustered"))
+                            name = paste0(g, " - Unclustered"))
       }
     }
     fig %>% plotly::layout(
@@ -8212,17 +8249,17 @@ smlm_server <- function(input, output, session) {
   )
 
   # ==========================================================================
-  # Trace-ID detection over time — unique traces vs acquisition time
+  # Trace-ID detection over time - unique traces vs acquisition time
   # ==========================================================================
   # GOAL: show how many UNIQUE TRACE IDs are detected as a function of
   # acquisition time. A trace ID is one continuous detection of a blinking
-  # fluorophore, so this is the detection-event RATE over the run — a direct QC
+  # fluorophore, so this is the detection-event RATE over the run - a direct QC
   # of whether imaging stayed stable (a declining rate flags photobleaching,
   # exhausted blinking, drift, or label/sample depletion).
   #
   # DIFFERS from the Median-Cluster detection plot above: no clustering is
-  # required (works on raw traces), and it draws ONE SERIES PER FILE — or per
-  # group in group mode — rather than a clustered/unclustered split.
+  # required (works on raw traces), and it draws ONE SERIES PER FILE - or per
+  # group in group mode - rather than a clustered/unclustered split.
   #
   # Each trace is counted ONCE, at its median tim, so a long trace with many
   # localizations does not dominate the early bins. Per-localization metadata
@@ -8233,7 +8270,7 @@ smlm_server <- function(input, output, session) {
   # its own acquisition window (see the plot): the line STOPS where that
   # dataset's tim ends, rather than dropping to a misleading zero.
   #
-  # RESULT stored: data.frame(tid, tim_med, dataset) — one row per trace.
+  # RESULT stored: data.frame(tid, tim_med, dataset) - one row per trace.
   tid_time_results <- reactiveVal(NULL)
 
   observeEvent(input$run_tid_time, {
@@ -8313,7 +8350,7 @@ smlm_server <- function(input, output, session) {
     # that fall inside THIS dataset's own tim window; bins outside it are set to
     # NA so the line STOPS at the dataset's end instead of dropping to zero
     # (zero would wrongly read as "detected nothing" rather than "acquisition
-    # over"). A genuine empty bin WITHIN the window stays 0 — a real dip.
+    # over"). A genuine empty bin WITHIN the window stays 0 - a real dip.
     yvals <- function(cnt, active) {
       tot <- sum(cnt); sc <- if (tot > 0) tot else 1
       y <- switch(mode,
@@ -8365,11 +8402,11 @@ smlm_server <- function(input, output, session) {
   )
 
   # ==========================================================================
-  # QC 1 — Localization precision cloud (within-trace scatter about the centroid)
+  # QC 1 - Localization precision cloud (within-trace scatter about the centroid)
   # ==========================================================================
   # GOAL: the direct measure of localization PRECISION. Pool every localization
   # minus its OWN trace centroid, recentre at (0,0), and look at the scatter.
-  # Its RMS radius is σ_loc — the resolution. The SHAPE flags problems: elongation
+  # Its RMS radius is σ_loc - the resolution. The SHAPE flags problems: elongation
   # = drift within a trace or an anisotropic PSF; heavy tails = mislinks / double
   # events; skew = a systematic bias. Uses raw uploaded data (before metadata
   # filters), so it reports the precision as acquired.
@@ -8377,7 +8414,7 @@ smlm_server <- function(input, output, session) {
   observeEvent(input$run_prec_cloud, {
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
-    # Precision is ALWAYS assessed on the single ACTIVE dataset — never pooled across
+    # Precision is ALWAYS assessed on the single ACTIVE dataset - never pooled across
     # files (an aggregate σ would blur per-acquisition precision). Restrict to it here.
     af <- input$active_file
     if (is.null(af) || !af %in% names(store)) af <- names(store)[[1]]
@@ -8387,7 +8424,7 @@ smlm_server <- function(input, output, session) {
     dxall <- dyall <- dzall <- numeric(0)          # pooled residuals (length-weighted)
     # Per-TRACE VARIANCES (one vote each, robust) and per-TRACE covariances. The
     # cross terms are needed because a cloud tilted off the x/y axes has its
-    # elongation entirely there — per-axis spreads alone cannot see it.
+    # elongation entirely there - per-axis spreads alone cannot see it.
     vxt <- vyt <- vzt <- numeric(0)
     cxyt <- cxzt <- cyzt <- numeric(0)
     nlt <- integer(0)                              # localizations per trace
@@ -8396,13 +8433,13 @@ smlm_server <- function(input, output, session) {
     # NOT the number of localizations: subtracting each trace's own centre
     # spends one degree of freedom PER TRACE. Dividing by N - 1 instead (what
     # sd() on the pooled residuals does) reads ~5% low at 5 localizations per
-    # trace and ~1% low at 15 — a real, n-dependent underestimate of sigma.
+    # trace and ~1% low at 15 - a real, n-dependent underestimate of sigma.
     ssx_all <- ssy_all <- ssz_all <- 0
     dof_all <- dofz_all <- 0L
     per_file <- list()
     pooled   <- list()                             # per-loc residuals (dx/dy/dz) for the plot
     # Median-of-chi-square correction. s^2 ~ sigma^2 * chisq(n-1)/(n-1), which is
-    # right-skewed, so the MEDIAN of the per-trace variances sits BELOW sigma^2 —
+    # right-skewed, so the MEDIAN of the per-trace variances sits BELOW sigma^2 -
     # by 16% at n = 5, i.e. sigma reads 8% low. Dividing by that distribution's
     # own median removes it exactly (same idea as the 1.4826 that makes the MAD
     # consistent for sigma). NOTE the usual c4 factor is the WRONG correction
@@ -8422,7 +8459,7 @@ smlm_server <- function(input, output, session) {
         # Residuals are taken about each trace's MEAN, not its median. The mean is
         # the maximum-likelihood centre under the Gaussian error model this panel
         # assumes, and it is the only centre for which the degree-of-freedom
-        # corrections below are exact — a median centre has no matching
+        # corrections below are exact - a median centre has no matching
         # correction. It is also the honest choice: a robust centre partly
         # ABSORBS the mislinked localizations that this panel exists to reveal.
         # Outlier resistance is supplied instead by the per-trace median further
@@ -8460,7 +8497,7 @@ smlm_server <- function(input, output, session) {
                            cyz = if (hasz) safe_cov(dy, dz) else NA_real_,
                            .groups = "drop")
         # ONE factor applied to every second moment of a trace, so the ellipse
-        # SHAPE (and hence the anisotropy and tilt) is untouched — only its size
+        # SHAPE (and hence the anisotropy and tilt) is untouched - only its size
         # is de-biased.
         mf <- med_fac(pts$nl)
         vxt <- c(vxt, pts$vx / mf); vyt <- c(vyt, pts$vy / mf)
@@ -8524,7 +8561,7 @@ smlm_server <- function(input, output, session) {
       yz = if (length(vzt)) robust_median_cov(vyt, vzt, cyzt) else NULL)
 
     # Headline anisotropy comes from the ROBUST matrix and is the eigenvalue
-    # ratio, not max(σx,σy)/min(σx,σy) — the latter reads ~1.0 on a 45°-tilted
+    # ratio, not max(σx,σy)/min(σx,σy) - the latter reads ~1.0 on a 45°-tilted
     # cloud and would report drifted data as "isotropic".
     ell_r <- cov_ellipse_params(cov_trace$xy)
 
@@ -8532,15 +8569,15 @@ smlm_server <- function(input, output, session) {
     # The pooled cloud mixes traces that do NOT share one sigma: MINFLUX
     # precision scales as 1/sqrt(photons) and photon counts vary a lot between
     # traces. A mixture of Gaussians of DIFFERENT widths is leptokurtic no
-    # matter how clean the data are — for X|v ~ N(0, v), kurtosis =
+    # matter how clean the data are - for X|v ~ N(0, v), kurtosis =
     # 3·E[v²]/E[v]². So comparing the observed kurtosis against 3 (which this
     # panel used to do, warning "possible mislinks / double events") flags
     # perfectly good data: at a realistic spread of per-trace sigma the
     # kurtosis of artifact-free simulated data reaches 7-15.
     # What is diagnostic is the EXCESS over what the observed sigma spread
     # already explains. Traces are weighted by n_i because that is how they
-    # enter the pooled cloud. The per-trace variances are themselves noisy —
-    # v̂ ~ v·χ²(n-1)/(n-1) gives E[v̂²] = v²(1 + 2/(n-1)) — so E[v²] is recovered
+    # enter the pooled cloud. The per-trace variances are themselves noisy -
+    # v̂ ~ v·χ²(n-1)/(n-1) gives E[v̂²] = v²(1 + 2/(n-1)) - so E[v²] is recovered
     # by the EXACT factor (n-1)/(n+1). Without it, short traces manufacture a
     # heterogeneity that is not there, the prediction comes out too low, and
     # the panel goes back to crying artifact on clean data.
@@ -8552,7 +8589,7 @@ smlm_server <- function(input, output, session) {
       Ev  <- sum(w * v)
       Ev2 <- sum(w * v^2 * (nl - 1L) / (nl + 1L))
       kurt_exp <- 3 * max(Ev2, Ev^2) / Ev^2
-      # Spread of the per-trace precision itself — a real property of the
+      # Spread of the per-trace precision itself - a real property of the
       # acquisition, reported in its own right rather than mislabelled as tails.
       sigma_spread <- stats::IQR(sqrt(v)) / stats::median(sqrt(v))
     }
@@ -8592,7 +8629,7 @@ smlm_server <- function(input, output, session) {
     # Each axis pair gets its own SQUARE panel: density heatmap + 1σ/2σ ellipses, a
     # faint zero crosshair through (0,0), no background grid, and a shared ±L nm frame.
     # The panels are built manually on explicit independent axes (x/y, x2/y2, x3/y3)
-    # rather than plotly::subplot() — subplot does not reliably re-map per-panel
+    # rather than plotly::subplot() - subplot does not reliably re-map per-panel
     # scaleanchor, which cross-linked the zoom across panels. Here each y_i is scale-
     # anchored to its own x_i, so aspect is equal (1 nm x == 1 nm y) AND zooming one
     # panel leaves the others untouched. Ellipse semi-axes are the per-axis robust σ.
@@ -8617,9 +8654,9 @@ smlm_server <- function(input, output, session) {
     # This used to be a hard-coded 30 nm, which only frames the plot correctly
     # when σ happens to be ~10 nm. On any dataset with a wider cloud the heatmap
     # filled the whole panel and the 1σ/2σ rings ran clean off it, leaving stray
-    # arcs cutting across the corners with no visible centre — the plot looked
+    # arcs cutting across the corners with no visible centre - the plot looked
     # broken and over-zoomed because it WAS over-zoomed.
-    # The frame follows the CORE — the robust, one-vote-per-trace σ — at a plain
+    # The frame follows the CORE - the robust, one-vote-per-trace σ - at a plain
     # 3σ. It must not be driven by the POOLED covariance: σ varies between
     # traces (photon count), so the pooled ellipse is pulled outward by a
     # minority of wide traces and sizing the frame to it leaves the visible
@@ -8632,7 +8669,7 @@ smlm_server <- function(input, output, session) {
     # silently dropped. It is a quantile, not a moment, so outliers cannot run
     # away with it. ONE L is shared by all panels so they stay comparable.
     # Each panel is framed on ITS OWN pair, not on a single shared L. In 3D
-    # σ_z is routinely 2-3x σ_xy, and one shared frame is then sized by z —
+    # σ_z is routinely 2-3x σ_xy, and one shared frame is then sized by z -
     # which leaves the Δx-Δy cloud as a small dot in the middle of an empty
     # panel. The axis numbers, which are printed per panel, carry the
     # cross-panel comparison instead.
@@ -8667,8 +8704,8 @@ smlm_server <- function(input, output, session) {
       # ── Density: kernel estimate, not a binned histogram ───────────────────
       # A 2D histogram estimates every bin independently, so each carries its
       # own full Poisson noise: at 60x60 bins and ~40k points that is ~9% at the
-      # peak but ~26% at the 2σ radius and ~90% at 3σ. The outer contours — the
-      # ones the eye reads as "the shape of the cloud" — were therefore mostly
+      # peak but ~26% at the 2σ radius and ~90% at 3σ. The outer contours - the
+      # ones the eye reads as "the shape of the cloud" - were therefore mostly
       # shot noise, which is exactly the ragged, under-smoothed look. Re-binning
       # cannot fix that (coarser blurs the core, finer worsens the tails); a
       # kernel estimate can, because each point informs a neighbourhood.
@@ -8720,7 +8757,7 @@ smlm_server <- function(input, output, session) {
         domain = c(0, 1), anchor = xid, scaleanchor = xid, scaleratio = 1, constrain = "domain")
     }
     # Legend swatches (once): zero-length invisible segments on panel 1. Paired
-    # so the comparison reads itself — solid is where the localizations are,
+    # so the comparison reads itself - solid is where the localizations are,
     # dotted is where a Gaussian of the fitted width would put the same
     # fraction, dashed gives every trace one vote instead of every localization.
     sw <- function(f, nm, colr, dsh) plotly::add_lines(f,
@@ -8744,7 +8781,7 @@ smlm_server <- function(input, output, session) {
       margin = list(t = 10, b = 100)), axis_args))
     # Autoscale-to-data interacts with scaleanchor to blow the ranges up (±100) and
     # desync the panel sizes. Make double-click / reset return to the fixed ±L frame
-    # instead, and drop the autoscale button so the only "fit" action is that reset —
+    # instead, and drop the autoscale button so the only "fit" action is that reset -
     # the panels then stay identical squares. Box-zoom (per panel) still works.
     plotly::config(p, doubleClick = "reset", displaylogo = FALSE,
                    modeBarButtonsToRemove = list("autoScale2d"))
@@ -8771,10 +8808,10 @@ smlm_server <- function(input, output, session) {
     kobs <- suppressWarnings(max(r$kurt_x, r$kurt_y, na.rm = TRUE))
     if (is.finite(kobs) && is.finite(r$kurt_exp) &&
         kobs - r$kurt_exp > 2 && kobs > 1.5 * r$kurt_exp)
-      warn <- c(warn, sprintf("heavy tails beyond what the σ spread explains (kurtosis %.1f vs %.1f expected — possible mislinks / double events)",
+      warn <- c(warn, sprintf("heavy tails beyond what the σ spread explains (kurtosis %.1f vs %.1f expected - possible mislinks / double events)",
                               kobs, r$kurt_exp))
     # If the length-weighted pooled σ is much larger than the per-trace median, a
-    # few long/wide traces (fiducials!) dominate — flag it and point at the scan.
+    # few long/wide traces (fiducials!) dominate - flag it and point at the scan.
     if (is.finite(r$sigma_xy_med) && r$sigma_xy > 1.5 * r$sigma_xy_med)
       warn <- c(warn, sprintf("pooled σ (%.1f) ≫ per-trace σ (%.1f): the pooled number is carried by a minority of wide or long traces%s",
                               r$sigma_xy, r$sigma_xy_med,
@@ -8782,8 +8819,8 @@ smlm_server <- function(input, output, session) {
                               # produce this gap; naming only fiducials sent the
                               # user hunting for contamination that need not exist.
                               if (is.finite(r$sigma_spread) && r$sigma_spread > 0.5)
-                                " — σ also varies widely between traces (photon-count spread), so check that before assuming contamination"
-                              else " — run the Fiducial scan"))
+                                " - σ also varies widely between traces (photon-count spread), so check that before assuming contamination"
+                              else " - run the Fiducial scan"))
     htmltools::div(style = "font-size:0.9em; margin-top:4px;",
       htmltools::tags$b(sprintf("σ_xy = %.2f nm (median per trace, robust)", r$sigma_xy_med)),
       if (r$has_z && is.finite(r$sigma_z_med)) sprintf(" · σ_z %.2f nm", r$sigma_z_med) else "",
@@ -8808,16 +8845,16 @@ smlm_server <- function(input, output, session) {
     })
 
   # ==========================================================================
-  # QC 3 — Fiducial / bright-contaminant flagging (report only)
+  # QC 3 - Fiducial / bright-contaminant flagging (report only)
   # ==========================================================================
   # GOAL: flag traces that behave like gold fiducials / bright aggregates rather
   # than single blinking molecules. Learned from a labelled pair of real datasets
   # (one with a fiducial section, one clean), fiducials separate on TWO robust
   # signatures, NOT on spread (spread does not distinguish them):
-  #   • BRIGHT   — efo is an extreme upper outlier. A gold bead reflects ~100× a
+  #   • BRIGHT   - efo is an extreme upper outlier. A gold bead reflects ~100× a
   #                fluorophore (efo ~1e7 vs ~1e5), so log10(efo) sits many robust
   #                MADs above the bulk. This is the single strongest signal.
-  #   • PERSISTENT + RECURRENT — the bead is re-localized far more than a blinking
+  #   • PERSISTENT + RECURRENT - the bead is re-localized far more than a blinking
   #                dye (long trace) AND many such traces pile up at the SAME spot
   #                (fiducials recur in one place; real labels are spread out).
   # Scores are per-file and ROBUST (median + k·MAD on log; MAD tolerates up to ~50%
@@ -8864,7 +8901,7 @@ smlm_server <- function(input, output, session) {
       nf <- length(store)
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
-        # A single odd file must not abort the whole scan — skip it and continue.
+        # A single odd file must not abort the whole scan - skip it and continue.
         rows[[fname]] <- tryCatch({
           df <- store[[fname]]
           if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df)))
@@ -8903,17 +8940,17 @@ smlm_server <- function(input, output, session) {
     rows <- Filter(Negate(is.null), rows)
     res <- if (length(rows)) do.call(rbind, rows) else NULL
     if (is.null(res) || !nrow(res)) {
-      # Not an error — just nothing to look at. Store an empty (0-row) result so
+      # Not an error - just nothing to look at. Store an empty (0-row) result so
       # the outputs show a calm "nothing found" state rather than a red message.
       fiducial_results(res %||% data.frame())
-      showNotification("Scan complete — no traces to assess in the selected files.",
+      showNotification("Scan complete - no traces to assess in the selected files.",
                        type = "message", duration = 5); return()
     }
     fiducial_results(res)
     nfl <- sum(res$flagged)
     showNotification(
       if (nfl == 0)
-        sprintf("Scan complete — no fiducial/contaminant candidates found in %d trace(s) across %d file(s).",
+        sprintf("Scan complete - no fiducial/contaminant candidates found in %d trace(s) across %d file(s).",
                 nrow(res), length(unique(res$dataset)))
       else
         sprintf("Flagged %d of %d traces (%.1f%%) as fiducial/contaminant candidates across %d file(s).",
@@ -8931,7 +8968,7 @@ smlm_server <- function(input, output, session) {
         xaxis = list(visible = FALSE), yaxis = list(visible = FALSE),
         annotations = list(list(text = "Press 'Run' to scan for fiducials / contaminants.",
                                 showarrow = FALSE, font = list(color = "#888", size = 13)))))
-    # The two discriminating axes: brightness (efo, log — gold reflects ~100×) and
+    # The two discriminating axes: brightness (efo, log - gold reflects ~100×) and
     # persistence (localizations per trace, log). Flagged traces sit in the bright
     # and/or long extremes. Falls back to spread on the x-axis when efo is absent.
     has_e <- "efo_med" %in% names(res) && any(is.finite(res$efo_med))
@@ -8944,7 +8981,7 @@ smlm_server <- function(input, output, session) {
                         " (z ", round(res$z_efo[m], 1), ")") else "",
       "<br>len z ", round(res$z_len[m], 1),
       if ("recur" %in% names(res)) paste0(" · ", res$recur[m], " neighbours") else "")
-    # Add each layer ONLY when it has points — an add_markers() with empty x/y is
+    # Add each layer ONLY when it has points - an add_markers() with empty x/y is
     # what makes plotly warn "No trace type / no positional attributes specified".
     p <- plotly::plot_ly()
     if (any(ok))
@@ -8989,7 +9026,7 @@ smlm_server <- function(input, output, session) {
 
   # Optional exclusion: when "Exclude flagged traces" is on, drop the traces the
   # Fiducial scan flagged (for that file) from a data frame before it is analysed.
-  # NON-DESTRUCTIVE and reversible — the loaded data is untouched; unticking the box
+  # NON-DESTRUCTIVE and reversible - the loaded data is untouched; unticking the box
   # (or re-running the scan) restores everything. tid excludes are matched PER FILE
   # (tids are only unique within a file), so `fname` must be the file the df is from.
   # Applied both in the active-file pipeline and in every batch analysis.
@@ -9033,7 +9070,7 @@ smlm_server <- function(input, output, session) {
   }
 
   ## ── Median Cluster (cluster2) Crowding vs Detection-Time Shift ─────────────────────────────
-  # One row per Cluster2 structure (built from its member centroids — de-blinked
+  # One row per Cluster2 structure (built from its member centroids - de-blinked
   # molecules when de-blinking is on, else trace IDs):
   #   nn_median  = median k-NN distance among members (smaller = denser) ± MAD
   #   time_shift = median(member tim_med) - median(unclustered background tim_med),
@@ -9067,7 +9104,7 @@ smlm_server <- function(input, output, session) {
     # WHY A PERMUTATION AND NOT THE SIMULATOR: shuffling the detection times among
     # the traces of a file keeps the real cluster membership, the real sizes, the
     # real geometry (so every point's x stays exactly where it is) and the real
-    # detection-time distribution of that acquisition — it destroys ONLY the
+    # detection-time distribution of that acquisition - it destroys ONLY the
     # association being tested. A simulator null would instead require assuming a
     # bleaching/detection model, which is itself calibrated from data of this kind;
     # that would make the test partly circular. The permutation is exact,
@@ -9098,7 +9135,7 @@ smlm_server <- function(input, output, session) {
         if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { diag["no_c2"] <- diag["no_c2"] + 1L; next }
         if (use_3d && !"z" %in% names(df)) { diag["no_z"] <- diag["no_z"] + 1L; next }
 
-        # Members = de-blinked molecules (when de-blinking is on) or trace IDs —
+        # Members = de-blinked molecules (when de-blinking is on) or trace IDs -
         # the SAME unit the Within-cluster-NN panel uses, so the two agree. When
         # using molecules, primary noise (cluster 0) is dropped; each molecule's
         # detection time is the median tim of its traces.
@@ -9194,7 +9231,7 @@ smlm_server <- function(input, output, session) {
       # Global test on the TREND, not the offset: Spearman rho between crowding and
       # time shift, observed vs its permutation distribution. Rank-based, so it is
       # unaffected by a constant clustered-vs-background offset and by the skew of
-      # the shift distribution — it asks only "does the shift depend on crowding?".
+      # the shift distribution - it asks only "does the shift depend on crowding?".
       rho_of <- function(y) suppressWarnings(
         stats::cor(res$nn_median, y, method = "spearman", use = "complete.obs"))
       rho_obs  <- rho_of(res$time_shift)
@@ -9281,7 +9318,7 @@ smlm_server <- function(input, output, session) {
       )
     }
 
-    # optional loess trend — per group when grouped, else over the pooled cloud
+    # optional loess trend - per group when grouped, else over the pooled cloud
     add_crowd_loess <- function(fig, d, col, nm) {
       if (!(isTRUE(input$crowd_trend) && nrow(d) >= 8)) return(fig)
       ord <- order(d$nn_median)
@@ -9301,7 +9338,7 @@ smlm_server <- function(input, output, session) {
 
     # Verdict line: the permutation test on the TREND (rho), plus how many points
     # left their own null interval. Stated explicitly so the slope is never read
-    # against zero — the null band, not zero, is the correct reference here.
+    # against zero - the null band, not zero, is the correct reference here.
     ns  <- crowd_null_stats()
     ttl <- if (!is.null(ns) && is.finite(ns$p) && stats_match) {
       list(text = sprintf(
@@ -9393,7 +9430,7 @@ smlm_server <- function(input, output, session) {
           pts <- as.matrix(sub[, cols, drop = FALSE])
           pts <- pts[stats::complete.cases(pts), , drop = FALSE]
           if (nrow(pts) < 2L) { diag["degenerate"] <- diag["degenerate"] + 1L; next }
-          # Shared k-NN spacing (median over members ± MAD) — identical definition
+          # Shared k-NN spacing (median over members ± MAD) - identical definition
           # to the Crowding panel, so the two report the same within-cluster NN.
           st <- member_nn_stats(pts, k = kk)
           if (is.null(st)) next
@@ -9520,7 +9557,7 @@ smlm_server <- function(input, output, session) {
 
     if (grouped) {
       for (ds in datasets) fig <- add_trends(fig, res[res$dataset == ds, , drop = FALSE], unname(pal[ds]), ds)
-      ttl <- "Within-cluster NN vs size — per-group fits (slope & rho in legend)"
+      ttl <- "Within-cluster NN vs size - per-group fits (slope & rho in legend)"
     } else {
       fig <- add_trends(fig, res, "#555555", "")
       ttl <- sprintf("Spearman rho = %.2f   |   linear slope = %s %s",
@@ -9594,7 +9631,7 @@ smlm_server <- function(input, output, session) {
     sub <- df[!is.na(df$cluster2) & df$cluster2 == id, , drop = FALSE]
     # Per-trace photon budget (eco summed over the trace's localizations). MINFLUX
     # localization variance scales as 1/photons, and the centroid of a trace
-    # averages its localizations, so the centroid's variance goes as 1/sum(eco) —
+    # averages its localizations, so the centroid's variance goes as 1/sum(eco) -
     # i.e. the inverse-variance weight for that centroid IS its total photon count.
     cent <- sub %>% dplyr::group_by(tid) %>%
       dplyr::summarise(
@@ -9619,7 +9656,7 @@ smlm_server <- function(input, output, session) {
   })
 
   # Full MLE fit (optim orthogonal-distance) of all 5 shapes to the trace-median
-  # centroids — same pathway the Display tab uses when fit_method = "mle", not
+  # centroids - same pathway the Display tab uses when fit_method = "mle", not
   # the heuristic moment-based geometry. Returns RMSDs, best (min-RMSD) shape and
   # the fitted parameters (used to draw the overlay).
   # Heavy part: the 5 MLE fits + RMSD + AIC/AICc/BIC. Independent of the ranking
@@ -9639,7 +9676,7 @@ smlm_server <- function(input, output, session) {
     # wrong in detail for MINFLUX: precision varies with photon count, so a
     # 50-photon trace should not pull the surface as hard as a 5000-photon one.
     # w_i = total eco of trace i (see viewer_current). n_eff is Kish's effective
-    # sample size — it exposes the cost of weighting, i.e. whether a couple of very
+    # sample size - it exposes the cost of weighting, i.e. whether a couple of very
     # bright traces are now carrying the fit.
     W <- if (isTRUE(input$viewer_weight_eco)) cur$w_eco else NULL
     n_eff <- if (!is.null(W)) sum(W)^2 / sum(W^2) else nrow(X)
@@ -9676,7 +9713,7 @@ smlm_server <- function(input, output, session) {
     # (the variance). AICc adds the small-sample correction and -> Inf when a model
     # has too few points to estimate (n <= k+1), which refuses over-parameterised fits.
     # When photon-weighted, point i has variance sigma^2/w_i and -2logL gains a
-    # -sum(log w_i) term — identical for every shape (same weights), so it cancels in
+    # -sum(log w_i) term - identical for every shape (same weights), so it cancels in
     # every AIC/AICc/BIC *difference*. The criteria stay comparable across shapes;
     # only their absolute values shift, so never compare them across weighting modes.
     n   <- nrow(X)
@@ -9883,10 +9920,10 @@ smlm_server <- function(input, output, session) {
       showNotification("No files loaded.", type = "warning"); return()
     }
     # mode drives BOTH what we group by and what a "point" is:
-    #   "cluster2"  structure size — group by median cluster, one point per
+    #   "cluster2"  structure size - group by median cluster, one point per
     #               de-blinked MOLECULE when de-blinking is on, else one point per
     #               trace ID. (The auto fallback is the whole point of this mode.)
-    #   "cluster"   label footprint — group by de-blinked molecule, one point per trace.
+    #   "cluster"   label footprint - group by de-blinked molecule, one point per trace.
     mode        <- input$rog_cluster_col %||% "cluster2"
     cluster_col <- if (mode == "cluster") "cluster" else "cluster2"
     store <- smlm_file_store()
@@ -10011,7 +10048,7 @@ smlm_server <- function(input, output, session) {
       plotly::layout(
         barmode = "overlay",
         xaxis = list(title = if (identical(input$rog_cluster_col %||% "cluster2", "cluster"))
-                               "Label footprint Rg (nm)" else "Median-cluster Rg — structure size (nm)"),
+                               "Label footprint Rg (nm)" else "Median-cluster Rg - structure size (nm)"),
         yaxis = list(title = if (density_mode) "Density" else "Count"),
         shapes = shapes,
         annotations = list(
@@ -10242,7 +10279,7 @@ smlm_server <- function(input, output, session) {
     }
 
     csr_label <- if (!is.null(env_res) && !grouped)
-      "theoretical CSR (uncorrected — see envelope)" else "CSR (L−r = 0)"
+      "theoretical CSR (uncorrected - see envelope)" else "CSR (L−r = 0)"
     fig %>%
       plotly::add_trace(
         x = range(res$r), y = c(0, 0), type = "scatter", mode = "lines",
@@ -10611,7 +10648,7 @@ smlm_server <- function(input, output, session) {
     }
 
     csr_label <- if (!is.null(env_res) && !aggregate)
-      "theoretical CSR (uncorrected — see envelope)" else "Random (L−r = 0)"
+      "theoretical CSR (uncorrected - see envelope)" else "Random (L−r = 0)"
     fig %>%
       plotly::add_trace(
         x = range(res$r), y = c(0, 0),
@@ -10916,7 +10953,7 @@ smlm_server <- function(input, output, session) {
       plotly::layout(
         xaxis = list(title = xlabel),
         yaxis = list(title = ylabel, scaleanchor = "x", scaleratio = 1),
-        title = sprintf("KDE — %s  [%s]  (Ch1 / Ch2)",
+        title = sprintf("KDE - %s  [%s]  (Ch1 / Ch2)",
                         r$dataset, paste(ax, collapse = "/")),
         paper_bgcolor = "white", plot_bgcolor = "white"
     )
@@ -10931,7 +10968,7 @@ smlm_server <- function(input, output, session) {
         tags$p(sprintf("Spatial-randomization p = %.3f  (%s; %d randomizations, null r = %.3f ± %.3f)",
                        r$costes_p, sig, r$costes_nsim, r$costes_null_mean, r$costes_null_sd),
                style = "font-size:13px; margin:2px 0; color:#555;"),
-        tags$p(sprintf("Null: %s", r$null_label %||% "—"),
+        tags$p(sprintf("Null: %s", r$null_label %||% "-"),
                style = "font-size:12px; margin:0 0 2px; color:#888;"),
         # Measured false-positive rates (simulation, see compute_kde_coloc header):
         # signal spread over the whole window -> shift 3% / csr 3%; signal confined to
@@ -10941,7 +10978,7 @@ smlm_server <- function(input, output, session) {
           HTML("&#9888; The uniform-CSR null tests against complete spatial randomness, so it largely reports &ldquo;both channels are non-uniform&rdquo; and rejects far too readily. Prefer the <b>random-shift</b> null."),
           style = "font-size:12px; margin:0; color:#b26a00;")
         else tags$p(
-          HTML("&#9888; Calibrated only when the signal fills the field. If it is confined to a small part of the view, randomizing over the bounding box makes this reject too readily — treat a low p as weak evidence and confirm with g&#8321;&#8322;(r) against its CSR envelope."),
+          HTML("&#9888; Calibrated only when the signal fills the field. If it is confined to a small part of the view, randomizing over the bounding box makes this reject too readily - treat a low p as weak evidence and confirm with g&#8321;&#8322;(r) against its CSR envelope."),
           style = "font-size:12px; margin:0; color:#b26a00;"))
     } else NULL
     tags$div(
