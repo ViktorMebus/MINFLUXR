@@ -288,10 +288,10 @@ trace's centroid computed *without* that localization, so a point is not unfairl
 centre. **Agreement** decides whether both traces must vote for each other (mutual) or either is
 enough.
 
-- *Parameters* - *f*, the fraction that must agree. Two traces of the *same* molecule score ≈0.5 by
-  construction, so useful values sit well below 0.5; below about 0.25 a single localization can decide
-  a short trace. *Distance tolerance* ρ loosens the "strictly closer" test; grouping accuracy rises
-  with ρ and then flattens, so erring high costs little.
+- *Parameters* - *f*, the fraction that must agree (default 0.3). Two traces of the *same* molecule
+  score ≈0.5 by construction, so useful values sit well below 0.5; below about 0.25 a single
+  localization can decide a short trace. *Distance tolerance* ρ (default 3.0) loosens the "strictly
+  closer" test; grouping accuracy rises with ρ and then flattens, so erring high costs little.
 - *Advantages* - no distance in nm and no dependence on the measured spread, so it needs neither a
   threshold nor a well-behaved σ. It is self-scaling: a diffuse trace automatically demands
   proportionally more separation than a tight one, which suits heterogeneous data. A stray
@@ -308,15 +308,14 @@ visible and reversible.
 #### Choosing the threshold
 
 *Measure threshold from data* sets it from your own file: it measures the per-axis trace spread and
-reports the smallest k at which no unmerged re-blinks remain, together with a more conservative k at
-which that conclusion holds across the confidence interval.
+returns **k × that spread**, with *k* defaulting to 2.8. Grouping accuracy is flat between about
+k = 2.6 and 3.1, and because a molecule can never be wider than the threshold, overshooting costs less
+than undershooting - so the default sits in that plateau rather than at its edge.
 
-Read the measured value as a **lower bound**, for two reasons. It detects re-blinks that are still
-unmerged, but once they are gone it has nothing left to see, so it cannot tell you when the threshold
-has grown large enough to start fusing distinct molecules. And it looks for leftover pairs at the
-scale of the localization precision, so it does not register any movement of the label between blinks.
-In fixed, fiducial-corrected SMLM that movement is small and the effect is minor, but it always biases
-the suggestion downwards rather than upwards.
+The threshold is the trace spread times *k*, and nothing else. Sample drift is measured, but it is
+reported in the [Localization Precision Cloud](#panels) QC panel and deliberately kept out of this
+number: the only molecules whose motion can be observed are the ones that were already merged - that
+is, the ones that moved *less* than the very radius being set - so feeding it back would be circular.
 
 Two diagnostics sit beside it - a density plot whose orange curve should show two humps (re-blinks
 left, separate molecules right) with your threshold in the gap, and an exploratory
@@ -362,12 +361,19 @@ Three grouping methods:
 `MinPts` (default 15) applies to all three. Set it near the smallest number of traces you would call a
 real structure - often 3–6, not higher.
 
-Two optional cleanup steps:
+Optional cleanup steps, applied in this order:
 
 - **Density prefilter** - before clustering, drop centroids with fewer than *n* neighbours within a
   radius, removing scattered background.
-- **Prune sparse cluster members** - after clustering, demote to noise any member whose local spacing
-  exceeds a multiple of its cluster's typical spacing (~2 trims clear outliers; lower is stricter).
+- **Core points only** (DBSCAN only) - keep only centroids that reach `MinPts` neighbours within
+  `eps`. Plain DBSCAN also absorbs *border* points, which is what attaches lone background centroids
+  to the rim of a real structure. HDBSCAN and OPTICS are already defined this way.
+- **Prune sparse cluster members** - demote to noise any member whose core distance (the radius it
+  needs to reach `MinPts` fellow members) exceeds a multiple of the median core distance of the
+  members around it. The baseline is local, so a density gradient inside a structure does not condemn
+  its sparser side. ~2 trims clear outliers; lower is stricter.
+- **Min members per Median Cluster** - drop whole clusters below a member count. Separate from
+  `MinPts` so the density scale and the "how big is a real structure" decision stay independent.
 
 **kNN-distance plot** - sorted distance to the (MinPts−1)-th neighbour of each centroid. The elbow
 marks the structure/background split and therefore a good `eps`; the current `eps` is drawn as a red
@@ -380,9 +386,16 @@ Settings can be saved and reset with the buttons at the bottom of the group.
 In **2D**: *Wrap Median Cluster in Convex Hull*.
 
 In **3D**: *Wrap Cluster in Alpha Shape* (concave hull via `alphashape3d`), or *Show isosurface* - a
-Gaussian-smoothed density surface with controls for grid resolution (12–40), padding (0–500 nm),
-surface level (density quantile 0.50–0.98), opacity, and smoothness sigma (10–500 nm). The isosurface
-can be restricted to one cluster ID and drawn in a single colour or per-cluster colours.
+surface render of the cluster, drawn as a contour of a Gaussian kernel density summed over the same
+representative points the clustering used (de-blinked molecule medians when de-blinking is on, else
+trace medians).
+
+The wrap sits at **2 × the structure's own median centroid spacing** by default, so each structure is
+wrapped at its own scale. One slider adjusts it: **padding (−40 to +200 nm)**, negative tightens and
+positive loosens. Tightening much below the default stops the surface closing and breaks it into
+separate lumps. Smoothing (sigma) and the sampling box follow from the wrap; both can be set manually
+behind checkboxes if needed. Remaining controls are grid resolution (12–40) and opacity. The
+isosurface can be restricted to one cluster ID and drawn in a single colour or per-cluster colours.
 
 #### Fitting & Metrics (3D only)
 
@@ -514,7 +527,10 @@ Each group gets its own colour. Additional options:
   merge**, so two colours can never be de-blinked into one molecule. In 3D the de-blinked molecules
   can be wrapped in alpha shapes.
 - **2-color Median Clustering** - Median Clustering run per channel, with the same DBSCAN / HDBSCAN /
-  OPTICS choice, prefilter and pruning, plus per-channel alpha shapes and isosurfaces in 3D.
+  OPTICS choice and the same cleanup steps (prefilter, core points only, prune, min members), plus
+  per-channel alpha shapes and isosurfaces in 3D. The isosurface uses the same density field and the
+  same padding dial as the mono-colour one, built from that channel's de-blinked molecule centroids
+  (trace medians when 2-color de-blinking is off).
 
 Settings save and reset with the buttons at the bottom of the group.
 
@@ -602,9 +618,72 @@ coordinates - pooling would mix observation windows and invent structure.
 
 | Panel | What it answers |
 |-------|-----------------|
-| Localization Precision Cloud | Every localization minus its own trace centroid - the empirical precision σ_loc. Solid rings enclose 50% and 90% of the localizations; dotted rings are the fitted Gaussian at 1σ and 2σ, with per-axis semi-axes so the ring is a rotated ellipse whose tilt exposes drift; the dashed ring is 1σ refitted with one vote per trace, and sits well inside the dotted 1σ when a minority of wide traces is inflating the pooled width. Click a legend entry to hide that ring, double-click to isolate it |
+| Localization Precision Cloud | Every localization minus its own trace centroid - the empirical precision σ_loc. Solid rings enclose 50% and 90% of the localizations; dotted rings are the fitted Gaussian at 1σ and 2σ, with per-axis semi-axes so the ring is a rotated ellipse whose tilt exposes drift; the dashed ring is 1σ refitted with one vote per trace, and sits well inside the dotted 1σ when a minority of wide traces is inflating the pooled width. Click a legend entry to hide that ring, double-click to isolate it. Also reports **sample stability** per file - see below |
 | Fiducial / Contaminant Scan | Flags traces behaving like gold beads or aggregates rather than single molecules (report only) |
 | Trace Detection over Time | Detection rate across the acquisition - photobleaching and drop-off |
+
+**Sample stability (drift and jitter).** The precision cloud reports, per file, how much the sample
+moved during the acquisition. Traces are first grouped into molecules, so a fluorophore that blinked
+at three separate times gives a small trajectory rather than a single step. Within each molecule, the
+displacement between two blinks is regressed on the time gap between them, which estimates a drift
+velocity with the whole acquisition as its lever arm.
+
+Two numbers come out of that, and they mean different things:
+
+- **Drift** is the part of the displacement that lines up with time - one direction, accumulating.
+  Reported over the whole run and, more usefully, across a *typical gap between blinks*. Tens of
+  nanometres across a multi-hour run is normal for a fiducial-locked sample; the line is only
+  highlighted when the per-gap figure exceeds the localization spread itself.
+- **Jitter** is what remains once drift is removed: how far two blinks of one molecule land apart for
+  reasons that do *not* accumulate. This is the quantity that governs how wide a de-blink radius has
+  to be. It still contains the localization error of the two centroids, so read it as an upper bound.
+
+*% directional* says which of the two dominates - near 0 is pure jitter, high values a coherent march.
+
+**Show sample drift plot** turns the same data into a picture. Every molecule that blinked more than
+once is placed at the origin at its first blink, and each later blink appears as one point positioned
+relative to it. One point is **one trace ID that was merged into that de-blinked ID** - the first
+trace of a molecule is not drawn, it *is* the origin, so a molecule built from three trace IDs
+contributes two points. In 3D the XY, XZ and YZ projections are drawn side by side on one common
+frame.
+
+**Reading it.** A cloud centred on the origin means the sample held still - that scatter is jitter.
+Points marching away in one direction, further the longer the gap, mean it drifted. The heavy red
+markers are the **geometric median displacement in each time bin** and are the clearest read:
+aggregating cancels the isotropic part, so under pure jitter every bin sits on the origin whatever
+its time gap, while under drift the bins step outward in order.
+
+The geometric median is used rather than a mean because a merged molecule occasionally holds two
+genuinely different fluorophores, which drops a displacement of tens of nanometres into an otherwise
+small cloud; and rather than a per-axis median because that is not rotation-equivariant - relabel x
+and y and the marker moves, which is unacceptable for a plot whose entire content is a direction. It
+is estimated once in full dimensionality and projected into each panel, so all three panels show the
+same point viewed three ways.
+
+On a single file a dashed line shows the fitted drift extended over the observed range of gaps; it is
+omitted when several files are loaded, since each acquisition drifts in its own direction and one line
+across all of them would mean nothing. That line is a least-squares fit through the origin, so it and
+the bin markers estimate the same quantity by different routes - they agree on a clean file, and a
+visible disagreement means the fit is being pulled by a few contaminated pairs.
+
+Points can be coloured three ways, and they answer different questions:
+
+- **Time since first blink** (default, Viridis) - how long after its molecule's first blink this one
+  arrived. This is the colouring that shows *accumulation*: under drift the late-gap points sit
+  furthest from the origin.
+- **Acquisition time** (Turbo, blue early → red late) - *when in the run* the blink happened. Drift
+  that runs steadily looks the same in every colour; drift that changed course does not. If blue
+  points favour one direction and red points another, the sample moved one way early and a different
+  way later - something the gap colouring cannot separate, because both periods contain similar gaps.
+- **De-blinked ID** - each molecule gets its own colour and its blinks are joined from the origin in
+  time order, so every multi-blink fluorophore draws its own small track. Under drift those tracks
+  all lean the same way. Colours repeat, so they group points rather than identify a molecule, and on
+  crowded files only the 200 molecules with the most blinks are drawn (the legend says so).
+
+Two limits worth knowing. Only molecules whose blinks were actually merged can be seen, so drift large
+enough to break a merge is understated rather than reported. And a group may occasionally hold two
+genuinely distinct molecules, which inflates jitter. Treat this as an indicator rather than a
+calibration.
 
 **Nearest-Neighbour & Spatial Statistics**
 
@@ -1038,11 +1117,12 @@ localizations.
 The **spread panel** histogram shows the distribution of per-TID spreads and overlays the current
 filter range. The median spread is reported as median(σ̃) ± nMAD, with nMAD = 1.4826 × MAD - the
 1.4826 makes nMAD a consistent estimator of σ for normal data - and the quartiles are drawn as dotted
-lines beside it. This matches pyMINFLUX convention summarizing the same distribution, which labels its median line with median ± MAD and marks the interquartile range alongside it.
+lines beside it. This matches pyMINFLUX convention summarizing the same distribution, which labels
+its median line with median ± MAD and marks the interquartile range alongside it.
 
-nMAD and the interquartile range both describe how σ̃ varies **between traces**. Axes are reported separately rather than pooled into one isotropic figure,
-because axial and lateral precision differ. σ̃ is a per-localization spread and an upper bound on the
-instrument's precision.
+nMAD and the interquartile range both describe how σ̃ varies **between traces**. Axes are reported
+separately rather than pooled into one isotropic figure, because axial and lateral precision differ.
+σ̃ is a per-localization spread and an upper bound on the instrument's precision.
 
 ---
 

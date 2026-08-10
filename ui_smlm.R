@@ -488,10 +488,12 @@ smlm_ui <- fluidPage(
           helpText("Two traces merge when their median positions are closer than this. ",
                    "This is the value the merge actually uses; k below just rewrites it in ",
                    "units of the measured trace spread."),
-          numericInput("centroid_k", "Threshold in units of trace spread (k)", value = 2.0,
+          numericInput("centroid_k", "Threshold in units of trace spread (k)", value = 2.8,
                        min = 0.5, max = 6, step = 0.1),
           helpText("Changing k rewrites the distance above. Too low leaves re-blinks counted ",
-                   "twice; too high fuses neighbouring molecules."),
+                   "twice; too high fuses neighbouring molecules. Grouping accuracy is flat ",
+                   "between about 2.6 and 3.1, and because a molecule can never be wider than ",
+                   "the threshold, erring high costs less than erring low."),
           helpText("Every trace in a molecule is within the threshold of every other, so a ",
                    "molecule can never be wider than the threshold above."),
           actionButton("suggest_eps_centroid", "Measure threshold from data", class = "btn-sm"),
@@ -592,13 +594,13 @@ smlm_ui <- fluidPage(
         helpText("DBSCAN: fixed radius (eps). HDBSCAN: adaptive, MinPts only (= min cluster size). OPTICS (Xi): adaptive density, keeps small structures; tuned by Xi."),
         conditionalPanel(
           condition = "input.cluster2_method == 'dbscan'",
-          numericInput("eps2", "Secondary DBSCAN Epsilon (nm)", value = 200, min = 3)
+          numericInput("eps2", "DBSCAN Epsilon (nm)", value = 200, min = 3)
         ),
         conditionalPanel(
           condition = "input.cluster2_method == 'optics'",
           numericInput("cluster2_xi", "OPTICS Xi (steepness, 0-1; lower = more/smaller clusters)", value = 0.05, min = 0.001, max = 0.5, step = 0.005)
         ),
-        numericInput("minpts2", "Secondary MinPts (all methods)", value = 15, min = 1),
+        numericInput("minpts2", "MinPts (all methods)", value = 15, min = 1),
         helpText("Tip: set MinPts near the smallest number of TIDs you'd call a real structure."),
         # -- local-density prefilter (drop scattered background TIDs) --
         checkboxInput("cluster2_prefilter", "Density prefilter (drop sparse background TIDs first)", value = FALSE),
@@ -608,12 +610,25 @@ smlm_ui <- fluidPage(
           numericInput("cluster2_prefilter_min", "Min neighbours within radius", value = 3, min = 1),
           helpText("Keeps only centroids with at least this many neighbours within the radius, then groups the survivors.")
         ),
+        # -- core-only membership (DBSCAN*) --
+        conditionalPanel(
+          condition = "input.cluster2_method == 'dbscan'",
+          checkboxInput("cluster2_core_only", "Core points only (drop border points)", value = FALSE),
+          helpText("DBSCAN also assigns border points: centroids within eps of a core point but sparse themselves.",
+                   "This keeps only centroids that reach MinPts neighbours within eps.",
+                   "HDBSCAN and OPTICS are already defined this way.")
+        ),
+        # -- minimum members per cluster --
+        numericInput("cluster2_min_members", "Min members per Median Cluster", value = 0, min = 0, step = 1),
+        helpText("Clusters left with fewer members than this are dropped whole. 0 = off. Counted after any core-only or pruning step."),
         # -- sparse-member pruning (post-clustering trim of loose members) --
         checkboxInput("cluster2_prune", "Prune sparse cluster members (trim loosely-attached traces)", value = FALSE),
         conditionalPanel(
           condition = "input.cluster2_prune == true",
-          numericInput("cluster2_prune_tol", "Prune tolerance (x cluster-median spacing; lower = stricter)", value = 2, min = 1.1, step = 0.1),
-          helpText("After clustering, demotes to noise any member whose local spacing exceeds this multiple of its cluster's typical spacing. ~2 trims clear outliers; lower is stricter.")
+          numericInput("cluster2_prune_tol", "Prune tolerance (x local core distance; lower = stricter)", value = 2, min = 1.1, step = 0.1),
+          helpText("Demotes to noise any member whose core distance (radius needed to reach MinPts neighbours)",
+                   "exceeds this multiple of the median core distance of the members around it.",
+                   "The baseline is local, so a density gradient within a structure does not condemn its sparser side.")
         ),
         # -- kNN-distance diagnostic to pick eps --
         checkboxInput("show_cluster2_knn", "Show kNN-distance plot (tune eps / see density gap)", value = FALSE),
@@ -640,10 +655,21 @@ smlm_ui <- fluidPage(
               )
             ),
             sliderInput("cluster2_iso_grid_res", "Grid resolution (higher = slower)", min = 12, max = 40, value = 22, step = 1),
-            sliderInput("cluster2_iso_pad", "Padding around cluster (nm)", min = 0, max = 500, value = 100, step = 10),
-            sliderInput("cluster2_iso_level_q", "Surface level (quantile)", min = 0.50, max = 0.98, value = 0.85, step = 0.01),
+            sliderInput("cluster2_iso_pad", "Padding around the surface (nm)", min = -40, max = 200, value = 0, step = 5),
+            helpText("Negative tightens the wrap, positive loosens it. The default wrap sits at",
+                     "2 x the structure's own median centroid spacing; below about 1.5 x the surface",
+                     "starts breaking into separate lumps rather than closing."),
             sliderInput("cluster2_iso_opacity", "Isosurface opacity", min = 0, max = 1, value = 0.25, step = 0.01),
-            sliderInput("cluster2_iso_sigma", "Smoothness (sigma, nm)", min = 10, max = 500, value = 150, step = 10)
+            checkboxInput("cluster2_iso_manual_offset", "Set the wrap distance manually", value = FALSE),
+            conditionalPanel(
+              condition = "input.cluster2_iso_manual_offset == true",
+              sliderInput("cluster2_iso_offset", "Wrap distance (nm)", min = 2, max = 200, value = 30, step = 2)
+            ),
+            checkboxInput("cluster2_iso_manual_sigma", "Set smoothing manually", value = FALSE),
+            conditionalPanel(
+              condition = "input.cluster2_iso_manual_sigma == true",
+              sliderInput("cluster2_iso_sigma", "Smoothing (sigma, nm)", min = 2, max = 200, value = 30, step = 2)
+            )
           )
         ),
         conditionalPanel(
@@ -991,31 +1017,46 @@ smlm_ui <- fluidPage(
             numericInput("cluster2_prefilter_r_tc2", "2-color prefilter radius (nm)", value = 150, min = 1),
             numericInput("cluster2_prefilter_min_tc2", "2-color min neighbours", value = 3, min = 1)
           ),
+          conditionalPanel(
+            condition = "input.cluster2_method_tc2 == 'dbscan'",
+            checkboxInput("cluster2_core_only_tc2", "2-color core points only (drop border points)", value = FALSE)
+          ),
+          numericInput("cluster2_min_members_tc2", "2-color min members per Median Cluster", value = 0, min = 0, step = 1),
           checkboxInput("cluster2_prune_tc2", "2-color prune sparse cluster members", value = FALSE),
           conditionalPanel(
             condition = "input.cluster2_prune_tc2 == true",
-            numericInput("cluster2_prune_tol_tc2", "2-color prune tolerance (x median spacing)", value = 2, min = 1.1, step = 0.1)
+            numericInput("cluster2_prune_tol_tc2", "2-color prune tolerance (x local core distance)", value = 2, min = 1.1, step = 0.1)
           ),
           conditionalPanel(
             condition = "input.mode3d == '3D'",
-            checkboxInput("show_tc2_alpha", "Wrap 2-color secondary clusters (tc2)", value = FALSE),
+            checkboxInput("show_tc2_alpha", "Wrap 2-color clusters (tc2)", value = FALSE),
             conditionalPanel(
               condition = "input.show_tc2_alpha == true && input.mode3d == '3D'",
               numericInput("tc2_alpha", "tc2 alpha", value = 150, min = 1, step = 1),
               sliderInput("tc2_alpha_opacity", "tc2 opacity", min = 0, max = 1, value = 0.18, step = 0.01),
               numericInput("tc2_alpha_min_pts", "tc2 min points to wrap", value = 15, min = 4, step = 1)
             ),
-            checkboxInput("show_tc2_isosurface", "Show isosurface for 2-color secondary clusters (tc2)", value = FALSE),
+            checkboxInput("show_tc2_isosurface", "Show isosurface for 2-color clusters (tc2)", value = FALSE),
             conditionalPanel(
               condition = "input.show_tc2_isosurface",
               checkboxInput("tc2_iso_selected_only", "Only selected tc2 cluster", value = TRUE),
               textInput("tc2_iso_cluster_label", "Selected tc2 cluster (A-# or B-#)", value = "A-1"),
               sliderInput("tc2_iso_grid_res", "Grid resolution (higher = slower)", min = 12, max = 40, value = 22, step = 1),
-              sliderInput("tc2_iso_pad", "Padding around cluster (nm)", min = 0, max = 500, value = 100, step = 10),
-              sliderInput("tc2_iso_level_q", "Surface level (quantile)", min = 0.50, max = 0.98, value = 0.85, step = 0.01),
-              sliderInput("tc2_iso_sigma", "Isosurface smoothness (sigma, nm)", min = 10, max = 500, value = 150, step = 10),
+              sliderInput("tc2_iso_pad", "Padding around the surface (nm)", min = -40, max = 200, value = 0, step = 5),
+              helpText("Negative tightens, positive loosens. Default wrap = 2 x the structure's own",
+                       "median centroid spacing. Built from de-blinked molecule centroids per channel",
+                       "(trace medians if 2-colour de-blinking is off)."),
               sliderInput("tc2_iso_opacity", "Isosurface opacity", min = 0, max = 1, value = 0.25, step = 0.01),
-              sliderInput("tc2_iso_eps", "Smoothness (epsilon)", min = 1e-6, max = 1e-2, value = 1e-4, step = 1e-6)
+              checkboxInput("tc2_iso_manual_offset", "Set the wrap distance manually", value = FALSE),
+              conditionalPanel(
+                condition = "input.tc2_iso_manual_offset == true",
+                sliderInput("tc2_iso_offset", "Wrap distance (nm)", min = 2, max = 200, value = 30, step = 2)
+              ),
+              checkboxInput("tc2_iso_manual_sigma", "Set smoothing manually", value = FALSE),
+              conditionalPanel(
+                condition = "input.tc2_iso_manual_sigma == true",
+                sliderInput("tc2_iso_sigma", "Smoothing (sigma, nm)", min = 2, max = 200, value = 30, step = 2)
+              )
             )
           )
         ),
@@ -1297,11 +1338,51 @@ smlm_ui <- fluidPage(
           numericInput("prec_cloud_min_loc", "Min localizations / trace", value = 5, min = 3, step = 1),
           checkboxInput("prec_cloud_use_z", "Include z (report σ_z)", value = FALSE),
           actionButton("run_prec_cloud", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
-          downloadButton("download_prec_cloud", "Download σ", class = "btn-sm")
+          downloadButton("download_prec_cloud", "Download σ", class = "btn-sm"),
+          checkboxInput("view_drift_plot", "Show sample drift plot", value = FALSE),
+          conditionalPanel(
+            condition = "input.view_drift_plot == true",
+            helpText("Each molecule that blinked more than once starts at the origin; every later ",
+                     "blink is one point, positioned relative to that molecule's first blink. ",
+                     "One point = one trace ID that was merged into that de-blinked ID."),
+            radioButtons("drift_plot_color", "Colour points by", inline = TRUE,
+                         choices = c("Time since first blink" = "time",
+                                     "Acquisition time" = "abs",
+                                     "De-blinked ID" = "mol"),
+                         selected = "time"),
+            conditionalPanel(
+              condition = "input.drift_plot_color == 'abs'",
+              helpText(style = "font-size:0.78em; color:#888;",
+                       "Blue early in the run through to red at the end. If displacements from one ",
+                       "part of the acquisition favour one direction and those from another part ",
+                       "favour a different one, the drift changed course rather than running steadily.")
+            ),
+            conditionalPanel(
+              condition = "input.drift_plot_color == 'mol'",
+              helpText(style = "font-size:0.78em; color:#888;",
+                       "Blinks of one molecule share a colour and are joined from the origin in ",
+                       "time order, so each molecule draws its own small track. Colours repeat - ",
+                       "they group points, they do not identify a molecule.")
+            ),
+            helpText(style = "font-size:0.78em; color:#888;",
+                     "A cloud centred on the origin means the sample held still - the scatter is ",
+                     "jitter. Points marching away in one direction, further the longer the gap, ",
+                     "mean the sample drifted. The heavy markers are the geometric median ",
+                     "displacement in each time bin, which is the clearest read of the two: ",
+                     "jitter cancels, so under a still sample every bin sits on the origin."),
+            helpText(style = "font-size:0.78em; color:#888;",
+                     "The geometric median is used rather than the mean because a merged molecule ",
+                     "occasionally holds two different fluorophores, and rather than a per-axis ",
+                     "median because that one changes if x and y are relabelled.")
+          )
         ),
         column(9,
           plotlyOutput("prec_cloud_plot", height = "340px"),
-          uiOutput("prec_cloud_stats")
+          uiOutput("prec_cloud_stats"),
+          conditionalPanel(
+            condition = "input.view_drift_plot == true",
+            plotlyOutput("prec_drift_plot", height = "330px")
+          )
         )
       ),
 
@@ -1540,7 +1621,7 @@ smlm_ui <- fluidPage(
           h4("Trace IDs / De-blinked Molecules per Median Cluster"),
           .method_box("amber",
             HTML("Cluster-occupancy counting, in the lineage of SMLM molecular-counting / blink-correction work (<b>Annibale et&nbsp;al. 2011</b>, <i>Nat. Methods</i> - quantitative photo-activated localization microscopy; <b>Sengupta et&nbsp;al. 2011</b>, PC-PALM). The number of units the median cluster contains."),
-            HTML("The grouping is always the <b>median cluster</b> (secondary DBSCAN structure). You choose what to count inside it: raw <b>trace IDs</b>, or <b>de-blinked molecules</b> (which collapse one molecule's repeated blinks into one unit - needs de-blinking on). Comparing the two shows how much of the raw count is blinking."),
+            HTML("The grouping is always the <b>median cluster</b>. You choose what to count inside it: raw <b>trace IDs</b>, or <b>de-blinked molecules</b> (which collapse one molecule's repeated blinks into one unit - needs de-blinking on). Comparing the two shows how much of the raw count is blinking."),
             HTML("<b>This is an occupancy count, not stoichiometry.</b> A trace-ID count over-counts molecules by an unknown, dye- and buffer-dependent blinking factor; de-blinked molecules partly correct for that but still depend on the de-blink eps. Annibale's blink-correction requires a dark-time distribution that is not calibrated here. Read it as a relative comparison between conditions acquired identically, never as an absolute subunit count.")),
           helpText("Counts, per median cluster, either distinct trace IDs or distinct primary",
                    "(de-blinked) clusters, across all loaded files. In MINFLUX one fluorophore",
@@ -1585,7 +1666,7 @@ smlm_ui <- fluidPage(
                    "split into traces inside Median Cluster structures vs unclustered background.",
                    "Reveals how detection of structures vs background evolves over the acquisition",
                    "(e.g. photobleaching drop-off) and feeds the simulator's acquisition model.",
-                   "Requires Secondary Clustering enabled in the Display tab."),
+                   "Requires Median Clustering enabled in the Display tab."),
           numericInput("det_time_bins", "Time bins", value = 40, min = 5, max = 300),
           radioButtons("det_time_yaxis", "Y axis",
                        choices = c("Count per bin"         = "count",
@@ -1666,7 +1747,7 @@ smlm_ui <- fluidPage(
                    "Flat = constant spacing (grows at fixed density); rising = the structure 'balloons'",
                    "(members spread apart with size); falling = it densifies.",
                    "Note: under DBSCAN within-cluster NN is <= eps2 (the link radius, default 200 nm);",
-                   "HDBSCAN/OPTICS impose no such bound. Requires Secondary Clustering."),
+                   "HDBSCAN/OPTICS impose no such bound. Requires Median Clustering."),
           radioButtons("size_nn_xmode", "X axis (cluster size)",
                        choices = c("Member count" = "count",
                                    "Convex-hull size (nm2 / nm3)" = "hull"),
@@ -1699,7 +1780,7 @@ smlm_ui <- fluidPage(
                    "Press Run to load the current clusters, then step through them; view raw 3D or a",
                    "PCA-normalized 2D projection (PC1 vs PC2 - most differential axes; PCA runs in 3D",
                    "and reduces to 2D when z exists). Shape fitting is optional - enable it below.",
-                   "Requires Secondary Clustering; press Plot in the Display tab first."),
+                   "Requires Median Clustering; press Plot in the Display tab first."),
           actionButton("run_viewer", "Run / Load clusters", icon = icon("play"), class = "btn-primary btn-sm"),
           tags$br(), tags$br(),
           fluidRow(
@@ -1733,15 +1814,10 @@ smlm_ui <- fluidPage(
               "Criterion values are not comparable between weighted and unweighted mode."),
             tags$div(style = "margin-top:2px; padding:5px 8px; border-left:3px solid #b26a00; background:rgba(178,106,0,0.06); font-size:0.8em; color:#7a5c00; line-height:1.45;",
               HTML(paste0(
-                "<b>Filter double events first.</b> A high <code>eco</code> / <code>efo</code> is not only better precision,",
-                "it is also the signature of <b>two fluorophores blinking in the same spot</b>, which is ",
-                "implausible for a single dye. On unfiltered data, weighting therefore hands the most ",
-                "influence to exactly the traces most likely to be double events, so the fit is pulled ",
-                "toward artefacts. Apply proper <code>efo</code>/<code>cfr</code>/<code>eco</code> metadata filters in the ",
-                "Display tab before enabling this. On a properly filtered dataset the weighted and ",
-                "unweighted fits usually agree closely - a <b>large</b> difference between them is itself ",
-                "a warning that unfiltered double events or a very uneven photon distribution are ",
-                "driving the result."))),
+                "<b>De-blink and filter double events first.</b> the fits are computed from trace ID's (or de-blinked events) median coordinates",
+                "so trace length does not pull the fit in a direction. Multiple detected trace ID on top of each other do pull the fit however.",
+                "Remember to de-blink to avoid skewing the fit. As we assume fits are computed from a cluster of molecules detected and de-blinked,",
+                "filtering out double events by adjusting the efo threshold, is also recommended."))),
             selectInput("viewer_fit_shape", "Fit overlay",
                         choices = c("Best (by ranking)" = "best", "None" = "none",
                                     "Sphere" = "sphere", "Ellipsoid" = "ellipsoid",

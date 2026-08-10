@@ -1105,6 +1105,8 @@ smlm_server <- function(input, output, session) {
       cluster2_prefilter_min = 3,
       cluster2_prune = FALSE,
       cluster2_prune_tol = 2,
+      cluster2_core_only = FALSE,
+      cluster2_min_members = 0,
       eps2 = 150,
       minpts2 = 8,
       
@@ -1116,10 +1118,12 @@ smlm_server <- function(input, output, session) {
       cluster2_iso_color = "#00CED1",
       cluster2_iso_unicolor = FALSE,
       cluster2_iso_grid_res = 22,
-      cluster2_iso_pad = 100,
-      cluster2_iso_level_q = 0.85,
+      cluster2_iso_pad = 0,
+      cluster2_iso_manual_offset = FALSE,
+      cluster2_iso_offset = 30,
       cluster2_iso_opacity = 0.25,
-      cluster2_iso_sigma = 150,
+      cluster2_iso_manual_sigma = FALSE,
+      cluster2_iso_sigma = 30,
       
       # 2D wrapper
       show_cluster2_shape_2D = FALSE,
@@ -1185,6 +1189,8 @@ smlm_server <- function(input, output, session) {
       cluster2_prefilter_min_tc2 = 3,
       cluster2_prune_tc2 = FALSE,
       cluster2_prune_tol_tc2 = 2,
+      cluster2_core_only_tc2 = FALSE,
+      cluster2_min_members_tc2 = 0,
       eps_tc2 = 150,
       minpts_tc2 = 8,
       show_tc2_alpha = FALSE,
@@ -1196,11 +1202,12 @@ smlm_server <- function(input, output, session) {
       tc2_iso_selected_only = TRUE,
       tc2_iso_cluster_label = "A-1",
       tc2_iso_grid_res = 22,
-      tc2_iso_pad = 100,
-      tc2_iso_level_q = 0.85,
-      tc2_iso_sigma = 150,
-      tc2_iso_opacity = 0.25,
-      tc2_iso_eps = 1e-4
+      tc2_iso_pad = 0,
+      tc2_iso_manual_offset = FALSE,
+      tc2_iso_offset = 30,
+      tc2_iso_manual_sigma = FALSE,
+      tc2_iso_sigma = 30,
+      tc2_iso_opacity = 0.25
     )
   }
   
@@ -1255,6 +1262,8 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("cluster2_prefilter_min_tc2"))) updateNumericInput(session, "cluster2_prefilter_min_tc2", value = as.numeric(getv("cluster2_prefilter_min_tc2")))
     if (!is.null(getv("cluster2_prune_tc2"))) updateCheckboxInput(session, "cluster2_prune_tc2", value = isTRUE(getv("cluster2_prune_tc2")))
     if (!is.null(getv("cluster2_prune_tol_tc2"))) updateNumericInput(session, "cluster2_prune_tol_tc2", value = as.numeric(getv("cluster2_prune_tol_tc2")))
+    if (!is.null(getv("cluster2_core_only_tc2"))) updateCheckboxInput(session, "cluster2_core_only_tc2", value = isTRUE(getv("cluster2_core_only_tc2")))
+    if (!is.null(getv("cluster2_min_members_tc2"))) updateNumericInput(session, "cluster2_min_members_tc2", value = as.numeric(getv("cluster2_min_members_tc2")))
     if (!is.null(getv("eps_tc2"))) updateNumericInput(session, "eps_tc2", value = as.numeric(getv("eps_tc2")))
     if (!is.null(getv("minpts_tc2"))) updateNumericInput(session, "minpts_tc2", value = as.integer(getv("minpts_tc2")))
     if (!is.null(getv("tc2_alpha"))) updateNumericInput(session, "tc2_alpha", value = as.numeric(getv("tc2_alpha")))
@@ -1265,10 +1274,11 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("tc2_iso_cluster_label"))) updateTextInput(session, "tc2_iso_cluster_label", value = as.character(getv("tc2_iso_cluster_label")))
     if (!is.null(getv("tc2_iso_grid_res"))) updateSliderInput(session, "tc2_iso_grid_res", value = as.numeric(getv("tc2_iso_grid_res")))
     if (!is.null(getv("tc2_iso_pad"))) updateSliderInput(session, "tc2_iso_pad", value = as.numeric(getv("tc2_iso_pad")))
-    if (!is.null(getv("tc2_iso_level_q"))) updateSliderInput(session, "tc2_iso_level_q", value = as.numeric(getv("tc2_iso_level_q")))
+    if (!is.null(getv("tc2_iso_offset"))) updateSliderInput(session, "tc2_iso_offset", value = as.numeric(getv("tc2_iso_offset")))
+    if (!is.null(getv("tc2_iso_manual_offset"))) updateCheckboxInput(session, "tc2_iso_manual_offset", value = isTRUE(getv("tc2_iso_manual_offset")))
     if (!is.null(getv("tc2_iso_sigma"))) updateSliderInput(session, "tc2_iso_sigma", value = as.numeric(getv("tc2_iso_sigma")))
     if (!is.null(getv("tc2_iso_opacity"))) updateSliderInput(session, "tc2_iso_opacity", value = as.numeric(getv("tc2_iso_opacity")))
-    if (!is.null(getv("tc2_iso_eps"))) updateSliderInput(session, "tc2_iso_eps", value = as.numeric(getv("tc2_iso_eps")))
+    if (!is.null(getv("tc2_iso_manual_sigma"))) updateCheckboxInput(session, "tc2_iso_manual_sigma", value = isTRUE(getv("tc2_iso_manual_sigma")))
   }
   
   
@@ -1363,6 +1373,8 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("cluster2_prefilter_min"))) updateNumericInput(session, "cluster2_prefilter_min", value = as.numeric(getv("cluster2_prefilter_min")))
     if (!is.null(getv("cluster2_prune"))) updateCheckboxInput(session, "cluster2_prune", value = isTRUE(getv("cluster2_prune")))
     if (!is.null(getv("cluster2_prune_tol"))) updateNumericInput(session, "cluster2_prune_tol", value = as.numeric(getv("cluster2_prune_tol")))
+    if (!is.null(getv("cluster2_core_only"))) updateCheckboxInput(session, "cluster2_core_only", value = isTRUE(getv("cluster2_core_only")))
+    if (!is.null(getv("cluster2_min_members"))) updateNumericInput(session, "cluster2_min_members", value = as.numeric(getv("cluster2_min_members")))
     if (!is.null(getv("eps2")))    updateNumericInput(session, "eps2", value = as.numeric(getv("eps2")))
     if (!is.null(getv("minpts2"))) updateNumericInput(session, "minpts2", value = as.numeric(getv("minpts2")))
 
@@ -1429,9 +1441,11 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("cluster2_iso_id")))       updateNumericInput(session, "cluster2_iso_id", value = as.integer(getv("cluster2_iso_id")))
     if (!is.null(getv("cluster2_iso_grid_res"))) updateSliderInput(session, "cluster2_iso_grid_res", value = as.numeric(getv("cluster2_iso_grid_res")))
     if (!is.null(getv("cluster2_iso_pad")))      updateSliderInput(session, "cluster2_iso_pad", value = as.numeric(getv("cluster2_iso_pad")))
-    if (!is.null(getv("cluster2_iso_level_q")))  updateSliderInput(session, "cluster2_iso_level_q", value = as.numeric(getv("cluster2_iso_level_q")))
+    if (!is.null(getv("cluster2_iso_offset")))   updateSliderInput(session, "cluster2_iso_offset", value = as.numeric(getv("cluster2_iso_offset")))
+    if (!is.null(getv("cluster2_iso_manual_offset"))) updateCheckboxInput(session, "cluster2_iso_manual_offset", value = isTRUE(getv("cluster2_iso_manual_offset")))
     if (!is.null(getv("cluster2_iso_opacity")))  updateSliderInput(session, "cluster2_iso_opacity", value = as.numeric(getv("cluster2_iso_opacity")))
     if (!is.null(getv("cluster2_iso_sigma")))    updateSliderInput(session, "cluster2_iso_sigma", value = as.numeric(getv("cluster2_iso_sigma")))
+    if (!is.null(getv("cluster2_iso_manual_sigma"))) updateCheckboxInput(session, "cluster2_iso_manual_sigma", value = isTRUE(getv("cluster2_iso_manual_sigma")))
     if (!is.null(getv("cluster2_iso_color")))    colourpicker::updateColourInput(session, "cluster2_iso_color", value = as.character(getv("cluster2_iso_color")))
     if (!is.null(getv("cluster2_iso_unicolor"))) updateCheckboxInput(session, "cluster2_iso_unicolor", value = isTRUE(getv("cluster2_iso_unicolor")))
     
@@ -1813,6 +1827,8 @@ smlm_server <- function(input, output, session) {
         cluster2_prefilter_min = input$cluster2_prefilter_min,
         cluster2_prune = isTRUE(input$cluster2_prune),
         cluster2_prune_tol = input$cluster2_prune_tol,
+        cluster2_core_only = isTRUE(input$cluster2_core_only),
+        cluster2_min_members = input$cluster2_min_members,
         eps2 = input$eps2,
         minpts2 = input$minpts2,
 
@@ -1824,9 +1840,11 @@ smlm_server <- function(input, output, session) {
         cluster2_iso_unicolor = isTRUE(input$cluster2_iso_unicolor),
         cluster2_iso_grid_res = input$cluster2_iso_grid_res,
         cluster2_iso_pad = input$cluster2_iso_pad,
-        cluster2_iso_level_q = input$cluster2_iso_level_q,
+        cluster2_iso_manual_offset = isTRUE(input$cluster2_iso_manual_offset),
+        cluster2_iso_offset = input$cluster2_iso_offset,
         cluster2_iso_opacity = input$cluster2_iso_opacity,
         cluster2_iso_sigma = input$cluster2_iso_sigma,
+        cluster2_iso_manual_sigma = isTRUE(input$cluster2_iso_manual_sigma),
         
         show_cluster2_shape_2D = isTRUE(input$show_cluster2_shape_2D),
         
@@ -1933,7 +1951,7 @@ smlm_server <- function(input, output, session) {
       use_z = TRUE,          # decided from the data, never from the plot mode
       w     = w,
       k     = { kk <- suppressWarnings(as.numeric(input$centroid_k))
-                if (!length(kk) || !is.finite(kk) || kk <= 0) 2.0 else kk })
+                if (!length(kk) || !is.finite(kk) || kk <= 0) 2.8 else kk })
     if (!is.null(r) && is.finite(r$sigma)) centroid_sigma_rv(r$sigma)
     r
   }
@@ -1980,22 +1998,17 @@ smlm_server <- function(input, output, session) {
       error = function(e) NULL)
     r$axis_w <- w
 
-    # k measured from the data: smallest multiplier leaving no unmerged
-    # re-blinks. Replaces the simulation-calibrated default where it can.
-    ex <- tryCatch(deblink_reblink_excess(df, r$sigma, w), error = function(e) NULL)
-    r$excess <- ex
-    if (!is.null(ex) && is.finite(ex$k_clear)) {
-      r$k <- ex$k_clear
-      r$suggested <- round(ex$k_clear * r$sigma, 1)
-      updateNumericInput(session, "centroid_k", value = ex$k_clear)
-    }
+    # DELIBERATELY NO DRIFT TERM HERE. Drift is measured, but in the precision
+    # QC panel, not in this suggestion - see sample_drift_estimate(). Feeding it
+    # back into the merge radius would be circular: the only molecules whose
+    # drift can be observed are the ones already merged, i.e. the ones that
+    # drifted LESS than the very threshold being set. The threshold is the trace
+    # spread times k, and nothing else.
+    updateNumericInput(session, "centroid_k", value = r$k)
     centroid_suggestion(r)
     updateNumericInput(session, "eps_centroid", value = r$suggested)
-    showNotification(sprintf("Centroid threshold %.1f nm (k = %.2f, σ = %.2f nm)%s.",
-                             r$suggested, r$k, r$sigma,
-                             if (!is.null(ex) && is.finite(ex$k_clear))
-                               " - k measured from residual re-blinking" else
-                               " - k from the default (residual test inconclusive)"),
+    showNotification(sprintf("Centroid threshold %.1f nm (k = %.2f x σ %.2f nm).",
+                             r$suggested, r$k, r$sigma),
                      type = "message", duration = 7)
   })
 
@@ -2018,26 +2031,7 @@ smlm_server <- function(input, output, session) {
                        cur_thr, if (is.finite(r$sigma) && r$sigma > 0) cur_thr / r$sigma else NA_real_,
                        shape, format(r$n_traces, big.mark = ","),
                        100 * (r$frac_merged %||% NA))),
-      # k_clear is where the residual pile-up meets the local-density
-      # expectation; k_clear_hi is where it meets it across the whole confidence
-      # interval. The pair brackets the choice, so both are shown rather than
-      # quoting the point estimate as if it were exact.
-      if (!is.null(r$excess) && is.finite(r$excess$k_clear))
-        helpText(sprintf("k = %.2f, measured from your data%s. Lower values leave re-blinks unmerged.",
-                         r$excess$k_clear,
-                         if (is.finite(r$excess$k_clear_hi %||% NA_real_) &&
-                             r$excess$k_clear_hi > r$excess$k_clear)
-                           sprintf("; k = %.2f clears it within confidence", r$excess$k_clear_hi)
-                         else ""))
-      else if (!is.null(r$excess))
-        helpText("Could not measure k from this data - too crowded to tell re-blinks from neighbours. Using the default.")
-      else NULL,
-      # The measured k only sees leftover pairs at ~2 sigma, so it cannot
-      # register label motion between blinks - which is what actually sets how
-      # far apart two blinks of one molecule land. It is a floor, not an answer.
-      if (!is.null(r$excess) && is.finite(r$excess$k_clear))
-        helpText("Measured k is a lower bound: it cannot see label motion between blinks. Check the count-vs-threshold curve before going below it.")
-      else NULL
+      helpText("Sample drift is reported in the Localization Precision Cloud QC panel; it is not folded into this threshold.")
     )
   })
 
@@ -2125,16 +2119,11 @@ smlm_server <- function(input, output, session) {
                                  use_z = TRUE, w = NULL, k = r$k)$sigma_ax,
       error = function(e) NULL)
     r$axis_w <- w
-    ex <- tryCatch(deblink_reblink_excess(df, r$sigma, w), error = function(e) NULL)
-    r$excess <- ex
-    if (!is.null(ex) && is.finite(ex$k_clear)) {
-      r$k <- ex$k_clear
-      r$suggested <- round(ex$k_clear * r$sigma, 1)
-    }
     tc1_suggestion(r)
     updateNumericInput(session, "eps_tc1", value = r$suggested)
-    showNotification(sprintf("2-color threshold %.1f nm (k = %.2f, pooled sigma %.2f nm).",
-                             r$suggested, r$k, r$sigma), type = "message", duration = 6)
+    showNotification(sprintf("2-color threshold %.1f nm (k = %.2f x pooled σ %.2f nm).",
+                             r$suggested, r$k, r$sigma),
+                     type = "message", duration = 6)
   })
 
   output$tc1_suggest_summary <- renderUI({
@@ -2147,10 +2136,7 @@ smlm_server <- function(input, output, session) {
                        paste(sprintf("%.1f", axr), collapse = " / "), cur,
                        if (is.finite(r$sigma) && r$sigma > 0) cur / r$sigma else NA_real_,
                        format(r$n_traces, big.mark = ","))),
-      if (!is.null(r$excess) && is.finite(r$excess$k_clear))
-        helpText(sprintf("k = %.2f, measured from your data. Spread is pooled over both channels.",
-                         r$excess$k_clear))
-      else helpText("Spread is pooled over both channels.")
+      helpText("Spread is pooled over both channels.")
     )
   })
 
@@ -2293,6 +2279,8 @@ smlm_server <- function(input, output, session) {
         cluster2_prefilter_min_tc2 = input$cluster2_prefilter_min_tc2,
         cluster2_prune_tc2 = isTRUE(input$cluster2_prune_tc2),
         cluster2_prune_tol_tc2 = input$cluster2_prune_tol_tc2,
+        cluster2_core_only_tc2 = isTRUE(input$cluster2_core_only_tc2),
+        cluster2_min_members_tc2 = input$cluster2_min_members_tc2,
         eps_tc2 = input$eps_tc2,
         minpts_tc2 = input$minpts_tc2,
         show_tc2_alpha = isTRUE(input$show_tc2_alpha),
@@ -2305,10 +2293,11 @@ smlm_server <- function(input, output, session) {
         tc2_iso_cluster_label = input$tc2_iso_cluster_label,
         tc2_iso_grid_res = input$tc2_iso_grid_res,
         tc2_iso_pad = input$tc2_iso_pad,
-        tc2_iso_level_q = input$tc2_iso_level_q,
+        tc2_iso_manual_offset = isTRUE(input$tc2_iso_manual_offset),
+        tc2_iso_offset = input$tc2_iso_offset,
+        tc2_iso_manual_sigma = isTRUE(input$tc2_iso_manual_sigma),
         tc2_iso_sigma = input$tc2_iso_sigma,
-        tc2_iso_opacity = input$tc2_iso_opacity,
-        tc2_iso_eps = input$tc2_iso_eps
+        tc2_iso_opacity = input$tc2_iso_opacity
       )
       
       jsonlite::write_json(s, path = file, auto_unbox = TRUE, pretty = TRUE)
@@ -5411,7 +5400,9 @@ smlm_server <- function(input, output, session) {
           prefilter_r   = input$cluster2_prefilter_r,
           prefilter_min = input$cluster2_prefilter_min,
           prune         = isTRUE(input$cluster2_prune),
-          prune_tol     = input$cluster2_prune_tol %||% 2
+          prune_tol     = input$cluster2_prune_tol %||% 2,
+          core_only     = isTRUE(input$cluster2_core_only),
+          min_members   = input$cluster2_min_members %||% 0
         )
         if (any(cid > 0)) {
           cid[cid > 0] <- cid[cid > 0] + (next_id - 1L)
@@ -5591,7 +5582,9 @@ smlm_server <- function(input, output, session) {
             prefilter_r   = input$cluster2_prefilter_r_tc2,
             prefilter_min = input$cluster2_prefilter_min_tc2,
             prune         = isTRUE(input$cluster2_prune_tc2),
-            prune_tol     = input$cluster2_prune_tol_tc2 %||% 2
+            prune_tol     = input$cluster2_prune_tol_tc2 %||% 2,
+            core_only     = isTRUE(input$cluster2_core_only_tc2),
+            min_members   = input$cluster2_min_members_tc2 %||% 0
           )
           if (g == 2L) cid[cid > 0] <- cid[cid > 0] + 10000L
           med$cluster_tc2[idx] <- cid
@@ -6137,8 +6130,16 @@ smlm_server <- function(input, output, session) {
     
     cluster2_medians <- NULL
     if (isTRUE(input$enable_cluster2) && "cluster2" %in% names(df)) {
+      # Member unit follows de-blinking, matching the two-colour isosurface and
+      # every other per-structure statistic (cluster2_member_col / smlm_nn_unit).
+      # This used to be hardcoded to `tid`, so with de-blinking on the envelope
+      # was built from blink events rather than molecules.
+      iso_unit <- cluster2_member_col(df)
       cluster2_medians <- df %>%
-        dplyr::group_by(tid) %>%
+        dplyr::filter(!is.na(cluster2), cluster2 != 0) %>%
+        { if (identical(iso_unit, "cluster"))
+            dplyr::filter(., !is.na(cluster), cluster > 0L) else . } %>%
+        dplyr::group_by(.data[[iso_unit]]) %>%
         dplyr::summarise(
           x = stats::median(x, na.rm = TRUE),
           y = stats::median(y, na.rm = TRUE),
@@ -6400,46 +6401,59 @@ smlm_server <- function(input, output, session) {
         "cluster_tc2" %in% names(df)) {
       
       grid_res <- input$tc2_iso_grid_res %||% 22
-      pad      <- input$tc2_iso_pad %||% 100
-      qlvl     <- input$tc2_iso_level_q %||% 0.85
+      pad      <- input$tc2_iso_pad %||% 0
       op       <- input$tc2_iso_opacity %||% 0.25
-      eps0     <- input$tc2_iso_eps %||% 1e-4
-      
+      # NULL = derive from this structure's own member spacing (2x), which is
+      # the setting that reliably closes into one surface.
+      iso_off  <- if (!isTRUE(input$tc2_iso_manual_offset)) NULL else {
+        o <- suppressWarnings(as.numeric(input$tc2_iso_offset %||% 30))
+        if (!is.finite(o) || o <= 0) NULL else o
+      }
+      sigma    <- if (!isTRUE(input$tc2_iso_manual_sigma)) NULL else {
+        s <- suppressWarnings(as.numeric(input$tc2_iso_sigma %||% 30))
+        if (!is.finite(s) || s <= 0) NULL else s
+      }
+
+      # Same member unit as every other tc2 statistic: the de-blinked molecule
+      # (cluster_tc1) when two-colour de-blinking has run, else the trace ID.
+      # This block used to build the field from RAW LOCALIZATIONS, so one long
+      # trace contributed hundreds of points and dominated the density while a
+      # short trace of the same molecule contributed a handful - the envelope
+      # then tracked trace length rather than labelling.
+      tc2_unit <- if ("cluster_tc1" %in% names(df) &&
+                      any(!is.na(df$cluster_tc1) & df$cluster_tc1 != 0L)) "cluster_tc1" else "tid"
+
       # choose which clusters to draw
       ids <- sort(unique(df$cluster_tc2))
       ids <- ids[is.finite(ids) & ids != 0]
-      
+
       if (isTRUE(input$tc2_iso_selected_only)) {
         sel <- parse_tc_label(input$tc2_iso_cluster_label)
         ids <- ids[ids == sel]
       }
       for (cid in ids) {
-        sub <- df[df$cluster_tc2 == cid, , drop = FALSE]
-        if (nrow(sub) < 20) next
-        if (!all(c("x","y","z") %in% names(sub))) next
-        
-        pts <- as.matrix(sub[, c("x","y","z")])
+        sub <- df[!is.na(df$cluster_tc2) & df$cluster_tc2 == cid, , drop = FALSE]
+        if (!nrow(sub) || !all(c("x","y","z") %in% names(sub))) next
+        if (identical(tc2_unit, "cluster_tc1"))
+          sub <- sub[!is.na(sub$cluster_tc1) & sub$cluster_tc1 != 0L, , drop = FALSE]
+        if (!nrow(sub)) next
+
+        cent <- sub %>%
+          dplyr::group_by(.data[[tc2_unit]]) %>%
+          dplyr::summarise(x = stats::median(x, na.rm = TRUE),
+                           y = stats::median(y, na.rm = TRUE),
+                           z = stats::median(z, na.rm = TRUE), .groups = "drop")
+        pts <- as.matrix(cent[, c("x","y","z")])
         pts <- pts[stats::complete.cases(pts), , drop = FALSE]
-        if (nrow(pts) < 20) next
-        
-        # build grid bounding box + padding
-        xr <- range(pts[,1]); yr <- range(pts[,2]); zr <- range(pts[,3])
-        xs <- seq(xr[1]-pad, xr[2]+pad, length.out = grid_res)
-        ys <- seq(yr[1]-pad, yr[2]+pad, length.out = grid_res)
-        zs <- seq(zr[1]-pad, zr[2]+pad, length.out = grid_res)
-        
-        grid <- as.matrix(expand.grid(x = xs, y = ys, z = zs))
-        # nearest distance from grid points to point cloud
-        nn <- RANN::nn2(data = pts, query = grid, k = 1)
-        d  <- as.numeric(nn$nn.dists[,1])
-        
-        sigma <- input$tc2_iso_sigma %||% 150
-        sigma <- as.numeric(sigma)
-        if (!is.finite(sigma) || sigma <= 0) sigma <- 150
-        
-        val <- exp(-(d*d) / (2 * sigma*sigma))
-        iso_level <- stats::quantile(val, probs = qlvl, na.rm = TRUE, names = FALSE)
-        
+        if (nrow(pts) < 4) next
+
+        fld <- cluster_density_field(pts, grid_res = grid_res, pad = pad,
+                                     sigma = sigma, offset = iso_off)
+        if (is.null(fld)) next
+        grid      <- fld$grid
+        val       <- fld$value
+        iso_level <- fld$level
+
         # group A = ids < 10000, group B = ids >= 10000
         tc2_iso_col <- if (cid < 10000L) {
           input$color_group1 %||% "#1f77b4"
@@ -6473,13 +6487,20 @@ smlm_server <- function(input, output, session) {
         isTRUE(input$mode3d == "3D")) {
       
       grid_res <- input$cluster2_iso_grid_res %||% 22
-      pad      <- input$cluster2_iso_pad %||% 100
-      qlvl     <- input$cluster2_iso_level_q %||% 0.85
+      pad      <- input$cluster2_iso_pad %||% 0
       op       <- input$cluster2_iso_opacity %||% 0.25
-      sigma    <- input$cluster2_iso_sigma %||% 150
-      sigma    <- as.numeric(sigma)
-      if (!is.finite(sigma) || sigma <= 0) sigma <- 150
-      
+      # NULL = derive from this structure's own member spacing (2x), the setting
+      # that reliably closes into one surface. A fixed nm value cannot serve a
+      # 30 nm molecule and a 500 nm vesicle in the same field of view.
+      iso_off  <- if (!isTRUE(input$cluster2_iso_manual_offset)) NULL else {
+        o <- suppressWarnings(as.numeric(input$cluster2_iso_offset %||% 30))
+        if (!is.finite(o) || o <= 0) NULL else o
+      }
+      sigma    <- if (!isTRUE(input$cluster2_iso_manual_sigma)) NULL else {
+        s <- suppressWarnings(as.numeric(input$cluster2_iso_sigma %||% 30))
+        if (!is.finite(s) || s <= 0) NULL else s
+      }
+
       ids <- sort(unique(cluster2_medians$cluster2))
       ids <- ids[is.finite(ids) & ids != 0]
 
@@ -6503,17 +6524,17 @@ smlm_server <- function(input, output, session) {
         pts <- pts[stats::complete.cases(pts), , drop = FALSE]
         if (nrow(pts) < 4) next
 
-        xr <- range(pts[,1]); yr <- range(pts[,2]); zr <- range(pts[,3])
-        xs <- seq(xr[1]-pad, xr[2]+pad, length.out = grid_res)
-        ys <- seq(yr[1]-pad, yr[2]+pad, length.out = grid_res)
-        zs <- seq(zr[1]-pad, zr[2]+pad, length.out = grid_res)
-
-        grid <- as.matrix(expand.grid(x = xs, y = ys, z = zs))
-        nn   <- RANN::nn2(data = pts, query = grid, k = 1)
-        d    <- as.numeric(nn$nn.dists[,1])
-
-        val <- exp(-(d*d) / (2 * sigma*sigma))
-        iso_level <- stats::quantile(val, probs = qlvl, na.rm = TRUE, names = FALSE)
+        # Gaussian KDE over the member centroids + a level enclosing `qlvl` of
+        # the labelling density. See cluster_density_field() for why this
+        # replaced the old nearest-distance field (it was blind to density, so
+        # every straggler grew its own bubble) and the old quantile-of-voxels
+        # level (sigma cancelled exactly; the view padding set the geometry).
+        fld <- cluster_density_field(pts, grid_res = grid_res, pad = pad,
+                                     sigma = sigma, offset = iso_off)
+        if (is.null(fld)) next
+        grid      <- fld$grid
+        val       <- fld$value
+        iso_level <- fld$level
 
         iso_col <- if (isTRUE(input$cluster2_iso_unicolor)) {
           input$cluster2_iso_color %||% "#00CED1"
@@ -8623,9 +8644,36 @@ smlm_server <- function(input, output, session) {
       sigma_spread <- stats::IQR(sqrt(v)) / stats::median(sqrt(v))
     }
 
+    # ── Sample stability: drift and jitter ────────────────────────────────────
+    # Belongs here rather than in the de-blink panel: it describes the SAMPLE,
+    # and folding it into the merge radius would be circular (the only molecules
+    # whose motion is observable are the ones already merged, i.e. those that
+    # moved LESS than the radius in question).
+    # Measured per file and pooled, because time is only comparable within one
+    # acquisition - two files start their clocks independently.
+    drift_by_file <- lapply(names(store), function(fname) {
+      dfx <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), input),
+                      error = function(e) NULL)
+      if (!is.data.frame(dfx) || !nrow(dfx) || !"tim" %in% names(dfx)) return(NULL)
+      # Group traces into molecules first, so a fluorophore seen at several
+      # separate times contributes a trajectory rather than one displacement.
+      # A generous radius is used deliberately: pairs that are really two
+      # different molecules displace in no particular direction, so they widen
+      # the interval without biasing the drift.
+      sgq <- tryCatch(suggest_centroid_threshold(dfx, min_n = min_loc)$sigma,
+                      error = function(e) NULL)
+      gid <- if (!is.null(sgq) && is.finite(sgq))
+        tryCatch(deblink_merge_centroids(dfx, 5 * sgq, NULL), error = function(e) NULL) else NULL
+      tryCatch(sample_drift_estimate(dfx, min_n = min_loc, group = gid),
+               error = function(e) NULL)
+    })
+    names(drift_by_file) <- names(store)
+    drift_by_file <- Filter(Negate(is.null), drift_by_file)
+
     keep <- if (nrow(P) > 40000L) sort(sample.int(nrow(P), 40000L)) else seq_len(nrow(P))
     Pp <- P[keep, , drop = FALSE]
     prec_cloud_results(list(
+      drift = drift_by_file,
       dx = Pp$dx, dy = Pp$dy, dz = Pp$dz,
       sigma_x = sx, sigma_y = sy, sigma_z = sz,
       sigma_x_med = sx_med, sigma_y_med = sy_med, sigma_z_med = sz_med,
@@ -8920,9 +8968,241 @@ smlm_server <- function(input, output, session) {
               format(r$n_traces, big.mark = ",")),
       if (length(warn)) htmltools::div(style = "color:#b26a00; margin-top:2px;",
         "⚠ ", paste(warn, collapse = "; "), ".") else
-        htmltools::div(style = "color:#2a6; margin-top:2px;", "Cloud is compact and near-isotropic."))
+        htmltools::div(style = "color:#2a6; margin-top:2px;", "Cloud is compact and near-isotropic."),
+      # ── Sample stability, one line per file ─────────────────────────────────
+      # Drift accumulates with time and has a direction; jitter does not. They
+      # are reported separately because they say different things about a
+      # sample, and because jitter - not drift - is what sets how far apart two
+      # blinks of one molecule land.
+      if (length(r$drift %||% list())) {
+        htmltools::tagList(
+          htmltools::div(style = "margin-top:6px; font-weight:600;", "Sample stability"),
+          lapply(names(r$drift), function(fn) {
+            d <- r$drift[[fn]]
+            txt <- sprintf("%s: drift %.1f nm over %.0f min (95%% CI %.1f-%.1f), %.1f nm across a typical %.0f s gap between blinks; jitter %.1f nm; %.0f%% of pair displacement is directional. From %s pairs%s.",
+                           fn, d$drift_run, d$span / 60, d$drift_run_lo, d$drift_run_hi,
+                           d$drift_typ, d$dt_typ, d$jitter, 100 * (d$frac_directed %||% NA_real_),
+                           format(d$n_pairs, big.mark = ","),
+                           if (is.finite(d$n_units)) sprintf(" in %s multi-blink molecules",
+                                                             format(d$n_units, big.mark = ",")) else "")
+            # Highlighted only when the drift is big enough to MATTER: a few tens
+            # of nm across a whole run is excellent stability, and colouring it
+            # as a warning would train the user to ignore the line. The bar is
+            # the drift across a typical gap between blinks exceeding the
+            # localization spread itself.
+            htmltools::div(style = if (isTRUE(d$significant) &&
+                                       isTRUE(d$drift_typ > (r$sigma_xy_med %||% Inf)))
+                             "color:#b26a00;" else "color:#555;", txt)
+          }),
+          htmltools::div(style = "color:#777; font-size:0.85em;",
+            "Only molecules whose blinks were merged can be seen here, so drift large enough to break a merge is understated. This is a sample readout and is not used to set the de-blink threshold.")
+        )
+      } else NULL)
   })
 
+
+  # ==========================================================================
+  # SAMPLE DRIFT PLOT - displacement from each molecule's FIRST blink
+  # ==========================================================================
+  # GOAL: show, rather than assert, whether the sample moved. Every molecule
+  # that blinked more than once is placed at the origin at its first blink; each
+  # later blink is one point, positioned relative to that origin and coloured by
+  # the gap since it.
+  #
+  # HOW TO READ IT: a cloud centred on the origin is a still sample - the
+  # scatter is jitter, which does not accumulate. Points marching off in one
+  # direction, further the longer the gap, are drift. The two are hard to tell
+  # apart from a single number, which is the whole reason for the plot.
+  #
+  # The binned means carry the reading. Averaging kills the isotropic part, so
+  # under pure jitter every bin sits on the origin whatever its time gap, while
+  # under drift the bins step outward in order. That is a far stronger cue than
+  # the raw scatter, which drift barely changes when jitter dominates.
+  output$prec_drift_plot <- renderPlotly({
+    r <- prec_cloud_results()
+    validate(need(!is.null(r), "Run the precision cloud first."))
+    dl <- r$drift %||% list()
+    validate(need(length(dl) > 0, "Sample drift could not be measured (needs traces with times, and molecules that blinked more than once)."))
+    st <- do.call(rbind, lapply(names(dl), function(fn) {
+      s <- dl[[fn]]$steps; if (is.null(s) || !nrow(s)) return(NULL)
+      s$file <- fn
+      # Molecule ids are per-file integers, so two files would otherwise share
+      # ids and be drawn as one molecule.
+      if (!is.null(s$mol)) s$mol <- paste(fn, s$mol, sep = " / ")
+      s
+    }))
+    validate(need(!is.null(st) && nrow(st) >= 5, "Too few multi-blink molecules to plot."))
+
+    ax  <- intersect(c("dx", "dy", "dz"), names(st))
+    lab <- c(dx = "Δx", dy = "Δy", dz = "Δz")
+    pairs_ax <- if (length(ax) >= 3) list(c("dx","dy"), c("dx","dz"), c("dy","dz")) else list(ax[1:2])
+
+    # One frame for all panels so the eye compares them directly; driven by the
+    # data rather than the fit, and by a quantile so a single wild pair cannot
+    # zoom the plot out to nothing.
+    L <- max(stats::quantile(abs(unlist(st[ax])), 0.99, na.rm = TRUE, names = FALSE) * 1.15, 5)
+
+    # Only draw a fitted drift arrow when there is exactly ONE file: drift has a
+    # direction, and two acquisitions do not share one, so a single arrow over
+    # pooled files would be meaningless.
+    one <- if (length(dl) == 1L) dl[[1]] else NULL
+    cmode  <- input$drift_plot_color %||% "time"
+    # Colouring by molecule needs a molecule to name. Spatial pairing (no
+    # de-blinked IDs available) leaves `mol` NA, so fall back to time.
+    by_mol <- identical(cmode, "mol") && "mol" %in% names(st) && any(!is.na(st$mol))
+    # Acquisition time needs t_abs; older cached results will not carry it.
+    by_abs <- identical(cmode, "abs") && "t_abs" %in% names(st) && any(is.finite(st$t_abs))
+    cvals  <- (if (by_abs) st$t_abs else st$dt) / 60
+    cpal   <- if (by_abs) "Turbo" else "Viridis"
+    ctitle <- if (by_abs) "run time (min)" else "gap (min)"
+
+    # ── Geometric median displacement per time-gap bin ───────────────────────
+    # Estimated ONCE in full dimensionality and then projected into each panel,
+    # so all three panels show the same estimated point viewed three ways. A
+    # per-panel 2D fit would give the XY marker a different underlying point
+    # from the XZ marker, which cannot be read as one displacement.
+    #
+    # GEOMETRIC median, not the mean and not a per-axis median. The mean has no
+    # breakdown point and these bins really are contaminated - a merged
+    # "molecule" occasionally holds two different fluorophores, dropping a
+    # tens-of-nm displacement into an otherwise ~10 nm cloud. A per-axis median
+    # is robust but NOT rotation-equivariant, so its marker would move if x and
+    # y were relabelled, which is fatal for a plot whose content is a direction.
+    # The geometric median is both robust and equivariant.
+    binc <- NULL
+    nb <- min(5L, max(2L, floor(nrow(st) / 8)))
+    br <- unique(stats::quantile(st$dt, seq(0, 1, length.out = nb + 1), na.rm = TRUE))
+    if (length(br) > 2) {
+      bin  <- cut(st$dt, br, include.lowest = TRUE)
+      idx  <- split(seq_len(nrow(st)), bin)
+      idx  <- idx[lengths(idx) > 0]
+      if (length(idx) >= 2) {
+        cen <- t(vapply(idx, function(ix)
+          geometric_median(as.matrix(st[ix, ax, drop = FALSE])), numeric(length(ax))))
+        colnames(cen) <- ax
+        binc <- list(cen = cen,
+                     t = vapply(idx, function(ix) stats::median(st$dt[ix], na.rm = TRUE), numeric(1)))
+      }
+    }
+
+    np  <- length(pairs_ax)
+    gap <- if (np > 1) 0.07 else 0
+    w   <- (1 - gap * (np - 1)) / np
+    fig <- plotly::plot_ly(); shapes <- list(); axis_args <- list()
+
+    for (i in seq_len(np)) {
+      a <- pairs_ax[[i]][1]; b <- pairs_ax[[i]][2]
+      xid <- if (i == 1) "x" else paste0("x", i)
+      yid <- if (i == 1) "y" else paste0("y", i)
+
+      if (by_mol) {
+        # One colour per molecule, cycled: with hundreds of molecules a colour
+        # cannot IDENTIFY one, but it does group a molecule's blinks so the eye
+        # can follow them. Each molecule is joined from the origin in time order,
+        # which turns every multi-blink fluorophore into its own small track -
+        # under drift those tracks all lean the same way.
+        pal <- grDevices::hcl.colors(12, "Dark 3")
+        mm  <- split(seq_len(nrow(st)), st$mol)
+        # Cap the number drawn. Each molecule is its own plotly trace, times the
+        # number of panels, so an unbounded count stalls the browser rather than
+        # informing anyone. The molecules with the MOST blinks are kept, since a
+        # three- or four-blink track shows a direction and a single step cannot.
+        cap <- 200L
+        n_mol_all <- length(mm)
+        if (n_mol_all > cap) mm <- mm[order(-lengths(mm))][seq_len(cap)]
+        for (mi in seq_along(mm)) {
+          ix <- mm[[mi]]
+          fig <- fig %>% plotly::add_trace(
+            x = c(0, st[[a]][ix]), y = c(0, st[[b]][ix]), xaxis = xid, yaxis = yid,
+            type = "scatter", mode = "lines+markers",
+            line = list(color = pal[(mi - 1L) %% length(pal) + 1L], width = 1),
+            marker = list(size = 6, opacity = 0.75,
+                          color = pal[(mi - 1L) %% length(pal) + 1L]),
+            name = if (n_mol_all > cap)
+                     sprintf("molecule track (%s of %s shown)", cap,
+                             format(n_mol_all, big.mark = ","))
+                   else "molecule track",
+            legendgroup = "mol",
+            showlegend = (i == 1 && mi == 1), inherit = FALSE,
+            text = paste("de-blinked ID", st$mol[ix][1]),
+            hovertemplate = paste0("%{text}<br>", lab[[a]], " %{x:.1f} nm<br>",
+                                   lab[[b]], " %{y:.1f} nm<extra></extra>"))
+        }
+      } else {
+        # Two continuous colourings, both drawn from the app's own palette set:
+        #   time - how long AFTER its molecule's first blink (Viridis)
+        #   abs  - WHEN in the acquisition it happened (Turbo, blue -> red)
+        # They answer different questions. The gap shows accumulation; the
+        # acquisition time shows whether early and late parts of the run pull in
+        # different directions, which a gap colouring cannot separate.
+        fig <- fig %>% plotly::add_markers(
+          x = st[[a]], y = st[[b]], xaxis = xid, yaxis = yid,
+          marker = list(size = 6, opacity = 0.55, color = cvals,
+                        colorscale = plotly_colorscale(cpal),
+                        showscale = (i == 1),
+                        colorbar = list(title = ctitle, len = 0.9, thickness = 12)),
+          name = "blink displacement", legendgroup = "pts", showlegend = FALSE,
+          inherit = FALSE, text = sprintf("%.1f min", cvals),
+          hovertemplate = paste0(lab[[a]], " %{x:.1f} nm<br>", lab[[b]],
+                                 " %{y:.1f} nm<br>", ctitle,
+                                 " %{text}<extra></extra>"))
+      }
+
+      # The per-bin centres, projected into this panel (computed once above).
+      if (!is.null(binc)) {
+        mx <- binc$cen[, a]; my <- binc$cen[, b]; mt <- binc$t
+        keep <- is.finite(mx) & is.finite(my)
+        # add_trace, not add_paths: add_paths forces mode = "lines" and plotly
+        # then warns and re-adds markers on every call. Neither sorts by x, so
+        # the point order is preserved either way (add_LINES is the one to
+        # avoid - it sorts, and would scramble this trajectory).
+        if (sum(keep) >= 2)
+          fig <- fig %>% plotly::add_trace(
+            x = c(0, mx[keep]), y = c(0, my[keep]), xaxis = xid, yaxis = yid,
+            type = "scatter", mode = "lines+markers",
+            line = list(color = "#c03030", width = 2),
+            marker = list(size = 10, color = "#c03030", symbol = "circle"),
+            name = "geometric median per time bin",
+            legendgroup = "bin", showlegend = (i == 1), inherit = FALSE,
+            text = c("start", sprintf("%.0f min", mt[keep] / 60)),
+            hovertemplate = "%{text}<br>%{x:.1f}, %{y:.1f} nm<extra></extra>")
+      }
+
+      # Fitted drift, extended over the observed range of gaps.
+      if (!is.null(one) && is.finite(one$rate) && one$rate > 0) {
+        v <- one$velocity; tmax <- max(st$dt, na.rm = TRUE)
+        va <- v[[sub("^d", "", a)]]; vb <- v[[sub("^d", "", b)]]
+        if (is.finite(va) && is.finite(vb))
+          fig <- fig %>% plotly::add_paths(
+            x = c(0, va * tmax), y = c(0, vb * tmax), xaxis = xid, yaxis = yid,
+            line = list(color = "#2c7fb8", width = 2, dash = "dash"),
+            name = "fitted drift", legendgroup = "fit", showlegend = (i == 1),
+            hoverinfo = "skip", inherit = FALSE)
+      }
+
+      axl <- function(x0, x1, y0, y1) list(type = "line", xref = xid, yref = yid,
+        x0 = x0, x1 = x1, y0 = y0, y1 = y1, line = list(color = "rgba(0,0,0,0.35)", width = 1))
+      shapes <- c(shapes, list(axl(0, 0, -L, L), axl(-L, L, 0, 0)))
+
+      dom <- c((i - 1) * (w + gap), (i - 1) * (w + gap) + w)
+      # X yields domain to satisfy the 1:1 scale; only one axis of the pair may
+      # declare scaleanchor or plotly widens a range to resolve the loop.
+      axis_args[[if (i == 1) "xaxis" else paste0("xaxis", i)]] <- list(
+        title = paste(lab[[a]], "from first blink (nm)"), range = c(-L, L),
+        zeroline = FALSE, showgrid = FALSE, domain = dom, anchor = yid,
+        scaleanchor = yid, scaleratio = 1, constrain = "domain")
+      axis_args[[if (i == 1) "yaxis" else paste0("yaxis", i)]] <- list(
+        title = paste(lab[[b]], "(nm)"), range = c(-L, L),
+        zeroline = FALSE, showgrid = FALSE, domain = c(0, 1), anchor = xid)
+    }
+
+    do.call(plotly::layout, c(list(fig, shapes = shapes,
+      showlegend = TRUE,
+      legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.22,
+                    yanchor = "top"),
+      margin = list(t = 10, b = 90)), axis_args)) %>%
+      plotly::config(displaylogo = FALSE)
+  })
 
   output$download_prec_cloud <- downloadHandler(
     filename = function() paste0("precision_cloud_perfile_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
@@ -9397,7 +9677,8 @@ smlm_server <- function(input, output, session) {
         marker = list(color = pal[ds], size = 7, opacity = 0.7,
                       line = list(color = "white", width = 0.5)),
         text = paste0("Median cluster ", sub$cluster2, "<br>n = ", sub$n_tids,
-                      " ", if ("unit" %in% names(sub)) sub$unit else "",
+                      " ", if ("unit" %in% names(sub))
+                             ifelse(sub$unit == "molecule", "de-blinked molecules", "trace IDs") else "",
                       "<br>NN median = ", round(sub$nn_median, 1), " ± ",
                       round(if ("nn_mad" %in% names(sub)) sub$nn_mad else 0, 1), " nm",
                       "<br>time shift = ", round(sub$time_shift, 2)),
@@ -9566,7 +9847,11 @@ smlm_server <- function(input, output, session) {
                                 "Press 'Run' to compute within-cluster NN vs size."))
     res <- apply_dataset_groups(res)
     shiny::validate(shiny::need(nrow(res) > 0, "No files assigned to groups (group mode)."))
-    unit_lbl <- if (all(res$unit == "primary_cluster")) "de-blinked molecules" else "trace IDs"
+    # res$unit holds "molecule" / "tid" (written by smlm_nn_unit above). The old
+    # test compared against "primary_cluster", a name from when de-blinking was
+    # raw-point DBSCAN, so it never matched and the label always read "trace IDs"
+    # even when the panel was plotting de-blinked molecules.
+    unit_lbl <- if (all(res$unit == "molecule")) "de-blinked molecules" else "trace IDs"
     xmode    <- input$size_nn_xmode %||% "count"
 
     if (identical(xmode, "hull")) {

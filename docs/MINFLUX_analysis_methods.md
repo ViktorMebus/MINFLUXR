@@ -165,6 +165,47 @@ outlying localizations.
   within radius `r` per point (fixed-radius local density used for colouring and the acquisition
   structure/background split).
 
+#### Membership refinements (`run_cluster2_grouping`)
+
+Three optional steps run after the chosen method, in this order: **core-only → prune → min members**.
+All are off by default; ordering matters, because the member-count filter must count what survived.
+
+- **Core points only (DBSCAN\*)** — classic DBSCAN assigns *border* points: centroids within `eps` of a
+  core point but sparse themselves. A lone background centroid 199 nm from the rim of a structure is
+  therefore drawn as a member. Keeping only core points is the cluster definition of Campello et al.
+  2013, which is why HDBSCAN and OPTICS need no equivalent (the flag is ignored for them). Measured on
+  a 150 nm shell of 200 medians in 400 scattered background medians (eps 200, minPts 15): removes
+  ~50–70% of the swallowed background, **0 real members lost** across shell / blob / ring / rod / arc /
+  helix.
+- **Sparse-member prune** — graded form of the same criterion. Statistic is each member's **core
+  distance** (radius needed to reach `minPts` fellow members); baseline is the **median core distance of
+  that member's own neighbourhood**. Cutoff stays relative (`tol` × baseline; no absolute nm).
+  - *Why core distance and not distance to the centroid or to a density maximum.* Both Euclidean
+    alternatives assume a convex, roughly isotropic blob. Measured false amputation on **pure**
+    structures (every point real, tol = 2): radial-from-geometric-median removed **10.5% of a rod** and
+    2.5% of an arc; Euclidean distance to density maxima removed **17% of a ring** and 17.5% of a rod.
+    Core distance removed **0% on all six shapes**, because it asks about local density rather than
+    about position relative to a centre — and the ends of a rod or the far side of a ring are
+    legitimately far from any centre.
+  - *Why a local baseline.* The earlier implementation compared each member's mean distance to its 3
+    nearest siblings against **one median per cluster**. On a cluster with an internal density gradient
+    that global threshold is set by the densest region, so it condemned the sparser side wholesale:
+    measured over 20 scenes (dense centre + genuinely looser periphery), it dropped **32 of 189 real
+    members (17%)**, of which 10–25% were points DBSCAN itself certified as *core*. The local baseline
+    brings that to 11.4 while remaining ≈0 on homogeneous clusters.
+- **Min members per Median Cluster** — drops whole clusters below a member count. Kept separate from
+  `minPts` so the density scale and "how big is a real structure" are not the same knob. The prune
+  cannot do this job: it skips clusters with <4 members outright, and because it is scale-free a tight
+  spurious 5–15 member cluster is internally consistent and loses nothing.
+
+🟡 **These change measurements, not just the picture.** Demoted members become `cluster2 = 0` and leave
+curvature, sphere radius, R_g, alpha-shape volume and the NN-vs-size panels. Tightening membership
+shrinks measured structure size systematically — report which refinements were on.
+
+⚠️ **Identifiability limit.** No density method separates a genuinely diffuse periphery of a structure
+from background centroids; in density terms they are the same object. Every setting here is a stated
+choice about what counts as belonging, not a measurement.
+
 ### I-A.2c Localization precision cloud (QC)
 
 Pools every localization minus **its own trace centroid** and recentres at (0,0): the empirical
@@ -309,6 +350,155 @@ MINFLUX z is multiplied by a refractive-index mismatch correction. This is a **p
   coefficients (c_l = (λ₁−λ₂)/Σλ, c_p = 2(λ₂−λ₃)/Σλ, c_s = 3λ₃/Σλ) and the **Rudnick–Gaspari asphericity**
   — used to *infer* cluster shape (linear filament vs planar vs isotropic) without the user declaring it.
 
+### I-A.6b Per-structure geometry table (`estimate_cluster2_curvature` / export)
+
+One row per Median Cluster. **Members are de-blinked molecules when de-blinking has run, else trace
+IDs** (`cluster2_member_col()`, the same rule as `smlm_nn_unit()`), each reduced to its median
+position first. The exported table reports `n_traces` (blinking events), `n_molecules` (NA when
+de-blinking is off) and `n_members` (the unit the geometry actually used) separately, plus
+`member_unit`, so a count can never be mistaken for the measurement basis.
+
+- **Curvature is MEAN curvature H = 1/R in nm⁻¹**, one convention app-wide. The metrics overlay
+  previously reported 1/R² (Gaussian curvature for a sphere) while this table reported 1/R — the same
+  word for two quantities. 🟡 For a fitted sphere both are one-to-one functions of `sphere_radius` and
+  carry **no information beyond it**; the column exists because bending is conventionally quoted this way.
+- **Removed: `curvature`, `curvature_deg`, `sphere_curvature_deg`.** The first two were λ₃/Σλ, the
+  variance fraction on the smallest principal axis — a **planarity** index (the Westin anisotropy
+  family, ref. 52), not curvature. Measured: R = 50, 150 and 500 nm shells all scored ≈0.30, so it
+  could not separate a small vesicle from a large one; a flat disc (0.0002) and a rod (0.0010) both
+  scored ≈0, so it could not separate a plane from a line. `asin(√·)` in degrees had no geometric
+  meaning, and `sphere_curvature_deg` was that identical formula under a name implying the sphere fit.
+- **`volume` + `volume_alpha` (`cluster_alpha_volume`).** Alpha is a probe radius, so a value below the
+  members' own spacing returns an *empty* shape. The previous hardcoded `alpha = 10` did exactly that:
+  measured **0 for every closed structure tested**, including a 150 nm shell whose members sat 18.5 nm
+  apart (that shell needs α ≈ 170 nm). Alpha is now walked up a ladder built from the group's own
+  median NN spacing, taking the smallest radius that is both **one connected component** and
+  **watertight**, and the radius used is reported alongside.
+  - *Recovery against known truth:* hollow shells at R = 50/150/500 nm → **95.9 / 96.0 / 96.1%**.
+  - *Connectivity alone is not sufficient for solid structures*: a uniformly filled R=150 ball gave
+    21.5% (and **worse with more points** — 14.3% at n=1500, since denser sampling connects at a
+    smaller α); adding the watertight test gives 75.0% and 83.8%.
+  - *Three tests, not two.* Connectivity + watertightness alone admit a **degenerate sliver**:
+    `components_ashape3d()` reports connectivity of *points*, and a closed-mesh test accepts any closed
+    sub-mesh, so a single tetrahedron spanning 4 of the members passes both. Observed on a real
+    31-member shell — α = 100.4 gave a 4-triangle shape and a volume of **3,155 nm³** where the correct
+    rung (α = 150.5, 58 triangles) gave **10,629,935**. A containment test (`inashape3d`: every member
+    must lie in the shape) is the third condition; it works for hollow and solid alike, where a
+    "fraction of points on the boundary" rule would not.
+  - 🟡 *Strong downward bias at low member counts.* Alpha shapes interpolate between sampled points with
+    flat facets, so they under-fill a curved surface and the deficit grows as sampling thins. Measured
+    on a true R=150 shell (median of 25 draws): **29.9% of truth at n=10, 44.4% at n=15, 54.6% at n=20,
+    67.6% at n=31, 78.8% at n=50, 86.2% at n=80, 92.3% at n=150, 96.0% at n=300.** Below ~20 members the
+    number is not usable as a volume. Read `volume` against `n_members`, always.
+  - 🟡 *What the number is:* for a hollow structure this is the volume **enclosed by** the labels once
+    α bridges them — the compartment they bound, not the volume of labelled material. It grows with α,
+    so `volume` and `volume_alpha` must be reported together.
+- 🟡 **Small-N bias in `sphere_radius`.** The geometric-median centre is fit to the same points the
+  radius is measured from, so it is biased low on few members: measured on a true R=150 shell,
+  **147.4 nm at n=40**, 149.1 at n=100, 149.7 at n=300, 149.9 at n=1000 (−1.7% to −0.1%). Same family
+  as the R_g small-N bias (§I-A.6); not corrected, since the magnitude is well under the labelling
+  uncertainty.
+
+#### Eccentricity (Ecc1/Ecc2/Ecc3 in the metrics overlay)
+
+Half-ranges `d ≥ e ≥ f` are taken along PC1/PC2/PC3, and each Ecc is the 2-D ellipse eccentricity of one
+principal cross-section: **Ecc1 = PC1 vs PC2, Ecc2 = PC1 vs PC3, Ecc3 = PC2 vs PC3**.
+
+- **Ecc3 = 0 is the correct answer for a prolate structure**, not a failure. It is `√(1−(f/e)²)`, which
+  is zero exactly when the two *smaller* axes are equal — i.e. the structure is rotationally symmetric
+  about its long axis (a cigar, a rod, a spherocylinder). Verified: a built 400:150:150 prolate gives
+  Ecc1 = Ecc2 = 0.930 and Ecc3 = 0.057; a genuinely triaxial 400:250:100 gives Ecc3 = 0.915 against a
+  truth of 0.917, and recovered axis ratios track the built ones (1.00 : 0.64 : 0.25 vs 1.00 : 0.62 : 0.25).
+  Ecc3 ≈ 0 while Ecc1, Ecc2 > 0 therefore *reports* that only one axis is distinct.
+- ⚠️ **Eccentricity has a large small-N floor and is biased away from zero.** PCA assigns axes by
+  *sample* variance, so the largest sampled direction always becomes PC1 and the smallest PC3 — the
+  ordering itself manufactures apparent elongation. Measured on a **true sphere** (all axes equal, truth
+  0.000), median over 400 draws:
+
+    | members | Ecc1 | Ecc2 | Ecc3 |
+    |---|---|---|---|
+    | 10 | 0.538 | 0.806 | 0.691 |
+    | 20 | 0.424 | 0.666 | 0.563 |
+    | 40 | 0.335 | 0.526 | 0.417 |
+    | 80 | 0.267 | 0.414 | 0.339 |
+    | 200 | 0.227 | 0.336 | 0.247 |
+    | 500 | 0.179 | 0.267 | 0.203 |
+    | 2000 | 0.122 | 0.184 | 0.135 |
+
+  A sphere with 40 members reports Ecc2 ≈ 0.53. **An eccentricity is evidence of elongation only if it
+  clearly exceeds the row for its own member count.** No null is computed in-app; compare by hand.
+
+### I-A.6c Median-cluster isosurface (`cluster_density_field`)
+
+A **Gaussian KDE over the member centroids**, contoured at the level enclosing a stated fraction of the
+labelling density. Its job is visual — wrapping a structure so it reads as an object rather than a point
+cloud — but the field it wraps is now a density, so the envelope follows the labelling.
+
+- **Members, not localizations.** Single-colour uses the cluster2 member centroids; two-colour now uses
+  de-blinked molecule centroids per channel (`cluster_tc1`, else trace medians). The tc2 block
+  previously built its field from **raw localizations**, so one long trace contributed hundreds of
+  points and dominated the density — the envelope tracked trace length rather than labelling. Measured
+  on a synthetic 2-colour set: 3000 raw localizations where there were 31 molecules.
+- **Level is calibrated to a surface offset in nanometres** — "how far outside the member centroids the
+  skin sits". Probe points on spheres of radius `offset` around the members are evaluated in the field,
+  and the median over probes that genuinely sit at that distance is the contour. Measured on an R=150
+  shell with 200 members (spacing 18 nm), the drawn skin reaches: asked 10 → 7.7 nm median / 11.8 nm
+  90th; 20 → 15.7 / 21.6; 30 → 24.6 / 32.5. So the surface *reaches* about the requested offset, with
+  its typical distance a little inside that.
+  - *Why not an enclosed-density fraction* (the first version of this): a Gaussian spreads mass over
+    ~3σ in every direction, so even "enclose 50% of the density" — the lowest the slider allowed — put
+    the skin **56.4 nm out (max 128.5)** on a 40-member shell, and 0.85 put it 108.7 nm out. A mass
+    fraction cannot express "hug the points"; a distance can.
+  - *Why not a fraction of the peak*: it collapses before it tightens — on the same shell, peak
+    fraction 0.4 → 681 voxels, 0.6 → 122, 0.8 → 16, i.e. the surface shatters into fragments.
+  - *Why the level is measured off-grid*: reading it from voxels lets the box size leak into the
+    surface. One far-flung member stretches the bounding box, voxels coarsen, the sampling band widens
+    to tens of nm, and the level drops far enough to re-draw the isolated straggler the density field
+    exists to suppress. The probe set is a deterministic Fibonacci sphere with members cycled, so a
+    redraw cannot jitter the surface and the global RNG stream is never touched.
+- **Default wrap = 2 × the structure's own median member spacing**, and **σ = max(0.5 × wrap, spacing)**.
+  Both numbers come from a fragmentation sweep, not taste. The enclosed region must be ONE connected
+  blob to read as a surface; counting connected components on a 250-member R=150 shell (spacing 15.2 nm):
+
+    | wrap | blobs (σ = 0.5 … 2× spacing) |
+    |---|---|
+    | 1.0× spacing | 31, 31, 21, 9, 5 |
+    | 1.5× | 1, 2, 3, 3, 2 |
+    | 2.0× | 1, 1, 1, 2, 1 |
+    | 2.5–3.0× | all 1 |
+
+  Repeated over 12 independent draws, **2.0× gave one blob in 12/12 at both n=100 and n=250, while
+  1.5× managed it in only 33%**. At one spacing the balls around neighbouring members barely touch, so
+  it never closes. σ ≈ 1 × spacing also minimises skin roughness (sd/mean of the outer radius: 0.028 at
+  σ = 1× vs 0.069 at 0.5× for a 2.5× wrap).
+- **One dial: padding (nm)**, added to (or, negative, subtracted from) the wrap — the coarser/tighter
+  control. Bandwidth and grid extent are derived from it, so no second knob can fight the first. The
+  box is sized to members + (wrap + 2σ) and is not a user setting: when padding was a separate box
+  control it both overrode a request for a tight box (forced to 3σ — 325 nm where the user asked for 0)
+  and leaked into the contour.
+- 🟡 **Sparse structures cannot be wrapped tightly.** The wrap follows member spacing, so a 40-member
+  shell wraps at ~82 nm while a 600-member one wraps at ~20 nm. Negative padding past about −10 nm
+  fragments the surface (22–25 blobs at −40/−20) — that is the sampling, not the renderer.
+- 🟡 **An isolated member still draws a small speck.** A lone member peaks at ~1 kernel while the
+  contour sits below that (0.41 kernels at the defaults), so it is drawn — but as **6 voxels, 0.19% of
+  the drawn volume**, reaching 21.6 nm against the structure's 32.7 nm skin. Under the old distance
+  transform its bubble was the *same size* as the structure's rim. Suppression is a consequence of how
+  tight the wrap is, not a guarantee; remove stragglers upstream with core-only / prune / min members
+  (§I-A.2b) if they must not appear at all.
+
+**What this replaced.** The field was `exp(−d²/2σ²)` on the distance to the **single nearest** member — a
+distance transform, not a density: a probe 60 nm from a lone isolated centroid and one 60 nm from a
+centroid with 30 neighbours both scored 0.9231, so every straggler grew its own detached bubble the same
+size as the real structure's rim. Under the KDE the same two probes now differ **5×** and the isolated
+member falls below the drawn level. The level was also `quantile(val, q)` over grid voxels; since `val`
+was monotone in `d`, quantiles commuted with it and **σ cancelled exactly** (σ = 10 nm and σ = 1000 nm
+gave a bit-identical voxel set), while view padding set the surface offset (**19.7 nm at pad 0 → 230.3 nm
+at pad 400**).
+
+🟡 **Still a visualization, not a density estimate.** The kernel is unnormalised and the mass integral is
+a voxel sum on a coarse grid, so the field is not in localizations/nm³ and the enclosed fraction is
+accurate only to the grid resolution. Use the Ripley/PCF panels for density statistics.
+
 ### I-A.7 Cluster shape fitting (3D viewer) — [Part II §6.5, 🟠 EXPLORATORY]
 - **Dictionary:** sphere, ellipsoid, helix, ring, arc. Each is fit by **orthogonal-distance MLE**
   (minimise Σ of squared point-to-surface distances). The ellipsoid projection solves the exact
@@ -323,6 +513,32 @@ MINFLUX z is multiplied by a refractive-index mismatch correction. This is a **p
   rather than the structure. The 2D view is a PCA projection onto PC1×PC2 (Pearson 1901).
 - **Why exploratory:** the shape is imposed by the dictionary and "best" is a model-selection outcome, not
   proof of biology; with few blink-inflated points several shapes are statistically indistinguishable.
+- **Centre estimate — geometric median (Weiszfeld 1937).** `geometric_median()` returns the point
+  minimising Σ‖pᵢ − m‖ (the L1 / spatial median), used by every `fit_*_geometry` heuristic and as the
+  MLE starting centre (`robust_center`). It replaced the **convex-hull surface centroid**, which is
+  defined entirely by the extreme points and therefore has breakdown 0 — one loosely-attached member
+  moves it. The geometric median has breakdown 0.5, and unlike a coordinate-wise `median(x), median(y),
+  median(z)` it is **rotation-equivariant** (verified to 1e-7 nm; the per-axis median deviated 1.3 nm on
+  the same anisotropic cloud), which matters because these centres are handed to `prcomp()` to define
+  ring normals and ellipsoid axes.
+  - *Measured, 150 nm shell of 200 medians, reported sphere radius against a truth of 150 nm:*
+
+    | | geometric median | hull centroid |
+    |---|---|---|
+    | clean | 149.4 | 150.0 |
+    | + 1 stray member | 149.4 | **188.9** |
+    | + 5% stray members | 150.1 | **266.7** |
+
+  - 🟡 *Honest trade-off:* on a **clean, complete, well-sampled hollow shell** the hull centroid is the
+    more accurate centre (0.5 nm vs 13.7 nm error at n=200) — surface points suit an area-weighted
+    surface centroid, while the geometric median carries ~R/√n sampling noise. That centre error enters
+    the radius only at second order (d²/2R ≈ 0.6 nm), which is why the clean column above is unchanged,
+    so the trade is ~0.4% of radius accuracy against the 26–78% failure a single stray member caused.
+  - ⚠️ *Not a centre of curvature.* For partially-labelled structures (a cap of a vesicle, an arc of a
+    ring) no centre-of-the-points statistic recovers the geometric centre — measured on a half-shell,
+    geometric median 86.5 nm and hull centroid 52.5 nm from truth, i.e. both sit inside the observed
+    cap. Use the MLE pathway, which optimises the centre against the shape model, when the centre is
+    itself the measurement.
 - **Photon (`eco`) weighting — implemented, `viewer_weight_eco`, default on.** The unweighted fit assumes
   **iid isotropic Gaussian** residuals with a single σ̂, but MINFLUX precision scales as 1/photons. A
   trace centroid averages that trace's localizations, so its variance goes as 1/Σ`eco` — meaning the
@@ -1154,8 +1370,18 @@ footprint).
 - **Applies to the *structural* tier only** (`cluster2`). De-blinking is a different method with a
   different provenance — see §6.1b.
 - **Fit:** density-based clustering is well-adapted to SMLM and widely used; DBSCAN in particular is a
-  community standard. MINFLUX's fine precision *helps*. The only caveat is §6.0 (feed de-blinked
+  community standard. MINFLUX's fine precision *helps*. The main caveat is §6.0 (feed de-blinked
   medians, tune `eps2` to the structure scale, not the label footprint).
+- **Membership refinements** (core-only / prune / min members, §I-A.2b) — the core-only option is
+  literature-backed (Campello et al. 2013 define clusters on core points precisely to avoid DBSCAN's
+  border-point assignment, which is also order-dependent when two clusters reach the same border
+  point). The **core-distance prune with a local baseline is tool-original** 🟡 and validated *in
+  silico* only: 0% false amputation across six structure geometries against 10.5–17.5% for the
+  Euclidean radial/mode-distance alternatives, and 11.4 vs 32.4 real members lost against the previous
+  global-median rule on gradient clusters. The min-members filter is a plain size threshold, not a test.
+- ⚠️ **Not resolvable by any of these:** separating a genuinely diffuse periphery of a structure from
+  background centroids. Density-based clustering has no information distinguishing them. Refinement
+  settings are declared choices; state them alongside any cluster count or structure size.
 
 ### 6.1b De-blinking (merging re-blinks) — 🟡 AMBER (tool-original, in-silico validated)
 - **Source:** none directly. The *problem* is standard (Annibale et al. 2011 established blink-merging
@@ -1364,14 +1590,15 @@ footprint).
 
 | Tool | Source | Rating |
 |---|---|---|
-| NN / median clustering (DBSCAN / HDBSCAN / OPTICS) | Clark & Evans 1954; Ester 1996; Ankerst 1999; Campello 2013 | 🟢 (feed de-blinked medians) |
+| NN / median clustering (DBSCAN / HDBSCAN / OPTICS) | Clark & Evans 1954; Ester 1996; Ankerst 1999; Campello 2013 (also the core-only option) | 🟢 (feed de-blinked medians) |
+| Median-cluster membership prune (core distance, local baseline) | this tool (in-silico validated) | 🟡 tool-original |
 | De-blinking (centroid / majority vote) | tool-original; problem framing after Annibale 2011 | 🟡 threshold assumption (§6.1b) |
 | Traces per cluster | Annibale 2011; Sengupta 2011 | 🟡 blinking (not stoichiometry) |
 | Ripley L / L₁₂ / PCF g₁₂ | Ripley 1977; Besag 1977; Lotwick & Silverman 1982; Dixon 2002; Sengupta 2011; Veatch 2012 | 🟢 / 🟡 labelling + registration |
 | Cross-channel NN & co-loc curve | Clark & Evans 1954; Dixon 2002; Lachmanovich 2003; Dunn 2011 | 🟢 (no null of its own) |
 | Radius of gyration / anisotropy | Rudnick & Gaspari 1986; Westin 1997/2002 | 🟢 |
 | KDE + Pearson co-loc | Silverman 1986; Dunn 2011 (*not* the Costes 2004 algorithm — see §6.4) | 🟡 bandwidth |
-| Shape fitting | Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989; Pearson 1901 | 🟠 exploratory |
+| Shape fitting | Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989; Pearson 1901; Weiszfeld 1937 (centre) | 🟠 exploratory |
 | GT estimate & structure size | this tool (in-silico validated); Prim 1957 | 🟠 exploratory |
 | Detection-time / crowding / NN-vs-size | this tool; Cleveland 1979; Barber 1996 | 🟠 exploratory |
 
@@ -1441,6 +1668,7 @@ footprint).
 56. Cleveland WS (1979). *Robust locally weighted regression and smoothing scatterplots* (loess). J. Am. Stat. Assoc. 74(368):829–836. doi:10.1080/01621459.1979.10481038
 57. Barber CB, Dobkin DP, Huhdanpaa H (1996). *The quickhull algorithm for convex hulls.* ACM Trans. Math. Softw. 22(4):469–483. doi:10.1145/235815.235821 *(Qhull, via `geometry::convhulln` — the convex-hull cluster-size option)*
 58. Pearson K (1901). *On lines and planes of closest fit to systems of points in space* (PCA). Philosophical Magazine 2(11):559–572. doi:10.1080/14786440109462720
+59. Weiszfeld E (1937). *Sur le point pour lequel la somme des distances de n points donnés est minimum.* Tôhoku Math. J. 43:355–386. *(the geometric-median iteration used by `geometric_median()`; see Vardi & Zhang 2000, PNAS 97(4):1423–1426, for the modern convergence treatment)*
 
 **Reviews**
 22. Saxton MJ, Jacobson K (1997). *Single-Particle Tracking: Applications to Membrane Dynamics.* Annu. Rev. Biophys. Biomol. Struct. 26:373–399. doi:10.1146/annurev.biophys.26.1.373

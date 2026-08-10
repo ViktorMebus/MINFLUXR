@@ -50,6 +50,7 @@
 ##   4. CLUSTERING
 ##      apply_clustering_pipeline ...... THE main entry point (primary + cluster2)
 ##      run_cluster2_grouping, .cluster2_core, .prune_sparse_members
+##      (membership refinements: core-only / core-distance prune / min members)
 ##      apply_two_color_clustering_pipeline
 ##
 ##   5. NEAREST NEIGHBOUR
@@ -1653,6 +1654,66 @@ cov_ellipse_params <- function(S, k = 1) {
   )
 }
 
+# =============================================================================
+# geometric_median() - A ROBUST CENTRE THAT DOES NOT DEPEND ON THE AXES
+# =============================================================================
+#
+# GOAL
+#   The point minimising the sum of DISTANCES to a set of points, found by
+#   Weiszfeld iteration. Used to summarise a cloud of displacement vectors where
+#   the answer is a direction, so the estimator must not care how x and y happen
+#   to be oriented.
+#
+# WHY NOT A PER-AXIS MEDIAN
+#   Taking median(x) and median(y) separately is NOT rotation-equivariant:
+#   rotate the frame, take the medians, rotate back, and you get a different
+#   vector. Measured on displacement clouds like the drift plot's, that
+#   disagreement reaches 6.8 nm - which for a plot whose entire content is a
+#   DIRECTION means the arrow would depend on the microscope's axis convention.
+#   The mean and the geometric median are both exactly equivariant (0.000 nm).
+#
+# WHY NOT THE MEAN
+#   The mean has no breakdown point. On these clouds the contamination is real:
+#   a "molecule" can hold two genuinely different fluorophores, which puts a
+#   displacement of tens of nm into an otherwise ~10 nm cloud. Measured RMSE
+#   against a known 10 nm shift, jitter sd 12 nm, n = 20 per bin:
+#
+#     contamination        mean    per-axis median   geometric median
+#     none                 4.55        5.69              4.95
+#     10% wrong molecule   5.70        6.01              5.54
+#     25% wrong molecule   7.59        6.81              6.07
+#     10% gross outliers  15.65        6.08              5.60
+#
+#   The geometric median is best or tied everywhere contamination exists and
+#   costs ~9% efficiency when there is none, which is the right trade for a
+#   panel whose whole purpose is judging a real sample.
+#
+# ARGUMENTS
+#   M    : matrix, one row per point
+#   iter : maximum Weiszfeld iterations
+#   tol  : stop when the estimate moves less than this
+#
+# RETURNS  numeric vector of length ncol(M); the mean for degenerate input.
+# =============================================================================
+geometric_median <- function(M, iter = 200L, tol = 1e-9) {
+  if (!is.matrix(M)) M <- as.matrix(M)
+  M <- M[stats::complete.cases(M), , drop = FALSE]
+  if (!nrow(M)) return(rep(NA_real_, ncol(M)))
+  if (nrow(M) <= 2L) return(colMeans(M))
+  y <- colMeans(M)
+  for (k in seq_len(iter)) {
+    d <- sqrt(rowSums(sweep(M, 2L, y)^2))
+    # A point sitting exactly on the current estimate would divide by zero; the
+    # floor keeps the step finite and costs nothing at these scales.
+    d[d < 1e-12] <- 1e-12
+    y2 <- colSums(M / d) / sum(1 / d)
+    if (!all(is.finite(y2))) return(colMeans(M))
+    if (sqrt(sum((y2 - y)^2)) < tol) return(y2)
+    y <- y2
+  }
+  y
+}
+
 # GOAL: the outline of a rotated ellipse as plain x/y vectors.
 # Drawn as a TRACE rather than a layout shape: a shape cannot be switched off
 # from the legend, and these rings are exactly what a reader wants to toggle.
@@ -2658,15 +2719,15 @@ build_center_args <- function(X, input) {
 }
 # ---------- MLE helpers (orthogonal-distance) ----------
 # (A) Sphere
-# Robust center helper (fallback to geometric median if hull fails)
-# --- Robust center guess (hull centroid -> geometric median -> mean) ---
+# --- Robust center guess (geometric median -> mean) ---
+# Starting centre for the MLE fits, via build_center_args(). Was the convex-hull
+# centroid, which is set by the extreme points (breakdown 0); geometric_median()
+# has breakdown 0.5, so a loosely-attached member no longer drags the start.
+# The MLE optimises the centre from here, so this changes where the search
+# begins, not what it converges to - except where the old start was pulled far
+# enough out to find a different local optimum.
 robust_center <- function(X) {
-  tryCatch(
-    compute_convex_hull_centroid(X),
-    error = function(e1) {
-      tryCatch(as.numeric(Gmedian::Gmedian(X)), error = function(e2) colMeans(X))
-    }
-  )
+  tryCatch(geometric_median(X), error = function(e) colMeans(X))
 }
 # =============================================================================
 # SHAPE FITTING - fit a geometric primitive to a cluster of localizations
@@ -3722,15 +3783,77 @@ spread_from_group <- function(x, y, z) {
   sqrt(mean((x - mx)^2 + (y - my)^2 + (z - mz)^2, na.rm = TRUE))
 }
 
+# =============================================================================
+# geometric_median() - ROBUST MULTIVARIATE CENTRE (WEISZFELD)
+# =============================================================================
+#
+# GOAL
+#   Return the point m minimising the SUM OF EUCLIDEAN DISTANCES to every row of
+#   `pts` (the L1 / spatial median). This is the centre used by the heuristic
+#   shape fits and as the MLE starting centre.
+#
+# WHY NOT THE CONVEX-HULL CENTROID (what these fits used before)
+#   compute_convex_hull_centroid() is an area-weighted centroid of the hull
+#   SURFACE, so it is defined entirely by the extreme points: one stray member
+#   drags it, i.e. its breakdown point is 0. The geometric median has breakdown
+#   0.5 - half the members must be corrupted before it can be moved without
+#   bound - which is what we want on MINFLUX clusters that may still carry a
+#   loosely-attached trace or two.
+#
+# WHY NOT A COORDINATE-WISE median(x), median(y), median(z)
+#   That is not rotation-equivariant: rotate the structure and the centre moves
+#   relative to it. Since these centres are handed to prcomp() to define ring
+#   normals and ellipsoid axes, the centre must rotate WITH the data. The
+#   geometric median does; the per-axis median does not.
+#
+# WHAT THIS IS NOT
+#   It is a centre OF THE POINTS, not a centre of curvature. When a structure is
+#   only partially labelled (a cap of a vesicle, an arc of a ring) no
+#   centre-of-the-points statistic recovers the sphere/ring centre - the
+#   geometric median then sits inside the observed patch. Use the MLE pathway
+#   (mle_fit_*, which optimises the centre itself) when the centre is the
+#   measurement; this is a robust starting point and a heuristic answer.
+#
+# ALGORITHM
+#   Weiszfeld (1937) fixed-point iteration
+#       m <- SUM_i (p_i / d_i) / SUM_i (1 / d_i),    d_i = ||p_i - m||
+#   started from the coordinate-wise median (already robust, so it lands close
+#   and converges in a handful of steps). The classic degeneracy is d_i = 0 when
+#   an iterate comes to rest exactly on a data point; d_i is floored at `eps_d`
+#   so the weight stays finite.
+#
+#   Deterministic and exact for the small member counts here (tens to hundreds),
+#   which is why this is used rather than Gmedian::Gmedian - that is a stochastic
+#   averaged-gradient estimator built for large n.
+geometric_median <- function(pts, max_iter = 200L, tol = 1e-7, eps_d = 1e-9) {
+  if (is.null(pts)) return(NULL)
+  if (!is.matrix(pts)) pts <- as.matrix(pts)
+  pts <- pts[stats::complete.cases(pts), , drop = FALSE]   # a partial row has no position
+  n <- nrow(pts)
+  if (n == 0L) return(rep(NA_real_, ncol(pts)))
+  if (n <= 2L) return(colMeans(pts))       # 1 point is its own median; for 2 the
+                                           # whole segment is optimal - take the midpoint
+  m <- apply(pts, 2, stats::median)        # robust starting point
+  for (i in seq_len(max_iter)) {
+    d <- sqrt(rowSums(sweep(pts, 2, m)^2))
+    d[d < eps_d] <- eps_d                  # iterate sitting on a data point
+    w <- 1 / d
+    m_new <- colSums(pts * w) / sum(w)
+    if (max(abs(m_new - m)) < tol) { m <- m_new; break }
+    m <- m_new
+  }
+  unname(m)
+}
+
 fit_sphere_geometry <- function(coords_matrix) {
-  center <- tryCatch(compute_convex_hull_centroid(coords_matrix), error = function(e) colMeans(coords_matrix))
+  center <- tryCatch(geometric_median(coords_matrix), error = function(e) colMeans(coords_matrix))
   r      <- stats::median(sqrt(rowSums(sweep(coords_matrix, 2, center)^2)))
   list(center = center, radius = r)
 }
 
 fit_ellipsoid_geometry <- function(coords_matrix) {
-  center <- tryCatch(compute_convex_hull_centroid(coords_matrix), error = function(e) colMeans(coords_matrix))
-  Xc     <- sweep(coords_matrix, 2, center)   # center at hull centroid before PCA so axes are aligned to ellipsoid center
+  center <- tryCatch(geometric_median(coords_matrix), error = function(e) colMeans(coords_matrix))
+  Xc     <- sweep(coords_matrix, 2, center)   # center before PCA so axes are aligned to the ellipsoid center
   pca    <- prcomp(Xc, center = FALSE, scale. = FALSE)
   rot    <- Xc %*% pca$rotation
   d <- diff(stats::quantile(rot[, 1], c(0.05, 0.95))) / 2
@@ -3743,7 +3866,7 @@ fit_ellipsoid_geometry <- function(coords_matrix) {
 }
 
 fit_helix_geometry <- function(coords_matrix, turns = 3, n_points = 5000) {
-  center <- colMeans(coords_matrix)
+  center <- tryCatch(geometric_median(coords_matrix), error = function(e) colMeans(coords_matrix))
   Xc     <- sweep(coords_matrix, 2, center)
   pca    <- prcomp(Xc, center = FALSE)
   a1 <- pca$rotation[, 1]; a2 <- pca$rotation[, 2]
@@ -3775,7 +3898,7 @@ fit_helix_geometry <- function(coords_matrix, turns = 3, n_points = 5000) {
 }
 
 fit_ring_geometry <- function(coords_matrix) {
-  center <- tryCatch(compute_convex_hull_centroid(coords_matrix),
+  center <- tryCatch(geometric_median(coords_matrix),
                      error = function(e) colMeans(coords_matrix))
   Xc     <- sweep(coords_matrix, 2, center)
   pca    <- prcomp(Xc, center = FALSE)
@@ -4328,7 +4451,13 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     
     distances <- sqrt(rowSums((coords_matrix - matrix(center, nrow = nrow(coords_matrix), ncol = 3, byrow = TRUE))^2))
     radius <- median(distances)
-    curvature <- if (radius > 0) 1 / radius^2 else NA
+    # ONE curvature convention app-wide: MEAN curvature H = 1/R (nm^-1), the
+    # quantity membrane-bending work is expressed in. This used to be 1/R^2 here
+    # (Gaussian curvature K for a sphere) while estimate_cluster2_curvature()
+    # reported 1/R, so the same word meant two different things in one codebase.
+    # For a fitted sphere both are just reparametrisations of `radius` and carry
+    # no information beyond it.
+    mean_curvature <- if (radius > 0) 1 / radius else NA
     sphere_area <- if (!is.na(radius) && radius > 0) 4 * pi * radius^2 else NA
     sphere_volume <- if (!is.na(radius) && radius > 0) (4/3) * pi * radius^3 else NA
     
@@ -4358,6 +4487,19 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     # ecc2: major (PC1) vs minor (PC3) plane.
     # ecc3: intermediate (PC2) vs minor (PC3) plane.
     # All three are needed to fully characterise a general 3-D ellipsoid.
+    #
+    # ecc3 == 0 IS A RESULT, NOT A FAILURE: it is zero exactly when the two
+    # SMALLER axes are equal, i.e. the structure is rotationally symmetric about
+    # its long axis (rod / cigar / spherocylinder). Verified against built
+    # shapes: prolate 400:150:150 -> ecc1 = ecc2 = 0.930, ecc3 = 0.057;
+    # triaxial 400:250:100 -> ecc3 = 0.915 against a truth of 0.917.
+    #
+    # CAVEAT (see docs I-A.6b): PCA orders axes by SAMPLE variance, so the
+    # largest sampled direction always becomes PC1 - the ordering manufactures
+    # apparent elongation. On a TRUE SPHERE the median reported ecc2 is 0.81 at
+    # 10 members, 0.53 at 40, 0.34 at 200, 0.18 at 2000. These numbers are only
+    # evidence of elongation when they clearly exceed that floor for the
+    # cluster's own member count.
     ecc1 <- if (is.finite(d) && d > 1e-6) sqrt(max(0, 1 - (e/d)^2)) else NA_real_
     ecc2 <- if (is.finite(d) && d > 1e-6) sqrt(max(0, 1 - (f/d)^2)) else NA_real_
     ecc3 <- if (is.finite(e) && e > 1e-6) sqrt(max(0, 1 - (f/e)^2)) else NA_real_
@@ -4599,7 +4741,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     result_table <- rbind(result_table, data.frame(
       cluster2 = cluster_id,
       center_x = center[1], center_y = center[2], center_z = center[3],
-      radius = radius, curvature = curvature,
+      radius = radius, mean_curvature_inv_nm = mean_curvature,
       surface_area_convex_hull = surface_area,
       surface_area_sphere = sphere_area,
       surface_area_ellipsoid = ellipsoid_area,
@@ -4641,7 +4783,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
         ", Radius=", fmt(radius, 2),
         ", Sphere Area=", fmt(sphere_area, 2),
         ", Sphere Vol=", fmt(sphere_volume, 2),
-        ", Curv=", ifelse(is.na(curvature), "NA", signif(curvature, 3))
+        ", Mean curv=", ifelse(is.na(mean_curvature), "NA", paste0(signif(mean_curvature, 3), " nm^-1"))
       ),
       "ellipsoid" = paste0(
         ", Ellipticity=", fmt(ellipticity, 2),
@@ -4747,73 +4889,442 @@ create_global_surface <- function(df, grid_n = 120, span = 0.25) {
   )
 }
 
-# Helper: Estimate curvature and volume for cluster2 using medians
-estimate_cluster2_curvature <- function(df) {
-  df %>%
-    filter(!is.na(cluster2) & cluster2 != 0) %>%
-    group_by(cluster2) %>%
-    group_modify(~{
-      df_medians <- .x %>%
-        group_by(tid) %>%
-        summarize(x = median(x), y = median(y), z = median(z), .groups = "drop")
-      coords <- as.matrix(df_medians[, c("x", "y", "z")])
-      
-      if (nrow(coords) >= 5) {
-        pca <- prcomp(coords, scale. = FALSE)
-        eigen_vals <- pca$sdev^2
-        curvature_index <- eigen_vals[3] / sum(eigen_vals)
-        curvature_deg <- asin(sqrt(curvature_index)) * (180 / pi)
-        
-        vol <- tryCatch({
-          ashape <- alphashape3d::ashape3d(coords, alpha = 10)
-          alphashape3d::volume_ashape3d(ashape)
-        }, error = function(e) NA)
-        
-        # fit_sphere_geometry: hull centroid + median orthogonal radius.
-        # Consistent with the main pipeline (same centre definition as
-        # the heuristic sphere fit shown in the 3-D viewer).
-        sphere_geo    <- fit_sphere_geometry(coords)
-        radius        <- sphere_geo$radius
-        sphere_curvature <- if (is.finite(radius) && radius > 0) 1 / radius else NA
-        sphere_deg    <- if (is.finite(radius)) asin(min(1, sqrt(curvature_index))) * (180 / pi) else NA
-        
+# =============================================================================
+# cluster2_member_col() - WHICH UNIT IS A "MEMBER" OF A MEDIAN CLUSTER
+# =============================================================================
+#
+# GOAL
+#   One rule, shared by every per-structure statistic: a member is a DE-BLINKED
+#   MOLECULE when de-blinking has run, otherwise a TRACE ID.
+#
+# WHY IT MATTERS
+#   A trace ID is one blinking event. One fluorophore commonly emits several, so
+#   counting trace IDs counts blinks, not molecules, and a structure's measured
+#   composition then moves with photophysics rather than with biology. This
+#   mirrors the server-side smlm_nn_unit() used by the Crowding and
+#   NN-vs-size panels, so all per-structure numbers agree on the unit.
+cluster2_member_col <- function(df, member_col = NULL) {
+  if (!is.null(member_col)) return(member_col)
+  if ("cluster" %in% names(df) && any(!is.na(df$cluster) & df$cluster > 0L)) "cluster" else "tid"
+}
+
+# =============================================================================
+# cluster_density_field() - GAUSSIAN KDE OVER A VOXEL GRID + A DENSITY LEVEL
+#                           THAT ENCLOSES A STATED FRACTION OF THE LABELLING
+# =============================================================================
+#
+# GOAL
+#   Give the 3-D viewer a smooth envelope to wrap a Median Cluster in, built
+#   from a field that actually responds to how dense the labelling is.
+#
+# WHAT IT REPLACED, AND WHY THAT MATTERED
+#   The isosurface used to score each voxel by its distance to the SINGLE
+#   NEAREST member: val = exp(-d^2 / 2 sigma^2). That is a distance transform,
+#   not a density - measured, a probe 60 nm from a lone isolated centroid and a
+#   probe 60 nm from a centroid with 30 neighbours within 200 nm both scored
+#   0.9231, identical. Visually that means every straggler grows its own
+#   detached bubble of exactly the same size as the real structure's rim, which
+#   is both misleading and ugly. Summing a kernel over ALL members instead makes
+#   the field proportional to local labelling density, so the body of the
+#   structure dominates and isolated members fade out.
+#
+# THE LEVEL IS CALIBRATED TO A SURFACE OFFSET IN NANOMETRES
+#   `offset` = "how far outside the member centroids should the skin sit". The
+#   level is read off the field at that distance: voxels whose nearest-member
+#   distance falls in a band around `offset` vote, and their MEDIAN value is the
+#   contour. The surface then follows the offset while density still modulates
+#   it - sparse patches pull in slightly, dense ones push out slightly, which is
+#   what makes it look like a skin rather than a union of balls.
+#
+#   WHY NOT AN ENCLOSED-DENSITY FRACTION (what this replaced). A Gaussian
+#   spreads its mass over ~3 sigma in every direction, so "enclose 50% of the
+#   labelling density" is already a thick band: measured on an R=150 shell with
+#   40 members, frac = 0.50 - the lowest the slider allowed - put the skin
+#   56.4 nm out (max 128.5), and frac = 0.85 put it 108.7 nm out. A mass
+#   fraction cannot express "hug the points"; a distance can.
+#
+#   WHY NOT A FRACTION OF THE PEAK either: it collapses too fast. On the same
+#   shell, peak fraction 0.4 -> 681 voxels, 0.6 -> 122, 0.8 -> 16, i.e. the
+#   surface shatters into fragments before it gets tight.
+#
+# THE TWO DIALS
+#   `offset` (NULL = 2 x member spacing) sets the wrap; `pad` adds to or
+#   subtracts from it, and is the coarser/tighter control. Everything else -
+#   bandwidth, grid extent - is derived, so there is no second knob that can
+#   silently fight the first.
+#
+# BOX
+#   The grid is sized to members + (offset + 2*sigma), just enough to contain
+#   the surface. It is NOT a user control: when padding was a separate box
+#   setting it both overrode a request for a tight box (forced to 3*sigma) and
+#   leaked into the contour.
+#
+# NOT A CALIBRATED DENSITY ESTIMATE
+#   The kernel is unnormalised and sampled on a coarse voxel grid, so `value` is
+#   not a density in localizations/nm^3. It is a visualization envelope; use the
+#   Ripley/PCF panels for density statistics.
+cluster_density_field <- function(pts, grid_res = 22L, pad = 0, sigma = NULL,
+                                  offset = NULL) {
+  if (is.null(pts)) return(NULL)
+  if (!is.matrix(pts)) pts <- as.matrix(pts)
+  if (ncol(pts) < 3L) return(NULL)
+  pts <- pts[stats::complete.cases(pts), 1:3, drop = FALSE]
+  storage.mode(pts) <- "double"
+  n <- nrow(pts)
+  if (n < 4L) return(NULL)
+
+  # ── member spacing sets every default scale ──
+  nnd <- tryCatch({
+    d <- RANN::nn2(pts, pts, k = 2L)$nn.dists[, 2]
+    d[is.finite(d) & d > 0]
+  }, error = function(e) numeric(0))
+  spacing <- if (length(nnd)) stats::median(nnd) else NA_real_
+  if (!is.finite(spacing) || spacing <= 0) {
+    diag_nm <- sqrt(sum((apply(pts, 2, max) - apply(pts, 2, min))^2))
+    spacing <- if (is.finite(diag_nm) && diag_nm > 0) diag_nm / 10 else 20
+  }
+
+  # ── surface offset: how far outside the members the skin sits ──
+  # AUTO = 2 x member spacing. One spacing is NOT enough: measured on a 250-member
+  # R=150 shell (spacing 15.2 nm) the enclosed region broke into 31, 21 or 9
+  # SEPARATE BLOBS at 1.0x depending on bandwidth - the balls around neighbouring
+  # members barely touch, so it never closes into a surface. Blob counts by
+  # offset: 1.0x -> 31/31/21/9/5, 1.5x -> 1/2/3/3/2, 2.0x -> 1/1/1/2/1,
+  # 2.5x and 3.0x -> all 1. Two spacings is the first setting that reliably
+  # closes while still hugging the structure.
+  offset <- suppressWarnings(as.numeric(offset %||% NA_real_))
+  if (!is.finite(offset) || offset <= 0) offset <- 2 * spacing
+
+  # `pad` adds to (or, negative, subtracts from) that - the coarser/tighter dial.
+  pad <- suppressWarnings(as.numeric(pad %||% 0))
+  if (!is.finite(pad)) pad <- 0
+  offset <- max(offset + pad, 0.25 * spacing)      # floor: never collapse to nothing
+
+  # ── bandwidth: smooth at the scale the skin is drawn at, but never below the
+  #    member spacing, or the field breaks into one bump per member. Measured
+  #    roughness (sd/mean of the outer skin radius) is minimised near
+  #    sigma ~ 1 x spacing: at offset 2.5x, sigma 0.5x/0.75x gave 0.069 against
+  #    0.028 at 1.0x.
+  sigma <- suppressWarnings(as.numeric(sigma %||% NA_real_))
+  if (!is.finite(sigma) || sigma <= 0) sigma <- max(0.5 * offset, spacing)
+
+  grid_res <- max(8L, as.integer(round(grid_res)))
+  # box: just enough to contain the surface, derived - never a separate control
+  margin <- offset + 2 * sigma
+
+  rng <- apply(pts, 2, range)
+  xs <- seq(rng[1, 1] - margin, rng[2, 1] + margin, length.out = grid_res)
+  ys <- seq(rng[1, 2] - margin, rng[2, 2] + margin, length.out = grid_res)
+  zs <- seq(rng[1, 3] - margin, rng[2, 3] + margin, length.out = grid_res)
+  grid <- as.matrix(expand.grid(x = xs, y = ys, z = zs))
+
+  # ── truncated KDE: a Gaussian is numerically dead past 3 sigma, so only the
+  #    nearest members can contribute. k is capped for cost, not for accuracy -
+  #    if more than `kmax` members sit within 3 sigma the tail they add is
+  #    negligible against the ones already counted.
+  kmax <- min(n, 512L)
+  nn <- tryCatch(RANN::nn2(pts, grid, k = kmax), error = function(e) NULL)
+  if (is.null(nn)) return(NULL)
+  w <- exp(-(nn$nn.dists^2) / (2 * sigma * sigma))
+  w[nn$nn.dists > 3 * sigma] <- 0
+  val <- as.numeric(rowSums(w))
+  if (!any(is.finite(val)) || max(val, na.rm = TRUE) <= 0) return(NULL)
+
+  # ── level calibrated to the offset, measured OFF-GRID ──
+  # Probe points are scattered on spheres of radius `offset` around randomly
+  # chosen members; the median field value over the probes that really do sit
+  # ~offset from the point set is the contour.
+  #
+  # This is deliberately independent of the voxel grid. Reading the level from
+  # grid voxels instead lets the BOX size leak into the surface: one far-flung
+  # member stretches the bounding box, the voxels coarsen, the "within one
+  # voxel of the offset" band widens to tens of nm, and the median is taken
+  # over voxels far from any member - which dropped the level low enough to
+  # re-draw the isolated straggler that the density field exists to suppress.
+  # Directions come from a Fibonacci sphere and members are cycled, so the probe
+  # set is deterministic (a redraw cannot jitter the surface) and evenly spread.
+  # Drawing them at random would also have meant calling set.seed() here, which
+  # would reset the GLOBAL RNG stream and silently perturb every downstream
+  # random draw - the permutation nulls, the alpha-surface subsample.
+  n_probe <- 1024L
+  kk    <- seq_len(n_probe) - 0.5
+  phi   <- acos(1 - 2 * kk / n_probe)
+  theta <- pi * (1 + sqrt(5)) * kk
+  dir   <- cbind(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi))
+  mi    <- rep_len(seq_len(n), n_probe)
+  probes <- pts[mi, , drop = FALSE] + dir * offset
+
+  pn <- tryCatch(RANN::nn2(pts, probes, k = min(n, 512L)), error = function(e) NULL)
+  if (is.null(pn)) return(NULL)
+  # keep probes that are genuinely at the offset - the rest landed back inside
+  # the structure, where the field says nothing about where the skin belongs
+  keep_p <- pn$nn.dists[, 1] >= 0.8 * offset
+  if (!any(keep_p)) keep_p <- rep(TRUE, nrow(probes))
+  pw <- exp(-(pn$nn.dists^2) / (2 * sigma * sigma))
+  pw[pn$nn.dists > 3 * sigma] <- 0
+  level <- stats::median(rowSums(pw)[keep_p])
+
+  # plotly draws nothing if the level sits at or above the peak
+  vmax <- max(val, na.rm = TRUE)
+  if (!is.finite(level) || level <= 0) level <- vmax * 1e-3
+  if (level >= vmax) level <- vmax * 0.999
+
+  list(grid = grid, value = val, level = level, sigma = sigma,
+       offset = offset, spacing = spacing, margin = margin, n_members = n)
+}
+
+# =============================================================================
+# cluster_alpha_volume() - ENCLOSED VOLUME OF ONE STRUCTURE, ALPHA CHOSEN FROM
+#                          THAT STRUCTURE'S OWN SPACING
+# =============================================================================
+#
+# GOAL
+#   Return list(volume, alpha): the alpha-shape volume enclosed by a structure's
+#   member centroids, plus the alpha radius actually used, so the number is
+#   reportable rather than dependent on a hidden constant.
+#
+# WHY THE ALPHA CANNOT BE A CONSTANT
+#   Alpha is a probe radius: gaps wider than it are left open, so a value below
+#   the members' own spacing returns an empty shape and a volume of ZERO. The
+#   previous fixed `alpha = 10` did exactly that - on a 150 nm shell whose
+#   members sat 18.5 nm apart it returned 0, as it did for every closed
+#   structure tested; that shell needs alpha ~ 200 nm to close. A 30 nm molecule
+#   and a 500 nm vesicle cannot share one probe radius, which is the same
+#   argument alpha_surface_3d() makes for the rendered surfaces.
+#
+# HOW ALPHA IS CHOSEN
+#   Walk a ladder of radii built from the group's own median nearest-neighbour
+#   spacing and take the SMALLEST that both (1) wraps every member in ONE
+#   connected component and (2) yields a WATERTIGHT boundary - every edge shared
+#   by exactly two faces. Same two tests alpha_surface_3d() uses for rendering.
+#
+#   Connectivity alone is not enough for SOLID structures. A filled cloud is
+#   connected at a very small alpha, but the boundary is then pitted with
+#   concavities that eat the volume: measured on a uniformly filled R=150 ball,
+#   connectivity-only recovered 21.5% of the true volume (14.3% at n=1500 - it
+#   gets WORSE with more points, since denser sampling connects at a still
+#   smaller alpha), while adding the watertight test gave 75.1% and 83.8%.
+#   Hollow shells are unaffected (96.0% either way), because they only connect
+#   once alpha spans the gaps, which is also when they close.
+#
+# WHAT THE NUMBER MEANS
+#   For a hollow structure this is the volume ENCLOSED BY the labels once alpha
+#   bridges the gaps between them - the volume of the compartment they bound,
+#   NOT the volume of labelled material. It also grows with alpha, so `alpha`
+#   is returned alongside and both belong in any report.
+cluster_alpha_volume <- function(pts) {
+  none <- list(volume = NA_real_, alpha = NA_real_)
+  if (is.null(pts)) return(none)
+  if (!is.matrix(pts)) pts <- as.matrix(pts)
+  if (ncol(pts) < 3L) return(none)
+  pts <- pts[stats::complete.cases(pts), 1:3, drop = FALSE]
+  storage.mode(pts) <- "double"
+  if (nrow(pts) < 4L) return(none)                 # a tetrahedron is the minimum
+
+  # A group flat in any axis makes the tetrahedralization degenerate; nudge by
+  # sub-picometre amounts (invisible at nm scale). Same guard as alpha_surface_3d().
+  for (k in 1:3) {
+    sdk <- stats::sd(pts[, k], na.rm = TRUE)
+    if (!is.finite(sdk) || sdk < 1e-9) pts[, k] <- pts[, k] + seq_len(nrow(pts)) * 1e-6
+  }
+
+  nnd <- tryCatch({
+    d <- RANN::nn2(pts, pts, k = 2L)$nn.dists[, 2]  # distance to nearest OTHER member
+    d[is.finite(d) & d > 0]
+  }, error = function(e) numeric(0))
+  diag_nm <- sqrt(sum((apply(pts, 2, max) - apply(pts, 2, min))^2))
+  base <- if (length(nnd)) stats::median(nnd) else diag_nm / 10
+  if (!is.finite(base) || base <= 0) base <- diag_nm / 10
+  if (!is.finite(base) || base <= 0) return(none)   # all members coincide
+
+  alphas <- c(base * c(1, 1.5, 2, 3, 4, 6, 8, 12, 20, 40), diag_nm)
+  alphas <- sort(unique(alphas[is.finite(alphas) & alphas > 0]))
+  if (!length(alphas)) return(none)
+
+  as3d <- suppressWarnings(tryCatch(alphashape3d::ashape3d(pts, alpha = alphas),
+                                    error = function(e) NULL))
+  if (is.null(as3d)) return(none)
+
+  comp <- suppressWarnings(tryCatch(
+    alphashape3d::components_ashape3d(as3d, indexAlpha = "all"),
+    error = function(e) NULL))
+  if (!is.null(comp) && !is.list(comp)) comp <- list(comp)
+
+  # Watertight test: every edge of a closed mesh belongs to exactly two faces;
+  # an edge used once is a hole rim. Same criterion as alpha_surface_3d().
+  is_closed <- function(tt) {
+    if (is.null(tt) || nrow(tt) < 4L) return(FALSE)
+    ed  <- rbind(tt[, c(1, 2)], tt[, c(2, 3)], tt[, c(1, 3)])
+    ed  <- cbind(pmin(ed[, 1], ed[, 2]), pmax(ed[, 1], ed[, 2]))   # undirected key
+    key <- paste(ed[, 1], ed[, 2])
+    all(tabulate(match(key, unique(key))) == 2L)
+  }
+  tri  <- if (!is.null(as3d$triang) && nrow(as3d$triang)) as.matrix(as3d$triang) else NULL
+  # per-alpha classification columns are the LAST length(alphas) columns, in the
+  # order the alphas were passed
+  cls0 <- if (!is.null(tri)) ncol(tri) - length(alphas) else 0L
+
+  for (ii in seq_along(alphas)) {
+    cc <- if (!is.null(comp) && length(comp) == length(alphas)) comp[[ii]] else NULL
+    # (1) one component covering every member == nothing shed at this radius
+    if (!is.null(cc) && !(length(cc) && all(is.finite(cc)) && all(cc == 1L))) next
+    if (ii < length(alphas)) {
+      # (2) watertight boundary
+      if (!is.null(tri) && cls0 >= 3L) {
+        cand <- tri[tri[, cls0 + ii] == 2L, 1:3, drop = FALSE]      # REGULAR = boundary
+        if (!nrow(cand) || !is_closed(cand)) next
+      }
+      # (3) the shape must actually CONTAIN the members. Tests (1) and (2) alone
+      # admit a degenerate sliver: components_ashape3d() reports connectivity of
+      # POINTS, and is_closed() accepts any closed sub-mesh, so a single
+      # tetrahedron spanning 4 of the members passes both. Observed on a real
+      # 31-member shell - alpha 100.4 gave a 4-triangle shape and a volume of
+      # 3,155 nm^3 where the correct rung (alpha 150.5, 58 triangles) gave
+      # 10,629,935. Requiring containment is the direct test and works for
+      # hollow and solid structures alike, where a "fraction of points on the
+      # boundary" rule would not.
+      inside <- suppressWarnings(tryCatch(
+        alphashape3d::inashape3d(as3d, indexAlpha = ii, points = pts),
+        error = function(e) NULL))
+      if (!is.null(inside) && !(length(inside) == nrow(pts) && all(inside))) next
+    }
+    v <- suppressWarnings(tryCatch(
+      alphashape3d::volume_ashape3d(as3d, indexAlpha = ii),
+      error = function(e) NA_real_))
+    if (length(v) && is.finite(v[1]) && v[1] > 0)
+      return(list(volume = as.numeric(v[1]), alpha = alphas[ii]))
+  }
+  none
+}
+
+# =============================================================================
+# estimate_cluster2_curvature() - PER-STRUCTURE SIZE, CURVATURE AND VOLUME
+# =============================================================================
+#
+# GOAL
+#   One row per Median Cluster: how many members, how big (fitted sphere
+#   radius), how curved (mean curvature) and what volume its members enclose.
+#
+# UNIT
+#   Members are de-blinked molecules when de-blinking has run, else trace IDs -
+#   see cluster2_member_col(). Each member is reduced to its MEDIAN position
+#   first, so localization precision enters as sigma/sqrt(n) rather than as
+#   the raw point cloud, and a long trace does not outvote a short one.
+#
+# CURVATURE
+#   MEAN curvature H = 1/R in nm^-1, one convention app-wide (see
+#   add_cluster2_lines_and_angles). For a fitted sphere this is a
+#   reparametrisation of `sphere_radius` and carries no extra information; it is
+#   reported because bending is conventionally quoted this way.
+#
+# WHAT WAS REMOVED AND WHY
+#   The old `curvature` / `curvature_deg` columns were lambda3/sum(lambda), the
+#   variance fraction on the smallest principal axis. That is a PLANARITY index
+#   (the Westin anisotropy family), not curvature: measured, R = 50, 150 and
+#   500 nm shells all scored ~0.30, so it could not distinguish a small vesicle
+#   from a large one, and a flat disc (0.0002) scored the same as a rod (0.0010),
+#   so it could not distinguish a plane from a line. `asin(sqrt(.))` in degrees
+#   had no geometric meaning, and `sphere_curvature_deg` was the identical
+#   formula under a name implying it came from the sphere fit.
+estimate_cluster2_curvature <- function(df, member_col = NULL) {
+  mcol <- cluster2_member_col(df, member_col)
+  unit_lbl <- if (identical(mcol, "cluster")) "de-blinked molecule" else "trace ID"
+
+  base <- df %>%
+    dplyr::filter(!is.na(cluster2) & cluster2 != 0)
+  if (identical(mcol, "cluster"))
+    base <- base %>% dplyr::filter(!is.na(cluster) & cluster > 0L)
+
+  base %>%
+    dplyr::group_by(cluster2) %>%
+    dplyr::group_modify(~{
+      med <- .x %>%
+        dplyr::group_by(.data[[mcol]]) %>%
+        dplyr::summarise(x = stats::median(x, na.rm = TRUE),
+                         y = stats::median(y, na.rm = TRUE),
+                         z = stats::median(z, na.rm = TRUE), .groups = "drop")
+      coords <- as.matrix(med[, c("x", "y", "z")])
+      coords <- coords[stats::complete.cases(coords), , drop = FALSE]
+      n_mem  <- nrow(coords)
+
+      if (n_mem >= 5) {
+        radius <- fit_sphere_geometry(coords)$radius     # geometric-median centre
+        av     <- cluster_alpha_volume(coords)
         data.frame(
-          curvature = curvature_index,
-          curvature_deg = curvature_deg,
-          volume = vol,
+          member_unit   = unit_lbl,
+          n_members     = n_mem,
           sphere_radius = radius,
-          sphere_curvature = sphere_curvature,
-          sphere_curvature_deg = sphere_deg
+          mean_curvature_inv_nm = if (is.finite(radius) && radius > 0) 1 / radius else NA_real_,
+          volume        = av$volume,
+          volume_alpha  = av$alpha
         )
       } else {
         data.frame(
-          curvature = NA, curvature_deg = NA, volume = NA,
-          sphere_radius = NA, sphere_curvature = NA, sphere_curvature_deg = NA
+          member_unit   = unit_lbl,
+          n_members     = n_mem,
+          sphere_radius = NA_real_,
+          mean_curvature_inv_nm = NA_real_,
+          volume        = NA_real_,
+          volume_alpha  = NA_real_
         )
       }
     }) %>%
-    ungroup()
+    dplyr::ungroup()
 }
 
 
-# Helper: Create downloadable curvature table
+# =============================================================================
+# build_curvature_table() - THE EXPORTED PER-STRUCTURE TABLE
+# =============================================================================
+#
+# GOAL
+#   One row per Median Cluster, joining membership/identity columns to the
+#   geometry from estimate_cluster2_curvature().
+#
+# COUNTS ARE REPORTED SEPARATELY AND LABELLED
+#   n_traces      = blinking events (trace IDs) - photophysics-dependent
+#   n_molecules   = de-blinked molecules, NA when de-blinking has not run
+#   n_members     = the unit the geometry was actually measured on (see
+#                   `member_unit`), so the table never implies the geometry used
+#                   a unit it did not.
+#   n_points      = raw localizations
 build_curvature_table <- function(df) {
   curvature_df <- estimate_cluster2_curvature(df)
-  
+  has_mol <- "cluster" %in% names(df) && any(!is.na(df$cluster) & df$cluster > 0L)
+
   merged <- df %>%
-    filter(!is.na(cluster2) & cluster2 != 0) %>%
-    group_by(cluster2) %>%
-    summarize(
-      trace_ids = paste(unique(tid), collapse = ", "),
-      clusters = paste(unique(cluster), collapse = ", "),
-      n_traces = length(unique(tid)),
-      n_points = n(),
-      x = median(x), y = median(y), z = median(z),
+    dplyr::filter(!is.na(cluster2) & cluster2 != 0) %>%
+    dplyr::group_by(cluster2) %>%
+    dplyr::summarize(
+      trace_ids   = paste(unique(tid), collapse = ", "),
+      molecules   = if (has_mol) paste(unique(cluster[!is.na(cluster) & cluster > 0L]), collapse = ", ") else NA_character_,
+      n_traces    = dplyr::n_distinct(tid),
+      n_molecules = if (has_mol) dplyr::n_distinct(cluster[!is.na(cluster) & cluster > 0L]) else NA_integer_,
+      n_points    = dplyr::n(),
+      # Structure position on the same footing as the geometry: the geometric
+      # median of the MEMBER centroids, not a coordinate-wise median of every
+      # raw localization (which weights long traces and is not rotation-equivariant).
       .groups = "drop"
     )
-  
-  full <- merged %>% left_join(curvature_df, by = "cluster2")
-  return(full)
+
+  mcol <- cluster2_member_col(df)
+  centres <- df %>%
+    dplyr::filter(!is.na(cluster2) & cluster2 != 0) %>%
+    { if (identical(mcol, "cluster")) dplyr::filter(., !is.na(cluster) & cluster > 0L) else . } %>%
+    dplyr::group_by(cluster2, .data[[mcol]]) %>%
+    dplyr::summarise(mx = stats::median(x, na.rm = TRUE),
+                     my = stats::median(y, na.rm = TRUE),
+                     mz = stats::median(z, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::group_by(cluster2) %>%
+    dplyr::group_modify(~{
+      g <- geometric_median(as.matrix(.x[, c("mx", "my", "mz")]))
+      data.frame(x = g[1], y = g[2], z = g[3])
+    }) %>%
+    dplyr::ungroup()
+
+  merged %>%
+    dplyr::left_join(centres, by = "cluster2") %>%
+    dplyr::left_join(curvature_df, by = "cluster2")
 }
 
 ## ── Secondary (cluster2) grouping engine ──────────────────────────────────────
@@ -4834,13 +5345,32 @@ build_curvature_table <- function(df) {
 # TID density than scattered background" as an explicit, tunable gate, and works
 # in front of any method.
 #
+# Three membership refinements run AFTER the method, in this order:
+#
+#   core_only    (DBSCAN only) keep only points that are themselves core, i.e.
+#                have >= minPts neighbours within eps. Classic DBSCAN also
+#                absorbs BORDER points - anything within eps of a core point,
+#                however isolated it is itself - which is what attaches lone
+#                background centroids to the rim of a real structure. Dropping
+#                them is the DBSCAN* cluster definition of Campello et al.
+#                (2013), the same definition HDBSCAN uses, so HDBSCAN/OPTICS
+#                need no equivalent and ignore this flag.
+#
+#   prune        graded version of the same idea - see .prune_sparse_members().
+#
+#   min_members  clusters left with fewer than this many members are dropped
+#                whole. Applied LAST so it counts what actually survived, and
+#                separate from minPts so the density scale and the "how big is
+#                a real structure" decision are not the same knob.
+#
 # `eps` is used only by dbscan; `xi` only by optics. Works in 2D or 3D depending
 # on ncol(pts).
 run_cluster2_grouping <- function(pts, method = "dbscan", eps = 200, minPts = 15,
                                   xi = 0.05,
                                   prefilter = FALSE, prefilter_r = NULL,
                                   prefilter_min = NULL,
-                                  prune = FALSE, prune_tol = 2) {
+                                  prune = FALSE, prune_tol = 2,
+                                  core_only = FALSE, min_members = 0) {
   if (is.null(pts)) return(integer(0))
   if (!is.matrix(pts)) pts <- as.matrix(pts)
   n <- nrow(pts)
@@ -4862,37 +5392,86 @@ run_cluster2_grouping <- function(pts, method = "dbscan", eps = 200, minPts = 15
   sub <- pts[keep, , drop = FALSE]
   lab <- .cluster2_core(sub, method, eps, minPts, xi)
 
+  # ── core-only membership (DBSCAN*) ──
+  # Only DBSCAN has border points to drop: HDBSCAN/OPTICS are already defined on
+  # core points, and neither has a fixed eps to test against.
+  if (isTRUE(core_only) && identical(method, "dbscan")) {
+    mp <- max(2L, as.integer(round(minPts)))
+    nn <- tryCatch(dbscan::frNN(sub, eps = eps, sort = FALSE), error = function(e) NULL)
+    if (!is.null(nn)) {
+      is_core <- (lengths(nn$id) + 1L) >= mp        # +1: frNN excludes self, minPts includes it
+      lab[!is_core] <- 0L
+    }
+  }
+
   # ── optional sparse-member pruning (post-clustering) ──
-  if (isTRUE(prune)) lab <- .prune_sparse_members(sub, lab, tol = prune_tol)
+  if (isTRUE(prune)) lab <- .prune_sparse_members(sub, lab, tol = prune_tol, minPts = minPts)
+
+  # ── minimum members per cluster, on what survived ──
+  # as.numeric() first: a restored settings file can deliver this as a string,
+  # and round() errors on character rather than coercing.
+  mm <- suppressWarnings(as.numeric(min_members %||% 0))
+  mm <- if (is.finite(mm)) as.integer(round(mm)) else 0L
+  if (is.finite(mm) && mm > 1L) {
+    tb <- table(lab[lab > 0])
+    small <- as.integer(names(tb)[tb < mm])
+    if (length(small)) lab[lab %in% small] <- 0L
+  }
+
+  # Renumber survivors to a contiguous 1..k so the documented output contract
+  # holds after members and whole clusters have been removed.
+  pos <- lab > 0
+  if (any(pos)) lab[pos] <- as.integer(factor(lab[pos]))
 
   out[keep] <- lab
   out
 }
 
 # Post-clustering refinement: within each cluster, demote to noise (0) any
-# member whose local neighbourhood (mean distance to its k nearest fellow
-# members) is much sparser than the cluster's typical member. The reference is
-# the per-cluster median of that distance, so it is robust on the small member
-# counts typical of MINFLUX structures, and scale-free across clusters of
-# different tightness. `tol` is the only knob: a member is dropped when its
-# local spacing exceeds `tol` x the cluster median (tol ~ 2 = "twice as loose").
-.prune_sparse_members <- function(pts, labels, tol = 2) {
+# member sitting in a much sparser spot than the members around it.
+#
+# STATISTIC: each member's CORE DISTANCE - the distance to its (minPts-1)'th
+# nearest fellow member, i.e. the radius it needs to reach minPts neighbours.
+# Small = deep inside a density maximum, large = on the outskirts. This judges
+# density at the SAME scale the clustering used (minPts), and it is a density
+# statistic, not a Euclidean distance to a centre or to a mode - so it behaves
+# on rings, arcs, rods and helices, where "far from the middle" is a property of
+# legitimate members rather than of stragglers.
+#
+# BASELINE: the median core distance of the member's OWN neighbourhood, not of
+# the whole cluster. A single per-cluster median is set by the densest region,
+# so on any structure with an internal density gradient it condemns the sparser
+# half wholesale even where those members are interior. A local baseline moves
+# with the gradient and only flags members that are loose RELATIVE TO THEIR
+# SURROUNDINGS.
+#
+# `tol` is the only knob and the cutoff stays relative (no absolute nm): a
+# member is dropped when its core distance exceeds `tol` x its neighbourhood's
+# median (tol ~ 2 = "twice as loose as the members around me").
+.prune_sparse_members <- function(pts, labels, tol = 2, minPts = 15) {
   if (!length(labels)) return(labels)
   tol <- suppressWarnings(as.numeric(tol %||% 2))
-  if (!is.finite(tol) || tol <= 1) return(labels)   # tol<=1 would trim core too
+  if (!is.finite(tol) || tol <= 1) return(labels)   # tol<=1 would trim the core too
+  mp  <- max(2L, as.integer(round(minPts %||% 15)))
   out <- labels
   for (cl in unique(labels[labels > 0])) {
     idx <- which(labels == cl)
     nm  <- length(idx)
-    if (nm < 4L) next                                # too few to judge sparsity
+    if (nm < 4L) next                                # no baseline from <4 members
     sub <- pts[idx, , drop = FALSE]
-    k   <- max(1L, min(3L, nm - 1L))
-    kd  <- tryCatch(dbscan::kNN(sub, k = k)$dist, error = function(e) NULL)
+
+    k  <- max(1L, min(mp - 1L, nm - 1L))             # core distance at the clustering scale
+    kd <- tryCatch(dbscan::kNN(sub, k = k)$dist, error = function(e) NULL)
     if (is.null(kd)) next
-    di  <- rowMeans(kd)                              # mean dist to k nearest siblings
-    ref <- stats::median(di)
-    if (!is.finite(ref) || ref <= 0) next
-    out[idx[di > tol * ref]] <- 0L                   # sparse members -> noise
+    cd <- kd[, k]
+
+    m   <- max(4L, min(mp, nm - 1L))                 # baseline neighbourhood
+    nbr <- tryCatch(dbscan::kNN(sub, k = m)$id, error = function(e) NULL)
+    if (is.null(nbr)) next
+    ref <- apply(nbr, 1, function(j) stats::median(cd[j]))   # neighbours', not own
+
+    drop <- is.finite(ref) & ref > 0 & cd > tol * ref
+    out[idx[drop]] <- 0L
   }
   out
 }
@@ -5144,8 +5723,8 @@ link_complete_threshold <- function(M, thr, max_comp = 2000L) {
 #   On a fixed, fiducial-corrected sample the motion term is small and the two
 #   are nearly tied - the gain at 1-2 nm is within noise. What complete linkage
 #   buys at EVERY motion level is tolerance to an over-large threshold, which is
-#   the error the suggestor actually makes (k_clear is biased low, but users
-#   correcting for it tend to overshoot). At 2 nm motion, F1 across k = 3.0 to
+#   the error a user makes when correcting a threshold by hand, which is to
+#   overshoot. At 2 nm motion, F1 across k = 3.0 to
 #   6.0 falls 0.928 -> 0.715 under single linkage and only 0.952 -> 0.843 under
 #   complete. It never scored WORSE at any motion level tested.
 #
@@ -5231,19 +5810,40 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL,
 #   the simulated error count bottoms out there (10 errors at k = 1.54, 11 at
 #   the k = 2.0 default this function ships with).
 #
-#   THAT COEFFICIENT ASSUMES THE LABEL DOES NOT MOVE BETWEEN BLINKS, and it is
-#   the weakest assumption in this whole panel. Re-running the calibration with
-#   an extra between-blink displacement shows how fast the optimum runs away:
+#   THE DEFAULT IS k = 2.8, MEASURED AGAINST GROUND TRUTH
+#   Ground truth was built on a real file's own point cloud: real per-trace
+#   residuals, real molecule positions, half the molecules given a second blink.
+#   Scoring which trace PAIRS were correctly grouped, over a range of injected
+#   between-blink displacement:
 #
-#     between-blink motion   0 nm   2 nm   4 nm   6 nm
-#     optimal k              1.4    1.8    2.3    3.0
+#     k        1 nm     2 nm     4 nm      mean
+#     2.00    0.928    0.916    0.864     0.903   <- the old default
+#     2.355   0.947    0.944    0.897     0.929   <- sigma -> FWHM, still tight
+#     2.80    0.954    0.952    0.931     0.946
+#     3.00    0.954    0.953    0.942     0.950
 #
-#   Split-half measurement on real files puts the centroid's own motion at ~4.4
-#   nm against a 1.5 nm random floor, so a real dataset is NOT in the k = 1.4
-#   column. k is therefore a visible control, defaulting to 2.0 rather than 1.5,
-#   and the app cannot measure the between-blink term for you - doing so would
-#   require knowing which traces are the same molecule, which is the question
-#   being asked. Use the count-vs-threshold curve and the diagnostic to judge it.
+#   The optimum sits at 2.7-3.1 and the curve is flat across it, so 2.8 is taken
+#   as the default rather than the exact peak. Complete linkage bounds a
+#   molecule's width by the threshold, so overshooting is far cheaper than
+#   undershooting - erring high is the safe direction.
+#
+#   FWHM (2.355 sigma) was tested as a principled-looking alternative and beats
+#   the old 2.0, but is consistently too tight. It also does not describe the
+#   right quantity: 2.355 is the width of the single-localization density
+#   profile, whereas merging asks whether two CENTROIDS agree.
+#
+#   Normalising by each trace's own sigma, or by the centroid standard error
+#   sigma/sqrt(n), was tested too. Per-trace sigma shrunk toward the global
+#   median wins by ~0.004 F1 - real but negligible against the ~0.05 that
+#   choosing k buys. sigma/sqrt(n) is markedly WORSE, because it tightens the
+#   threshold for long traces while the physical displacement between blinks
+#   does not shrink with n.
+#
+#   The old default assumed the label moves appreciably between blinks. Measured
+#   on fiducial-locked SMLM (35 and 105 min runs) there is no coherent sample
+#   drift and no dependence of pair separation on the time gap between blinks,
+#   so the point-cloud spread - not motion - sets the scale. See
+#   sample_drift_estimate(), which flags the rare file where that fails.
 #
 # ANISOTROPY
 #   When per-axis weights are supplied the coordinates are whitened first, so
@@ -5264,7 +5864,7 @@ deblink_merge_centroids <- function(sub_df, thr, w = NULL,
 #   NULL when the spread cannot be estimated.
 # =============================================================================
 suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
-                                       use_z = TRUE, w = NULL, k = 2.0) {
+                                       use_z = TRUE, w = NULL, k = 2.8) {
   if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) return(NULL)
   has_z <- isTRUE(use_z) && has_axial_data(df)
   cols  <- if (has_z) c("x","y","z") else c("x","y")
@@ -5316,152 +5916,208 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 }
 
 # =============================================================================
-# deblink_reblink_excess() - MEASURE k FROM THE DATA, NOT FROM SIMULATION
+# sample_drift_estimate() - HOW FAR DID THE SAMPLE MOVE DURING THE RUN?
 # =============================================================================
 #
 # GOAL
-#   Find the smallest threshold at which no re-blinking is left over, using only
-#   the data. This replaces guessing k from a simulation-calibrated constant.
+#   Put a number, with an interval, on how much the sample moved across the
+#   acquisition - so the de-blink radius can be widened on the rare file that
+#   drifted, and left on the trace spread everywhere else.
 #
-# THE IDEA
-#   If merging is incomplete, the leftovers are unmerged re-blinks of the same
-#   fluorophore - and those sit ON TOP of each other, a few nm apart. So after
-#   merging, look at the molecule nearest-neighbour distances: an excess of
-#   pairs closer than ~2 sigma, far above the local density at ordinary
-#   separations, means re-blinks are still being counted twice. Raise k until
-#   that excess disappears.
+# WHY NOT WITHIN-TRACE SLOPES (tried, and it cannot work)
+#   The obvious test - regress each axis on time inside a trace and look for a
+#   common direction - has no power here. A trace lasts ~0.15 s, so drift of
+#   even 0.3 nm/s moves the sample 0.05 nm while it is being recorded, against a
+#   localization sigma of ~7 nm. Measured on synthetic data with drift injected
+#   from 0 to 0.3 nm/s, the coherence statistic never left its null value.
+#   Within-trace slopes see fast jitter only, never slow drift, and scaling such
+#   a slope up to the length of the run produced absurd numbers (31 um).
 #
-#   Measured on a real file (288 traces, sigma 5.81 nm):
-#     k = 1.0  15.1% of molecules within 2 sigma   78x the reference density
-#     k = 1.5   6.6%                               32x
-#     k = 2.0   0.0%                                0x   <- clears here
-#   That is a direct, per-dataset answer where the 1.5 default was an assumption.
+# THE LEVER ARM IS THE GAP BETWEEN BLINKS
+#   Take pairs of traces whose centroids are close enough to be re-blinks of one
+#   molecule. If the sample drifted at velocity v, the later blink of a pair sits
+#   at displacement v * dt from the earlier one. Regressing the SIGNED
+#   displacement on the SIGNED time gap, through the origin, estimates v with a
+#   lever arm of the whole acquisition instead of 0.15 s.
 #
-# THE REFERENCE: A FIXED SHELL, AND WHY THE ALTERNATIVES WERE REJECTED
-#   The reference is the molecule density in a fixed 30-60 nm shell. That is
-#   crude - inside a cluster the density at 30-60 nm sits well above the field
-#   average, so the reference is inflated and the excess ratio deflated. Two
-#   replacements were built and MEASURED against ground-truth simulation
-#   (40 clusters x 8 molecules, 2 blinks each, sigma 5.7 nm, sweeping the
-#   between-blink label motion). Both were worse and neither is in use:
+#   Pairs that are actually two DIFFERENT molecules do not bias this. Their
+#   displacement is isotropic with zero mean, so they widen the interval but
+#   cannot tilt the slope. That is why the radius can be generous.
 #
-#     between-blink motion    3     6     9    12    15  nm
-#     k that recovers truth  1.50  2.00  2.25  2.50  2.75
-#     fixed shell (in use)   2.00  2.00  2.00  2.00  2.00
-#     local-density null     2.00  1.75  1.50  1.25  1.25
-#     adaptive test scale      NA    NA  1.00  1.00  1.00
-#
-#   The local-density null (inhomogeneous Poisson, intensity from the k-th
-#   neighbour) is the textbook correction and it does remove the clustering
-#   confound - but it moves k the WRONG WAY, because the kNN intensity probe
-#   absorbs the re-blink pile-up it is meant to be measured against. The fixed
-#   shell survives only because it is insensitive, not because it is right.
-#
-# THE LIMIT THAT NO REFERENCE FIXES
-#   Read the table again: the k that recovers the truth is set by BETWEEN-BLINK
-#   MOTION, and this test cannot see that term at all. It looks for leftover
-#   pairs at ~2 sigma, a scale tied to localization noise. The more the label
-#   moves between blinks, the more the leftovers are spread out, the weaker that
-#   short-range signal becomes - so the test clears EARLIER exactly when a
-#   LARGER k is needed. k_clear is therefore biased low on any sample with real
-#   label motion, and the bias grows with the motion. Treat it as a floor, and
-#   use the count-vs-threshold curve to choose above it.
-#
-# WHAT IT CAN AND CANNOT SEE
-#   It detects UNDER-merging sharply. It cannot detect OVER-merging: once the
-#   excess is gone, raising k further only fuses genuine neighbours and the test
-#   stays silent. So the value it returns is a LOWER BOUND - the smallest safe k
-#   - and the count-vs-threshold curve shows what going higher costs.
-#
-#   Another route was tried and has no power here: two traces overlapping in
-#   TIME cannot be the same fluorophore, which would certify wrong merges. On
-#   real data, 0 of 239 trace pairs within 60 nm overlapped in time - the
-#   instrument does not track two molecules at once - so that test is dead.
-#
-# THE STOPPING RULE IS AN INTERVAL, NOT A POINT
-#   `excess` is a ratio of two sampled fractions, so taking the first k where it
-#   dips under 1 is a noisy, biased-low rule. A Wilson interval on the observed
-#   fraction gives excess_lo/excess_hi, and two k values are returned:
-#     k_clear    first k with excess <= 1          (point estimate, as before)
-#     k_clear_hi first k with excess_hi <= 1       (no residual within CI)
-#   k_clear_hi is the conservative end - it keeps merging until the pile-up is
-#   gone beyond sampling noise - and is never smaller than k_clear.
+# THE ONE REAL BIAS
+#   Selecting pairs by separation truncates exactly the large displacements fast
+#   drift produces, pulling the estimate toward zero. The radius is therefore set
+#   well above the merge threshold, and drift large enough to push same-molecule
+#   pairs outside it is UNDERSTATED rather than missed - on a badly drifting file
+#   this is a lower bound.
 #
 # ARGUMENTS
-#   df, sigma, w : as for suggest_centroid_threshold(); sigma in the same metric
-#   ks           : multipliers to try
-#   ref_lo/ref_hi: the shell (nm) used as the "ordinary density" reference
-#   conf         : confidence level for the Wilson interval on the excess
+#   df     : localization table (tid, tim, x, y[, z])
+#   min_n  : traces shorter than this are ignored
+#   radius : pair-selection radius in nm; defaults to 10 x the trace spread
+#   conf   : confidence level for the interval on the drift
 #
-# RETURNS  list(table, k_clear, k_clear_hi, near_nm); k_clear is NA when the
-#          excess never clears.
+# RETURNS
+#   list(rate, rate_lo, rate_hi, drift_run, drift_run_lo, drift_run_hi, dt_typ,
+#   drift_typ, jitter, frac_directed, direction, n_units, span, n_pairs, radius,
+#   dims, significant) - rates in nm/s, drift_run in nm across the acquisition,
+#   drift_typ in nm across a typical gap between blinks, jitter in nm - or NULL
+#   when it cannot be measured.
+#
+#   DRIFT vs JITTER: drift is the displacement that lines up with time and
+#   accumulates; jitter is the scatter left once it is removed, which does not.
+#   frac_directed says which of the two dominates (0 = pure jitter, 1 = a
+#   coherent march). `group` supplies molecule ids (de-blinked IDs) so that a
+#   fluorophore seen at several times gives a trajectory instead of one step.
 # =============================================================================
-deblink_reblink_excess <- function(df, sigma, w = NULL, ks = seq(1, 4, by = 0.25),
-                                   ref_lo = 30, ref_hi = 60, conf = 0.95) {
-  if (!is.data.frame(df) || !nrow(df) || !is.finite(sigma) || sigma <= 0) return(NULL)
+sample_drift_estimate <- function(df, min_n = 5L, radius = NULL, conf = 0.95,
+                                  group = NULL) {
+  if (!is.data.frame(df) || !nrow(df) || !all(c("tid", "tim", "x", "y") %in% names(df)))
+    return(NULL)
   cols <- intersect(c("x", "y", "z"), names(df))
+  keep <- stats::complete.cases(df[, c("tim", cols), drop = FALSE])
+  d <- df[keep, , drop = FALSE]
+  if (!nrow(d)) return(NULL)
+  # A synthesised constant z would add a zero-variance axis to every distance.
+  cols <- cols[vapply(cols, function(a) stats::sd(d[[a]], na.rm = TRUE) > 0, logical(1))]
   if (length(cols) < 2L) return(NULL)
-  near  <- 2 * sigma
-  shell <- (ref_hi^length(cols) - ref_lo^length(cols))
 
-  # Wilson score interval for a proportion - behaves at the p -> 0 end, where a
-  # normal-approximation interval would run negative and where this test spends
-  # most of its time.
-  wilson <- function(p, n, conf) {
-    if (!is.finite(p) || !is.finite(n) || n <= 0) return(c(NA_real_, NA_real_))
-    z   <- stats::qnorm(1 - (1 - conf) / 2)
-    den <- 1 + z^2 / n
-    ctr <- (p + z^2 / (2 * n)) / den
-    hw  <- z * sqrt(p * (1 - p) / n + z^2 / (4 * n^2)) / den
-    c(max(0, ctr - hw), min(1, ctr + hw))
+  gid_row <- if (!is.null(group)) as.character(group)[keep] else NULL
+
+  ord <- split(seq_len(nrow(d)), as.character(d$tid))
+  ord <- ord[lengths(ord) >= max(3L, as.integer(min_n))]
+  if (length(ord) < 20L) return(NULL)
+
+  M  <- t(vapply(ord, function(ix) matrixStats_colMedian(as.matrix(d[ix, cols, drop = FALSE])),
+                 numeric(length(cols))))
+  tm <- vapply(ord, function(ix) stats::median(d$tim[ix], na.rm = TRUE), numeric(1))
+  # One molecule id per TRACE. Traces never straddle molecules, so the first row
+  # of a trace names its molecule.
+  tg <- if (!is.null(gid_row)) vapply(ord, function(ix) gid_row[ix[1]], character(1)) else NULL
+  ok <- is.finite(rowSums(M)) & is.finite(tm) & (if (is.null(tg)) TRUE else !is.na(tg))
+  M  <- M[ok, , drop = FALSE]; tm <- tm[ok]
+  if (!is.null(tg)) tg <- tg[ok]
+  if (nrow(M) < 20L) return(NULL)
+
+  if (is.null(radius) || !is.finite(radius) || radius <= 0) {
+    sg <- stats::median(vapply(ord[ok], function(ix)
+      sqrt(mean(apply(as.matrix(d[ix, cols, drop = FALSE]), 2L, stats::var), na.rm = TRUE)),
+      numeric(1)), na.rm = TRUE)
+    radius <- if (is.finite(sg) && sg > 0) 10 * sg else 60
   }
 
-  # Molecule positions must live in the SAME metric the clustering used. The
-  # merge runs on whitened coordinates whenever `w` is supplied, and `near` is
-  # derived from a sigma measured in that same whitened metric - so rebuilding
-  # the centroids from raw columns compared a weighted threshold against
-  # unweighted distances and silently mis-scaled the whole test under
-  # anisotropic weighting.
-  Pw <- apply_deblink_weights(as.matrix(df[, cols, drop = FALSE]), w)
+  # Pair traces that belong to the same molecule. Two routes:
+  #   GROUPED - an explicit molecule id (the de-blinked ID). Highest purity, and
+  #             a fluorophore seen at three separate times contributes three
+  #             pairs, so one long-lived molecule gives a whole mini-trajectory
+  #             rather than a single displacement.
+  #   SPATIAL - no grouping supplied: pair traces sitting within `radius`.
+  # The grouped route is TRUNCATED by whatever threshold produced the grouping:
+  # a molecule whose blinks drifted further than that radius was never merged,
+  # so it cannot appear here. That is exactly why this is a QC readout and must
+  # not feed back into the merge threshold - it would be measuring its own input.
+  n_units <- NA_integer_
+  if (!is.null(tg)) {
+    gs <- split(seq_along(tg), tg)
+    gs <- gs[lengths(gs) >= 2L]
+    if (!length(gs)) return(NULL)
+    cb <- lapply(gs, function(v) utils::combn(v, 2L))
+    ii <- unlist(lapply(cb, function(m) m[1, ]), use.names = FALSE)
+    jj <- unlist(lapply(cb, function(m) m[2, ]), use.names = FALSE)
+    n_units <- length(gs)
+  } else {
+    nb <- tryCatch(dbscan::frNN(M, eps = radius), error = function(e) NULL)
+    if (is.null(nb)) return(NULL)
+    ii <- rep(seq_along(nb$id), lengths(nb$id))
+    jj <- unlist(nb$id, use.names = FALSE)
+    sel <- jj > ii                                 # keep each pair once
+    ii <- ii[sel]; jj <- jj[sel]
+  }
+  if (length(ii) < 20L) return(NULL)
 
-  rows <- lapply(ks, function(k) {
-    th <- k * sigma
-    cl <- tryCatch(deblink_merge_centroids(df, th, w), error = function(e) NULL)
-    if (is.null(cl)) return(NULL)
-    M <- do.call(rbind, lapply(split(seq_len(nrow(Pw)), cl), function(ix)
-      matrixStats_colMedian(Pw[ix, , drop = FALSE])))
-    M <- M[is.finite(rowSums(M)), , drop = FALSE]
-    if (nrow(M) < 5L) return(NULL)
-    nn <- tryCatch(dbscan::kNN(M, k = 1L)$dist[, 1L], error = function(e) NULL)
-    if (is.null(nn)) return(NULL)
-    nn <- nn[is.finite(nn)]
-    if (length(nn) < 5L) return(NULL)
+  # Orient every pair the same way in time, so the displacement reads "later
+  # minus earlier" and a common drift adds instead of cancelling.
+  late  <- ifelse(tm[jj] >= tm[ii], jj, ii)
+  early <- ifelse(tm[jj] >= tm[ii], ii, jj)
+  dt <- tm[late] - tm[early]
+  dP <- M[late, , drop = FALSE] - M[early, , drop = FALSE]
+  use <- is.finite(dt) & dt > 0 & is.finite(rowSums(dP))
+  dt <- dt[use]; dP <- dP[use, , drop = FALSE]
+  if (length(dt) < 20L || sum(dt^2) <= 0) return(NULL)
 
-    frac <- mean(nn < near)
-    ref  <- mean(nn >= ref_lo & nn < ref_hi) / shell * near^length(cols)
-    ci   <- wilson(frac, length(nn), conf)
-    ex   <- function(p) if (ref > 0) round(p / ref, 2) else NA_real_
+  # Regression through the origin, per axis: v = sum(dt * dP) / sum(dt^2).
+  sdt2  <- sum(dt^2)
+  v     <- as.numeric(crossprod(dt, dP)) / sdt2
+  resid <- dP - outer(dt, v)
+  dfree <- max(length(dt) - 1L, 1L)
+  se    <- sqrt(colSums(resid^2) / dfree / sdt2)
+  tcrit <- stats::qt(1 - (1 - conf) / 2, dfree)
 
-    data.frame(k = k, threshold = round(th, 2), n_molecules = nrow(M),
-               frac_close = round(frac, 4),
-               excess = ex(frac), excess_lo = ex(ci[1]), excess_hi = ex(ci[2]))
-  })
-  tb <- do.call(rbind, Filter(Negate(is.null), rows))
-  if (is.null(tb) || !nrow(tb)) return(NULL)
+  span <- diff(range(d$tim, na.rm = TRUE))
+  rate <- sqrt(sum(v^2))
+  # The displacement that matters is NOT the drift across the whole run - it is
+  # the drift across the gap between two blinks of one molecule, which is what
+  # the merge radius has to cover. The median gap among candidate pairs is the
+  # available proxy for it, and it is typically a fraction of the run.
+  dt_typ <- stats::median(dt)
+  # Interval on the SPEED: propagate the per-axis errors along the fitted
+  # direction, which is the quantity the caller acts on.
+  se_r <- if (rate > 0) sqrt(sum((v / rate)^2 * se^2)) else sqrt(sum(se^2))
+  lo <- max(0, rate - tcrit * se_r); hi <- rate + tcrit * se_r
 
-  # First k where the short-range pile-up is indistinguishable from ordinary
-  # density (excess <= 1) - i.e. nothing looks like a leftover re-blink.
-  # k_clear is the point estimate, which is a noisy first-crossing of a ratio;
-  # k_clear_hi waits until the whole interval has come down and is the value to
-  # prefer when under-merging is the costlier error. Both are floors - see the
-  # motion limit documented above.
-  first_k <- function(v) { i <- which(is.finite(v) & v <= 1); if (length(i)) tb$k[i[1]] else NA_real_ }
+  # DRIFT vs JITTER. Drift is the part of the displacement that lines up with
+  # time - one direction, growing with the gap. Jitter is what is left once that
+  # is removed: how far two blinks of one molecule land apart for reasons that do
+  # NOT accumulate. Both are reported because they mean different things about a
+  # sample, and because jitter is the term that actually sets how wide a de-blink
+  # radius has to be.
+  #   jitter here still contains the localization error of the two centroids, so
+  #   it is an upper bound on any real positional wobble.
+  jitter <- sqrt(mean(rowSums(resid^2)))
 
-  list(table      = tb,
-       k_clear    = first_k(tb$excess),
-       k_clear_hi = first_k(tb$excess_hi),
-       near_nm    = round(near, 2))
+  # Displacements FROM EACH MOLECULE'S FIRST BLINK, for the drift plot: every
+  # molecule starts at the origin and each later blink is one point. This is a
+  # subset of the pairs used for the fit (the fit also uses second-to-third
+  # steps, which carry information but have no common origin to plot against),
+  # so the plot shows the same phenomenon on a readable frame rather than the
+  # exact rows the regression saw.
+  if (!is.null(tg)) {
+    firsts <- vapply(split(seq_along(tg), tg), function(v) v[which.min(tm[v])], integer(1))
+    is_first <- logical(length(tm)); is_first[firsts] <- TRUE
+    ssel <- is_first[early[use]]
+  } else {
+    ssel <- rep(TRUE, length(dt))
+  }
+  steps <- if (any(ssel)) {
+    st <- as.data.frame(dP[ssel, , drop = FALSE])
+    names(st) <- paste0("d", cols)
+    st$dt <- dt[ssel]
+    # Which molecule each step belongs to, so the caller can colour by it and
+    # join one molecule's blinks into a trajectory. NA when there is no grouping
+    # (spatial pairing has no molecule to name).
+    st$mol <- if (!is.null(tg)) tg[early[use]][ssel] else NA_character_
+    # WHEN in the acquisition this blink happened, as distinct from dt (how long
+    # AFTER its molecule's first blink it happened). Colouring by this shows
+    # whether displacements point one way early in the run and another way
+    # later - a reversal or a step that a gap-based colour cannot reveal.
+    st$t_abs <- tm[late[use]][ssel]
+    st[order(st$mol, st$dt), , drop = FALSE]
+  } else NULL
+  # Directional purity: how much of the total displacement the fitted drift
+  # explains. Near 0 = scattered (jitter only), near 1 = a coherent march.
+  tot <- sum(dP^2)
+  frac_dir <- if (tot > 0) max(0, 1 - sum(resid^2) / tot) else NA_real_
+
+  list(rate = rate, rate_lo = lo, rate_hi = hi,
+       drift_run = rate * span, drift_run_lo = lo * span, drift_run_hi = hi * span,
+       dt_typ = dt_typ, drift_typ = rate * dt_typ,
+       jitter = jitter, frac_directed = frac_dir, n_units = n_units,
+       direction = if (rate > 0) v / rate else rep(NA_real_, length(cols)),
+       velocity = stats::setNames(v, cols), axes = cols, steps = steps,
+       span = span, n_pairs = length(dt), radius = radius, dims = length(cols),
+       significant = is.finite(lo) && lo > 0)
 }
+
 
 # =============================================================================
 # deblink_merge_majority_vote() - LET THE LOCALIZATIONS VOTE
@@ -5963,7 +6619,9 @@ apply_clustering_pipeline <- function(df, input) {
         prefilter_r   = input$cluster2_prefilter_r,
         prefilter_min = input$cluster2_prefilter_min,
         prune         = isTRUE(input$cluster2_prune),
-        prune_tol     = input$cluster2_prune_tol %||% 2
+        prune_tol     = input$cluster2_prune_tol %||% 2,
+        core_only     = isTRUE(input$cluster2_core_only),
+        min_members   = input$cluster2_min_members %||% 0
       )
       if (any(cid > 0)) {
         cid[cid > 0] <- cid[cid > 0] + (next_id - 1L)
@@ -6880,7 +7538,9 @@ apply_two_color_clustering_pipeline <- function(df, input) {
         prefilter_r   = input$cluster2_prefilter_r_tc2,
         prefilter_min = input$cluster2_prefilter_min_tc2,
         prune         = isTRUE(input$cluster2_prune_tc2),
-        prune_tol     = input$cluster2_prune_tol_tc2 %||% 2
+        prune_tol     = input$cluster2_prune_tol_tc2 %||% 2,
+        core_only     = isTRUE(input$cluster2_core_only_tc2),
+        min_members   = input$cluster2_min_members_tc2 %||% 0
       )
       if (g == 2L) cid[cid > 0] <- cid[cid > 0] + 10000L
       med2$cluster_tc2[idx] <- cid
