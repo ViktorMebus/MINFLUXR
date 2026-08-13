@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## sim_server.R  —  Simulation tab server logic
+## sim_server.R  -  Simulation tab server logic
 ## Synthetic MINFLUX localizations (shapes OR image-guided)
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -21,8 +21,8 @@ sim_server <- function(input, output, session) {
 
   # Single source of truth: is the FOV / ROI window active?  TRUE in Acquisition
   # mode, or in Normal mode when the user pins an ROI ("Pin axes to a FOV").
-  # Used everywhere the FOV matters — axis pinning, background spread, and the
-  # confocal window — so they can never disagree.
+  # Used everywhere the FOV matters - axis pinning, background spread, and the
+  # confocal window - so they can never disagree.
   sim_use_fov <- function() {
     identical(input$sim_mode %||% "normal", "acquisition") ||
       isTRUE(input$sim_view_fov)
@@ -94,7 +94,7 @@ sim_server <- function(input, output, session) {
   # ── Detection-rate SHAPE models ─────────────────────────────────────────────
   # The instantaneous structure detection rate is  struct_rate · g(t),  where
   # g(t) ∈ [0, 1] is a normalized SHAPE and struct_rate is the CHARACTERISTIC
-  # (reference) rate — the peak for a decaying run, the plateau for a rising or
+  # (reference) rate - the peak for a decaying run, the plateau for a rising or
   # constant one. Three shapes cover the profiles seen in real MINFLUX runs:
   #
   #   "decay"    g(t) = level + (1-level)·e^{-t/τ}     starts at 1, → level
@@ -168,14 +168,14 @@ sim_server <- function(input, output, session) {
     # struct_rate / bg_rate are TRACES PER HOUR (easier to match real settings);
     # converted to per-minute internally.  Detections follow an ABSOLUTE rate
     # r(t) = X·(floor + (1-floor)·e^{-t/τ}), so how fast the structure resolves
-    # depends on the rate and structure — NOT on the chosen duration.
+    # depends on the rate and structure - NOT on the chosen duration.
     T_min     <- T_sec / 60
     tau_min   <- max(1e-6, decay_min)
     rate_min  <- struct_rate / 60                    # per hour → per minute
     bg_min    <- bg_rate / 60
 
     # Photon budget: each fluorophore yields ~blinks detections before bleaching.
-    # This caps the TOTAL TIDs (over-counting) only — it does NOT gate resolution
+    # This caps the TOTAL TIDs (over-counting) only - it does NOT gate resolution
     # (a molecule is resolved by its FIRST detection; the extra blinks just pile
     # more TIDs on top).
     struct_cap <- n_pool * max(1, blinks)
@@ -191,14 +191,14 @@ sim_server <- function(input, output, session) {
                numeric(1))
     # Photobleaching consumes the photon budget GRADUALLY (fluorophores bleach at
     # different times), so the total saturates smoothly toward struct_cap and the
-    # structure rate tapers off — no hard cliff when the budget is reached.
+    # structure rate tapers off - no hard cliff when the budget is reached.
     bleach <- exp(-cum_R / struct_cap)          # fraction of budget still emitting
     N_t    <- struct_cap * (1 - bleach)         # total recorded TIDs (over-counting)
     n_s    <- N_t[ng]
 
     # Expected distinct molecules resolved by time t: a molecule is found once
     # ANY of its f_m fluorophores is first detected.  Driven by cum_R (rate ×
-    # time × pool) — INDEPENDENT of the per-fluorophore blink budget, so
+    # time × pool) - INDEPENDENT of the per-fluorophore blink budget, so
     # "detections before bleaching" never shifts the road to X% resolved.
     # crowd_m (≤ 1, per molecule, aligned to the sorted unique mol_ids) slows
     # discovery where emitters crowd the donut: a crowded molecule's effective
@@ -268,7 +268,7 @@ sim_server <- function(input, output, session) {
 
     R_mean <- n_tr / (T_sec / 3600)
 
-    # τ from a log-linear fit of |rate − late_rate| toward 0 — works whether the
+    # τ from a log-linear fit of |rate − late_rate| toward 0 - works whether the
     # rate falls (dye bleaching) OR rises (e.g. buffer activating over the run).
     tau_min <- 15
     exc     <- abs(rate_v - Rf)
@@ -280,7 +280,7 @@ sim_server <- function(input, output, session) {
         if (is.finite(slope) && slope < 0) tau_min <- max(0.5, (-1 / slope) / 60)
       }
     }
-    # If the rate visibly changed over the run, τ can't exceed it — a noisy
+    # If the rate visibly changed over the run, τ can't exceed it - a noisy
     # (especially rising) profile can fit an absurd τ ≫ run, which would make the
     # simulated change look flat.  Cap at the run length.
     tau_min <- min(tau_min, T_sec / 60)
@@ -314,7 +314,7 @@ sim_server <- function(input, output, session) {
 
     # Spatial split: a trace sitting in a locally dense neighbourhood is ON the
     # structure; an isolated trace is background.  Uses the DBSCAN core-point
-    # criterion (≥ minPts neighbours within eps) — absolute density, so it works
+    # criterion (≥ minPts neighbours within eps) - absolute density, so it works
     # even when the structure itself is densely labeled.  Approximate; the user
     # can override the resulting fraction.  Also bins the two classes separately
     # so the measured structure / background rate curves can be overlaid.
@@ -334,21 +334,78 @@ sim_server <- function(input, output, session) {
       rate_v_bg     <- hist(t0_tid[!is_struct], breaks = br, plot = FALSE)$counts / bin_hr
     }
 
+    # ── Point-cloud profile ───────────────────────────────────────────────────
     # Localization precision = SD of the repeated final localizations WITHIN a
-    # trace (the molecule re-localized while ON); median over traces with ≥3.
-    # Photons/loc from the effective count (eco).  Effective TCP diameter that
-    # reproduces this precision at this photon count: L_eff = 2·σ·√N.
+    # trace (the molecule re-localized while ON), per axis, median over traces
+    # with >= 3 localizations.  Photons/loc from the effective count (eco).
+    # Effective TCP diameter reproducing this precision: L_eff = 2·σ·√N.
+    #
+    # CAVEAT (stated in the UI too): a within-trace SD is not pure localization
+    # precision — it also contains any real molecular motion, stage drift and
+    # sample wobble during the trace.  On a static target that is small; on
+    # anything mobile this is an UPPER BOUND on precision, not an estimate of it.
     nl  <- as.numeric(tapply(df$x, df$tid, length))
     sx  <- as.numeric(tapply(df$x, df$tid, stats::sd))
     sy  <- as.numeric(tapply(df$y, df$tid, stats::sd))
+    sz  <- if ("z" %in% names(df))
+             as.numeric(tapply(df$z, df$tid, stats::sd))
+           else rep(NA_real_, length(nl))
     okp <- nl >= 3 & is.finite(sx) & is.finite(sy)
-    sigma_x <- if (any(okp)) stats::median(sx[okp]) else NA_real_
-    sigma_y <- if (any(okp)) stats::median(sy[okp]) else NA_real_
-    sigma_z <- NA_real_
-    if ("z" %in% names(df)) {
-      sz <- as.numeric(tapply(df$z, df$tid, stats::sd))
-      if (any(okp & is.finite(sz))) sigma_z <- stats::median(sz[okp & is.finite(sz)])
+
+    # Small-n bias correction.  The sample SD under-estimates sigma at small n,
+    # which matters now that the user controls the trace-length gate and can let
+    # short traces dominate.  Each trace's s is divided by its OWN factor.
+    #
+    # NOT c4.  The textbook constant c4(n) = E[s]/sigma un-biases the MEAN of the
+    # sampling distribution, but this aggregates with a MEDIAN, and median(s)
+    # sits BELOW E[s] at small n.  Dividing by c4 under a median therefore leaves
+    # about 2.5 % of the bias in place (measured, short-trace-heavy population).
+    # The matching constant for a median aggregator is the median of the same
+    # chi distribution:  m(n) = sqrt(qchisq(0.5, n-1) / (n-1)).
+    #   n = 3:  c4 = 0.886  but  m = 0.833   (raw median is 7.6 % low)
+    # Using m recovers sigma to within ~0.2 % of truth.
+    # NOTE: either constant CANCELS exactly in the axis ratios below (both axes
+    # share the same n), so the ratios do not depend on this choice.
+    sd_median_debias <- function(n) {
+      n <- pmax(2, n)
+      sqrt(stats::qchisq(0.5, n - 1) / (n - 1))
     }
+    cc   <- sd_median_debias(nl)
+    sx_c <- sx / cc; sy_c <- sy / cc; sz_c <- sz / cc
+
+    # Median and spread (nMAD) of the per-trace sigma.  The SPREAD is the point:
+    # real MINFLUX sigma is heteroscedastic (it tracks photon count), and a
+    # single median throws exactly that away.
+    med_mad <- function(v) {
+      v <- v[is.finite(v)]
+      if (!length(v)) return(c(NA_real_, NA_real_))
+      c(stats::median(v), 1.4826 * stats::mad(v, constant = 1))
+    }
+    mx <- med_mad(sx_c[okp]); my <- med_mad(sy_c[okp])
+    mz <- med_mad(sz_c[okp & is.finite(sz_c)])
+    sigma_x <- mx[1]; sigma_y <- my[1]; sigma_z <- mz[1]
+
+    # Axis ratios, as the MEDIAN OF PER-TRACE RATIOS rather than the ratio of
+    # medians: within one trace both axes share the same photon count, so the
+    # per-trace ratio already divides the photon dependence out and measures
+    # cloud SHAPE alone.  This is what an anisotropic simulated cloud needs.
+    okr     <- okp & is.finite(sx) & sx > 0
+    ratio_yx <- if (any(okr)) stats::median((sy / sx)[okr]) else NA_real_
+    okrz     <- okr & is.finite(sz)
+    ratio_zx <- if (any(okrz)) stats::median((sz / sx)[okrz]) else NA_real_
+
+    # Distributions kept whole (not just their medians) — 8.1c resamples these
+    # to give every simulated localization its own photon count and every
+    # simulated trace its own length.  Capped so a huge run cannot bloat the
+    # stored profile; resampling from 200 k is indistinguishable from 5 M.
+    CAP  <- 200000L
+    subs <- function(v) {
+      v <- v[is.finite(v)]
+      if (length(v) > CAP) v[sample.int(length(v), CAP)] else v
+    }
+    eco_vec <- if ("eco" %in% names(df)) subs(as.numeric(df$eco)) else numeric(0)
+    len_vec <- as.integer(nl[is.finite(nl)])       # ALL gated traces, not just okp
+
     photons  <- if ("eco" %in% names(df)) stats::median(df$eco, na.rm = TRUE) else NA_real_
     sigma_xy <- mean(c(sigma_x, sigma_y), na.rm = TRUE)
     L_eff    <- if (is.finite(sigma_xy) && is.finite(photons) && photons > 0)
@@ -362,11 +419,21 @@ sim_server <- function(input, output, session) {
          rate_t = rate_t, rate_v = rate_v,
          rate_v_struct = rate_v_struct, rate_v_bg = rate_v_bg,
          sigma_x = sigma_x, sigma_y = sigma_y, sigma_z = sigma_z,
+         sigma_x_mad = mx[2], sigma_y_mad = my[2], sigma_z_mad = mz[2],
+         ratio_yx = ratio_yx, ratio_zx = ratio_zx,
+         n_sigma_traces = sum(okp),
+         debias_med = if (any(okp)) stats::median(cc[okp]) else NA_real_,
+         eco_vec = eco_vec, eco_n = if ("eco" %in% names(df)) sum(is.finite(df$eco)) else 0L,
+         len_vec = len_vec,
+         len_med = if (length(len_vec)) stats::median(len_vec) else NA_real_,
+         len_q = if (length(len_vec))
+                   stats::quantile(len_vec, c(0.25, 0.75), names = FALSE)
+                 else c(NA_real_, NA_real_),
          photons = photons, L_eff = L_eff)
   }
 
   # ╔══════════════════════════════════════════════════════════════════════════╗
-  # ║  PHASE 1 — Synthetic localizations                                      ║
+  # ║  PHASE 1 - Synthetic localizations                                      ║
   # ╚══════════════════════════════════════════════════════════════════════════╝
 
   # ── Shape generators ────────────────────────────────────────────────────────
@@ -497,7 +564,7 @@ sim_server <- function(input, output, session) {
     df
   }
 
-  # Hollow sphere — uniform surface sampling with adjustable shell thickness.
+  # Hollow sphere - uniform surface sampling with adjustable shell thickness.
   # In 2D collapses to a ring (circle cross-section).
   gen_hollow_sphere <- function(n, radius, shell_thick, use_3d = FALSE) {
     if (!use_3d) {
@@ -518,7 +585,7 @@ sim_server <- function(input, output, session) {
     df
   }
 
-  # Double ring — two parallel rings separated along Z (or offset along Y in 2D).
+  # Double ring - two parallel rings separated along Z (or offset along Y in 2D).
   # Useful for nuclear pore complex (~35 nm separation), centrioles, etc.
   gen_double_ring <- function(n, diameter, ring_width, separation_nm,
                                z_thickness = 0, use_3d = FALSE) {
@@ -540,7 +607,7 @@ sim_server <- function(input, output, session) {
     df
   }
 
-  # Arc — a partial ring spanning arc_extent_deg degrees.
+  # Arc - a partial ring spanning arc_extent_deg degrees.
   # arc_start_deg sets the angular position of the start of the arc.
   gen_arc <- function(n, diameter, ring_width, arc_start_deg, arc_extent_deg,
                        z_thickness = 0, use_3d = FALSE) {
@@ -558,7 +625,7 @@ sim_server <- function(input, output, session) {
     df
   }
 
-  # Oligomeric ring stack — fixed, evenly-spaced subunit positions (no randomness).
+  # Oligomeric ring stack - fixed, evenly-spaced subunit positions (no randomness).
   # Models protein complexes: hexamers, heptamers,
   # nuclear pore subcomplexes, etc.
   # GT positions are rigidly determined: exactly n_subunits × n_stacks molecules.
@@ -629,7 +696,7 @@ sim_server <- function(input, output, session) {
     m     <- img_gray; m[m < threshold] <- 0
     probs <- as.vector(m)
     if (sum(probs) == 0)
-      stop("All pixels are below the threshold — lower the threshold value.")
+      stop("All pixels are below the threshold - lower the threshold value.")
     probs <- probs / sum(probs)
     H <- nrow(m); W <- ncol(m)
 
@@ -723,7 +790,7 @@ sim_server <- function(input, output, session) {
     n_f     <- nrow(f_df)
 
     # Step 3b: per-fluorophore detection filter.
-    # Labeling efficiency applies to each individual fluorophore independently —
+    # Labeling efficiency applies to each individual fluorophore independently -
     # this is the biologically relevant quantity for MINFLUX: what fraction of
     # the theoretical TIDs are actually detected?  Molecules where every
     # fluorophore is missed simply produce no TIDs (equivalent to being
@@ -843,7 +910,7 @@ sim_server <- function(input, output, session) {
   # scale_by_fluor: divide each fluorophore's lambda by the number of
   #   fluorophores on its molecule (requires mol_id column in fluoro_df).
   #   Keeps total locs per molecule ≈ trace_length regardless of labeling
-  #   strategy — models a fixed observation budget per molecule.
+  #   strategy - models a fixed observation budget per molecule.
 
   gen_localizations <- function(fluoro_df, trace_length,
                                  sigma_loc_xy, sigma_loc_z = sigma_loc_xy,
@@ -918,11 +985,11 @@ sim_server <- function(input, output, session) {
     max(1, sigma_ex * sigma_det / sqrt(sigma_ex^2 + sigma_det^2))
   }
 
-  # Fraction of a point emitter's light that passes the pinhole — the encircled
+  # Fraction of a point emitter's light that passes the pinhole - the encircled
   # energy of the Airy pattern within the pinhole radius. v is the optical radius
   # (v = 3.8317 at exactly 1 AU, the first Airy minimum, where ~84 % is enclosed).
   # This drives the real confocal trade-off: closing the pinhole (AU < 1) rejects
-  # light — dimmer, noisier — but tightens the PSF and sections better; opening it
+  # light - dimmer, noisier - but tightens the PSF and sections better; opening it
   # (AU > 1) barely adds signal yet blurs and lets in out-of-focus haze.
   confocal_collection_efficiency <- function(au) {
     v <- 3.8317 * max(0, au)
@@ -1327,7 +1394,7 @@ sim_server <- function(input, output, session) {
 
     # ── Background / noise TIDs ──────────────────────────────────────────────
     # Acquisition mode: count = background detection rate (traces/hour) × duration,
-    # mirroring the structure — longer runs accumulate more non-specific TIDs.
+    # mirroring the structure - longer runs accumulate more non-specific TIDs.
     # Normal mode: a plain fixed count.  Background is spread across the FOV when
     # set, else the multi-copy FOV, else the GT bounding box + 10 % padding.
     # Each background detection is a fresh random position. TID numbering
@@ -1390,7 +1457,7 @@ sim_server <- function(input, output, session) {
 
     # ── RMSE: per-TID displacement error (GT position vs trace median) ──────────
     # Only computed for real TIDs (1 … nrow(fluoro)); background TIDs excluded.
-    # Pre-split locs by TID for O(1) lookup per trace — essential when multi-
+    # Pre-split locs by TID for O(1) lookup per trace - essential when multi-
     # copy produces thousands of TIDs.  Capped at 1 000 sampled TIDs so the
     # computation stays fast even with very large multi-copy scenes.
     rmse_vals <- NULL
@@ -1483,6 +1550,8 @@ sim_server <- function(input, output, session) {
     list(gt = gt, fluoro = fluoro, fluoro_pool = fluoro_pool,
          locs = locs,
          link_nm = link_nm, n_fluor = n_fluor, lbl_note = lbl_note,
+         dye_spread_nm = dye_spread_nm, blink_lambda = blink_lambda,
+         eff_pct = eff_pct,
          protein_r_nm = protein_r_nm,
          sigma_loc_xy = sigma_loc_xy, sigma_loc_z = sigma_loc_z,
          n_prot = n_prot, n_fluoro = nrow(fluoro),
@@ -1502,7 +1571,7 @@ sim_server <- function(input, output, session) {
 
   # ── Live acquisition timeline ────────────────────────────────────────────────
   # Recomputes the saturation / detection-rate curves from the last-generated
-  # fluorophore pool whenever the acquisition parameters change — so the
+  # fluorophore pool whenever the acquisition parameters change - so the
   # Acquisition tab reacts to rate / duration / background / bleaching live, with
   # no need to re-Generate the structure.  A fixed seed keeps the curve stable
   # for a given parameter set (it only moves when an input actually changes).
@@ -1553,7 +1622,189 @@ sim_server <- function(input, output, session) {
   # Load a .npy / .json / .csv run, measure its detection-rate profile, duration
   # and FOV, pre-fill the Acquisition inputs, and keep the measured rate curve to
   # overlay on the Acquisition plot.
-  sim_real_rv <- reactiveVal(NULL)
+  sim_real_rv  <- reactiveVal(NULL)   # analysis of the GATED run (drives everything)
+  sim_real_raw <- reactiveVal(NULL)   # the run exactly as uploaded, never gated
+
+  # ── Calibration gate ────────────────────────────────────────────────────────
+  # GOAL: restrict a real run to the localizations / traces the calibration is
+  # measured from, and report exactly how much was dropped.
+  #
+  # Order is deliberate: EFO and CFR gate individual LOCALIZATIONS first, then
+  # trace length is recounted on the survivors and the length gate drops whole
+  # TRACES.  So "trace length" here means USABLE localizations per trace - gating
+  # hard on EFO and then asking for >= 20 locs is a far stricter request than
+  # either gate alone, which is why the info box reports both stages.
+  #
+  # Non-finite values are KEPT (a gate cannot judge a missing number) and counted
+  # separately, so leaving a range at its full extent is always a true no-op.
+  # A NULL range is a no-op too: the column is absent, or the widget is not built.
+  .rng_ok <- function(r)
+    length(r) == 2L && all(is.finite(r)) && r[2] >= r[1]
+
+  # A column is usable only if it exists AND carries at least one finite value.
+  .col_ok <- function(df, nm)
+    nm %in% names(df) &&
+      any(is.finite(suppressWarnings(as.numeric(df[[nm]]))))
+
+  gate_real_run <- function(df, efo_rng = NULL, cfr_rng = NULL, len_rng = NULL) {
+    if (is.null(df) || !all(c("tid", "tim", "x", "y") %in% names(df))) return(NULL)
+    n_loc_in <- nrow(df)
+    n_tr_in  <- length(unique(df$tid))
+
+    # ── Stage 1: localization-level gates (EFO, CFR) ──────────────────────────
+    keep    <- rep(TRUE, n_loc_in)
+    n_na    <- c(efo = 0L, cfr = 0L)   # values a gate could not judge
+    narrowed <- character(0)           # gates the user actually tightened
+    for (nm in c("efo", "cfr")) {
+      rng <- if (identical(nm, "efo")) efo_rng else cfr_rng
+      if (!.rng_ok(rng) || !.col_ok(df, nm)) next
+      v    <- suppressWarnings(as.numeric(df[[nm]]))
+      fin  <- is.finite(v)
+      keep <- keep & (!fin | (v >= rng[1] & v <= rng[2]))
+      n_na[nm] <- sum(!fin)
+      full <- range(v[fin])
+      if (rng[1] > full[1] || rng[2] < full[2]) narrowed <- c(narrowed, toupper(nm))
+    }
+    g <- df[keep, , drop = FALSE]
+    n_loc_mid <- nrow(g)
+    n_tr_mid  <- length(unique(g$tid))
+
+    # ── Stage 2: trace-level gate on the SURVIVING localization count ─────────
+    if (.rng_ok(len_rng) && n_loc_mid > 0) {
+      tl   <- table(g$tid)
+      ok   <- names(tl)[tl >= len_rng[1] & tl <= len_rng[2]]
+      g    <- g[as.character(g$tid) %in% ok, , drop = FALSE]
+      full <- range(as.integer(tl))
+      if (len_rng[1] > full[1] || len_rng[2] < full[2])
+        narrowed <- c(narrowed, "trace length")
+    }
+
+    # Traces with >= 3 localizations are the only ones a within-trace SD can be
+    # measured from, so they are the sample size that actually sets sigma.
+    n_sig <- if (nrow(g) > 0) sum(table(g$tid) >= 3L) else 0L
+
+    list(df = g, narrowed = narrowed, n_na = n_na,
+         n_loc_in = n_loc_in, n_loc_mid = n_loc_mid, n_loc_out = nrow(g),
+         n_tr_in  = n_tr_in,  n_tr_mid  = n_tr_mid,
+         n_tr_out = length(unique(g$tid)), n_tr_sigma = n_sig)
+  }
+
+  # The gated run.  Rebuilt whenever the file, a gate range or the axial factor
+  # changes; every calibrated number downstream is measured on THIS subset.
+  # The stored z is RAW, so the factor is applied here — one place, so sigma_z
+  # and fov_z can never disagree with the number shown in the input.
+  sim_real_gated <- reactive({
+    raw <- sim_real_raw()
+    if (is.null(raw)) return(NULL)
+    g <- gate_real_run(raw$df,
+                       efo_rng = input$sim_real_efo_range,
+                       cfr_rng = input$sim_real_cfr_range,
+                       len_rng = input$sim_real_len_range)
+    if (is.null(g)) return(NULL)
+    # Until the widget exists, fall back to the factor detected for this file,
+    # so the very first calibration already uses the right one.
+    zc <- suppressWarnings(as.numeric(input$sim_real_z_cal %||% raw$cal$factor))
+    if (!is.finite(zc) || zc <= 0) zc <- 1
+    if ("z" %in% names(g$df)) g$df$z <- g$df$z * zc
+    g$z_cal <- zc
+    g$z_src <- raw$cal
+    g$has_z <- isTRUE(raw$has_z)
+    g
+  })
+
+  # Axial calibration for the loaded run.  Rebuilt per upload (so a new file can
+  # never inherit the previous file's factor) and pre-filled from what the file
+  # itself says: .npy/.json are raw and need the correction; a CSV is returned
+  # to raw first, then offered the factor its producer had applied.
+  # NOTE: this is the refractive-index axial correction, NOT sim_crlb_z_factor
+  # (the sigma_z/sigma_xy precision ratio). Both default near 0.7 and they are
+  # unrelated quantities.
+  output$sim_real_zcal_ui <- renderUI({
+    raw <- sim_real_raw()
+    if (is.null(raw)) return(NULL)
+    cal <- raw$cal
+    # A 2D run has no axial structure to calibrate — say nothing about z.
+    if (!isTRUE(raw$has_z))
+      return(tags$div(style = "font-size:0.78em; color:#999; margin-bottom:6px;",
+                      "2D run — no axial calibration needed."))
+    tagList(
+      numericInput("sim_real_z_cal", "Axial calibration factor (z x)",
+                   value = cal$factor, min = 0.05, max = 5, step = 0.05),
+      tags$div(style = "font-size:0.78em; color:#666; margin-top:-6px;",
+        sprintf("Detected: %s%s. Applied to z before σ_z and the FOV depth are measured.",
+                cal$source, if (isTRUE(cal$certain)) "" else " - assumed"))
+    )
+  })
+
+  # Gate widgets, built from the uploaded run's own ranges so the default value
+  # spans the whole data and is therefore a no-op.  Columns the file does not
+  # carry (a plain CSV often has no efo / cfr) say so instead of silently
+  # passing everything.
+  output$sim_real_gate_ui <- renderUI({
+    raw <- sim_real_raw()
+    if (is.null(raw)) return(NULL)
+    df     <- raw$df
+    tl_rng <- range(as.integer(table(df$tid)))
+
+    # No `step` here on purpose: numericRangeInput errors on step = NULL, and
+    # EFO/CFR have no natural increment - the browser's default suits both.
+    num_rng <- function(id, label, nm) {
+      if (!.col_ok(df, nm))
+        return(tags$div(style = "font-size:0.78em; color:#999; margin-bottom:6px;",
+                        sprintf("%s - not in this file, gate unavailable.",
+                                toupper(nm))))
+      v <- suppressWarnings(as.numeric(df[[nm]]))
+      r <- range(v[is.finite(v)])
+      shinyWidgets::numericRangeInput(id, label, value = r,
+                                      min = r[1], max = r[2])
+    }
+
+    tags$details(
+      class = "sim-group", open = NA,
+      tags$summary(tags$b("Calibration gate")),
+      helpText("Restricts which localizations and traces the precision and",
+               "trace-length statistics are measured from. EFO and CFR gate",
+               "individual localizations; the length gate then drops whole",
+               "traces by how many localizations survived."),
+      num_rng("sim_real_efo_range", "EFO range (Hz)",  "efo"),
+      num_rng("sim_real_cfr_range", "CFR range",       "cfr"),
+      shinyWidgets::numericRangeInput(
+        "sim_real_len_range", "Localizations per trace",
+        value = tl_rng, min = tl_rng[1], max = tl_rng[2], step = 1),
+      uiOutput("sim_real_gate_info")
+    )
+  })
+
+  # Before / after counts for both gate stages.  The gate is only useful if its
+  # severity is visible, so this always reports rather than only on trouble.
+  output$sim_real_gate_info <- renderUI({
+    g <- sim_real_gated()
+    if (is.null(g)) return(NULL)
+    pct <- function(a, b) if (b > 0) sprintf("%.0f%%", 100 * a / b) else "-"
+
+    too_few <- g$n_loc_out < 10L || g$n_tr_sigma < 3L
+    tags$div(
+      class = if (too_few) "alert alert-warning" else "well well-sm",
+      style = "padding:6px 10px; font-size:0.78em; margin:6px 0;",
+      tags$b("Gate"), tags$br(),
+      sprintf("Localizations: %d → %d  (%s kept)",
+              g$n_loc_in, g$n_loc_out, pct(g$n_loc_out, g$n_loc_in)), tags$br(),
+      sprintf("Traces: %d → %d  (%s kept); %d with ≥ 3 locs set σ",
+              g$n_tr_in, g$n_tr_out, pct(g$n_tr_out, g$n_tr_in), g$n_tr_sigma),
+      if (any(g$n_na > 0)) tagList(tags$br(),
+        sprintf("%s value(s) missing and left ungated.",
+                paste(sprintf("%s: %d", toupper(names(g$n_na)[g$n_na > 0]),
+                              g$n_na[g$n_na > 0]), collapse = ", "))),
+      if (too_few) tagList(tags$br(), tags$b(
+        "Too little left to calibrate - widen the gate.")),
+      # Gating is not neutral: every one of these selections keeps the brighter,
+      # better-centred, longer-lived molecules, which are also the most precise.
+      if (length(g$narrowed) > 0 && !too_few) tagList(tags$br(), tags$span(
+        style = "color:#854d0e;",
+        sprintf("%s narrowed - this keeps the brighter / better-centred / longer traces, so the calibrated σ is tighter than the run as a whole.",
+                paste(g$narrowed, collapse = ", "))))
+    )
+  })
 
   # Split the measured total rate into structure + constant background given the
   # fraction of traces that are on-structure, and push the fitted MODEL plus its
@@ -1587,26 +1838,61 @@ sim_server <- function(input, output, session) {
     f <- input$sim_real_file
     req(f)
     ext <- get_ext(f$name)
-    df <- tryCatch(
+    # Read to RAW, uncorrected z from every source, exactly like the SMLM tab —
+    # then ONE axial factor is applied in sim_real_gated(), under user control.
+    # Reading with the readers' 0.7 default instead would bake the correction in
+    # for .npy/.json while leaving a .csv at whatever its producer applied, so
+    # the same run would give a different sigma_z depending on its format.
+    got <- tryCatch(
       withProgress(message = "Reading run…", value = 0.2, {
         switch(ext,
-          npy  = read_minflux_npy_as_df(f$datapath),
-          json = read_minflux_json_as_df(f$datapath),
-          csv  = read.csv(f$datapath, check.names = FALSE),
+          npy  = list(df = read_minflux_npy_as_df(
+                             f$datapath, keep_final_only = TRUE,
+                             keep_valid_only = TRUE, z_scale = 1.0),
+                      cal = list(factor = PYMINFLUX_Z_SCALE_DEFAULT,
+                                 source = "raw instrument data (.npy)",
+                                 certain = TRUE)),
+          json = list(df = read_minflux_json_as_df(
+                             f$datapath, keep_final_only = TRUE,
+                             keep_valid_only = TRUE, z_scale = 1.0),
+                      cal = list(factor = PYMINFLUX_Z_SCALE_DEFAULT,
+                                 source = "raw instrument data (.json)",
+                                 certain = TRUE)),
+          # A CSV arrives with SOME factor already in its z. strip_csv_z_
+          # calibration() divides it back out and reports what it found —
+          # our own export records the factor explicitly, pyMINFLUX does not.
+          csv  = {
+            raw <- strip_csv_z_calibration(read.csv(f$datapath, check.names = FALSE))
+            list(df = raw, cal = attr(raw, "z_cal"))
+          },
           stop("Unsupported file type (use .npy, .json or .csv)."))
       }),
       error = function(e) {
         showNotification(paste("Load failed:", conditionMessage(e)),
                          type = "error", duration = 8); NULL
       })
-    if (is.null(df)) return()
-    a <- analyze_real_run(df)
-    if (is.null(a)) {
-      showNotification("Could not analyze run (need tid, tim, x, y).",
+    if (is.null(got)) return()
+    # Same column canonicalization the SMLM tab applies, so alternative headers
+    # (trace_id, x_nm, photons, …) are accepted here too.
+    df <- canonicalize_minflux_df(got$df)
+    if (!all(c("tid", "tim", "x", "y") %in% names(df))) {
+      showNotification("Could not read run (need tid, tim, x, y).",
                        type = "error", duration = 6); return()
     }
-    sim_real_rv(a)
+    # Store the run ungated and at RAW z, together with the detected axial
+    # provenance.  Building the widgets from it makes sim_real_gated() fire, and
+    # the calibration observer does the rest — so upload, a gate change and an
+    # axial-factor change all follow exactly the same path.
+    sim_real_raw(list(df = df, cal = got$cal, ext = ext,
+                      has_z = has_axial_data(df)))
+    showNotification("Run loaded - calibrating from the current gate.",
+                     type = "message", duration = 4)
+  })
 
+  # Push every measured value into the Acquisition / precision inputs.  Called on
+  # upload AND on every gate change, so the inputs always reflect the subset the
+  # gate currently selects.
+  push_real_calibration <- function(a) {
     # Pre-fill the Acquisition inputs from the measured values.
     hrs  <- floor(a$duration_hr)
     mins <- min(59L, as.integer(round((a$duration_hr - hrs) * 60)))
@@ -1634,10 +1920,20 @@ sim_server <- function(input, output, session) {
       updateNumericInput(session, "sim_crlb_photons", value = round(a$photons))
     if (is.finite(a$L_eff))
       updateNumericInput(session, "sim_crlb_L", value = round(a$L_eff))
+  }
 
-    showNotification("Acquisition + precision set from the real run.",
-                     type = "message", duration = 5)
-  })
+  # Re-calibrate whenever the run or the gate changes.  Everything downstream
+  # reads sim_real_rv(), so the whole tab follows the gate from this one place.
+  # A gate that leaves too little to measure keeps the previous calibration
+  # rather than silently resetting the inputs - the gate info box says so.
+  observeEvent(sim_real_gated(), {
+    g <- sim_real_gated()
+    req(g)
+    a <- analyze_real_run(g$df)
+    if (is.null(a)) return()
+    sim_real_rv(a)
+    push_real_calibration(a)
+  }, ignoreNULL = TRUE)
 
   # Manual override of the structure/background split (re-derives the rates).
   observeEvent(input$sim_real_struct_frac, {
@@ -1650,9 +1946,18 @@ sim_server <- function(input, output, session) {
     if (is.null(a))
       return(tags$small(style = "color:#888;",
         "Load a .npy / .json MINFLUX run to calibrate the model from real data."))
-    tags$div(class = "alert alert-success",
+    # Counts here are those of the GATED subset, not the file - the gate box
+    # directly above reports the before/after so the two can never be confused.
+    # When the gate is starved, these numbers are the last calibration that
+    # succeeded, so they must be labelled as stale rather than as current.
+    g     <- sim_real_gated()
+    stale <- !is.null(g) && (g$n_loc_out < 10L || g$n_tr_sigma < 3L)
+    suffix <- if (stale) " (last valid gate)"
+              else if (!is.null(g) && length(g$narrowed) > 0) " (gated)"
+              else ""
+    tags$div(class = if (stale) "alert alert-warning" else "alert alert-success",
              style = "padding:6px 10px; font-size:0.82em; margin:4px 0;",
-      tags$b(sprintf("%d traces over %.1f h", a$n_traces, a$duration_hr)),
+      tags$b(sprintf("%d traces over %.1f h%s", a$n_traces, a$duration_hr, suffix)),
       tags$br(),
       sprintf("Total rate: peak %.0f, mean %.0f, floor %.0f /hr  (τ≈%.0f min)",
               a$rate_peak, a$rate_mean, a$rate_floor, a$tau_min),
@@ -1662,14 +1967,30 @@ sim_server <- function(input, output, session) {
       tags$br(),
       sprintf("FOV: %.0f × %.0f%s nm", a$fov_x, a$fov_y,
               if (a$fov_z > 1) sprintf(" × %.0f", a$fov_z) else ""),
-      if (is.finite(a$sigma_x)) tagList(tags$br(),
-        sprintf("Precision σ: x %.1f, y %.1f%s nm%s",
-                a$sigma_x, a$sigma_y,
-                if (is.finite(a$sigma_z)) sprintf(", z %.1f", a$sigma_z) else "",
-                if (is.finite(a$photons))
-                  sprintf("  |  %.0f photons/loc → L≈%.0f nm",
-                          a$photons, a$L_eff)
-                else "")))
+      # ── Point-cloud profile ──────────────────────────────────────────────
+      # Median ± nMAD per axis: the SPREAD is what makes the cloud MINFLUX-like,
+      # so it is shown next to the median rather than collapsed into it.
+      if (is.finite(a$sigma_x)) tagList(
+        tags$hr(style = "margin:5px 0;"),
+        tags$b("Point cloud"),
+        sprintf(" (%d traces, ≥3 locs)", a$n_sigma_traces), tags$br(),
+        sprintf("σ ± nMAD: x %.1f ± %.1f, y %.1f ± %.1f%s nm",
+                a$sigma_x, a$sigma_x_mad, a$sigma_y, a$sigma_y_mad,
+                if (is.finite(a$sigma_z))
+                  sprintf(", z %.1f ± %.1f", a$sigma_z, a$sigma_z_mad) else ""),
+        tags$br(),
+        sprintf("Axis ratio: y/x %.2f%s", a$ratio_yx,
+                if (is.finite(a$ratio_zx)) sprintf(", z/x %.2f", a$ratio_zx) else ""),
+        tags$br(),
+        sprintf("Locs per trace: median %.0f (IQR %.0f–%.0f)",
+                a$len_med, a$len_q[1], a$len_q[2]),
+        if (is.finite(a$photons)) tagList(tags$br(),
+          sprintf("%.0f photons/loc (n=%d) → L ≈ %.0f nm", a$photons,
+                  a$eco_n, a$L_eff)),
+        tags$br(),
+        tags$span(style = "color:#666;", sprintf(
+          "σ is small-n debiased (×%.3f at the median trace length). Within-trace SD also contains real motion and drift, so it bounds precision rather than measuring it.",
+          1 / a$debias_med))))
   })
 
   # ── Compare-strategies reactive ─────────────────────────────────────────────
@@ -1803,7 +2124,7 @@ sim_server <- function(input, output, session) {
     gc      <- if (dark) "rgba(255,255,255,0.1)" else "rgba(0,0,0,0.1)"
     show_grid <- !isTRUE(input$sim_hide_grid)
 
-    # Field of view — display window only, nothing is cropped. Axes are pinned to
+    # Field of view - display window only, nothing is cropped. Axes are pinned to
     # a real-camera-style FOV; the 3D aspect ratio reflects the true X:Y:Z
     # proportions so Z appears compressed (4000×4000×1000). Always on in
     # Acquisition mode; in Normal mode it's opt-in via "Pin axes to a FOV (ROI)".
@@ -1842,7 +2163,7 @@ sim_server <- function(input, output, session) {
              z_part)
     }
 
-    # GT layer — bright distinct markers so they stand out in both 2D and 3D.
+    # GT layer - bright distinct markers so they stand out in both 2D and 3D.
     # In image mode these are the intensity-weighted sampled molecule positions.
     if (isTRUE(input$sim_show_gt) && nrow(res$gt) > 0) {
       gt_clean <- res$gt[, intersect(c("x","y","z"), names(res$gt)), drop = FALSE]
@@ -1857,7 +2178,7 @@ sim_server <- function(input, output, session) {
     }
 
 
-    # Localization layer — coloured by TID, Z, time, or local density.
+    # Localization layer - coloured by TID, Z, time, or local density.
     if (isTRUE(input$sim_show_locs) && nrow(res$locs) > 0) {
       cmode <- input$sim_color_mode %||% "tid"
       if (identical(cmode, "z") && !(use_3d && "z" %in% names(res$locs)))
@@ -2025,7 +2346,7 @@ sim_server <- function(input, output, session) {
         yaxis$range <- c(-fov_y / 2, fov_y / 2)
       }
 
-      # Scale bar (2D only) — reuses the shared SMLM make_scale_bar helper.
+      # Scale bar (2D only) - reuses the shared SMLM make_scale_bar helper.
       sb <- NULL
       if (isTRUE(input$sim_show_scale_bar)) {
         x_span <- if (use_fov) fov_x else {
@@ -2203,12 +2524,12 @@ sim_server <- function(input, output, session) {
       class = "alert alert-info",
       style = "padding:6px 10px; font-size:0.84em; margin-top:4px;",
       tags$b(sprintf("%d fluorophore(s) per molecule", p$n_fluor)),
-      sprintf(" \u2014 linker ~%d nm", round(p$link_nm)),
+      sprintf(" - linker ~%d nm", round(p$link_nm)),
       tags$br(), p$note
     )
   })
 
-  # ── CRLB precision preview (live — no Generate needed) ──────────────────────
+  # ── CRLB precision preview (live - no Generate needed) ──────────────────────
   output$sim_crlb_preview <- renderUI({
     req(identical(input$sim_prec_mode %||% "manual", "crlb"))
     L_nm    <- max(1,    as.numeric(input$sim_crlb_L       %||% 100))
@@ -2274,17 +2595,82 @@ sim_server <- function(input, output, session) {
     res <- sim_result()
     if (is.null(res)) return(NULL)
 
-    link       <- res$link_nm
-    sig_xy     <- res$sigma_loc_xy
-    prot_r     <- res$protein_r_nm %||% 0
-    theory     <- sqrt(prot_r^2 + link^2 + sig_xy^2)
-    obs        <- if (!is.null(res$rmse_vals) && length(res$rmse_vals) >= 1)
-                    mean(res$rmse_vals) else NA_real_
+    # ── Error budget, all terms as RADIAL RMS displacement (nm) ───────────────
+    # Every component must be expressed in the SAME quantity before it can go in
+    # quadrature.  The observed value this is compared against is a radial
+    # distance |trace median - GT|, so radial RMS is the common currency.
+    #
+    #   protein   epitope offset: a FIXED magnitude r        -> r^2
+    #   linker    |N(0, s)| with s = link*sqrt(pi/2), so the MEAN magnitude is
+    #             link_nm but E[|d|^2] = s^2 = (pi/2)*link^2.  Using link^2 here
+    #             (as this panel used to) understates the term by 20 %.
+    #   dye       per-AXIS sigma -> radial variance is D * dye_spread^2
+    #   loc       per-AXIS sigma, and the TID position is the MEDIAN of n_loc
+    #             localizations, so the localization term is DIVIDED DOWN by the
+    #             trace length.  Omitting that made "observed vs theoretical"
+    #             compare two different quantities.
+    #             The textbook Var(median) = (pi/2)*sigma^2/n is ASYMPTOTIC and
+    #             runs +17 % at n=3, +9 % at n=5 - exactly the short traces
+    #             MINFLUX produces.  (pi/2)/(n + pi/2 - 1) holds to ~2 % from
+    #             n=3 up.  It smooths over the odd/even-n zigzag in the exact
+    #             value, which is right here because Poisson trace lengths mix
+    #             both parities anyway.
+    D       <- if (isTRUE(res$use_3d)) 3L else 2L
+    link    <- res$link_nm
+    dspread <- res$dye_spread_nm %||% 0
+    prot_r  <- res$protein_r_nm  %||% 0
+    sig_xy  <- res$sigma_loc_xy
+    sig_z   <- res$sigma_loc_z %||% sig_xy
 
-    # Resolution limit for separating two molecules: ~2× the combined
-    # localization spread σ (Gaussian clouds separate at ≳2σ). MINFLUX
-    # resolution is the measured spread (σ / MAD per TID), not an optical FWHM.
-    resolve_limit <- 2 * theory
+    # Localizations per REAL trace (background TIDs excluded).  The WHOLE vector
+    # is kept, not just its median: trace lengths are Poisson/geometric and the
+    # median-variance factor is convex, so evaluating it at the median length
+    # under-states the ensemble mean by 5-7 % (Jensen).  Averaging the factor
+    # over the realized lengths removes that exactly.
+    n_vec     <- numeric(0)
+    n_loc_med <- 1
+    if (!is.null(res$locs) && nrow(res$locs) > 0 && !is.null(res$fluoro)) {
+      tid_i <- suppressWarnings(as.integer(res$locs$tid))
+      real  <- !is.na(tid_i) & tid_i >= 1L & tid_i <= nrow(res$fluoro)
+      if (any(real)) {
+        n_vec     <- as.numeric(table(tid_i[real]))
+        n_loc_med <- max(1, stats::median(n_vec))
+      }
+    }
+
+    # Variance of the median of n Gaussian draws, per unit sigma^2.
+    med_var_f <- function(n) (pi / 2) / (pmax(1, n) + pi / 2 - 1)
+    var_loc1  <- if (D == 3L) 2 * sig_xy^2 + sig_z^2 else 2 * sig_xy^2
+    v_prot    <- prot_r^2
+    v_link    <- (pi / 2) * link^2
+    v_dye     <- D * dspread^2
+    v_loc     <- var_loc1 * if (length(n_vec)) mean(med_var_f(n_vec))
+                            else med_var_f(n_loc_med)
+
+    theory <- sqrt(v_prot + v_link + v_dye + v_loc)
+    # What NO amount of acquisition time removes: the per-molecule label offset.
+    # dye_spread is excluded because it averages once a molecule's TIDs are
+    # merged; protein + linker are drawn once per molecule and never do.
+    lab_floor <- sqrt(v_prot + v_link)
+
+    # Observed as an RMS too (it was a mean of magnitudes, which is a different
+    # statistic and always smaller), so the two are directly comparable.
+    obs <- if (!is.null(res$rmse_vals) && length(res$rmse_vals) >= 1)
+             sqrt(mean(res$rmse_vals^2)) else NA_real_
+
+    # Per-MOLECULE error after merging that molecule's TIDs — the quantity that
+    # decides whether two molecules can be told apart.  dye_spread averages over
+    # the dyes detected, sigma_loc over all their localizations.
+    n_dye_det <- max(1, res$n_fluor * (res$eff_pct %||% 100) / 100)
+    n_tid_mol <- n_dye_det * (1 + (res$blink_lambda %||% 0))
+    n_loc_mean <- if (length(n_vec)) mean(n_vec) else n_loc_med
+    eps_mol   <- sqrt(v_prot + v_link + D * dspread^2 / n_dye_det +
+                      var_loc1 * med_var_f(n_tid_mol * n_loc_mean))
+
+    # Two molecules are separable at ~k x their position error. k = 2 is kept
+    # for continuity with previous numbers; strictly, two INDEPENDENT estimates
+    # each of error eps separate at 2*sqrt(2)*eps.
+    resolve_limit <- 2 * eps_mol
     max_val       <- max(theory, obs, 1, na.rm = TRUE) * 1.05
 
     make_bar <- function(label, value, color) {
@@ -2311,21 +2697,35 @@ sim_server <- function(input, output, session) {
       style = "font-size:0.88em; margin-top:8px;",
       tags$b("Precision Budget"),
       tags$br(),
-      tags$small("Error components (\u03C3, nm):"),
+      tags$small(sprintf(
+        "Radial RMS displacement of one TID from its molecule (%dD, %.0f locs/trace):",
+        D, n_loc_med)),
       tags$br(), tags$br(),
       if (prot_r > 0) make_bar("Protein size (epitope offset)", prot_r, "#be185d"),
-      make_bar("Linker / label error",           link,   "#e07b39"),
-      make_bar("Localization precision \u03C3_xy", sig_xy, "#3b82c4"),
-      make_bar("\u221A(link\u00B2 + \u03C3\u00B2_xy)  — combined theoretical",
-               theory, "#7c3aed"),
+      make_bar("Linker / label error  (\u221A(\u03C0/2)\u00B7link)",
+               sqrt(v_link), "#e07b39"),
+      if (dspread > 0)
+        make_bar("Dye spread in complex", sqrt(v_dye), "#0891b2"),
+      make_bar("Localization  (\u03c3 averaged over the trace)",
+               sqrt(v_loc), "#3b82c4"),
+      make_bar("Combined - theoretical", theory, "#7c3aed"),
       if (!is.na(obs))
-        make_bar(sprintf("Observed mean TID displacement  (n\u202F=\u202F%d)",
+        make_bar(sprintf("Observed TID displacement (RMS, n\u202F=\u202F%d)",
                          length(res$rmse_vals)),
                  obs, "#16a34a"),
       tags$small(style = "color:#888;",
-        "Observed should approach combined theoretical when traces are long."),
+        "Observed and theoretical should agree; both are radial RMS."),
+      # The label floor is the headline: it is what the acquisition CANNOT fix.
+      tags$div(
+        style = paste0("margin-top:8px; padding:5px 8px; border-radius:4px;",
+                       " font-size:0.82em; background:#f1f5f9; color:#334155;"),
+        tags$b(sprintf("Label floor: %.1f nm", lab_floor)),
+        tags$br(),
+        "Protein offset + linker are drawn once per molecule, so no extra ",
+        "localizations or acquisition time reduce them."),
       if (!is.na(res$gt_nnd)) {
         resolvable <- res$gt_nnd >= resolve_limit
+        never      <- res$gt_nnd < 2 * lab_floor
         tags$div(
           style = sprintf(
             paste0("margin-top:8px; padding:5px 8px; border-radius:4px;",
@@ -2333,13 +2733,21 @@ sim_server <- function(input, output, session) {
             if (resolvable) "#dcfce7" else "#fef9c3",
             if (resolvable) "#166534" else "#854d0e"),
           tags$b(if (resolvable) "\u2714 Structure resolvable"
+                 else if (never) "\u2716 Not resolvable with this label"
                  else "\u26A0 Below resolution limit"),
           tags$br(),
-          sprintf("GT molecule spacing \u2248 %.0f nm vs 2\u03c3 limit = %.0f nm.  %s",
-            res$gt_nnd, resolve_limit,
-            if (resolvable) "Individual molecules can be resolved."
-            else paste0("Proteins are closer than ~2\u03c3 of the localization",
-                        " spread and will appear as unresolved clusters."))
+          sprintf(paste0("GT spacing \u2248 %.0f nm vs 2\u00D7 per-molecule error",
+                         " (%.1f nm) = %.0f nm.  %s"),
+            res$gt_nnd, eps_mol, resolve_limit,
+            if (resolvable)
+              "Individual molecules can be resolved."
+            else if (never)
+              paste0("The spacing is below 2\u00D7 the label floor, so this ",
+                     "cannot be fixed by imaging longer - a shorter linker ",
+                     "is required.")
+            else
+              paste0("Currently unresolved, but the label floor still allows ",
+                     "it - more localizations per molecule would close the gap."))
         )
       }
     )
@@ -2450,10 +2858,10 @@ sim_server <- function(input, output, session) {
     theory_b <- sqrt(pr_b^2 + b$link_nm^2 + sig^2)
     obs_a    <- if (!is.null(a$rmse_vals) && length(a$rmse_vals) >= 1)
                   sprintf("%.1f nm (n=%d)", mean(a$rmse_vals), length(a$rmse_vals))
-                else "—"
+                else "-"
     obs_b    <- if (!is.null(b$rmse_vals) && length(b$rmse_vals) >= 1)
                   sprintf("%.1f nm (n=%d)", mean(b$rmse_vals), length(b$rmse_vals))
-                else "—"
+                else "-"
 
     cell_style <- "padding:4px 8px; white-space:normal; word-break:break-word;"
     hdr  <- function(...) tags$th(style = paste0(cell_style, " text-align:left;"), ...)
@@ -2491,8 +2899,8 @@ sim_server <- function(input, output, session) {
                sprintf("%.0f nm", a$link_nm),
                sprintf("%.0f nm", b$link_nm)),
           row2("Label footprint",
-               if (!is.na(a$footprint_nm)) sprintf("~%.0f nm", a$footprint_nm) else "—",
-               if (!is.na(b$footprint_nm)) sprintf("~%.0f nm", b$footprint_nm) else "—"),
+               if (!is.na(a$footprint_nm)) sprintf("~%.0f nm", a$footprint_nm) else "-",
+               if (!is.na(b$footprint_nm)) sprintf("~%.0f nm", b$footprint_nm) else "-"),
           if (pr_a > 0 || pr_b > 0)
             row2("Protein radius",
                  sprintf("%.1f nm", pr_a),
@@ -2553,7 +2961,7 @@ sim_server <- function(input, output, session) {
     bg_eff   <- bg_ph * au^2              # out-of-focus background admitted
 
     # Render from the UNIQUE fluorophore pool (one physical dye = one PSF), not
-    # the over-counted MINFLUX detection list — re-detecting a molecule over the
+    # the over-counted MINFLUX detection list - re-detecting a molecule over the
     # acquisition does not make its confocal spot brighter.
     #   • Each fluorophore = one PSF at its displaced position, n_ph photons.
     #     Multi-dye labels (e.g. polyclonal + secondary) still stack into a
@@ -2594,14 +3002,14 @@ sim_server <- function(input, output, session) {
                                           extent = fov_ext)
     shiny::validate(shiny::need(!is.null(img_data), "Rendering failed."))
 
-    # FWHM = 2.355 × σ: optical resolution — apparent width of a point source
+    # FWHM = 2.355 × σ: optical resolution - apparent width of a point source
     # and the minimum resolvable separation between two identical emitters.
     fwhm_nm   <- round(psf_sig * 2.355)
     title_txt <- sprintf(
       "Confocal view  (\u03C3 \u2248 %.0f nm, FWHM \u2248 %d nm, signal %.0f%% @ %.2f AU)",
       psf_sig, fwhm_nm, 100 * ee, au)
 
-    # Hot Red LUT (ImageJ "Red Hot") — fixed regardless of dark mode; the
+    # Hot Red LUT (ImageJ "Red Hot") - fixed regardless of dark mode; the
     # confocal image is always rendered on black. Low → high:
     # black → red → orange → yellow → white.
     cscale <- list(
@@ -2616,7 +3024,7 @@ sim_server <- function(input, output, session) {
     # on black with no gridlines and white axis text regardless of dark mode.
     cf_bg <- "#000000"; cf_fg <- "#DDDDDD"
 
-    # Scale bar — same controls as the MINFLUX view, forced white so it stands
+    # Scale bar - same controls as the MINFLUX view, forced white so it stands
     # out on the black image, measured against the rendered image width.  The
     # full image span is stored so the zoom observer can re-scale the bar.
     x_span <- diff(range(img_data$xs, na.rm = TRUE))
@@ -2652,9 +3060,9 @@ sim_server <- function(input, output, session) {
         x          = img_data$xs, y = img_data$ys, z = img_data$img,
         colorscale = cscale,
         # Auto-contrast the display (like ImageJ auto B&C) so it looks like a real
-        # confocal image. The pinhole still shows through the DATA — closing it
+        # confocal image. The pinhole still shows through the DATA - closing it
         # collects fewer photons (grainier via Poisson) and tightens the PSF;
-        # opening it adds out-of-focus background — not through raw brightness.
+        # opening it adds out-of-focus background - not through raw brightness.
         showscale  = FALSE, hoverinfo = "skip",
         name       = "Diffraction-limited"
       )
@@ -2729,7 +3137,7 @@ sim_server <- function(input, output, session) {
                            line = list(color = "#e07b39", width = 1.5),
                            name = "Detection rate", hoverinfo = "x+y")
     # Optional decomposition of the PREDICTED rate into its structure (decaying +
-    # bleaching) and constant background components — makes explicit that the
+    # bleaching) and constant background components - makes explicit that the
     # orange total = structure + background, and the floor is background.
     # Convention: solid = model, dotted = measured (real run, below).
     if (isTRUE(input$sim_real_show_split) && !is.null(a$rate_struct)) {
@@ -2856,7 +3264,7 @@ sim_server <- function(input, output, session) {
       tags$small(style = "color:#888;",
         if (reached)
           paste("Resolved early, then later traces re-detect the same",
-                "molecules — the over-counting you group as repeat blinks.",
+                "molecules - the over-counting you group as repeat blinks.",
                 "Increase the rate or duration to resolve more; decrease them",
                 "(or shorten the run) to see partial resolution.")
         else
@@ -2952,7 +3360,7 @@ sim_server <- function(input, output, session) {
              sprintf("%s of %s  ·  %s locs", format(cb$n_tracks, big.mark = ","),
                      format(cb$n_total %||% cb$n_tracks, big.mark = ","), format(cb$n_loc, big.mark = ","))),
         rowf("Cycle time", sprintf("%.3g ms", cb$cyc)),
-        rowf("Photons/loc (median eco)", if (is.finite(cb$photons)) sprintf("%.0f", cb$photons) else "—"),
+        rowf("Photons/loc (median eco)", if (is.finite(cb$photons)) sprintf("%.0f", cb$photons) else "-"),
         rowf("Dark-cycle prob.", sprintf("%.2f  (%.0f%% integrated)", cb$p_dark, 100 * cb$integ)),
         rowf("Track length (median)", sprintf("%.0f · mean %.0f", cb$med_len, cb$mean_len))),
       htmltools::tags$p(style = "color:#888; margin-top:3px;",
@@ -3070,7 +3478,7 @@ sim_server <- function(input, output, session) {
       attr(pos, "states") <- states
       pos
     }
-    # Survivorship: a molecule that moves > R_reacq during a dark gap is lost — the
+    # Survivorship: a molecule that moves > R_reacq during a dark gap is lost - the
     # track ends there. Reproduces the dark-cycle bias (long jumps culled → apparent
     # confinement). Off unless enabled.
     surv    <- isTRUE(input$sim_trk_surv)
@@ -3170,7 +3578,7 @@ sim_server <- function(input, output, session) {
       plotly::plot_ly(d, x = ~x, y = ~y, split = ~factor(tid),
                       type = "scatter", mode = "lines",
                       line = list(width = 1), showlegend = FALSE) %>%
-        plotly::layout(title = "Simulated MINFLUX tracks — 2D projection (first 60)",
+        plotly::layout(title = "Simulated MINFLUX tracks - 2D projection (first 60)",
           xaxis = list(title = "x (nm)"),
           yaxis = list(title = "y (nm)", scaleanchor = "x"))
   })
@@ -3185,7 +3593,7 @@ sim_server <- function(input, output, session) {
       col <- if (is.finite(rr) && abs(rr - 1) < 0.25) "#228833" else "#BB7700"
       htmltools::tags$span(style = sprintf("color:%s; font-weight:bold;", col),
         sprintf("%.4g µm²/s  (%.0f%% of truth)", cve$D_um2_s, 100 * rr))
-    } else "—"
+    } else "-"
     motion_lbl <- switch(res$motion %||% "free",
       confined = sprintf("confined (OU tether, L_c = %.0f nm)", res$L_c),
       directed = sprintf("directed (v = %.3g µm/s)", res$v_nmms),
@@ -3210,11 +3618,11 @@ sim_server <- function(input, output, session) {
             bf <- cve$D_um2_s / res$D_um2_s
             htmltools::tags$span(style = if (abs(bf - 1) > 0.05) "color:#b26a00;font-weight:bold;" else "",
               sprintf("%.2f×  →  divide apparent D by %.2f to correct", bf, bf))
-          } else "—")),
+          } else "-")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Recovered σ_loc"),
-          htmltools::tags$td(if (!is.null(cve)) sprintf("%.2f nm", cve$sigma_nm) else "—")),
+          htmltools::tags$td(if (!is.null(cve)) sprintf("%.2f nm", cve$sigma_nm) else "-")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Integrated (single-cycle) fraction"),
-          htmltools::tags$td(if (is.finite(frac_int)) sprintf("%.0f%%", 100 * frac_int) else "—")),
+          htmltools::tags$td(if (is.finite(frac_int)) sprintf("%.0f%%", 100 * frac_int) else "-")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Median Δt / median track length"),
           htmltools::tags$td(sprintf("%.3g ms / %.0f locs",
             if (length(dt_all)) stats::median(dt_all) else NA_real_, stats::median(as.numeric(table(df$tid))))))),
@@ -3222,27 +3630,27 @@ sim_server <- function(input, output, session) {
         if (identical(res$motion, "confined")) {
           tau_c   <- if (res$D_um2_s > 0) (res$L_c^2 / (res$D_um2_s * 1000)) else Inf   # ms
           med_dur <- stats::median(unlist(lapply(split(df$tim, df$tid), function(t) (max(t) - min(t)) * 1000)))
-          verdict <- if (is.finite(tau_c) && tau_c < 0.5 * med_dur) "✓ RESOLVABLE" else "⚠ NOT resolvable — looks free"
-          sprintf("Confined (OU, L_c=%.0f nm): CVE gives the LOCAL D at single-cycle lags (≈ truth); confinement is an MSD plateau ≈ 2·d·L_c² in the Tracking tab. Resolvability: τ_c = L_c²/D ≈ %.3g ms vs median track duration ≈ %.3g ms → %s. (If τ_c ≳ track duration, free diffusion over a short track mimics the same extent — the key artifact to test.)",
+          verdict <- if (is.finite(tau_c) && tau_c < 0.5 * med_dur) "✓ RESOLVABLE" else "⚠ NOT resolvable - looks free"
+          sprintf("Confined (OU, L_c=%.0f nm): CVE gives the LOCAL D at single-cycle lags (≈ truth); confinement is an MSD plateau ≈ 2·d·L_c² in the Tracking tab. Resolvability: τ_c = L_c²/D ≈ %.3g ms vs median track duration ≈ %.3g ms → %s. (If τ_c ≳ track duration, free diffusion over a short track mimics the same extent - the key artifact to test.)",
                   res$L_c, tau_c, med_dur, verdict)
         }
         else if (identical(res$motion, "directed"))
           "Directed: the CVE local D reflects the diffusive part; the drift shows as an upward-curving MSD / a sustained drift-velocity in the Tracking tab."
         else if (identical(res$motion, "twostate"))
-          "Two-state: mixed mobile/immobile steps — the CVE gives a population-average D; load in the Tracking tab and fit the HMM to recover the two states."
+          "Two-state: mixed mobile/immobile steps - the CVE gives a population-average D; load in the Tracking tab and fit the HMM to recover the two states."
         else
-          "Free diffusion: the CVE round-trip should land near 100 % of truth — that is the validation loop.",
+          "Free diffusion: the CVE round-trip should land near 100 % of truth - that is the validation loop.",
         " Download the tracks (CSV) and load them in the Tracking tab to test the full MSD / confinement pipeline against this known ground truth."),
       # Projection artifact: 2D imaging of a CURVED-surface protein under-measures the
       # azimuthal motion (its out-of-plane component is dropped), so the recovered D is a
-      # fixed fraction of truth (~75% for a side-on cylinder) — NOT a bug, and the same
+      # fixed fraction of truth (~75% for a side-on cylinder) - NOT a bug, and the same
       # bias applies to real 2D data. The factor is itself a useful geometric calibration.
       if ((res$geom %||% "") %in% c("sphere","rod","ellipsoid") && identical(res$mode, "surface") && isTRUE(res$proj2d))
         htmltools::tags$p(style = "color:#b26a00; font-size:0.9em; margin-top:4px;",
           htmltools::HTML("&#9888; "),
           htmltools::tags$b("2D projection of a curved surface:"),
           " recovered D is expected BELOW truth (≈75% for a side-on cylinder) because the ",
-          "out-of-plane part of the azimuthal motion is lost — this is a real geometric bias that ",
+          "out-of-plane part of the azimuthal motion is lost - this is a real geometric bias that ",
           "also affects your real 2D data. Use this ratio as the correction factor, or acquire in 3D. ",
           "It applies to free AND confined alike, so it is not the confinement signal."))
   })

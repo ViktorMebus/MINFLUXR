@@ -304,7 +304,7 @@ smlm_ui <- fluidPage(
                    " (What is \u03c3\u0303 \u00b1 nMAD?)",
                    title = paste(
                      "\u03c3\u0303 = per-trace localization spread: the standard deviation of x/y/z within each trace, normalized by n\u22121.",
-                     "Reported per axis as median(\u03c3\u0303) \u00b1 nMAD, with the interquartile range of \u03c3\u0303 alongside \u2014",
+                     "Reported per axis as median(\u03c3\u0303) \u00b1 nMAD, with the interquartile range of \u03c3\u0303 alongside -",
                      "nMAD = 1.4826 \u00d7 median(|\u03c3\u0303_i \u2212 median(\u03c3\u0303)|).",
                      "Factor 1.4826 \u2248 1/\u03a6\u207b\u00b9(3/4): makes nMAD a consistent estimator of \u03c3 for normal data.",
                      "nMAD and IQR describe how \u03c3\u0303 varies BETWEEN traces."
@@ -734,7 +734,7 @@ smlm_ui <- fluidPage(
           conditionalPanel(
             condition = "input.fit_type == 'helix'",
             sliderInput("helix_turns", "Helix turns (initialisation hint)", min = 1, max = 10, value = 3),
-            helpText("Used only to seed the pitch estimate. The fitted turn count is determined by the data extent and the optimized pitch \u2014 it will not be exactly this value.")
+            helpText("Used only to seed the pitch estimate. The fitted turn count is determined by the data extent and the optimized pitch - it will not be exactly this value.")
           ),
           conditionalPanel(
             condition = "input.fit_type == 'arc'",
@@ -1128,7 +1128,7 @@ smlm_ui <- fluidPage(
         tags$summary(tags$b("Estimate Ground-Truth Positions"),
                      tags$span("EXPLORATORY",
                                style = "margin-left:8px;font-size:10px;font-weight:700;color:#fff;background:#e67e22;border-radius:3px;padding:1px 5px;vertical-align:middle;")),
-        helpText("Exploratory, model-based estimate (not a direct measurement). Reverse-engineers the labeling model to turn traces / median-clusters back into candidate ground-truth positions, an approximate count, and a crowding flag. Hollow circles are coloured green (low) → red (high) by position uncertainty. See the method/reference notes below the read-outs."),
+        helpText("Exploratory, model-based estimate. Reverse-engineers the labeling model to turn traces / median-clusters back into candidate ground-truth positions, an approximate count, and a crowding flag. Hollow circles are coloured green (low) → red (high) by position uncertainty. See the method/reference notes below the read-outs."),
         checkboxInput("show_gt_estimate", "Show estimated GT candidates", value = FALSE),
         conditionalPanel(
           condition = "input.show_gt_estimate == true",
@@ -1279,6 +1279,191 @@ smlm_ui <- fluidPage(
     tabPanel("Analysis",
       tags$br(),
 
+      # How filtering relates to the Display tab. Worth stating once, up here: the
+      # batch analyses read the SAME filter inputs as the Display tab and apply them
+      # identically to every loaded file, but the sliders' BOUNDS are auto-detected
+      # from the active file, which is the part that surprises people.
+      tags$div(style = "margin:0 0 12px; padding:7px 12px; border-left:4px solid #cfe0ee; background:#f6f9fc; font-size:0.86em; color:#445;",
+        tags$b("Filtering: "),
+        "every analysis on this tab applies the ", tags$b("Display-tab filter ranges"),
+        " (EFO, CFR, DCR, ECO, dwell, fluo, trace-ID length, trace spread, outlier trimming) ",
+        "identically to all loaded files - not just the active one. Note the sliders' ",
+        tags$i("limits"), " are auto-detected from the active file, so if another dataset runs ",
+        "higher on a metric, check the range still means what you intend before comparing groups. ",
+        "The time (", tags$code("tim"), ") range is per-file by nature, since each acquisition has its own timeline."),
+
+      # -- Transfection / labelling-density tools (collapsed: niche) ----------
+      # Tucked into a closed <details> because these only matter for a specific
+      # situation - comparing TRANSIENTLY TRANSFECTED cells, where each cell got an
+      # undefined plasmid load so labelling density is not a property of the
+      # condition. Most experiments should never open it.
+      fluidRow(column(12,
+        tags$details(style = "margin:0 0 14px; border:1px solid #dfe6ec; border-radius:4px; background:#fbfcfd;",
+          tags$summary(style = "cursor:pointer; padding:7px 12px; font-weight:600; color:#2c3e50;",
+                       "⚙ Labelling-density normalisation & support window",
+                       tags$span(style = "font-weight:400; color:#7b8794; margin-left:8px;",
+                                 "- for transiently transfected cells; leave closed otherwise")),
+          tags$div(style = "padding:4px 12px 10px;",
+            tags$div(style = "font-size:0.85em; color:#7a5c00; margin-bottom:8px;",
+              tags$b("Also note: "), "the number of trace IDs and de-blinked molecules you detect keeps",
+              " growing the longer you image, so a longer acquisition looks like a denser sample even",
+              " when expression is identical. Compare acquisitions of similar length, and use Trace",
+              " Detection over Time to check the detection rate has flattened before reading a",
+              " density difference as biology."),
+          # -- Support-aware observation window (one switch, several panels) --------
+          fluidRow(column(12,
+            tags$div(style = "margin:0 0 12px; padding:7px 12px; border-left:4px solid #cfe0ee; background:#f6f9fc;",
+              checkboxInput("spatial_edge_correct",
+                            "Apply boundary (edge) correction - recommended",
+                            value = FALSE),
+              checkboxInput("spatial_use_support",
+                            "Also replace the bounding box with the sample footprint (only if your cell does not fill the frame)",
+                            value = FALSE),
+              tags$div(style = "font-size:0.85em; color:#445; line-height:1.5;",
+                "Both apply to ", tags$b("Ripley's L, g(r), L\u2081\u2082, g\u2081\u2082 and the co-localization null"),
+                ". They fix different things, and usually only the first is wanted.",
+                tags$br(), tags$br(),
+                tags$b("Edge correction"), " is the safe, general one. A point near the edge of the ",
+                "window has fewer neighbours available to it than one in the middle, simply because ",
+                "part of its surroundings falls outside. Uncorrected, every curve drifts as r grows ",
+                "and a random pattern stops reading as random. Leave this on.",
+                tags$br(), tags$br(),
+                tags$b("Footprint window"), " changes what counts as the observed area. If your cell ",
+                "fills the scan field the bounding box already is the cell, so leave this off. Turn ",
+                "it on when the cell is concave or only partly in frame, because then the box ",
+                "contains a large empty region and the pattern looks clustered purely from framing.",
+                tags$br(), tags$br(),
+                tags$span(style = "color:#7a5c00;",
+                  "Two things to know. Correcting the edge of a bounding box that contains a lot of ",
+                  "empty space is worse than not correcting it, so on a concave cell use both ",
+                  "settings together rather than the first alone. And this window is the ",
+                  tags$i("outline of the cell"), ", not the region where the sample is densest - a ",
+                  "window drawn tightly around your structures would erase the very clustering it is ",
+                  "meant to measure, so if the footprint comes out in disconnected pieces the ",
+                  "bounding box is used instead and you are told."),
+                " The support map below shows the region in use."),
+              uiOutput("spatial_window_readout"))
+          )),
+
+          # -- Labelling-density normalisation (opt-in) ---------------------------
+          fluidRow(
+            column(3,
+              h4("Labelling Density", .exploratory_badge()),
+              .method_box("amber",
+                HTML("<b>Random thinning</b>: keep each unit with a fixed probability. Doing this leaves the pair correlation g(r) and Ripley's K unchanged (<b>Illian et&nbsp;al. 2008</b>; <b>Chiu et&nbsp;al. 2013</b>), so real clustering survives thinning while an apparent difference caused only by labelling density does not. The sample area is estimated either by smoothing the localizations into a density map (<b>Hyndman 1996</b>) or by a morphological occupancy estimate (<b>Serra 1982</b>); the area-free density check uses nearest-neighbour distances (<b>Thompson 1956</b>)."),
+                HTML("Thinning drops whole <b>units</b> - a trace ID, or a de-blinked molecule with all of its localizations - never individual localizations, which would shorten traces and break de-blinking without actually thinning the pattern. Units default to de-blinked molecules, because a trace ID is a single blink and so trace-ID density mixes expression level together with photophysics. The draw is reproducible for a given file."),
+                HTML("<b>This does not rescue an under-powered design.</b> Thinning equalises density, but it cannot separate density from biology when the two are genuinely linked - and for a self-aggregating protein they are, since aggregation depends on concentration. A difference that survives at matched density is evidence; a difference in how clustering <i>scales</i> with density is stronger evidence. Nothing is ever up-sampled, so a file already below the target is left alone. Thinning also costs precision in anything count-based, and small clusters can drop below minPts and disappear.")),
+              helpText(HTML("For when labelling density varies between cells for reasons that are not biology - transient transfection, expression level, labelling efficiency. Nearest-neighbour distances shrink as density rises, and DBSCAN at a fixed eps and minPts is itself a density threshold, so both read a high expresser as more clustered even when nothing has changed. Leave this off if that does not apply to your experiment.")),
+              checkboxInput("dens_norm_enable", "Measure density per file", value = FALSE),
+              conditionalPanel(
+                condition = "input.dens_norm_enable == true",
+                selectInput("dens_norm_unit", "Unit",
+                            choices = c("Auto (molecules if de-blinking on)" = "auto",
+                                        "De-blinked molecules" = "cluster",
+                                        "Trace IDs"            = "tid"),
+                            selected = "auto"),
+                checkboxInput("dens_norm_3d", "3-D (per µm³)", value = FALSE),
+                numericInput("dens_nn_k", "k for local density / NN check", value = 3,
+                             min = 1, max = 20, step = 1),
+
+                tags$hr(style = "margin:8px 0;"),
+                selectInput("dens_support_mode", "Support",
+                            choices = c("Smoothed density, 99% region (recommended)" = "kde",
+                                        "Occupancy grid (edge & dark-region aware)"  = "grid",
+                                        "Convex hull"  = "hull",
+                                        "Bounding box" = "bbox"),
+                            selected = "kde"),
+                helpText(HTML("The area density is divided by. A field usually contains the <b>cell edge</b> and interior <b>dark regions</b>; the bounding box counts those as sample.")),
+                numericInput("dens_grid_h", "Grid cell (nm)", value = 100, min = 10, step = 10),
+                conditionalPanel(
+                  condition = "input.dens_support_mode == 'kde'",
+                  numericInput("dens_kde_bw", "Smoothing bandwidth (nm)", value = 150, min = 10, step = 25),
+                  numericInput("dens_kde_frac", "Fraction of units enclosed", value = 0.99,
+                               min = 0.5, max = 1, step = 0.01),
+                  helpText(HTML("Smooths the localizations into a density map and keeps the smallest region containing this share of the units (<b>Hyndman 1996</b>). Dark regions fall below the cut on their own, and there is no fill radius to tune. <b>Keep the fraction and the bandwidth the same across every sample you compare</b> - together they define what \"the sample area\" means, so changing them per file makes the areas incomparable."))
+                ),
+                conditionalPanel(
+                  condition = "input.dens_support_mode == 'grid'",
+                  checkboxInput("dens_close_auto", "Auto gap fill", value = TRUE),
+                  helpText(HTML("Gaps in the data have two causes and this radius tells them apart: <b>sparse sampling</b> inside the cell should be filled in, because it is still sample, while a <b>dark region</b> or the space outside the cell should stay excluded. This is the most important setting here - set it too small and the area traces your structures instead of your cell. Auto picks a radius from each file and applies one common value to all of them.")),
+                  conditionalPanel(
+                    condition = "input.dens_close_auto == false",
+                    numericInput("dens_close_nm", "Fill gaps up to (nm)", value = 200, min = 0, step = 50)
+                  ),
+                  helpText(HTML("<b>The gap fill is also what protects dark regions.</b> It can only close a hole narrower than roughly twice its radius, so anything wider than that stays excluded. If dark regions in your cell are being swallowed, lower the radius and check the result on the support map.")),
+                  checkboxInput("dens_show_sweep", "Show gap-fill sweep", value = FALSE)
+                ),
+                checkboxInput("dens_show_map", "Show support map", value = FALSE),
+                helpText(HTML("Draws one dataset with the counted area outlined in <b style=\"color:#1a8a1a\">green</b> and the disregarded part shaded <b style=\"color:#c03030\">red</b>. Use it to check that the green region looks like your cell rather than like a tracing of your structures. Works for every support mode; the bounding box is always the most generous and the occupancy grid the least.")),
+                conditionalPanel(
+                  condition = "input.dens_show_map == true",
+                  selectInput("dens_map_file", "Dataset to render", choices = NULL)
+                ),
+                checkboxInput("dens_plot_log", "Log density axis", value = TRUE),
+                helpText("Local density can span a wide range within a single cell, and a log axis keeps the whole distribution readable. Untick if your values are tightly grouped."),
+
+                tags$hr(style = "margin:8px 0;"),
+                checkboxInput("dens_thin_enable", "Thin all files to a common density", value = FALSE),
+            tags$div(style = "font-size:0.82em; color:#7a5c00; margin:2px 0 6px; padding:4px 8px; border-left:3px solid #e0c890; background:#fffdf6;",
+              tags$b("Only needed for count-based read-outs."), " Thinning is what makes ",
+              "DBSCAN cluster counts, % in clusters, cluster sizes and nearest-neighbour ",
+              "distances comparable between files, because all of those change with how ",
+              "densely the sample is labelled.", tags$br(),
+              tags$b("Ripley's L and g(r) do not need it"), " - they already divide the ",
+              "density out, so thinning them discards data without changing the answer. ",
+              "Leave this off unless you are reporting counts."),
+                conditionalPanel(
+                  condition = "input.dens_thin_enable == true",
+                  radioButtons("dens_target_mode", "Target",
+                               choices = c("Lowest in the set"      = "min",
+                                           "Control group's median" = "control",
+                                           "Manual"                 = "manual"),
+                               selected = "min"),
+                  helpText("Lowest-in-set never needs up-sampling, so it is the default."),
+                  conditionalPanel(
+                    condition = "input.dens_target_mode == 'control' && input.analysis_by == 'group'",
+                    selectInput("dens_target_group", "Control group", choices = NULL)
+                  ),
+                  conditionalPanel(
+                    condition = "input.dens_target_mode == 'manual'",
+                    numericInput("dens_target_manual", "Target (units/µm² or µm³)",
+                                 value = NA, min = 0, step = 1)
+                  )
+                ),
+                actionButton("run_density", "Measure density", icon = icon("play"),
+                             class = "btn-primary btn-sm"),
+                downloadButton("download_density", "Download", class = "btn-sm")
+              )
+            ),
+            column(9,
+              conditionalPanel(
+                condition = "input.dens_norm_enable == true",
+                uiOutput("density_status"),
+                conditionalPanel(
+                  condition = "output.dens_norm_active == true",
+                  tags$div(style = "margin:6px 0; padding:5px 10px; border-left:4px solid #c03030; background:#fdf3f3; font-size:0.82em;",
+                    tags$b("Thinning active."), " Analyses below run on thinned data (after filters, before clustering). Quality-Control panels are exempt.")
+                ),
+                plotlyOutput("density_plot", height = "290px"),
+                conditionalPanel(
+                  condition = "input.dens_show_map == true",
+                  tags$div(style = "margin-top:10px;",
+                           plotlyOutput("density_map", height = "460px"))
+                ),
+                conditionalPanel(
+                  condition = "input.dens_show_sweep == true && input.dens_support_mode == 'grid'",
+                  tags$div(style = "margin-top:10px;",
+                           plotlyOutput("density_sweep_plot", height = "330px"))
+                ),
+                tags$div(style = "margin-top:10px;", DT::dataTableOutput("density_table"))
+              )
+            )
+          ),
+          tags$hr()
+          )
+        )
+      )),
+
       # -- Dataset Groups (shared across analyses) ---------------------------
       wellPanel(
         h4("Dataset Groups"),
@@ -1318,7 +1503,6 @@ smlm_ui <- fluidPage(
         )
       ),
 
-
       # -- SECTION: Quality Control --
       fluidRow(column(12, tags$h3('Quality Control',
         style = "border-bottom:2px solid #d7dde3; padding-bottom:4px; margin-top:18px; color:#2c3e50;"))),
@@ -1326,11 +1510,15 @@ smlm_ui <- fluidPage(
       # -- QC: Localization precision cloud ----------------------------------
       fluidRow(
         column(3,
-          h4("Localization Precision Cloud"),
+          h4("Localization Precision & Sample drift estimation"),
           .method_box("green",
-            HTML("The direct measure of localization precision. Every localization is plotted relative to its own trace centroid and pooled at (0,0); the RMS radius is σ_loc, drawn as the 1σ and 2σ ellipses (per-axis σ<sub>x</sub>, σ<sub>y</sub>, σ<sub>z</sub>)."),
-            HTML("Pooled within-trace residuals average out real motion and keep only the measurement scatter, so the cloud IS the precision. Uses the <b>filtered</b> localizations - the same set the Display tab plots (metadata / length / spread filters and any fiducial exclusion applied) - so it reports the precision of the data you actually keep."),
-            HTML("The <b>shape</b> is the QC: a compact isotropic disc is good; <b>elongation</b> (anisotropy &gt; ~1.3) points to drift within a trace or an anisotropic PSF; <b>heavy tails</b> (kurtosis ≫ 3) point to mis-links / double events; a net <b>skew</b> points to a systematic bias.<br><br>The frame is zoomed to the per-trace-median precision so the real cloud fills it. With <b>Include z</b> on, three panels are shown: XY, XZ and YZ.")),
+            HTML("Every localization is plotted relative to its own trace centroid and pooled at (0,0); the RMS radius is σ_loc, drawn as the 1σ and 2σ ellipses (per-axis σ<sub>x</sub>, σ<sub>y</sub>, σ<sub>z</sub>)."),
+            HTML("Uses the post-filtered localizations, set in the Display tab options (metadata / length / spread filters and any fiducial exclusion applied). MINFLUX has <b>no fitted PSF</b>: the doughnut is the <b>excitation</b> intensity pattern, and a position comes from the ratio of photon counts collected at a few known beam positions around its central zero. Precision is therefore set by the size of that targeting pattern and the photon count, not by the width of an imaged spot - so σ here does not scale like a camera-SMLM PSF width."),
+            HTML("σ is an <b>upper bound on precision</b>: it also contains label and linker motion, molecule motion and any residual drift within the trace. <b>Anisotropy is not the same as poor precision</b> - it says σ differs by direction, and the tight axis is genuinely tight. It does mean a single pooled σ is not meaningful, which is why axes are reported separately and the rings are drawn as rotated ellipses: a <b>tilted</b> cloud has correlated x and y errors, so per-axis σ alone understates the spread along the long axis. <b>The tilt is the diagnostic.</b> A consistent orientation shared across traces points to something fixed in the instrument or to residual drift, which is directional; anisotropy that is radial with respect to the beam pattern is expected estimator behaviour, since MINFLUX precision depends on where the molecule sits inside the targeting pattern. In 3D the axial and lateral directions are probed by different beam geometry, so σ<sub>z</sub> ≠ σ<sub>xy</sub> is normal in either direction.")),
+          .method_box("amber",
+            HTML("<b>Sample drift and jitter.</b> Drift is estimated from the displacement of trace ID centroids between detected blinks sorted by time. Using the de-blinked option we assume that the same molecule blinked - and was detected - more than once."),
+            HTML("Apply your de-blinking at a satisfactory levels, otherwise this tool defaults to performing its own de-blink by proximity. The first detected trace ID within a de-blinked group is used as origin 0,0,0 and regressed in time by subsequent detected trace ID's. <b>Drift</b> is the part that lines up with time and accumulates, while <b>jitter</b> is the scatter left once drift is removed. Pairs that are really two different molecules scatter isotropically about zero, so they widen the interval without tilting the slope."), 
+            HTML("Trace ID grouping assumes that the same molecule blinked and was detected multiple times, making this a rough estimate of drift. If grouped trace ID's are genuinly different molecules grouped into one we inflate drift by the molecule spacing. Moreover, if the sample has moved more than our de-blinking radius, we cannot detect drift as detected molecules are no longer grouped. Use this as exploratory at best, locking the frame with fiducials and optionally beamline-monitoring, already corrects for sample drift")),
           helpText("Pooled scatter of every localization about its trace centroid. Reports σ_x/σ_y",
                    "(σ_z), anisotropy, skew and kurtosis. Uses the filtered (Display-tab) data."),
           helpText(style = "font-size:0.78em; color:#888;",
@@ -1474,15 +1662,17 @@ smlm_ui <- fluidPage(
             HTML("A sharp peak below ~40&nbsp;nm is usually the <b>label footprint, not biology</b> (Annibale et&nbsp;al. 2011; Sengupta et&nbsp;al. 2011). The distance-range filter trims the histogram but does not correct the bias. NN is a summary statistic with no CSR reference here - use Ripley&nbsp;L(r) with its envelope if you need significance.")),
           selectInput("nn_batch_unit", "NN unit",
             choices = c(
+              "Auto - molecules if de-blinking is on"  = "auto",
               "TID centroids (all files)"             = "tid",
               "De-blinked molecule centroids"             = "pcid",
               "TID centroids within Median Clusters"         = "cluster2_tid",
               "De-blinked molecule centroids within Median Clusters" = "cluster2_pcid"
             ),
-            selected = "tid"
+            selected = "auto"
           ),
           helpText(
             "All modes run on every loaded file using current Display tab filters and clustering settings.",
+            "Auto follows the Display tab's de-blinking switch, so turning de-blinking on applies it here and to every dataset.",
             "Median Cluster modes require Median Clustering to be enabled."
           ),
           numericInput("nn_batch_k", "Nearest neighbors (k)", value = 1, min = 1, max = 20),
@@ -1531,7 +1721,8 @@ smlm_ui <- fluidPage(
           downloadButton("download_batch_nn", "Download distances", class = "btn-sm")
         ),
         column(9,
-          plotlyOutput("nn_batch_hist", height = "420px"),
+          uiOutput("nn_batch_stale"),
+          plotlyOutput("nn_batch_hist", height = "540px"),
           tableOutput("nn_batch_stats")
         )
       ),
@@ -1554,13 +1745,15 @@ smlm_ui <- fluidPage(
                    "Large datasets are subsampled to 2000 points per file."),
           selectInput("ripley_unit", "Unit",
             choices = c(
+              "Auto - molecules if de-blinking is on" = "auto",
               "TID centroids"             = "tid",
               "De-blinked molecule centroids" = "cluster"
             ),
-            selected = "tid"
+            selected = "auto"
           ),
-          helpText("Unit: which points the statistic runs on - one centroid per trace ID, or one per",
-                   "the de-blinked molecule if de-blinking is enabled."),
+          helpText("Which points the statistic runs on. Auto follows the Display tab's de-blinking",
+                   "switch and applies it to every dataset, so the unit never silently disagrees",
+                   "with the other panels."),
           checkboxInput("ripley_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
           helpText("All files: pool every loaded dataset into one curve; uncheck to analyze only the active file."),
           conditionalPanel(
@@ -1585,6 +1778,9 @@ smlm_ui <- fluidPage(
             radioButtons("ripley_group_band", "Group spread band",
                          choices = c("IQR (Q25-Q75)" = "iqr", "±SD" = "sd", "None" = "none"),
                          selected = "iqr", inline = TRUE),
+            checkboxInput("ripley_show_files", "Show individual files (shaded by group)", value = FALSE),
+            helpText("Draws each file as a thin shade of its group's colour behind the group mean,",
+                     "so a group difference can be judged against its own replicate spread."),
             helpText("In group mode each file's L(r)-r is computed on its own window, then averaged",
                      "within the group (one mean curve per group); the band shows between-file spread.",
                      "Curves are interpolated onto a common r-grid (up to the smallest per-file r max).",
@@ -1605,7 +1801,67 @@ smlm_ui <- fluidPage(
           downloadButton("download_ripley", "Download", class = "btn-sm")
         ),
         column(9,
-          plotlyOutput("ripley_plot", height = "400px")
+          uiOutput("ripley_stale"),
+          plotlyOutput("ripley_plot", height = "540px")
+        )
+      ),
+      tags$hr(),
+
+      # -- Univariate pair-correlation g(r) ----------------------------------
+      fluidRow(
+        column(3,
+          h4("Pair Correlation g(r)"),
+          .method_box("green",
+            HTML("The pair-correlation (radial distribution) function - the <b>derivative</b> form of Ripley's K, counting point pairs in a shell (r−dr/2, r+dr/2] normalized by the shell area (2D) or volume (3D):<br><span style=\"font-family:serif; margin-left:6px;\">ĝ(r) = A · 2·N<sub>pairs</sub>(shell) / [n(n−1) · shell]</span><br>g&nbsp;=&nbsp;1 under complete spatial randomness, &gt;1 clustering at scale r, &lt;1 exclusion. In SMLM this is the PC-PALM statistic (<b>Sengupta et&nbsp;al. 2011</b>; <b>Veatch et&nbsp;al. 2012</b>), developed precisely to separate repeated appearances of one molecule from genuine clustering. Theory: <b>Illian et&nbsp;al. 2008</b>; <b>Stoyan &amp; Stoyan 1994</b>."),
+            HTML("The one-colour version of the g₁₂(r) below, run on the same de-blinked units as Ripley's L. Because g divides out the intensity twice over, it does not care how densely the sample is labelled - which makes it the right choice when comparing cells whose expression level differs. And because each radius is measured independently rather than accumulated, you read the aggregate size off <b>where g comes back down to 1</b>, and a short-range blinking or label artefact stays in the first few bins instead of leaking into every larger radius."),
+            HTML("Points near the window boundary lose some of the neighbours they would otherwise have, which pulls g downward at larger radii. Switch on edge correction (top of the tab) to remove that; without it, judge the curve against the Monte-Carlo envelope rather than against the flat g&nbsp;=&nbsp;1 line, since the envelope carries the same bias. g is also noisier than L at short radii, because a thin ring holds far fewer pairs than a filled disc - widen the bins or smooth rather than reading much into a single spike. In group mode the per-file curves are averaged; coordinates are never pooled.")),
+          helpText(HTML("Scale-local clustering statistic. The <b>r at which g falls back to 1</b> is the characteristic aggregate size, and the height of g is how many times denser than random the neighbourhood is at that scale. Note a solid (Gaussian) aggregate makes g <i>decrease monotonically</i> from small r - a true interior peak indicates a hollow or shell-like structure, or a characteristic spacing, instead.")),
+          selectInput("pcf_unit", "Unit",
+            choices = c("Auto - molecules if de-blinking is on" = "auto",
+                        "TID centroids" = "tid",
+                        "De-blinked molecule centroids" = "cluster"),
+            selected = "auto"),
+          checkboxInput("pcf_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
+          conditionalPanel(
+            condition = "output.mplex_active == true",
+            checkboxInput("pcf_by_channel", "Split by multiplex channel (with 'all files')", value = FALSE)
+          ),
+          checkboxInput("pcf_use_3d", "Use 3-D coordinates (z)", value = FALSE),
+          helpText("3-D: count pairs in spherical shells instead of 2-D annuli. Use only for",
+                   "genuinely 3-D data."),
+          numericInput("pcf_r_max", "r max (nm, 0 = auto)", value = 0, min = 0, step = 10),
+          numericInput("pcf_r_steps", "r steps", value = 50, min = 10, max = 300),
+          helpText("Fewer steps = wider shells = more pairs per bin = a less noisy curve, at coarser",
+                   "spatial resolution. 40-60 is usually the right trade-off."),
+          checkboxInput("pcf_smooth", "Smooth curve (loess)", value = TRUE),
+          numericInput("pcf_smooth_span", "Smoothing span", value = 0.25, min = 0.05, max = 0.8, step = 0.05),
+          helpText("Cosmetic only - it does not change the statistic or the summary numbers."),
+          fluidRow(
+            column(6, numericInput("pcf_win_lo", "Summary window lo (nm)", value = 0, min = 0, step = 10)),
+            column(6, numericInput("pcf_win_hi", "hi (nm)", value = 0, min = 0, step = 10))
+          ),
+          helpText("The window the summary mean and integrated excess are taken over. Leave both at",
+                   "0 for an automatic 5-40% of r max. Set it to the scale you want to compare."),
+          conditionalPanel(
+            condition = "input.analysis_by == 'group'",
+            radioButtons("pcf_group_band", "Group spread band",
+                         choices = c("IQR (Q25-Q75)" = "iqr", "±SD" = "sd", "None" = "none"),
+                         selected = "iqr", inline = TRUE),
+            checkboxInput("pcf_show_files", "Show individual files (shaded by group)", value = FALSE)
+          ),
+          checkboxInput("pcf_envelope", "Show CSR envelope (Monte-Carlo)", value = FALSE),
+          helpText(HTML("<b>Reading the band.</b> It shows how much a purely random pattern would vary, so it is a spread, not an offset - <b>nothing is subtracted from your curve</b>. g already sits at 1 for a random pattern. The band is widest at short radii because a thin ring contains very few pairs there, so a random pattern's g is genuinely noisier; a peak at short range therefore has to clear a wider bar than a modest rise further out. Read significance as the curve leaving the band, and quote strength as g itself, or as the area between g and 1.")),
+          conditionalPanel(
+            condition = "input.pcf_envelope == true",
+            numericInput("pcf_nsim", "Envelope simulations", value = 99, min = 19, max = 199)
+          ),
+          actionButton("run_pcf", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
+          downloadButton("download_pcf", "Download", class = "btn-sm")
+        ),
+        column(9,
+          uiOutput("pcf_stale"),
+          plotlyOutput("pcf_plot", height = "540px"),
+          uiOutput("pcf_summary")
         )
       ),
       tags$hr(),
@@ -1762,7 +2018,8 @@ smlm_ui <- fluidPage(
           downloadButton("download_size_nn", "Download", class = "btn-sm")
         ),
         column(9,
-          plotlyOutput("size_nn_plot", height = "420px")
+          plotlyOutput("size_nn_plot", height = "420px"),
+          uiOutput("size_nn_small_n")
         )
       ),
 
@@ -1865,7 +2122,8 @@ smlm_ui <- fluidPage(
           downloadButton("download_rog", "Download", class = "btn-sm")
         ),
         column(9,
-          plotlyOutput("rog_hist", height = "380px")
+          plotlyOutput("rog_hist", height = "380px"),
+          uiOutput("rog_small_n")
         )
       ),
 
@@ -2097,6 +2355,11 @@ smlm_ui <- fluidPage(
                     tags$td("Standard second-moment cluster size (gyration tensor); anisotropy after Rudnick & Gaspari 1986")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Ripley's L(r)")),
                     tags$td("Ripley 1977; variance-stabilising L-transform, Besag 1977")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Pair correlation g(r)")),
+                    tags$td("Pair-correlation / radial distribution function (Illian et al. 2008; Stoyan & Stoyan 1994); the SMLM lineage is PC-PALM, Sengupta et al. 2011 and Veatch et al. 2012; density-invariant by construction (normalized by intensity squared)")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Labelling-density normalisation")),
+                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                            " - independent p-thinning, whose exact invariance of g(r) and K(r) is standard point-process theory (Illian et al. 2008; Chiu et al. 2013); morphological support estimate after Serra 1982; support-free k-NN intensity after Thompson 1956. Applying it as a between-condition correction, and the choice of thinning target, are this tool's design and validated in silico only")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Bivariate Ripley L₁₂(r)")),
                     tags$td("Lotwick & Silverman 1982; Dixon 2002 (bivariate/cross point-pattern statistics)")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Pair cross-correlation g₁₂(r)")),

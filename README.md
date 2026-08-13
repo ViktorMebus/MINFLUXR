@@ -614,110 +614,150 @@ analyses relabel and pool by group so you can compare conditions. Files left una
 Spatial statistics (Ripley / PCF) average per-file curves within a group rather than pooling
 coordinates - pooling would mix observation windows and invent structure.
 
-**Quality Control**
+### De-blinking applies to every dataset
 
-| Panel | What it answers |
-|-------|-----------------|
-| Localization Precision Cloud | Every localization minus its own trace centroid - the empirical precision σ_loc. Solid rings enclose 50% and 90% of the localizations; dotted rings are the fitted Gaussian at 1σ and 2σ, with per-axis semi-axes so the ring is a rotated ellipse whose tilt exposes drift; the dashed ring is 1σ refitted with one vote per trace, and sits well inside the dotted 1σ when a minority of wide traces is inflating the pooled width. Click a legend entry to hide that ring, double-click to isolate it. Also reports **sample stability** per file - see below |
-| Fiducial / Contaminant Scan | Flags traces behaving like gold beads or aggregates rather than single molecules (report only) |
-| Trace Detection over Time | Detection rate across the acquisition - photobleaching and drop-off |
+De-blinking is a **global** switch (Display tab), and every batch analysis re-derives it per file, so
+enabling it once applies it to all loaded datasets - there is nothing to set per file.
 
-**Sample stability (drift and jitter).** The precision cloud reports, per file, how much the sample
-moved during the acquisition. Traces are first grouped into molecules, so a fluorophore that blinked
-at three separate times gives a small trajectory rather than a single step. Within each molecule, the
-displacement between two blinks is regressed on the time gap between them, which estimates a drift
-velocity with the whole acquisition as its lever arm.
+The panels with a **Unit** selector (Batch NN, Ripley's L, g(r)) default to **Auto**, which resolves to
+de-blinked molecules when de-blinking is on and trace IDs when it is off. That default exists because
+the two halves used to be able to disagree silently: a panel left on trace IDs would ignore de-blinking
+while its neighbours honoured it, and choosing a molecule unit with de-blinking *off* asked for
+molecules that were never created, so the panel came back empty with no explanation. Choosing a
+molecule unit explicitly while de-blinking is off now falls back to trace IDs with a warning rather
+than returning nothing.
 
-Two numbers come out of that, and they mean different things:
+Note the **Crowding** panel needs unclustered background traces to reference its timing shift against.
+If every molecule ends up inside a median cluster it will report nothing - that is the background rule,
+not a de-blinking problem.
 
-- **Drift** is the part of the displacement that lines up with time - one direction, accumulating.
-  Reported over the whole run and, more usefully, across a *typical gap between blinks*. Tens of
-  nanometres across a multi-hour run is normal for a fiducial-locked sample; the line is only
-  highlighted when the per-gap figure exceeds the localization spread itself.
-- **Jitter** is what remains once drift is removed: how far two blinks of one molecule land apart for
-  reasons that do *not* accumulate. This is the quantity that governs how wide a de-blink radius has
-  to be. It still contains the localization error of the two centroids, so read it as an upper bound.
+### Observation window and edge correction (opt-in)
 
-*% directional* says which of the two dominates - near 0 is pure jitter, high values a coherent march.
+Two checkboxes at the top of the tab, inside the collapsed labelling-density section. They apply to
+Ripley's L, g(r), L12, g12 and the co-localization null, and they fix **different** things - usually only
+the first is wanted.
 
-**Show sample drift plot** turns the same data into a picture. Every molecule that blinked more than
-once is placed at the origin at its first blink, and each later blink appears as one point positioned
-relative to it. One point is **one trace ID that was merged into that de-blinked ID** - the first
-trace of a molecule is not drawn, it *is* the origin, so a molecule built from three trace IDs
-contributes two points. In 3D the XY, XZ and YZ projections are drawn side by side on one common
-frame.
+**Edge correction.** A point near the edge of the window has fewer neighbours available to it than one in
+the middle, simply because part of its surroundings falls outside the window. Left uncorrected, that
+deficit grows with r, so every curve drifts downward at larger radii and a genuinely random pattern stops
+reading as random. The correction accounts for how much of each neighbourhood actually fell inside the
+window (the translation correction; Illian et al. 2008; Baddeley et al. 2015). Leave it on.
 
-**Reading it.** A cloud centred on the origin means the sample held still - that scatter is jitter.
-Points marching away in one direction, further the longer the gap, mean it drifted. The heavy red
-markers are the **geometric median displacement in each time bin** and are the clearest read:
-aggregating cancels the isotropic part, so under pure jitter every bin sits on the origin whatever
-its time gap, while under drift the bins step outward in order.
+**Footprint window.** Changes what counts as the observed area. If your cell fills the scan field, the
+bounding box already *is* the cell and you should leave this off. Turn it on when the cell is concave or
+only partly in frame - then the box contains a large empty region, the density is under-stated, and the
+pattern reads as clustered purely because of how it was framed.
 
-The geometric median is used rather than a mean because a merged molecule occasionally holds two
-genuinely different fluorophores, which drops a displacement of tens of nanometres into an otherwise
-small cloud; and rather than a per-axis median because that is not rotation-equivariant - relabel x
-and y and the marker moves, which is unacceptable for a plot whose entire content is a direction. It
-is estimated once in full dimensionality and projected into each panel, so all three panels show the
-same point viewed three ways.
+Two things to know:
 
-On a single file a dashed line shows the fitted drift extended over the observed range of gaps; it is
-omitted when several files are loaded, since each acquisition drifts in its own direction and one line
-across all of them would mean nothing. That line is a least-squares fit through the origin, so it and
-the bin markers estimate the same quantity by different routes - they agree on a clean file, and a
-visible disagreement means the fit is being pulled by a few contaminated pairs.
+- The settings are **not independent**. Correcting the edge of a bounding box that contains a lot of
+  empty space is worse than not correcting it at all, because it amplifies a deficit that was partly
+  cancelling the area error. On a concave cell, use both together rather than the first alone.
+- The window is the **outline of the cell**, not the region where the sample happens to be densest. A
+  window drawn tightly around your structures would erase the clustering it is meant to measure, so the
+  footprint is estimated independently of the Labelling Density panel, and if it comes out in
+  disconnected pieces the bounding box is used instead and you are told.
 
-Points can be coloured three ways, and they answer different questions:
+The co-localization null also randomises within this window rather than within the bounding box, which is
+what makes it trustworthy for a cell that does not fill its frame. It is now conservative rather than
+exactly calibrated: safe to quote as "not significant", but for a positive claim prefer g12(r) read
+against its envelope. The two-colour statistics get the window and the edge correction; the support map
+in the Labelling Density panel shows which region is in use.
 
-- **Time since first blink** (default, Viridis) - how long after its molecule's first blink this one
-  arrived. This is the colouring that shows *accumulation*: under drift the late-gap points sit
-  furthest from the origin.
-- **Acquisition time** (Turbo, blue early → red late) - *when in the run* the blink happened. Drift
-  that runs steadily looks the same in every colour; drift that changed course does not. If blue
-  points favour one direction and red points another, the sample moved one way early and a different
-  way later - something the gap colouring cannot separate, because both periods contain similar gaps.
-- **De-blinked ID** - each molecule gets its own colour and its blinks are joined from the origin in
-  time order, so every multi-blink fluorophore draws its own small track. Under drift those tracks
-  all lean the same way. Colours repeat, so they group points rather than identify a molecule, and on
-  crowded files only the 200 molecules with the most blinks are drawn (the legend says so).
+### What a Ripley L(r)-r curve should look like
 
-Two limits worth knowing. Only molecules whose blinks were actually merged can be seen, so drift large
-enough to break a merge is understated rather than reported. And a group may occasionally hold two
-genuinely distinct molecules, which inflates jitter. Treat this as an indicator rather than a
-calibration.
+- **Random:** flat at 0 across the whole range.
+- **Clustered:** rises from 0, peaks somewhere near the characteristic cluster scale, then decays slowly
+  back toward 0 as larger radii average over the whole field.
+- **Regular / dispersed:** dips below 0 at short range.
 
-**Nearest-Neighbour & Spatial Statistics**
+A curve that heads **straight down into the negative in a near-straight line** is not a biological result.
+K scales with the window area, so if the area being divided by is much too small the whole curve is
+pulled down proportionally, which looks like a line. The usual cause is a window drawn around the
+structures instead of around the cell - see the decision rule above.
 
-| Panel | What it answers |
-|-------|-----------------|
-| Batch NN Distance Histogram | k-th nearest-neighbour distances across files or channels |
-| Ripley's L(r) | Clustering vs randomness across length scales, with an optional Monte-Carlo CSR envelope |
+Note also that L(r)-r **does not return to zero** once clustering stops, and that is expected rather than
+a sign of structure at larger scales. K counts every pair closer than r, so an excess at short range stays
+counted at every larger radius; the curve decays only slowly from there. That is also why the position of
+the L(r)-r peak is *not* the cluster size - read the size from g(r) instead, at the radius where it comes
+back down to 1.
 
-**Median-Cluster Analyses**
+### How filtering works on this tab
 
-| Panel | What it answers |
-|-------|-----------------|
-| Trace IDs / De-blinked Molecules per Median Cluster | Occupancy - how many traces, or how many de-blinked molecules, per structure |
-| Median Clusters Detection over Time ⚠ | When structures appear during acquisition |
-| Median Clusters Crowding vs Detection-Time Shift ⚠ | Whether crowding biases when a structure is detected |
-| Within Median Clusters NN vs Cluster Size ⚠ | Internal spacing as a function of structure size |
-| Cluster Viewer and Shape Fitting ⚠ | Per-structure 3D inspection and geometric fits |
-| Radius of Gyration (RoG) | Structure size from the second moment, with anisotropy |
+Every analysis on the Analysis tab applies the **Display-tab filter ranges** - EFO, CFR, DCR, ECO,
+dwell, fluo, trace-ID length, trace spread and outlier trimming - identically to *all* loaded files,
+not only the active one. There is no separate per-file filtering to set up.
 
-**Two-Color Analysis**
+The one thing to watch: the sliders' *limits* are auto-detected from the **active file**, so if another
+dataset runs higher on a metric, check that a range which looks like "no filter" still means that
+before comparing groups. The time (`tim`) range is per-file by nature, since each acquisition has its
+own timeline. This is stated as a note at the top of the tab.
 
-| Panel | What it answers |
-|-------|-----------------|
-| Cross-Channel NN & Co-localization | Two-colour proximity, as distances and as a co-localization curve |
-| Bivariate Ripley's L₁₂(r) | Cross-channel clustering across scales |
-| Pair Cross-Correlation g₁₂(r) | Cross-channel correlation as a function of separation |
-| 2D KDE Density Map | Smoothed density field per channel, with a pixel-level overlap metric |
+### Labelling density normalisation (opt-in) ⚠
 
-All analyses operate on the filtered, de-blinked and clustered data visible in the Display tab. In
-2-color mode, group membership comes from the DCR split (or the `fluo` column).
+Collapsed by default, and off by default - most experiments do not need it.
 
-**NN unit.** The Batch NN and Cross-Channel panels share a *unit* selector that decides what counts as
-one point: TID centroids, de-blinked molecule centroids, or either of those restricted to within each
-Median Cluster. Raw localizations are deliberately not an option - they are not molecules.
+It exists for the case where labelling density varies between acquisitions for reasons that are not
+biology: transient transfection giving each cell an undefined plasmid load, differing expression level,
+run-to-run labelling efficiency. That variation is not cosmetic, and it pushes in the direction that
+*mimics* aggregation. Nearest-neighbour distances shrink as density rises, and DBSCAN at a fixed eps and
+minPts is itself a density threshold, so a high expresser reads as more clustered even when nothing about
+its organisation has changed.
+
+**Measure** reports, per file, how many units there are and the density over an estimated sample area:
+
+- **Unit** is a de-blinked molecule when de-blinking is on, and a trace ID otherwise. This matters: a
+  trace ID is a single blink, so trace-ID density mixes expression level together with photophysics and
+  laser power, and is not comparable between runs.
+- **Area** is the region the sample actually occupies, not the bounding box. A MINFLUX field routinely
+  contains the edge of a cell and interior dark regions, and a bounding box counts all of that as sample,
+  so a cell imaged half in frame reads at half its true density purely from framing. Four estimators are
+  offered; the default smooths the localizations into a density map and keeps the smallest region holding
+  a given share of the units (Hyndman 1996). Dark regions fall below the cut on their own and there is no
+  fill radius to tune. The alternatives are an occupancy grid with a morphological fill, the convex hull,
+  and the bounding box.
+- **Density (NN)** is a second estimate from nearest-neighbour distances that needs no area at all, so it
+  is a useful check on the area-based number. It is deliberately not used as the thinning target, because
+  it measures density locally and clustering inflates it.
+
+The plot shows one **horizontal violin per dataset** over the per-unit local density, with the overall
+density marked as a diamond. The single number tells you how much label there is; the shape tells you how
+it is arranged. A cell with real aggregates is heterogeneous - a sparse background plus a dense tail -
+where a uniformly labelled cell at the same average is narrow. Keep the smoothing settings identical
+across the samples you compare: together they define what "the sample area" means.
+
+**Show support map** draws one dataset with the counted area outlined in green and the disregarded part
+shaded red, over the localizations. This is what makes the area estimate checkable - the number says
+"30% of the frame", but only the picture says whether that 30% is the *cell* or a tracing of your own
+*structures*. Two honest limits: the frame is the bounding box of the data, because a localization table
+carries no record of the real scan field, so red only ever marks interior dark regions and concave
+margins; and in 3-D the map is a plan view, so the area looks larger in projection than it is.
+
+**Thin all files to a common density** is the second, separate opt-in. Keeping each unit with a fixed
+probability leaves the pair correlation g(r) and Ripley's K unchanged, so real clustering survives
+thinning while a difference caused only by labelling density does not. Thinning every file to one density
+therefore makes even the fixed-threshold DBSCAN read-outs comparable. It drops whole units - a trace or a
+molecule with all its localizations - after the metadata filters and before clustering. Quality-Control
+panels are exempt: they must see the data as acquired.
+
+**Scope: what thinning is and is not for.** It matters only for **count-based** read-outs - DBSCAN cluster
+counts, % in clusters, cluster sizes, nearest-neighbour distributions - which change with labelling
+density by construction, and are not comparable between files of differing density unless you match first.
+**Ripley's L and g(r) do not need it at all**, because they already divide the density out; thinning those
+discards data without changing the answer. The useful summary: **for K, L and g the observation window is
+everything and the labelling density is nothing** - they divide density out but multiply by the area,
+which is why the area estimate and the edge correction matter so much and this section usually does not.
+
+With thinning off, the density measurement is still worth having: it tells you how comparable your
+acquisitions are, whether you have enough molecules for a stable g(r) estimate, and whether density
+happens to confound with condition.
+
+Two limits the panel will not exceed. It **never up-samples**, so a file already below the target is left
+untouched; the default target is the lowest density in the set for exactly that reason. And thinning
+**cannot separate density from biology when the two are genuinely linked** - for a self-aggregating
+protein they are, since aggregation depends on concentration. A difference that survives at matched
+density is evidence; a difference in how clustering *scales* with density is stronger evidence, and needs
+a spread of expression levels per condition rather than one matched pair.
 
 ### Two-colour method details
 
@@ -999,11 +1039,19 @@ Generates labelled synthetic structures in 2D or 3D. Two **simulation modes**:
 
 A fixed ground-truth seed lets you compare labelling strategies on the *same* structure.
 
-**Labeling Strategy** - each labelled molecule generates N fluorophore positions, and each fluorophore
-becomes one trace ID in the output. Presets cover direct tags (SNAP / Halo / Click, DOL = 1),
+**Labeling Strategy** - each labelled molecule draws `K ~ max(1, Poisson(n_fluor))` fluorophores,
+each detected independently at the labelling efficiency, and each detected fluorophore becomes one or
+more trace IDs (blinking splits it further). Presets cover direct tags (SNAP / Halo / Click, DOL = 1),
 nanobodies, primary monoclonal and polyclonal IgG (with and without NHS multi-labelling), primary +
 secondary (nanobody or IgG) sandwiches, streptavidin, and a Custom option. These are the same presets
 the SMLM tab's *Estimate Ground-Truth Positions* inverts.
+
+Two consequences worth knowing before choosing one: a polyclonal + secondary IgG sandwich produces
+**~32 trace IDs per protein**, and the shared linker sets a resolution **floor** that no amount of
+acquisition time removes (~50 nm for that sandwich, ~6 nm for a nanobody). The full generative model -
+dye counts, the three displacement levels, TID multiplication, and a table of every preset's
+TIDs/molecule, detection probability and resolution floor - is derived in
+[docs/simulator.md §1.2](docs/simulator.md).
 
 **Localization precision** - either a manual σ (separate XY and Z) or a **CRLB from photon budget**.
 
@@ -1018,7 +1066,11 @@ render of the same ground truth - objective NA, pinhole in Airy units, pixel siz
 fluorophore, background, Poisson shot noise), *Acquisition* (the timeline plot and summary), and
 *Compare strategies* (two labelling strategies A and B side by side on identical ground truth).
 
-Simulated data can be sent directly to the SMLM or Tracking tabs for immediate analysis.
+Simulated localizations and the ground-truth positions export as CSV; re-upload them in the SMLM tab
+to analyse them through the normal pipeline.
+
+> Full simulator reference - the generative pipeline stage by stage, the acquisition maths, and the
+> known fidelity gaps - is in [docs/simulator.md](docs/simulator.md).
 
 ### Phase 2 - Diffusion / Tracking (ground-truth simulator)
 
@@ -1230,7 +1282,7 @@ either the IQR or the MAD as a spread indicator.
 
 > The first-NN distance distribution reveals the typical inter-molecule or inter-structure spacing. A
 > narrow peak indicates a regular, lattice-like arrangement; a broad tail suggests heterogeneity.
-> **A sharp peak below ~40 nm is usually the label footprint, not biology** - the distance-range
+> **A sharp peak below ~40 nm is usually the label footprint* - the distance-range
 > filter trims the histogram but does not correct that bias. NN carries no CSR reference; use
 > Ripley's L(r) with its envelope if you need significance.
 

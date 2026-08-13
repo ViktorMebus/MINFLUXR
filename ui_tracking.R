@@ -759,7 +759,7 @@ tracking_ui <- fluidPage(
           selectInput("trk_geom_type", "Shape",
             choices = c("None - unbounded"                          = "none",
                         "Sphere / round cell"                       = "sphere",
-                        "Rod / spherocylinder (e.g. a bacterium)"   = "rod",
+                        "Rod / spherocylinder"                      = "rod",
                         "Ellipsoid"                                 = "ellipsoid",
                         "Flat membrane / supported bilayer"         = "membrane",
                         "Filament / linear track"                   = "filament"),

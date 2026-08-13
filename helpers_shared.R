@@ -1,6 +1,6 @@
-## ─────────────────────────────────────────────────────────────────────────────
+## -----------------------------------------------------------------------------
 ## helpers_shared.R  -  helpers used by BOTH the SMLM and Tracking tabs
-## ─────────────────────────────────────────────────────────────────────────────
+## -----------------------------------------------------------------------------
 ##
 ## PURPOSE
 ##   This is the app's FRONT DOOR. Almost all of it is the import layer: it
@@ -45,7 +45,7 @@
 ##
 ## CONVENTION: jsonlite is NOT attached - always call jsonlite:: explicitly, or
 ## its `validate` shadows shiny::validate.
-## ─────────────────────────────────────────────────────────────────────────────
+## -----------------------------------------------------------------------------
 
 # Null-coalescing operator: `a %||% b` returns a unless it is NULL, else b.
 # Used constantly to give Shiny inputs a default before they have rendered.
@@ -60,16 +60,16 @@ sigloc <- function(sub = "loc") htmltools::HTML(sprintf("&sigma;<sub>%s</sub>", 
 
 # Collapsible per-method infobox: what the method is, where it is from, how it is
 # adapted for MINFLUX (irregular Δt / short tracks / nm precision / blinking), and
-# the honest caveat. `rating` is a 🟢/🟡/🟠 chip:
+# the honest caution. `rating` is a 🟢/🟡/🟠 chip:
 #   green  = standard method, well-suited to MINFLUX as used here
 #   amber  = standard method, but a MINFLUX property strains an assumption
 #   orange = bespoke to this tool, no published MINFLUX equivalent (exploratory)
 # Lives here (not in a ui_*.R) because helpers_shared.R is sourced first, so both
 # ui_smlm.R and ui_tracking.R can call it at source time.
-.method_box <- function(rating, source, adaptation, caveat) {
+.method_box <- function(rating, source, adaptation, caution) {
   chip <- switch(rating,
     green  = tags$span("🟢 well-adapted",  style = "color:#1a8a1a;"),
-    amber  = tags$span("🟡 adapted, with caveats", style = "color:#b26a00;"),
+    amber  = tags$span("🟡 adapted, with caution", style = "color:#b26a00;"),
     orange = tags$span("🟠 exploratory for MINFLUX", style = "color:#e67e22;"),
     tags$span(rating))
   tags$details(style = "margin:4px 0 10px; font-size:0.82em;",
@@ -78,7 +78,7 @@ sigloc <- function(sub = "loc") htmltools::HTML(sprintf("&sigma;<sub>%s</sub>", 
     tags$div(style = "padding:6px 4px 2px 10px; color:#555; line-height:1.5; border-left:3px solid #cfe0ee;",
       tags$p(style = "margin:2px 0;", tags$b("Origin: "), source),
       tags$p(style = "margin:2px 0;", tags$b("MINFLUX adaptation: "), adaptation),
-      tags$p(style = "margin:2px 0; color:#7a5c00;", tags$b("Caveat: "), caveat)))
+      tags$p(style = "margin:2px 0; color:#7a5c00;", tags$b("Caution: "), caution)))
 }
 
 # Lower-case file extension of a path/filename ("Sample.NPY" -> "npy").
@@ -87,7 +87,7 @@ get_ext <- function(filename) {
   tolower(sub("^.*\\.", "", filename))
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Labeling-method presets - SINGLE SOURCE OF TRUTH.
 # Used by the Simulator (forward model: GT -> traces) and by the SMLM tab's
 # inverse GT-estimator (traces -> candidate GT). Keeping one table means the
@@ -101,7 +101,7 @@ get_ext <- function(filename) {
 #   dye_spread_nm Gaussian SD of individual dye positions within the complex
 #   footprint_nm  approximate excluded-zone diameter around each labeled protein
 #   blink_lambda  mean EXTRA TID appearances per fluorophore (dye re-activation)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 minflux_label_presets <- function() {
   list(
     # -- Covalent / minimal-linkage tags --------------------------------------
@@ -173,14 +173,14 @@ read_minflux_csv <- function(path) {
   df
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Pure-R NumPy (.npy) reader - no Python/reticulate dependency.
 # Supports v1/v2/v3 headers and C-order (fortran_order = FALSE) arrays, including
 # *structured* (record) dtypes with named fields and fixed-shape sub-arrays
 # (e.g. loc = (3,) f8, dcr = (2,) f8) - exactly the layout Abberior MINFLUX
 # "tabular" exports use. Nested struct fields (legacy m2205 itr blocks) are not
 # supported and raise an informative error.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 # Map a NumPy dtype token ("<f8", "|b1", "?", ">i4", "<u4", ...) to readBin args.
 .npy_dtype_info <- function(tok) {
@@ -783,7 +783,7 @@ read_minflux_npy_as_df <- function(path,
   )
 }
 
-# ── collapse_minflux_iterations() ────────────────────────────────────────────
+# -- collapse_minflux_iterations() --------------------------------------------
 # GOAL: reduce MINFLUX's multi-stage localization to ONE row per localization.
 #
 # MINFLUX does not measure a position in one shot. It ITERATES: each iteration
@@ -842,7 +842,7 @@ collapse_minflux_iterations <- function(df, keep_itr = 9L) {
     )
 }
 
-# ── canonicalize_minflux_df() ────────────────────────────────────────────────
+# -- canonicalize_minflux_df() ------------------------------------------------
 # GOAL: accept the many column-naming conventions found in the wild and rename
 # them to the ONE canonical schema documented in the file header, so nothing
 # downstream ever has to guess.
@@ -1252,7 +1252,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
     # then match using a bounds constraint (MINFLUX extent must land inside the
     # physical image after alignment) with rank preference.
 
-    # ── Robust 1-D Gaussian smooth (kernel clamped to vector length) ──────────
+    # -- Robust 1-D Gaussian smooth (kernel clamped to vector length) ----------
     gauss1d <- function(v, sigma) {
       n <- length(v)
       if (n < 3L || !is.finite(sigma) || sigma <= 0) return(v)
@@ -1270,7 +1270,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
       m
     }
 
-    # ── Peak finding via which.max (linear index → row/col): crash-proof ──────
+    # -- Peak finding via which.max (linear index → row/col): crash-proof ------
     # Avoids the which(m==max, arr.ind=TRUE)[1,] pattern that fails on edge cases.
     find_peaks <- function(m, n_max, min_sep) {
       nr   <- nrow(m); nc <- ncol(m)
@@ -1293,7 +1293,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
       pks[seq_len(nfound)]
     }
 
-    # ── 1. Confocal: gray-convert → resize → write raw → read back → matrix ────
+    # -- 1. Confocal: gray-convert → resize → write raw → read back → matrix ----
     # We bypass image_data() entirely and write the grayscale image to a temp
     # "GRAY" raw file (ImageMagick raw format: exactly W×H bytes, row-major,
     # no header).  This is unambiguous regardless of bit depth or colorspace quirks.
@@ -1388,7 +1388,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
       list(x = nm[["x"]], y = nm[["y"]])
     })
 
-    # ── 2. MINFLUX: TID-density histogram → smooth → top-N clusters ──────────
+    # -- 2. MINFLUX: TID-density histogram → smooth → top-N clusters ----------
     fin   <- is.finite(df_xy$x) & is.finite(df_xy$y)
     x_f   <- df_xy$x[fin]; y_f <- df_xy$y[fin]
     if (!length(x_f)) stop("foci: no finite MINFLUX coordinates")
@@ -1439,7 +1439,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
            y = (by_d[iy] + by_d[iy + 1L]) / 2.0)
     })
 
-    # ── 3. Geometric permutation matching ─────────────────────────────────────
+    # -- 3. Geometric permutation matching -------------------------------------
     # Generate every ordered k-length selection of data peaks assigned to the
     # top-k image peaks (image peak rank 1..k always stays in position).
     # For each assignment compute the mean translation (optimal rigid offset for
@@ -1539,7 +1539,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
     x0 <- mean(x) - nm[["x"]]
     y0 <- mean(y) - nm[["y"]]
 
-    # ── Extract cell boundary polygon via convex hull of bright (membrane) pixels
+    # -- Extract cell boundary polygon via convex hull of bright (membrane) pixels
     # The hull of membrane ring pixels approximates the outer cell boundary.
     # Vertices are converted to data-nm coordinates (using the alignment offset
     # computed above) so the polygon can be used directly for trace filtering.
@@ -1583,7 +1583,7 @@ auto_align_overlay <- function(img, df_xy, px_size,
   )
 }
 
-# ── Vectorised point-in-polygon via ray casting ──────────────────────────────
+# -- Vectorised point-in-polygon via ray casting ------------------------------
 # Returns logical vector; TRUE where (test_x[i], test_y[i]) is inside the
 # polygon defined by vertices (poly_x, poly_y).  Polygon is auto-closed.
 .pnpoly_vec <- function(test_x, test_y, poly_x, poly_y) {

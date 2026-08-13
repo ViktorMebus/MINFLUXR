@@ -2350,7 +2350,7 @@ tracking_server <- function(input, output, session) {
     n   <- nrow(ts)
     tags$div(
       style = "color:#555; margin-bottom:4px; font-size:0.9em;",
-      tags$b("Trace lifetimes \u2014"),
+      tags$b("Trace lifetimes -"),
       sprintf("%d traces \u00B7 mean %.0f ms \u00B7 median %.0f ms", n, avg, med)
     )
   })
@@ -4736,16 +4736,16 @@ tracking_server <- function(input, output, session) {
     }
 
     # ----- NO RELAYOUT HERE, EVER -----
-    # draw_frame is RESTYLE-ONLY in every path. Any relayout \u2014 even a title-only one \u2014
+    # draw_frame is RESTYLE-ONLY in every path. Any relayout - even a title-only one -
     # makes plotly re-solve the scaleanchor aspect constraint and visibly rescales the
     # FOV (the sequential loop skips relayout for the same reason; see
     # run_sequential_loop_plain). Gating it on "not playing" was not enough: draw_frame
     # is also driven by the slider observer and by stale slider echoes that arrive after
     # playback ends (slider_guard is reset to 0 there), so the flags can read "paused"
-    # while frames are still advancing \u2014 which produced a per-frame FOV jitter after
+    # while frames are still advancing - which produced a per-frame FOV jitter after
     # stop-then-replay. The frame/marker readout now lives in trk_frame_meta (driven by
-    # tick()), which costs the plot nothing. uirevision keeps the view \u2014 and any user
-    # zoom \u2014 stable across the restyles.
+    # tick()), which costs the plot nothing. uirevision keeps the view - and any user
+    # zoom - stable across the restyles.
 
     # ----- Slider sync (throttled to every 5 frames during playback) -----
     if (!is.null(isolate(input$trk_frame_idx))) {
@@ -5205,7 +5205,7 @@ tracking_server <- function(input, output, session) {
   })
   # Per-track D and alpha fits - computed when histogram OR clustering is open
   # Per-track fits feeding the D histogram, the D/CI clustering and the per-track
-  # CSV export \u2014 all derived from the SAME Unified MSD calculation (per-track OLSF
+  # CSV export - all derived from the SAME Unified MSD calculation (per-track OLSF
   # D + confinement index), via the cached trk_unified_tdiff reactive.
   msd_pertk_fits <- reactive({
     req(isTRUE(input$trk_show_msd))
@@ -10200,7 +10200,7 @@ tracking_server <- function(input, output, session) {
         marker = list(color = bar_cols),
         text  = sprintf("\u03C3=%.1f %s  D=%.2g %s%s", bd$sigma, sig_unit, bd$D_vals, d_unit,
                         ifelse(is_noise,
-                               sprintf("  (\u2264 noise floor %.2g %s \u2014 immobile/noise-limited)", bd$D_noise, d_unit),
+                               sprintf("  (\u2264 noise floor %.2g %s - immobile/noise-limited)", bd$D_noise, d_unit),
                                "")),
         hovertemplate = "%{text}<extra></extra>"
       ) %>%
@@ -10310,7 +10310,7 @@ tracking_server <- function(input, output, session) {
     sig_unit <- if (norm_dt) "nm/\u221Ams" else "nm"
 
     is_noise <- if (!is.null(bd$noise_state)) bd$noise_state else rep(FALSE, K)
-    fmt_time <- function(ms) if (!is.finite(ms)) "\u2014"
+    fmt_time <- function(ms) if (!is.finite(ms)) "-"
                              else if (ms >= 1000) sprintf("%.2f s", ms / 1000)
                              else sprintf("%.0f ms", ms)
     dwell <- if (!is.null(bd$dwell_ms)) bd$dwell_ms else rep(NA_real_, K)
@@ -10340,7 +10340,7 @@ tracking_server <- function(input, output, session) {
       ),
       if (is.finite(bd$D_noise %||% NA_real_))
         tags$p(style = "color:#888; font-size:0.92em; margin-top:4px;",
-          sprintf("Noise floor D = %.2g %s (\u03C3_loc = %.2f nm). States at or below it are marked \u26A0 \u2014 they are indistinguishable from localization noise, not resolved diffusive states.",
+          sprintf("Noise floor D = %.2g %s (\u03C3_loc = %.2f nm). States at or below it are marked \u26A0 - they are indistinguishable from localization noise, not resolved diffusive states.",
                   bd$D_noise, d_unit, bd$sigma_loc_nm))
       else
         tags$p(style = "color:#888; font-size:0.92em; margin-top:4px;",
@@ -10358,7 +10358,7 @@ tracking_server <- function(input, output, session) {
           for (a in seq_len(K)) for (b in seq_len(K)) if (a != b && is.finite(Q[a, b]) && Q[a, b] > 0)
             off <- c(off, sprintf("S%d\u2192S%d %.3g s\u207B\u00B9", a, b, Q[a, b] * 1000))  # \u00D71000: per-ms \u2192 per-s
           if (length(off)) paste(off, collapse = "  \u00B7  ") else "no state switches observed in the decoded paths"
-        } else "\u2014"
+        } else "-"
         tags$div(style = "margin-top:6px; border-top:1px dashed #ddd; padding-top:4px;",
           tags$p(style = "color:#444; font-size:0.9em; margin:2px 0;",
             tags$b("Transition rates (continuous-time, \u0394t-corrected): "), rate_txt),
@@ -10670,7 +10670,7 @@ tracking_server <- function(input, output, session) {
     steps <- do.call(rbind, step_rows[!sapply(step_rows, is.null)])
     steps <- steps[is.finite(steps$dt) & steps$dt > 0 & is.finite(steps$r2), ]
     shiny::validate(shiny::need(nrow(steps) >= min_pts * 2,
-      "Too few steps \u2014 relax filters or lower 'Min steps per cell'."))
+      "Too few steps - relax filters or lower 'Min steps per cell'."))
 
     # Optional: keep only INTEGRATED (single-cycle) steps. A step spanning dark
     # cycles has a large \u0394t and a spatially meaningless midpoint (the molecule may
@@ -10683,7 +10683,7 @@ tracking_server <- function(input, output, session) {
       keep_step <- pmax(1L, as.integer(round(steps$dt / t_c_dmap))) == 1L
       steps <- steps[keep_step, , drop = FALSE]
       shiny::validate(shiny::need(nrow(steps) >= min_pts * 2,
-        "Too few integrated (single-cycle) steps \u2014 untick 'Integrated steps only' or relax filters."))
+        "Too few integrated (single-cycle) steps - untick 'Integrated steps only' or relax filters."))
     }
 
     # Global median dt used to normalise all cells to the same lag
@@ -10756,7 +10756,7 @@ tracking_server <- function(input, output, session) {
 
     finite_vals <- z_log[is.finite(z_log)]
     shiny::validate(shiny::need(length(finite_vals) > 0,
-      "No cells met the minimum step threshold \u2014 lower 'Min steps per cell' or reduce grid resolution."))
+      "No cells met the minimum step threshold - lower 'Min steps per cell' or reduce grid resolution."))
 
     # Clip to 2nd–98th percentile so one extreme cell doesn't dominate the scale
     zmin <- floor(quantile(finite_vals, 0.02, na.rm = TRUE))

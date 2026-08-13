@@ -298,7 +298,7 @@ sim_ui <- fluidPage(
                        "Generate. Disabled when Multi-copy is on (each copy",
                        "is then rotated independently).")
             ),
-            # Multi-copy tiling \u2014 Normal mode only (Acquisition mode places
+            # Multi-copy tiling - Normal mode only (Acquisition mode places
             # structures in the FOV via its own "Number of structures" control).
             conditionalPanel("input.sim_mode == 'normal'",
               tags$hr(style = "margin-top:6px; margin-bottom:6px;"),
@@ -383,7 +383,7 @@ sim_ui <- fluidPage(
                          "Label complex footprint (nm)",
                          value = 8, min = 0, max = 100, step = 0.5),
             helpText("Approximate diameter of excluded zone around each",
-                     "labeled protein \u2014 used for steric exclusion check.",
+                     "labeled protein - used for steric exclusion check.",
                      "~2 nm (direct tag) to ~20 nm (2\u00B0 IgG).")
           ),
 
@@ -535,8 +535,12 @@ sim_ui <- fluidPage(
                      "in the data, but \u201CCalibrate from a real run\u201D derives it",
                      "as L \u2248 2\u03C3\u221AN from your measured precision + photons."),
             numericInput("sim_crlb_L",
-                         "L \u2014 effective TCP diameter (nm)",
-                         value = 50, min = 10, max = 2000, step = 10),
+                         "L - effective TCP diameter (nm)",
+                         value = 120, min = 10, max = 2000, step = 10),
+            helpText("Default 120 nm reproduces \u03c3 \u2248 7 nm at 80 photons.",
+                     "L is EFFECTIVE, not the instrument's pattern diameter: it",
+                     "absorbs drift, motion and imperfect centring, so it comes",
+                     "out 2\u20133\u00d7 the physical final-iteration L."),
             numericInput("sim_crlb_photons",
                          "Photons per localization",
                          value = 80, min = 1, max = 5000, step = 5),
@@ -569,7 +573,7 @@ sim_ui <- fluidPage(
                         "Scale trace length with fluorophore count",
                         value = FALSE),
           helpText("Divides each TID\u2019s budget by the number of TIDs on",
-                   "its molecule \u2014 keeps total locs per molecule constant",
+                   "its molecule - keeps total locs per molecule constant",
                    "regardless of labeling strategy."),
           tags$hr(style = "margin:6px 0;"),
           tags$b("Background / noise TIDs"),
@@ -613,6 +617,10 @@ sim_ui <- fluidPage(
           helpText("Loads a MINFLUX .npy / .json and fills the FOV, duration and",
                    "detection-rate profile below from the real data, then overlays",
                    "its measured rate on the Acquisition plot."),
+          # Axial calibration + gating.  Both appear only once a file is loaded,
+          # and both are built from that file's own data / provenance.
+          uiOutput("sim_real_zcal_ui"),
+          uiOutput("sim_real_gate_ui"),
           sliderInput("sim_real_struct_frac",
                       "Structure fraction of detections",
                       min = 0, max = 1, value = 0.5, step = 0.05),
@@ -932,10 +940,10 @@ sim_ui <- fluidPage(
                          class = "btn-default btn-sm btn-block"),
             uiOutput("sim_trk_calib_report")),
           tags$hr(style = "margin:6px 0;"),
-          selectInput("sim_trk_geom", "Cell geometry",
-            choices = c("Sphere (coccus)" = "sphere",
-                        "Rod / spherocylinder (E. coli)" = "rod",
-                        "Ellipsoid (ovoid / coccobacillus)" = "ellipsoid",
+          selectInput("sim_trk_geom", "Shape geometry",
+            choices = c("Sphere" = "sphere",
+                        "Rod / spherocylinder" = "rod",
+                        "Ellipsoid" = "ellipsoid",
                         "Membrane plane (flat sheet in 3D)" = "membrane",
                         "Free diffusion (no boundaries)" = "free"),
             selected = "rod"),
