@@ -1292,24 +1292,44 @@ smlm_ui <- fluidPage(
         "higher on a metric, check the range still means what you intend before comparing groups. ",
         "The time (", tags$code("tim"), ") range is per-file by nature, since each acquisition has its own timeline."),
 
-      # -- Transfection / labelling-density tools (collapsed: niche) ----------
+      # -- Density and area normalization (opt-in) --------------------------------------
       # Tucked into a closed <details> because these only matter for a specific
-      # situation - comparing TRANSIENTLY TRANSFECTED cells, where each cell got an
-      # undefined plasmid load so labelling density is not a property of the
-      # condition. Most experiments should never open it.
+      # situation - comparing cells, where each cell got an
+      # undefined amount of label load so labelling density is not a property of the
+      # condition. 
       fluidRow(column(12,
         tags$details(style = "margin:0 0 14px; border:1px solid #dfe6ec; border-radius:4px; background:#fbfcfd;",
           tags$summary(style = "cursor:pointer; padding:7px 12px; font-weight:600; color:#2c3e50;",
-                       "⚙ Labelling-density normalisation & support window",
+                       "⚙ Density & area normalization",
                        tags$span(style = "font-weight:400; color:#7b8794; margin-left:8px;",
-                                 "- for transiently transfected cells; leave closed otherwise")),
+                                 "- for samples with variable labelling density or images with empty regions")),
           tags$div(style = "padding:4px 12px 10px;",
             tags$div(style = "font-size:0.85em; color:#7a5c00; margin-bottom:8px;",
-              tags$b("Also note: "), "the number of trace IDs and de-blinked molecules you detect keeps",
-              " growing the longer you image, so a longer acquisition looks like a denser sample even",
-              " when expression is identical. Compare acquisitions of similar length, and use Trace",
-              " Detection over Time to check the detection rate has flattened before reading a",
-              " density difference as biology."),
+              tags$b("Note: "),
+              "trace-ID and de-blinked-molecule counts depend on acquisition length, labelling ",
+              "efficiency, expression level and buffer, so two acquisitions can differ in density ",
+              "without differing in biology.",
+              tags$br(), tags$br(),
+              tags$b("Empty regions manufacture clustering. "),
+              "Ripley's L, g(r) and the co-localization null all divide by the observed area and ",
+              "assume a point could have landed anywhere in it. Counting empty field as sample ",
+              "puts the expected density too low, so every real point appears to have more ",
+              "neighbours than chance allows. K is inflated by the ratio of counted area to true ",
+              "sample area, which turns L(r) - r into a straight rising ramp - the same signature ",
+              "as real clustering, produced by framing alone. The ramp grows with that ratio ",
+              "(as its square root in 2-D, its cube root in 3-D), so a cell filling half the frame ",
+              "is hit far harder than one that fills it. This is what the footprint window fixes.",
+              tags$br(), tags$br(),
+              tags$b("Density moves the distance-based measures on its own. "),
+              "Under complete randomness the mean nearest-neighbour distance falls as the inverse ",
+              "square root of density in 2-D and the inverse cube root in 3-D - doubling the label ",
+              "density shortens it by about 29% and 21% respectively, with no change in ",
+              "organisation. DBSCAN is more direct still: a fixed eps with minPts is itself a ",
+              "density threshold, so a denser field crosses it more easily and the same random ",
+              "pattern yields larger and fewer, then finally one merged, cluster. ",
+              tags$b("K(r) and g(r) are the exception"), " - they divide density out by ",
+              "construction, which is why the correction here is to thin the denser file down to ",
+              "a common density rather than to rescale a curve."),
           # -- Support-aware observation window (one switch, several panels) --------
           fluidRow(column(12,
             tags$div(style = "margin:0 0 12px; padding:7px 12px; border-left:4px solid #cfe0ee; background:#f6f9fc;",
@@ -1317,16 +1337,16 @@ smlm_ui <- fluidPage(
                             "Apply boundary (edge) correction - recommended",
                             value = FALSE),
               checkboxInput("spatial_use_support",
-                            "Also replace the bounding box with the sample footprint (only if your cell does not fill the frame)",
+                            "Also replace the bounding box with the sample footprint (if your cell(s) do not fill the frame)",
                             value = FALSE),
               tags$div(style = "font-size:0.85em; color:#445; line-height:1.5;",
                 "Both apply to ", tags$b("Ripley's L, g(r), L\u2081\u2082, g\u2081\u2082 and the co-localization null"),
-                ". They fix different things, and usually only the first is wanted.",
+                ". They fix different things:",
                 tags$br(), tags$br(),
-                tags$b("Edge correction"), " is the safe, general one. A point near the edge of the ",
+                tags$b("Edge correction"), " A point near the edge of the ",
                 "window has fewer neighbours available to it than one in the middle, simply because ",
-                "part of its surroundings falls outside. Uncorrected, every curve drifts as r grows ",
-                "and a random pattern stops reading as random. Leave this on.",
+                "part of its surroundings falls outside the imaged area. Uncorrected, every curve drifts as r grows ",
+                "and a random pattern stops reading as random.",
                 tags$br(), tags$br(),
                 tags$b("Footprint window"), " changes what counts as the observed area. If your cell ",
                 "fills the scan field the bounding box already is the cell, so leave this off. Turn ",
@@ -1345,14 +1365,14 @@ smlm_ui <- fluidPage(
               uiOutput("spatial_window_readout"))
           )),
 
-          # -- Labelling-density normalisation (opt-in) ---------------------------
+          # -- Labelling-density normalizsation (opt-in) ---------------------------
           fluidRow(
             column(3,
               h4("Labelling Density", .exploratory_badge()),
               .method_box("amber",
-                HTML("<b>Random thinning</b>: keep each unit with a fixed probability. Doing this leaves the pair correlation g(r) and Ripley's K unchanged (<b>Illian et&nbsp;al. 2008</b>; <b>Chiu et&nbsp;al. 2013</b>), so real clustering survives thinning while an apparent difference caused only by labelling density does not. The sample area is estimated either by smoothing the localizations into a density map (<b>Hyndman 1996</b>) or by a morphological occupancy estimate (<b>Serra 1982</b>); the area-free density check uses nearest-neighbour distances (<b>Thompson 1956</b>)."),
-                HTML("Thinning drops whole <b>units</b> - a trace ID, or a de-blinked molecule with all of its localizations - never individual localizations, which would shorten traces and break de-blinking without actually thinning the pattern. Units default to de-blinked molecules, because a trace ID is a single blink and so trace-ID density mixes expression level together with photophysics. The draw is reproducible for a given file."),
-                HTML("<b>This does not rescue an under-powered design.</b> Thinning equalises density, but it cannot separate density from biology when the two are genuinely linked - and for a self-aggregating protein they are, since aggregation depends on concentration. A difference that survives at matched density is evidence; a difference in how clustering <i>scales</i> with density is stronger evidence. Nothing is ever up-sampled, so a file already below the target is left alone. Thinning also costs precision in anything count-based, and small clusters can drop below minPts and disappear.")),
+                HTML("<b>Independent random thinning</b>: keep each unit with a fixed probability. This leaves the pair correlation g(r) and Ripley's K unchanged in expectation (<b>Illian et&nbsp;al. 2008</b>; <b>Chiu et&nbsp;al. 2013</b>), so genuine clustering survives it while a difference driven only by labelling density does not. Support area comes from a smoothed-density region (<b>Hyndman 1996</b>) or a morphological occupancy estimate (<b>Serra 1982</b>); the area-free density check uses nearest-neighbour distances (<b>Thompson 1956</b>)."),
+                HTML("Whole <b>units</b> are dropped - a trace ID, or a de-blinked molecule with every one of its localizations - never individual localizations, which would shorten traces and corrupt de-blinking and per-trace spread without thinning the pattern. The default unit is the <b>de-blinked molecule</b>: a trace ID is one blink, so trace-ID density mixes expression level with photophysics. Density divides by the estimated support rather than the bounding box, because a MINFLUX field routinely contains the cell edge and interior dark regions. The draw is seeded per file and reproduces on re-run."),
+                HTML("Use this only where density varies for reasons that are <b>not</b> biology - expression level, labelling efficiency, acquisition length. <b>Do not thin when density is itself the biology</b>: for a concentration-dependent process, equalising density removes the effect being measured. <b>Do not thin files already at comparable density</b>, and do not thin for Ripley's L or g(r) - in both cases it discards data and widens the interval without changing the answer. Thinning is one-way (nothing is up-sampled) and can push a small cluster below minPts, turning a real structure into noise. A difference that survives at matched density is evidence; how clustering <i>scales</i> with density is the stronger test.")),
               helpText(HTML("For when labelling density varies between cells for reasons that are not biology - transient transfection, expression level, labelling efficiency. Nearest-neighbour distances shrink as density rises, and DBSCAN at a fixed eps and minPts is itself a density threshold, so both read a high expresser as more clustered even when nothing has changed. Leave this off if that does not apply to your experiment.")),
               checkboxInput("dens_norm_enable", "Measure density per file", value = FALSE),
               conditionalPanel(
@@ -2357,7 +2377,7 @@ smlm_ui <- fluidPage(
                     tags$td("Ripley 1977; variance-stabilising L-transform, Besag 1977")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Pair correlation g(r)")),
                     tags$td("Pair-correlation / radial distribution function (Illian et al. 2008; Stoyan & Stoyan 1994); the SMLM lineage is PC-PALM, Sengupta et al. 2011 and Veatch et al. 2012; density-invariant by construction (normalized by intensity squared)")),
-            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Labelling-density normalisation")),
+            tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Labelling-density normalization")),
                     tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
                             " - independent p-thinning, whose exact invariance of g(r) and K(r) is standard point-process theory (Illian et al. 2008; Chiu et al. 2013); morphological support estimate after Serra 1982; support-free k-NN intensity after Thompson 1956. Applying it as a between-condition correction, and the choice of thinning target, are this tool's design and validated in silico only")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Bivariate Ripley L₁₂(r)")),

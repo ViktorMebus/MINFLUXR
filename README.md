@@ -1358,9 +1358,9 @@ Vogler's MINFLUX Time-Signature Analysis (Vogler et al. 2025, *Commun. Biol.*).
 
 #### The interval law
 
-MINFLUX has no fixed clock. The molecule is localized once per cycle *when it emits*; during a dark
+MINFLUX has no fixed clock. The molecule is localized once per cycle *if it emits or is detected*; during a dark
 cycle nothing is recorded, so the next localization simply lands one or more cycles later. Intervals
-are therefore **quantised, not distributed**:
+are therefore **hard quantized by a TCP cycle time**:
 
 ```math
 \Delta t = k \cdot t_c + \text{SW}, \qquad k \in \lbrace 1, 2, 3, \ldots \rbrace
