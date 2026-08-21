@@ -147,11 +147,50 @@ tracking_server <- function(input, output, session) {
     prev_tid_idx          = NULL,
     play_gen              = 0L,   # global playback generation (simultaneous mode)
     manifest_dir          = NULL, # current working chunks (may be filtered)
-    original_manifest_dir = NULL, # frozen at upload - Filter & Rechunk always reads from here
+    original_manifest_dir = NULL, # frozen at upload - the rechunk always reads from here
+    last_rechunk_dir      = NULL, # previous rechunk output, deleted once superseded
     bigfile_notice        = FALSE,
     chunking              = FALSE,
     trk_diag              = NULL  # list(data_clusters, img_blobs) in data coords
   )
+  # ── Chunk size actually used ────────────────────────────────────────────────
+  # GOAL: turn the "TIDs per chunk" input into the value the chunker gets, for
+  # both the upload path and Filter & Rechunk, so the two cannot disagree.
+  #
+  # A DELIBERATELY SMALL SETTING IS HONOURED. Small chunks are the whole point of
+  # the control: playback animates one chunk at a time, so a modest machine that
+  # cannot render 100 tracks needs 30. Only a blank or non-numeric entry falls
+  # back to the default. The floor is TPC_MIN rather than the default, so a value
+  # below it is clamped up by a little instead of being thrown back to 100.
+  #
+  # WHY THERE IS A FLOOR AT ALL: each chunk becomes one file on disk, so a value
+  # near 1 would emit thousands of files for a large dataset and make every
+  # manifest read slow.
+  TPC_MIN <- 5L
+  .tids_per_chunk <- function() {
+    v <- suppressWarnings(as.integer(isolate(input$trk_tids_per_chunk)))
+    if (!is.finite(v) || v < 1L) return(TIDS_PER_CHUNK_DEFAULT)   # blank / garbage
+    max(TPC_MIN, v)
+  }
+
+  # ── Which chunk the selector lands on when it is rebuilt ────────────────────
+  # "__all__" = animate every TID; "first" = land on chunk 1.
+  #
+  # Rebuilding the selector (upload, Filter & Rechunk, Reset ranges) has to pick a
+  # value, and the previous selection cannot simply be carried over: re-chunking at
+  # a different size renumbers the chunks, so "chunk 5" may not exist afterwards and
+  # would not hold the same tracks if it did. What IS meaningful is whether the user
+  # was scoped to a chunk at all, so that is what is preserved - someone who was on a
+  # chunk stays on a chunk (the first one, which always exists), and someone on
+  # "All TIDs" stays on all. Landing a machine that could not render everything back
+  # on "All TIDs" is what this avoids.
+  trk_chunk_pref <- reactiveVal("__all__")
+
+  # Plot Data asks for a rechunk through this counter rather than calling the
+  # routine directly, so the 260-line filter/rechunk observer stays exactly where
+  # it is and keeps its own progress bar and error handling.
+  rechunk_request <- reactiveVal(0L)
+
   is_playing         <- reactiveVal(FALSE)
   tick               <- reactiveVal(0L)
   slider_guard       <- reactiveVal(0L)
@@ -594,127 +633,103 @@ tracking_server <- function(input, output, session) {
     if (is.finite(val)) trk_sigma_loc_cve(val)
   }, ignoreInit = TRUE)
 
+  # GOAL: report the CVE calibration as numbers plus short verdicts.
+  # The reasoning that used to be printed here on every run (why photons are not
+  # used as weights, what sigma_loc feeds downstream, why only integrated pairs
+  # qualify) now lives in the panel's collapsible Method box and in README
+  # "CVE (Covariance-Based Estimator)". On-screen text stays numeric.
   output$trk_cve_status <- renderUI({
     b <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
     if (is.null(b))
       return(htmltools::div(style = "color:#888; font-size:0.9em;",
-        "Press ", htmltools::tags$b("Estimate ", sigloc(), " & quality"), " to calibrate from the data (no MSD needed)."))
-    # Verdict on the ANALYZED integrated fraction (SAME metric as TSA / cycle-time
-    # status, so all quality verdicts agree). The tolerance-weighted continuity is
-    # reported alongside (it drives the continuity GATE). "Raw" = the TRUE frozen
-    # upload data (never filtered); "Analyzed" = the data the analyses use.
-    fi_raw  <- b$frac_integ %||% NA_real_
-    fi_filt <- b$frac_integ_filt %||% NA_real_
-    c_raw   <- b$cont_raw  %||% NA_real_
-    c_filt  <- b$cont_filt %||% NA_real_
-    q_use   <- if (is.finite(fi_filt)) fi_filt else fi_raw
-    q_verdict <- if (!is.finite(q_use)) c("UNKNOWN", "#888")
-                 else if (q_use >= 0.7) c("GOOD", "#1a8a1a")
-                 else if (q_use >= 0.5) c("MODERATE", "#b26a00")
-                 else c("POOR", "#c03030")
-    improved <- is.finite(c_raw) && is.finite(c_filt) && (c_filt - c_raw) > 0.01
-    frac_line <- {
-      integ_txt <- if (is.finite(fi_raw) && is.finite(fi_filt))
-                     sprintf("%.0f%%→%.0f%%", 100 * fi_raw, 100 * fi_filt)
-                   else if (is.finite(fi_raw)) sprintf("%.0f%%", 100 * fi_raw) else "-"
-      cont_txt  <- if (is.finite(c_raw) && is.finite(c_filt))
-                     sprintf("%.2f→%.2f", c_raw, c_filt)
-                   else if (is.finite(c_raw)) sprintf("%.2f", c_raw) else "-"
-      sprintf("  ·  continuity (raw→analyzed) %s%s  ·  integrated %s",
-              cont_txt, if (improved) " ▲" else "", integ_txt)
-    }
+        "Press ", htmltools::tags$b("Estimate ", sigloc(), " & quality"), " to calibrate."))
+
+    AMB <- "#B8860B"; RED <- "#c03030"; DIM <- "#888"
+    row  <- function(...) htmltools::div(style = "margin:1px 0;", ...)
+    dim_ <- function(...) htmltools::span(style = sprintf("color:%s;", DIM), ...)
+    warn <- function(...) htmltools::span(style = sprintf("color:%s;", AMB), ...)
+    num  <- function(x, fmt, na = "-") if (is.finite(x)) sprintf(fmt, x) else na
+
+    # ── sigma_loc ──────────────────────────────────────────────────────────────
     sigma_line <- if (isTRUE(b$degenerate) && !is.finite(b$sig_pt_med))
-      htmltools::span(style = "color:#c03030;",
-        sigloc(), ": not resolvable - consecutive steps are positively correlated ",
-        "(drift/directed motion dominates). Enter ", sigloc(), " manually or use a less directed subset.")
+      row(htmltools::span(style = sprintf("color:%s;", RED),
+        sigloc(), " not resolvable - consecutive steps are positively correlated (drift dominates). Enter it manually."))
     else if (is.finite(b$sig_pt_med))
-      htmltools::span(
-        htmltools::tags$b(sigloc(), sprintf(" = %.2f nm", b$sig_pt_med)),
-        if (is.finite(b$sig_pt_lo)) sprintf(" (95%% CI %.2f–%.2f)", b$sig_pt_lo, b$sig_pt_hi) else "",
-        sprintf(" · per-track median, n=%d; IQR %.2f nm; CV %.0f%%; pooled %.2f nm",
-                b$n_pt, b$sig_pt_iqr %||% NA_real_, 100 * (b$sig_pt_cv %||% NA_real_), b$sigma),
-        # Is σ actually resolved? (r₁ → 0 means per-track σ differences are motion, not noise.)
-        if (is.finite(b$noise_frac))
-          htmltools::span(style = sprintf("color:%s;", if (b$noise_frac >= 0.15) "#888" else "#B8860B"),
-            sprintf("  ·  noise = %.0f%% of step variance (r₁ = %.3f)%s",
-                    100 * max(0, b$noise_frac), b$r1_norm,
-                    if (b$noise_frac < 0.15) " - σ heterogeneity between tracks is motion-dominated, treat the spread below as indicative" else "")) else NULL)
+      row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sig_pt_med)),
+          dim_(sprintf("  (%sn=%d tracks  \u00b7  CV %s  \u00b7  pooled %.2f)",
+                       if (is.finite(b$sig_pt_lo)) sprintf("95%% CI %.2f-%.2f  \u00b7  ", b$sig_pt_lo, b$sig_pt_hi) else "",
+                       b$n_pt, num(100 * (b$sig_pt_cv %||% NA_real_), "%.0f%%"), b$sigma)))
     else
-      htmltools::span(htmltools::tags$b(sigloc(), sprintf(" = %.2f nm", b$sigma)),
-        sprintf("  (CVE pooled, %s consecutive integrated pairs)", format(b$n_pairs, big.mark = ",")))
-    # The one photon fact that changes what you should DO: if photons track mobility, any
-    # ECO/EFO filter is silently a mobility filter.
-    # 3D only: lateral vs axial precision. The app-wide σ_loc pools all axes, so if the
-    # axial precision is much worse, that ONE number over-states σ_xy - and the purely
-    # lateral tools (D-map, 2D-mode JDD/MSD) then over-subtract their noise floor.
+      row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sigma)),
+          dim_(sprintf("  (pooled, %s integrated pairs)", format(b$n_pairs, big.mark = ","))))
+
+    # ── lateral vs axial (3D only) - a pooled sigma over-states the lateral floor,
+    #    which the x-y-only tools (D-map, 2D JDD/MSD) would then over-subtract.
     aniso_line <- if (isTRUE(b$has_z) && is.finite(b$sigma_xy) && is.finite(b$sigma_z))
-      htmltools::span(style = "font-size:0.92em;", htmltools::br(),
-        # sigloc() is an HTML object, so it must be a sibling tag - passing it through
-        # sprintf("%s") stringifies it and the markup then renders as literal text.
-        htmltools::span(style = "color:#888;",
-          "per-axis ", sigloc(),
-          sprintf(": lateral (x,y) %.2f nm  ·  axial (z) %.2f nm",
-                  b$sigma_xy, b$sigma_z)),
-        if (is.finite(b$sig_aniso) && b$sig_aniso > 1.3)
-          htmltools::span(style = "color:#B8860B;",
-            htmltools::HTML(sprintf(
-              "  &#9888; axial precision is %.1f× worse, so the pooled %s above over-states the <b>lateral</b> noise floor. The x&ndash;y tools (D-map, 2D JDD/MSD) will over-subtract - enter %.2f nm manually for those.",
-              b$sig_aniso, sigloc(), b$sigma_xy)))
-        else NULL)
+      row(dim_(sprintf("lateral %.2f  \u00b7  axial %.2f nm", b$sigma_xy, b$sigma_z)),
+          if (is.finite(b$sig_aniso) && b$sig_aniso > 1.3)
+            warn(htmltools::HTML(sprintf(
+              "  &#9888; axial %.1f\u00d7 worse \u2014 enter %.2f nm for the D-map / 2D JDD",
+              b$sig_aniso, b$sigma_xy))) else NULL)
     else NULL
-    prec_line <- if (is.finite(b$phot_mob_rho) && b$phot_mob_rho <= -0.35)
-      htmltools::span(style = "color:#B8860B; font-size:0.92em;", htmltools::br(),
-        htmltools::HTML(sprintf(
-          "&#9888; ρ[%s, step variance] = %.2f - photon count here tracks <b>mobility</b>, not brightness (a fast molecule leaves the beam sooner and collects fewer photons). So an %s filter in Track Cleaning is also a <b>mobility filter</b> and will skew the D distribution.",
-          toupper(b$phot_col %||% "photon"), b$phot_mob_rho, toupper(b$phot_col %||% "photon"))))
+
+    # ── how well sigma is resolved (r1 -> 0 means the per-track spread is motion) ──
+    noise_line <- if (is.finite(b$noise_frac))
+      row(dim_(sprintf("noise %.0f%% of step variance (r\u2081 = %.3f)", 100 * max(0, b$noise_frac), b$r1_norm)),
+          if (b$noise_frac < 0.15) warn(htmltools::HTML("  &#9888; "), sigloc(),
+                                          " spread is motion-dominated, indicative only") else NULL)
     else NULL
-    htmltools::div(style = "font-size:0.92em; margin:4px 0;",
-      sigma_line, aniso_line, prec_line, htmltools::br(),
-      htmltools::span(htmltools::tags$b("Data quality (analyzed): "),
-        htmltools::span(style = sprintf("color:%s; font-weight:bold;", q_verdict[2]), q_verdict[1]),
-        frac_line),
-      htmltools::br(),
-      htmltools::span(style = "color:#888; font-size:0.94em;",
-        {
-          # Report D in the MOTION's degrees of freedom, matching the
-          # Displacement-vs-Diffusion panel. A per-axis CVE spreads 2-DOF motion
-          # over 3 recorded axes, so on a surface tracked in 3D the raw value is
-          # D_true * d_mot/d_obs = 2/3 of the truth. Corrected HERE rather than in
-          # trk_cve_bundle() because the other consumer (line ~8499) applies the
-          # same factor itself and would otherwise double-correct.
-          d_obs   <- if (isTRUE(b$has_z)) 3L else 2L
-          d_mot   <- { mo <- input$trk_motion %||% "volume"
-                       if (identical(mo, "filament")) 1L
-                       else if (identical(mo, "surface")) min(2L, d_obs)
-                       else d_obs }
-          d_use   <- b$D_cve * d_obs / d_mot
-          d_tag   <- if (d_mot != d_obs)
-                       sprintf(" corrected x%d/%d for %s motion", d_obs, d_mot,
-                               input$trk_motion %||% "volume") else ""
-          sprintf("cycle time = %s  ·  free D (CVE)%s = %s µm²/s  ·  %s steps",
-                  if (is.finite(b$t_cycle)) sprintf("%.4g ms", b$t_cycle) else "unknown",
-                  d_tag,
-                  if (is.finite(d_use)) sprintf("%.3g", d_use / 1e3) else "-",
-                  format(b$n_steps, big.mark = ","))
-        }),
-      if (is.finite(b$frac_implaus %||% NA_real_) || is.finite(b$n_suspect %||% NA_real_)) {
-        bad <- (is.finite(b$frac_implaus) && b$frac_implaus > 0.01) ||
-               (is.finite(b$n_suspect) && is.finite(b$n_tracks_pt) && b$n_tracks_pt > 0 &&
-                b$n_suspect / b$n_tracks_pt > 0.05)
-        htmltools::div(style = sprintf("font-size:0.9em; margin-top:3px; color:%s;", if (bad) "#b26a00" else "#888"),
-          htmltools::tags$b("Linking QC: "),
-          if (is.finite(b$n_implaus))
-            sprintf("%s implausible jumps (%.2f%% of steps, |Δr|>5× expected for their gap)",
-                    format(b$n_implaus, big.mark = ","), 100 * b$frac_implaus) else "-",
-          if (is.finite(b$n_suspect))
-            htmltools::span(sprintf("  ·  %d/%d suspicious tracks (degenerate/outlier ",
-                                    b$n_suspect, b$n_tracks_pt), sigloc(), ")") else "",
-          if (bad) "  - inspect at high density / long dark gaps (possible mis-links)." else " - within expectation.")
-      } else NULL,
-      if (isTRUE(b$degenerate)) NULL else htmltools::div(style = "color:#2a6; font-size:0.9em; margin-top:3px;",
-        "→ ", sigloc(), " is now the app-wide noise floor for the D-map, JDD, confinement, HMM, directionality and speed. ",
-        "Cycle time drives gap-splitting, the quality gate and the D-map.")
-    )
+
+    # ── photon channel = mobility proxy, so an ECO/EFO filter is a mobility filter ──
+    eco_line <- if (is.finite(b$phot_mob_rho) && b$phot_mob_rho <= -0.35)
+      row(warn(htmltools::HTML(sprintf(
+        "&#9888; %s tracks mobility (&rho; = %.2f) \u2014 %s filters bias D",
+        toupper(b$phot_col %||% "photon"), b$phot_mob_rho, toupper(b$phot_col %||% "photon")))))
+    else NULL
+
+    # ── data quality: same integrated-fraction metric as TSA / cycle-time status ──
+    fi_raw  <- b$frac_integ %||% NA_real_;      fi_filt <- b$frac_integ_filt %||% NA_real_
+    c_raw   <- b$cont_raw   %||% NA_real_;      c_filt  <- b$cont_filt      %||% NA_real_
+    q_use   <- if (is.finite(fi_filt)) fi_filt else fi_raw
+    q_verd  <- if (!is.finite(q_use)) c("UNKNOWN", DIM)
+               else if (q_use >= 0.7) c("GOOD", "#1a8a1a")
+               else if (q_use >= 0.5) c("MODERATE", "#b26a00")
+               else c("POOR", RED)
+    pair_txt <- function(a, z, fmt) if (is.finite(a) && is.finite(z)) sprintf(paste0(fmt, "\u2192", fmt), a, z)
+                                    else if (is.finite(a)) sprintf(fmt, a) else "-"
+    # D in the MOTION's degrees of freedom: a per-axis CVE spreads 2-DOF motion over
+    # 3 recorded axes, so surface motion tracked in 3D reads 2/3 of the truth.
+    d_obs <- if (isTRUE(b$has_z)) 3L else 2L
+    d_mot <- { mo <- input$trk_motion %||% "volume"
+               if (identical(mo, "filament")) 1L else if (identical(mo, "surface")) min(2L, d_obs) else d_obs }
+    d_use <- b$D_cve * d_obs / d_mot
+    qual_line <- row(
+      htmltools::tags$b("Quality "),
+      htmltools::span(style = sprintf("color:%s; font-weight:bold;", q_verd[2]), q_verd[1]),
+      dim_(sprintf("  \u00b7  integrated %s  \u00b7  continuity %s%s",
+                   pair_txt(100 * fi_raw, 100 * fi_filt, "%.0f%%"),
+                   pair_txt(c_raw, c_filt, "%.2f"),
+                   if (is.finite(c_raw) && is.finite(c_filt) && (c_filt - c_raw) > 0.01) " \u25b2" else "")))
+    calib_line <- row(dim_(sprintf(
+      "cycle %s  \u00b7  D %s \u00b5m\u00b2/s%s  \u00b7  %s steps",
+      num(b$t_cycle, "%.4g ms", "unknown"), num(d_use / 1e3, "%.3g"),
+      if (d_mot != d_obs) sprintf(" (%d/%d for %s)", d_obs, d_mot, input$trk_motion %||% "volume") else "",
+      format(b$n_steps, big.mark = ","))))
+
+    # ── linking QC: implausible jumps and per-track sigma outliers ──────────────
+    qc_line <- if (is.finite(b$frac_implaus %||% NA_real_) || is.finite(b$n_suspect %||% NA_real_)) {
+      bad <- (is.finite(b$frac_implaus) && b$frac_implaus > 0.01) ||
+             (is.finite(b$n_suspect) && is.finite(b$n_tracks_pt) && b$n_tracks_pt > 0 &&
+              b$n_suspect / b$n_tracks_pt > 0.05)
+      txt <- paste(c(
+        if (is.finite(b$n_implaus)) sprintf("%s implausible jumps (%.2f%%)", format(b$n_implaus, big.mark = ","), 100 * b$frac_implaus),
+        if (is.finite(b$n_suspect)) sprintf("%d/%d suspicious tracks", b$n_suspect, b$n_tracks_pt)), collapse = "  \u00b7  ")
+      row(htmltools::span(style = sprintf("color:%s;", if (bad) AMB else DIM),
+        htmltools::tags$b("Linking QC "), txt, if (bad) "  \u2014 check mis-links at high density / long gaps" else ""))
+    } else NULL
+
+    htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
+      sigma_line, aniso_line, noise_line, eco_line, qual_line, calib_line, qc_line)
   })
 
   # Per-track σ_loc heterogeneity histogram (σ_loc is NOT a single instrument
@@ -861,8 +876,11 @@ tracking_server <- function(input, output, session) {
       man <- readr::read_csv(manf, show_col_types = FALSE)
       chunk_choices <- setNames(man$file, paste0("Chunk ", man$chunk, " (", man$n_tids, " tids)"))
       all_choices <- c("All TIDs" = "__all__", chunk_choices)
+      # Chunk 1 if the user was scoped to a chunk before this rebuild, else all TIDs.
+      sel_now <- if (identical(trk_chunk_pref(), "first") && nrow(man) >= 1L)
+                   man$file[1] else "__all__"
       return(tagList(
-        selectInput("trk_chunk_sel", "Playback chunk", choices = all_choices, selected = "__all__"),
+        selectInput("trk_chunk_sel", "Playback chunk", choices = all_choices, selected = sel_now),
         helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
           "Filtering, gap-splitting, analysis and the full-track overlay always use ALL ",
           "TIDs. This selector only limits which TIDs are ANIMATED during playback, to ",
@@ -1135,10 +1153,9 @@ tracking_server <- function(input, output, session) {
       ))
       trk_rechunk_stats_rv(NULL)  # clear any leftover rechunk stats from prior dataset
       trk_rechunk_bbox(NULL)      # clear locked spatial extent from prior dataset
+      trk_chunk_pref("__all__")   # a new dataset does not inherit a chunk scoping
 
-      # use user-entered chunk value if provided, else the default
-      user_tpc <- suppressWarnings(as.integer(isolate(input$trk_tids_per_chunk)))
-      if (!is.finite(user_tpc) || user_tpc < 50) user_tpc <- TIDS_PER_CHUNK_DEFAULT
+      user_tpc <- .tids_per_chunk()
 
       manf <- split_by_tid_to_dir(
         df, out_dir,
@@ -2117,9 +2134,23 @@ tracking_server <- function(input, output, session) {
   .pattern_vertices <- function(p) {
     if (is.null(p) || is.na(p)) return(NA_integer_)
     switch(tolower(p),
-           hexagon = 6L, square = 4L, triangle = 3L,
+           hexagon = 6L, square = 4L, triangle = 3L, octahedron = 6L,
            zline = 2L, zline2 = 2L, line = 2L,
            NA_integer_)
+  }
+
+  # TCP diameter of one iteration, in nm. Sequence files store the pattern size as
+  # the dimensionless `patGeoFactor`; L = patGeoFactor x TCP_L_PER_GEOFACTOR_NM.
+  # A 3D iteration may carry a [lateral, axial] pair (e.g. zline gives [0.8, 4.0]);
+  # the LATERAL element is the one that governs escape from the pattern, and it is
+  # also the L the D_max form is written for, so the first element is used.
+  .itr_L_nm <- function(it) {
+    pg <- it[["patGeoFactor"]]
+    if (is.null(pg)) return(NA_real_)
+    pg <- suppressWarnings(as.numeric(unlist(pg)))
+    pg <- pg[is.finite(pg) & pg > 0]
+    if (!length(pg)) return(NA_real_)
+    pg[1] * TCP_L_PER_GEOFACTOR_NM
   }
 
   # ── trk_seq_params() - read the Imspector imaging sequence JSON ─────────────
@@ -2144,13 +2175,26 @@ tracking_server <- function(input, output, session) {
     getm  <- function(it, k) { m <- it[["Mode"]]; if (is.null(m)) return(NA); v <- m[[k]]; if (is.null(v)) NA else v }
     pats  <- vapply(itrs, function(it) { v <- getm(it, "pattern"); if (is.na(v)) NA_character_ else as.character(v) }, character(1))
     dims  <- suppressWarnings(vapply(itrs, function(it) as.integer(getm(it, "dim")), integer(1)))
+    # maxOffTime may sit on the final iteration or at the top level, and is often
+    # the string "unspecified" on stock tracking sequences. Prefer the iteration
+    # value, fall back to the top-level one, else leave NA for the 3 ms default.
     moff  <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "maxOffTime")))   # seconds
+    if (!is.finite(moff)) moff <- suppressWarnings(as.numeric(getp(seq, "maxOffTime")))
     prep  <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "patRepeat")))
     pht   <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "phtLimit")))
     pdw   <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "patDwellTime"))) # seconds (timeout)
     final_pat <- tail(pats[!is.na(pats)], 1L)
     if (length(final_pat) == 0) final_pat <- NA_character_
     dim_final <- suppressWarnings(as.integer(tail(dims[!is.na(dims)], 1L)))
+    # TCP diameter per iteration, and the final one - the iteration a tracking
+    # sequence reiterates once locked on, which is the L the D_max ceiling needs.
+    # The whole ladder is returned too, so a sequence that loops an earlier
+    # iteration can be read off and entered by hand.
+    L_by_itr <- vapply(itrs, .itr_L_nm, numeric(1))
+    L_final  <- if (length(L_by_itr)) L_by_itr[length(L_by_itr)] else NA_real_
+    # `headstart` is the loop-back offset: -1 (every tracking sequence seen) means
+    # the last iteration is the one repeated. Reported, not acted on.
+    hs <- suppressWarnings(as.integer(getp(seq, "headstart")))
     list(
       ok = TRUE,
       n_itr = length(itrs),
@@ -2161,7 +2205,10 @@ tracking_server <- function(input, output, session) {
       maxOffTime_ms = if (is.finite(moff)) moff * 1000 else NA_real_,
       patRepeat = prep,
       phtLimit = pht,
-      patDwellTime_ms = if (is.finite(pdw)) pdw * 1000 else NA_real_
+      patDwellTime_ms = if (is.finite(pdw)) pdw * 1000 else NA_real_,
+      L_by_itr = L_by_itr,
+      L_tcp_nm = L_final,
+      headstart = if (is.finite(hs)) hs else NA_integer_
     )
   })
 
@@ -2186,6 +2233,10 @@ tracking_server <- function(input, output, session) {
       updateSelectInput(session, "trk_hw_pattern", selected = "other")
       updateNumericInput(session, "trk_hw_vertices", value = nv)
     }
+    # D_max ceiling: take L from the sequence rather than a default. The ceiling
+    # scales as L^2, so this is the input that most needs to come from the file.
+    if (is.finite(sp$L_tcp_nm) && sp$L_tcp_nm > 0)
+      updateNumericInput(session, "trk_dmax_L", value = round(sp$L_tcp_nm, 1))
   }, ignoreInit = TRUE)
 
   output$trk_seq_json_status <- renderUI({
@@ -2200,9 +2251,14 @@ tracking_server <- function(input, output, session) {
     tags$div(style = "font-size:0.84em; background:#eef5ee; border:1px solid #cdd; border-radius:4px; padding:6px 8px; margin-top:-2px;",
       tags$b("Sequence loaded "), sprintf("(%d iterations)", sp$n_itr), tags$br(),
       sprintf("Patterns: %s", paste(upat, collapse = ", ")), tags$br(),
-      sprintf("Tracking iteration: %s  ·  dim = %s",
+      sprintf("Tracking iteration: %s  ·  dim = %s  ·  L_TCP = %s",
               if (length(sp$final_pattern) && !is.na(sp$final_pattern)) sp$final_pattern else "?",
-              if (is.finite(sp$dim)) sprintf("%dD", sp$dim) else "?"), tags$br(),
+              if (is.finite(sp$dim)) sprintf("%dD", sp$dim) else "?",
+              if (is.finite(sp$L_tcp_nm)) sprintf("%.1f nm", sp$L_tcp_nm) else "?"), tags$br(),
+      if (any(is.finite(sp$L_by_itr)))
+        tags$span(sprintf("Iteration L: %s nm",
+                          paste(ifelse(is.finite(sp$L_by_itr), sprintf("%.0f", sp$L_by_itr), "?"),
+                                collapse = " · ")), tags$br()) else NULL,
       if (is.finite(sp$maxOffTime_ms))
         sprintf("maxOffTime = %.3g ms  →  gap-split @ %s cycles",
                 sp$maxOffTime_ms, ifelse(is.na(gap_cyc), "?", as.character(gap_cyc)))
@@ -2259,13 +2315,12 @@ tracking_server <- function(input, output, session) {
         tags$tr(tags$td("Cycle time used downstream"),
                 tags$td(tags$b(sprintf("%.4g ms", cyc_in_use))))),
       tags$p(style = "font-size:0.8em; color:#666; margin:5px 0 0 0;",
-        if (identical(verdict[1], "GOOD"))
-          "Most steps are single-cycle (integrated): gap-free tracking, well-conditioned for diffusion analysis."
+        if (identical(verdict[1], "GOOD")) "Mostly single-cycle steps."
         else if (identical(verdict[1], "MODERATE"))
-          "A sizeable minority of steps span 2+ cycles (dark cycles). Enable the track-quality gate / end-trim (Display tab) to clean it - the Calibration panel shows the after-filter improvement."
+          "Many steps span 2+ cycles - try the continuity gate / end-trim (Display tab)."
         else if (identical(verdict[1], "POOR"))
-          "Most steps span multiple cycles - frequent dropouts. Trust the cluster cycle (not the modal Δt), and filter dark-heavy tracks/ends before trusting D."
-        else "Insufficient structure to judge. Modal/cluster ratio is used as a fallback cadence check."))
+          "Frequent dropouts - filter dark-heavy tracks and ends before trusting D."
+        else "Too little structure to judge; falling back on the modal/cluster ratio."))
   })
 
   # Per-interval TOTAL acquisition-cycle counts across all meta-filtered tracks:
@@ -2386,16 +2441,18 @@ tracking_server <- function(input, output, session) {
                       value = val, min = bounds[1], max = bounds[2])
   })
 
-  # ---- Filter & Rechunk -------------------------------------------------------
+  # ---- Filter + rechunk (driven by Plot Data) ---------------------------------
   # Always reads from original_manifest_dir (frozen at upload) so repeated
   # rechunks are idempotent - Reset Ranges + Rechunk restores the full dataset.
   # Writes filtered result to a new dir that becomes the new manifest_dir.
-  observeEvent(input$trk_rechunk_filtered, {
+  observeEvent(rechunk_request(), {
     req(!is.null(rv$original_manifest_dir))
     manf <- file.path(rv$original_manifest_dir, "manifest.csv")
     req(file.exists(manf))
+    # Read BEFORE anything is rebuilt: was the user scoped to a chunk, or on all TIDs?
+    sel_before <- isolate(input$trk_chunk_sel)
 
-    withProgress(message = "Filter & Rechunk: loading chunks...", value = 0, {
+    withProgress(message = "Applying filters: loading chunks...", value = 0, {
       man <- readr::read_csv(manf, show_col_types = FALSE)
       n_chunks <- nrow(man)
 
@@ -2580,8 +2637,7 @@ tracking_server <- function(input, output, session) {
 
       incProgress(0.6, detail = "Writing new chunks...")
       out_dir  <- file.path(tempdir(), paste0("rechunked_", as.integer(Sys.time())))
-      user_tpc <- suppressWarnings(as.integer(isolate(input$trk_tids_per_chunk)))
-      if (!is.finite(user_tpc) || user_tpc < 50) user_tpc <- TIDS_PER_CHUNK_DEFAULT
+      user_tpc <- .tids_per_chunk()
 
       manf_new <- split_by_tid_to_dir(df_all, out_dir, tids_per_chunk = user_tpc, fmt = CHUNK_FORMAT)
       if (!file.exists(manf_new)) {
@@ -2590,7 +2646,14 @@ tracking_server <- function(input, output, session) {
       }
 
       readr::write_csv(tid_sum_new, file.path(out_dir, "tid_summary.csv"))
-      rv$manifest_dir <- out_dir
+      # Carry the scoping, not the index: on a chunk before -> chunk 1 of the new
+      # chunking; on "All TIDs" before -> still all. Set before the manifest swap so
+      # the selector rebuild below already sees it.
+      trk_chunk_pref(if (isTruthy(sel_before) && !identical(sel_before, "__all__"))
+                       "first" else "__all__")
+      old_rechunk         <- rv$last_rechunk_dir   # superseded by out_dir; removed below
+      rv$last_rechunk_dir <- out_dir
+      rv$manifest_dir     <- out_dir
       trk_data_key(as.character(as.numeric(Sys.time())))
 
       # Compute stats across ALL remaining TIDs so filter UIs auto-update to the
@@ -2635,9 +2698,21 @@ tracking_server <- function(input, output, session) {
       n_tids <- length(unique(df_all$tid))
       n_new  <- nrow(readr::read_csv(manf_new, show_col_types = FALSE))
       showNotification(
-        sprintf("Rechunked: %d TIDs in %d chunk(s).", n_tids, n_new),
+        sprintf("%s TIDs kept, in %d chunk(s) @ %d TIDs/chunk. Showing %s.",
+                format(n_tids, big.mark = ","), n_new, user_tpc,
+                if (identical(isolate(trk_chunk_pref()), "first") && n_new >= 1)
+                  "chunk 1" else "all TIDs"),
         type = "message", duration = 8
       )
+
+      # Each press writes a fresh chunk set to tempdir(). Now that this runs on
+      # every Plot Data, the superseded one is removed rather than left to
+      # accumulate copies of the dataset. Done last, so nothing is deleted unless
+      # the new set was written and swapped in successfully. The frozen upload set
+      # is never a candidate.
+      if (!is.null(old_rechunk) && !identical(old_rechunk, out_dir) &&
+          !identical(old_rechunk, rv$original_manifest_dir) && dir.exists(old_rechunk))
+        unlink(old_rechunk, recursive = TRUE)
     })
   }, ignoreInit = TRUE)
 
@@ -3322,20 +3397,32 @@ tracking_server <- function(input, output, session) {
     plot_trigger(Sys.time())
   }
 
-  # Plot Data: full mode re-renders the static plot (no frames); playback proxy-pushes.
-  # Plot Data = a full, reliable rebuild in BOTH modes (re-reads the filtered data
-  # and re-renders the chart, like Filter & Rechunk). fire_layout bumps data_ver
-  # (reruns trk()) and rebuilds the WebGL chart from scratch, so the plot always
-  # reflects the current filters when pressed.
+  # ── Plot Data - the single apply action ─────────────────────────────────────
+  # Applies everything the user has changed: cleaning (split / end-trim / continuity
+  # gate), the metadata / length / duration / spatial filters, re-chunks the
+  # survivors at the current TIDs-per-chunk setting, and re-renders.
+  #
+  # There is no separate rechunk button. The rechunk path already ended in
+  # trk_data_key(), which fires the layout, so the two actions were doing the same
+  # work with the rechunk merely persisting the result - splitting them into two
+  # presses only raised the question of which order to use them in.
+  #
+  # NO fire_layout() on the rechunk branch: trk_data_key() fires it, and calling
+  # both would render the chart twice. The fallback branch covers a dataset with no
+  # manifest (chunking is skipped for some file types), where there is nothing to
+  # rechunk and a plain rebuild is the whole job.
   observeEvent(input$trk_plot_data, {
     bump_clean()      # (re)apply split / end-trim / continuity gate with current settings
-    fire_layout("plot_data_btn")
+    manf <- if (!is.null(rv$original_manifest_dir))
+              file.path(rv$original_manifest_dir, "manifest.csv") else NA_character_
+    if (!is.na(manf) && file.exists(manf)) rechunk_request(isolate(rechunk_request()) + 1L)
+    else fire_layout("plot_data_btn")
   })
   observeEvent(list(
     input$trk_play_mode,
     input$trk_view_mode_main, input$trk_full_connect, input$trk_full_raw,
     input$trk_show_full_tracks_faint, input$trk_show_moving_trails, input$trk_color_mode,
-    input$trk_dark_show, input$trk_color_speed_win
+    input$trk_dark_show, input$trk_color_speed_win, input$trk_chunk_scope_full
     # trk_show_heatmap deliberately NOT here - the dwell-time heatmap is heavy, so it
     # applies on the next Plot Data (heatmap_store is plot_trigger-gated). Toggling the
     # checkbox alone no longer forces a full rebuild that showed nothing until Plot Data.
@@ -3555,8 +3642,10 @@ tracking_server <- function(input, output, session) {
   # ── Chunk-scoped PLAYBACK ───────────────────────────────────────────────────
   # Chunking exists only to keep the animation smooth: the filter pipeline,
   # analysis, and the full-track static overlay all use ALL TIDs, but the moving
-  # markers/trails are limited to the selected chunk's TIDs. Returns the chunk's
-  # ORIGINAL TIDs (or NULL = animate everything when "All TIDs" is selected).
+  # markers/trails are limited to the selected chunk's TIDs. Returns the TIDs exactly
+  # as the chunk file stores them - original ("42") for upload chunks, segment
+  # ("42_s1") once a rechunk has baked the split in; scope_playback() below accepts
+  # either. NULL = animate everything ("All TIDs" selected).
   trk_playback_chunk_tids <- reactive({
     sel <- input$trk_chunk_sel
     if (!isTruthy(sel) || identical(sel, "__all__") || !file.exists(sel)) return(NULL)
@@ -3570,13 +3659,26 @@ tracking_server <- function(input, output, session) {
     unique(as.character(ch$tid))
   })
 
-  # Subset a display data.frame to the chunk's TIDs. Split segments ("42_s1") are
-  # matched by their base TID ("42") so a chunk still animates its split children.
+  # Subset a display data.frame to the chunk's TIDs.
+  #
+  # A chunk file holds one of TWO TID conventions, and the match has to accept both:
+  #   * UPLOAD chunks hold the original TIDs ("42"). Gap-splitting happens live
+  #     afterwards, so the display frame carries segments ("42_s1") that must still
+  #     be matched to their parent chunk - hence the base-TID comparison.
+  #   * RE-CHUNKED sets have the split BAKED IN (the rechunk writes "42_s1" as the
+  #     TID), so the display frame and the chunk file agree exactly and the base
+  #     comparison alone never matches - "42" is not in {"42_s1", ...}. Every row
+  #     then failed, the guard below returned the whole frame, and selecting a
+  #     chunk appeared to do nothing.
+  # Testing both forms covers each case without over-matching: a chunk holding
+  # "42_s1" still does not pull in "42_s2", which may belong to a different chunk.
+  #
   # Falls back to the full frame if the scope would leave nothing to animate.
   scope_playback <- function(d, chunk_tids) {
     if (is.null(chunk_tids) || !nrow(d) || !"tid" %in% names(d)) return(d)
-    base <- sub("_s\\d+$", "", as.character(d$tid), perl = TRUE)
-    keep <- base %in% chunk_tids
+    tid_d <- as.character(d$tid)
+    base  <- sub("_s\\d+$", "", tid_d, perl = TRUE)
+    keep  <- tid_d %in% chunk_tids | base %in% chunk_tids
     if (!any(keep)) return(d)            # chunk fully filtered out - don't blank playback
     d[keep, , drop = FALSE]
   }
@@ -3674,8 +3776,15 @@ tracking_server <- function(input, output, session) {
 
       # Progress feedback: building the per-track overlay (decimate + split into one
       # trace per track) is the visible cost of each Plot Data / upload-settle render.
+      # Full tracks normally draws every filtered TID - the chunk is a playback
+      # cost control. When the user asks for it, scope this view to the selected
+      # chunk as well, using the same TIDs the animation would show. Analysis and
+      # filtering are untouched either way: they always read all TIDs.
+      df_full <- if (isTRUE(isolate(input$trk_chunk_scope_full)))
+                   scope_playback(df, isolate(trk_playback_chunk_tids())) else df
+
       full_build <- withProgress(message = "Building track view…", value = 0.2, {
-        df_static <- decimate_per_tid(df, max_pts = max_pts, tcol = "tim",
+        df_static <- decimate_per_tid(df_full, max_pts = max_pts, tcol = "tim",
                                       extra_cols = c("col_dark", "n_dark",
                                                      "col_speed", "v_drift"))
         setProgress(0.5, detail = sprintf("%s tracks", format(length(unique(df_static$tid)), big.mark = ",")))
@@ -6026,15 +6135,24 @@ tracking_server <- function(input, output, session) {
     keep
   }
 
-  # Shared trackable-diffusion ceiling (D_max) estimate - used by the D_max panel AND
-  # surfaced as a warning next to the MSD/eDIFF result (single source of truth). Above
-  # ~D_max the MINFLUX localization loop can no longer keep the doughnut centred, so D
-  # is systematically UNDER-estimated (Vogler et al. 2025; SimuFLUX, Marin & Ries 2025).
-  # Pure function of the localization table + TCP diameter L_TCP (nm) & hardware dead-time
-  # t_hw (ms). Returns D_max in um^2/s (Vogler form preferred, simple form fallback).
-  dmax_estimate <- function(df, L = 400, t_hw = 0.05) {
+  # Shared trackable-diffusion ceiling (D_max) estimate, backing the D_max panel.
+  # Above ~D_max the MINFLUX localization loop can no longer keep the doughnut centred,
+  # so D is systematically UNDER-estimated (Vogler et al. 2025; SimuFLUX, Marin & Ries 2025).
+  #
+  # WHICH L THIS IS. L_TCP is the diameter of the FINAL iteration - the one that is
+  # reiterated continuously while tracking - because that is the pattern the particle
+  # has to stay inside between consecutive fixes. The coarse search iterations that
+  # precede lock-on are irrelevant here, and so is the much tighter final iteration an
+  # IMAGING sequence would use: SPT deliberately stops at a larger L, since precision
+  # improves only linearly as L shrinks (sigma_CRLB ~ L/(4*sqrt(N))) while the escape
+  # risk grows quadratically (D_max ~ L^2). 150 nm is the tracking-iteration diameter
+  # in Vogler et al. 2025 and matches the simulator's L default (sim_server.R).
+  #
+  # Pure function of the localization table + L_TCP (nm) & hardware dead-time t_hw (ms).
+  # Returns D_max in um^2/s (Vogler form preferred, simple form fallback).
+  dmax_estimate <- function(df, L = DMAX_L_TCP_DEFAULT, t_hw = 0.05) {
     if (is.null(df) || !nrow(df) || !all(c("tid","tim") %in% names(df))) return(NULL)
-    if (!is.finite(L)    || L    <= 0) L    <- 400
+    if (!is.finite(L)    || L    <= 0) L    <- DMAX_L_TCP_DEFAULT
     if (!is.finite(t_hw) || t_hw <  0) t_hw <- 0.05
     efo_med <- if ("efo" %in% names(df)) { v <- df$efo[is.finite(df$efo) & df$efo > 0]; if (length(v)) median(v) else NA_real_ } else NA_real_
     eco_med <- if ("eco" %in% names(df)) { v <- df$eco[is.finite(df$eco) & df$eco > 0]; if (length(v)) median(v) else NA_real_ } else NA_real_
@@ -6067,7 +6185,7 @@ tracking_server <- function(input, output, session) {
 
     L    <- suppressWarnings(as.numeric(input$trk_dmax_L))
     t_hw <- suppressWarnings(as.numeric(input$trk_dmax_t_hw))
-    if (!is.finite(L)    || L    <= 0) L    <- 400
+    if (!is.finite(L)    || L    <= 0) L    <- DMAX_L_TCP_DEFAULT
     if (!is.finite(t_hw) || t_hw <  0) t_hw <- 0.05
 
     de <- dmax_estimate(df, L, t_hw)            # shared helper (single source of truth)
@@ -6097,11 +6215,13 @@ tracking_server <- function(input, output, session) {
       if (ratio > 0.5)  return("#BB7700")   # amber: caution
       return("#228833")                      # green: safe
     }
+    # Short verdicts - the mechanism (the loop loses lock above D_max, so D reads low)
+    # is in README "Fast-Diffusion Ceiling" and the panel footnote below.
     flag_msg <- function(ratio) {
       if (!is.finite(ratio)) return("")
-      if (ratio > 0.8)  return(" ⚠ D near/above D<sub>max</sub> - the tracking loop loses lock, so D is likely UNDER-estimated (Vogler 2025; SimuFLUX)")
-      if (ratio > 0.5)  return(" ⚠ D approaching D<sub>max</sub> - D may be under-estimated; interpret with caution")
-      return(" ✓ D is well below D<sub>max</sub>")
+      if (ratio > 0.8)  return(" ⚠ at the ceiling - D is likely under-estimated")
+      if (ratio > 0.5)  return(" ⚠ approaching the ceiling")
+      return(" ✓ safe")
     }
 
     use_ratio <- if (is.finite(ratio_vogler)) ratio_vogler else ratio_simple
@@ -6113,8 +6233,15 @@ tracking_server <- function(input, output, session) {
       htmltools::tags$table(
         style = "width:100%; border-collapse:collapse;",
         htmltools::tags$tr(
-          htmltools::tags$td(style="padding:3px 6px; color:#666;", "TCP diameter L_TCP"),
-          htmltools::tags$td(style="padding:3px 6px; font-weight:bold;", sprintf("%g nm", L))
+          htmltools::tags$td(style="padding:3px 6px; color:#666;", "L_TCP (final iteration)"),
+          htmltools::tags$td(style="padding:3px 6px; font-weight:bold;", sprintf("%g nm", L),
+            # D_max goes as L^2, so the wrong iteration moves the ceiling by an order
+            # of magnitude silently. Only flag clearly imaging-range diameters: fine
+            # patterns are legitimate for slow targets, so the threshold sits well
+            # below the 100-300 nm a tracking iteration normally uses.
+            if (is.finite(L) && L < 60) htmltools::span(style = "font-weight:normal; color:#B8860B;",
+              htmltools::HTML(" &#9888; tight for tracking \u2014 confirm this is the reiterated iteration"))
+            else NULL)
         ),
         htmltools::tags$tr(
           htmltools::tags$td(style="padding:3px 6px; color:#666;", "t_loc from ECO/EFO"),
@@ -6159,14 +6286,10 @@ tracking_server <- function(input, output, session) {
 
       htmltools::tags$div(
         style = "margin-top:8px; font-size:0.82em; color:#666;",
-        htmltools::HTML("D<sub>max</sub> simple = L_TCP² / (16 · t_loc). "),
-        htmltools::HTML("D<sub>max</sub> Vogler = (L_TCP²/16) · ψ_MFX / (N_PL + ψ_MFX · t_hw), from Vogler et al. (2025, Commun. Biol.). "),
-        "t_loc = ECO / EFO × 1000 (ms) - the time to collect ECO photons at rate EFO. ",
-        "ECO is the photon count per localization (= N_PL directly). ",
-        "Median Δt is shown as a cross-check. ",
-        htmltools::tags$b("Note:"), " this is the THEORETICAL ceiling (Vogler 2025 report ≈10–11 µm²/s), ",
-        "but tracking has only been DEMONSTRATED to ≈2.5 µm²/s (lipids) - so treat D above ~2–3 µm²/s ",
-        "as suspect even when the flag is still green."
+        htmltools::HTML("L<sub>TCP</sub>²/(16·t_loc) &nbsp;·&nbsp; Vogler: (L<sub>TCP</sub>²/16)·ψ/(N_PL + ψ·t_hw), "),
+        "with L the final iteration reiterated during tracking. The ceiling scales as L². ",
+        htmltools::tags$b("Theoretical ceiling"), " (Vogler 2025 report ≈10–11 µm²/s); tracking is only ",
+        "demonstrated to ≈2.5 µm²/s, so treat D above ~2–3 µm²/s as suspect even on a green flag."
       )
     )
   })
@@ -7407,11 +7530,11 @@ tracking_server <- function(input, output, session) {
             col <- if (isTRUE(bad)) "#b26a00" else "#3a7d3a"
             htmltools::div(style = sprintf("color:%s; font-size:0.86em; margin-top:2px;", col),
               htmltools::HTML(sprintf(
-                "Free diffusion on this %s (%s, %s) %s &mdash; simulated, so nothing there is trapped or driven. %s",
+                "Simulated free diffusion on this %s (%s, %s) %s &mdash; %s",
                 attr(gm, "geom"), attr(gm, "dims"), attr(gm, "mode"), say,
                 if (isTRUE(bad))
-                  "The shape alone accounts for much of the measured value, so treat it as geometry rather than biology and shorten the upper fit limit."
-                else "The shape alone does not account for the measured value over this window.")))
+                  "geometry, not biology: shorten the upper fit limit."
+                else "so the shape does not explain your value over this window.")))
           }
         }
       }
@@ -7444,16 +7567,12 @@ tracking_server <- function(input, output, session) {
       # on your own" in his toolbox. So when fitting Linear, remind the user that in a confined
       # space (e.g. E. coli) the reported D is only an apparent/local D, and point to the CI +
       # Confined/Anomalous models - flagged as beyond-standard-for-MINFLUX.
+      # One line, not a lecture: the reasoning is in the panel's Method box.
       if (identical(model, "linear"))
-        htmltools::div(style = "color:#8a6d00; font-size:0.82em; margin-top:5px; border-top:1px dashed #e0d0a0; padding-top:4px;",
+        htmltools::div(style = "color:#8a6d00; font-size:0.82em; margin-top:4px;",
           htmltools::HTML("&#9432; "),
-          htmltools::tags$b("Assumes free Brownian diffusion."),
-          " In a confined space (e.g. a small cell or compartment) the MSD plateaus and this Linear D is only an ",
-          "apparent/local D. Check the confinement index (CI, in the Cluster panel) or switch ",
-          htmltools::tags$b("Fit model"), " to ", htmltools::tags$b("Confined"),
-          " (plateau → domain size L) or ", htmltools::tags$b("Anomalous"),
-          " (α<1 = sub-diffusive). Confined/anomalous MSD is beyond the standard MINFLUX workflow ",
-          "(Vogler 2025 covers free diffusion) - treat those fits as exploratory."),
+          htmltools::tags$b("Free-Brownian fit"),
+          " - under confinement this D is apparent/local. Cross-check the confinement index."),
       # Per-cluster eDIFF / tDIFF breakdown (when clustering is enabled).
       local({
         cdiff <- tryCatch(trk_unified_cluster_diff(), error = function(e) NULL)
@@ -8348,19 +8467,15 @@ tracking_server <- function(input, output, session) {
         sprintf("Confined %.0f%%  ·  free-like %.0f%%  ·  directed %.0f%%",
                 100 * f_c, 100 * f_f, 100 * f_d)),
       tags$div(style = "color:#666; margin-top:2px;",
-        sprintf("n = %d tracks · null simulated from this dataset: σ_loc = %.2f nm, D = %.3g µm²/s, cycle time and dark-gap pattern as measured, %d free tracks per grid point. Matched per track on localization count%s.",
+        sprintf("n = %d tracks · null: σ_loc = %.2f nm, D = %.3g µm²/s, %d free tracks per grid point, matched on localization count%s",
                 nrow(pt), attr(pt, "sigma"), attr(pt, "D_use") / 1e3, attr(pt, "nsim"),
-                if (isTRUE(attr(pt, "D_matched"))) " and on each track's own D" else "")),
-      if (isTRUE(attr(pt, "D_matched")))
-        tags$div(style = "color:#666; margin-top:2px;",
-          "Per-track D varies enough here, relative to the localization noise, to move the free range - so the null is matched on D as well as length. Without that, slower molecules would be judged against a null built for the faster ones and read as confined.")
-      else NULL,
+                if (isTRUE(attr(pt, "D_matched"))) " and per-track D" else "")),
       tags$div(style = "color:#666; margin-top:2px;",
-        sprintf("Resolution floor: a free molecule covers ~%.0f nm in the median track (%.1f ms). Confinement LARGER than this cannot be seen - a low confined %% means \"nothing confined below ~%.0f nm\", not \"free\".",
-                rv2, attr(pt, "T_med"), rv2)),
+        htmltools::HTML(sprintf(
+          "Resolution floor <b>%.0f nm</b> in the median track (%.1f ms) - confinement larger than this is invisible.",
+          rv2, attr(pt, "T_med")))),
       tags$div(style = "color:#888; margin-top:2px;",
-        "Each tail holds ~5% of free tracks by construction. This test is sensitive to confinement but ",
-        tags$b("weak for directed motion"), " - use Directionality or Speed & Transport for transport."))
+        "~5% per tail by construction; weak for directed motion - use Directionality or Speed & Transport."))
   })
 
   output$trk_dl_conf_ci_csv <- downloadHandler(
@@ -8766,7 +8881,7 @@ tracking_server <- function(input, output, session) {
         if (dm != d_obs)
           htmltools::div(style = "color:#555; margin-top:3px;",
             htmltools::HTML(sprintf(
-              "Surface motion: <b>%d degrees of freedom</b> on %d recorded axes. The per-axis D is rescaled to the in-plane value <b>%.3g µm²/s</b> and the free band uses χ²(%d).",
+              "Surface motion: %d DOF on %d axes &rarr; in-plane D = <b>%.3g µm²/s</b>, band uses χ²(%d).",
               dm, d_obs, Dm / 1e3, dm)))
         else NULL
       },
@@ -8776,17 +8891,17 @@ tracking_server <- function(input, output, session) {
         if (is.finite(Dc) && is.finite(Dm) && Dc > 0 && Dm > 0 && abs(log(Dm / Dc)) > log(1.3))
           htmltools::div(style = "color:#B8860B; margin-top:3px; font-size:0.93em;",
             htmltools::HTML(sprintf(
-              "&#9888; CVE D = %.3g and MSD D = %.3g µm²/s differ by %.1f×. The null scales with D, so the split below is D-sensitive - switch the D source to see how much. An MSD D <i>below</i> the CVE D is the expected signature of a bending (confined) MSD, and using it would under-call confinement.",
+              "&#9888; CVE D = %.3g vs MSD D = %.3g µm²/s (%.1f× apart) - the split below is D-sensitive.",
               Dc / 1e3, Dm / 1e3, max(Dm, Dc) / min(Dm, Dc))))
         else NULL
       },
       htmltools::br(),
       htmltools::HTML(sprintf(
-        "vs the infinite-plane free null: <b style='color:#2c7fb8;'>%.0f%% sub-diffusive</b> · <b style='color:#9e9e9e;'>%.0f%% free-consistent</b> · <b style='color:#e31a1c;'>%.0f%% super-diffusive</b>. Under pure free diffusion each tail is ~5%%.",
+        "Infinite-plane null: <b style='color:#2c7fb8;'>%.0f%% sub-diffusive</b> · <b style='color:#9e9e9e;'>%.0f%% free</b> · <b style='color:#e31a1c;'>%.0f%% super-diffusive</b> (~5%% per tail by construction)",
         100 * f_sub, 100 * f_free, 100 * f_sup)),
       htmltools::div(style = "color:#555; margin-top:5px;",
         htmltools::HTML(sprintf(
-          "Resolution floor: with this D and duration, a molecule explores ~<b>%.0f nm</b> (RMS free extent) - confinement <i>smaller</i> than this is invisible to the test.", resolv))),
+          "Resolution floor <b>%.0f nm</b> RMS free extent - confinement below this is invisible.", resolv))),
       {
         # ONE ensemble D sets the band for every track, so a population with a wide
         # spread of per-track D reads as sub-diffusive at the slow end even when every
@@ -8800,7 +8915,7 @@ tracking_server <- function(input, output, session) {
         if (is.finite(sdl) && sdl > 0.35)
           htmltools::div(style = "color:#B8860B; margin-top:5px; font-size:0.95em;",
             htmltools::HTML(sprintf(
-              "&#9888; Per-track D spans a wide range (sd of log<sub>10</sub>D = %.2f, i.e. ~%.0f× between the 5th and 95th percentile). The band uses a <b>single ensemble D</b> for every track, so slower-than-average molecules fall below it even when they diffuse freely - this inflates the sub-diffusive fraction. Treat the split as an upper bound on confinement and compare with Confinement Analysis, which is D-independent.",
+              "&#9888; Wide per-track D (sd log<sub>10</sub>D = %.2f, ~%.0f× across the 5-95%% range). One ensemble D sets the band, so slow-but-free tracks fall below it: the sub-diffusive %% is an upper bound.",
               sdl, 10^(2 * 1.645 * sdl))))
         else NULL
       },
@@ -8808,7 +8923,7 @@ tracking_server <- function(input, output, session) {
         gn <- trk_disp_geom_null()
         if (is.null(gn))
           htmltools::div(style = "color:#B8860B; margin-top:5px; font-size:0.95em;",
-            htmltools::HTML("&#9888; This is the <b>infinite-plane</b> null. A molecule diffusing freely on a curved/finite surface is already capped by geometry, so it reads mildly sub-diffusive here. Enable <b>Step 2</b> (green band: free diffusion ON a chosen geometry at this D) to tell whether sub-diffusive means <i>truly confined</i> or just <i>geometrically constrained</i>. The super-diffusive call is <b>specific but not sensitive</b>: when D is large a real drift adds little to net displacement (v·T can be ≪ √(4DT)), so weak directed motion hides - a low super-diffusive % does <i>not</i> rule out transport (use Speed &amp; Transport for that)."))
+            htmltools::HTML("&#9888; Infinite-plane null - free diffusion on a curved or finite surface already reads mildly sub-diffusive. Enable <b>Step 2</b> to separate truly confined from geometrically constrained. The super-diffusive call is specific but insensitive, so a low %% does not rule out transport."))
         else {
           gc <- gn$gclass
           fc <- mean(gc == "confined"); fg2 <- mean(gc == "free-on-geometry"); fd <- mean(gc == "directed")
@@ -8826,20 +8941,19 @@ tracking_server <- function(input, output, session) {
             htmltools::div(style = "color:#555; margin-top:4px;",
               htmltools::HTML(
                 if (unbounded)
-                  sprintf("This geometry is unbounded, so it barely differs from the infinite-plane null (%.0f%% confined) - pick a closed surface (sphere / rod / ellipsoid) to test whether finite size explains the sub-diffusive fraction.", 100 * fc)
+                  sprintf("Unbounded geometry, so this barely differs from the infinite-plane null (%.0f%% confined) - pick a closed surface to test finite size.", 100 * fc)
                 else sprintf(
-                  "Of the %.0f%% flagged sub-diffusive by the infinite-plane test, the geometry-aware null keeps only <b>%.0f%% as truly confined</b> - the rest is explained by finite size + curvature alone. %s",
+                  "Of the %.0f%% called sub-diffusive on the plane, geometry keeps <b>%.0f%% as truly confined</b>%s",
                   100 * f_sub, 100 * fc,
-                  if (fc <= 0.08)
-                    "That is at/near the 5% free-diffusion baseline, so this population is <b>consistent with free surface diffusion</b> once geometry is accounted for."
-                  else "That excess over the ~5% free baseline is the <b>genuinely confined</b> fraction."))),
+                  if (fc <= 0.08) " - at the ~5% free baseline, so consistent with free surface diffusion."
+                  else " - the excess over the ~5% free baseline."))),
             htmltools::div(style = "color:#555; margin-top:4px; font-size:0.94em;",
               htmltools::HTML(
                 if ((attr(res, "d_obs") %||% 2L) == 2L)
-                  "Your data is 2D, so the geometry is simulated in full 3D and <b>projected to the image plane</b> - i.e. it assumes the structure is 3D even though tracking is 2D (the surface D is set from the measured 2D D via the projection factor above)."
-                else "Your data is 3D, so the geometry null is evaluated in full 3D (no projection).")),
+                  "2D data: the geometry is simulated in 3D and projected to the image plane."
+                else "3D data: the geometry null is evaluated in 3D, no projection.")),
             htmltools::div(style = "color:#B8860B; margin-top:4px; font-size:0.94em;",
-              htmltools::HTML("&#9888; The null uses the same surface-diffusion physics as the Simulator. Set the geometry and sizes to match your sample. It reflects/wraps at the surface but does not model dark-cycle survivorship - if that biases your data, cross-check in the Simulator with survivorship on."))
+              htmltools::HTML("&#9888; The null reflects at the surface but does not model dark-cycle survivorship."))
           )
         }
       }
@@ -9611,14 +9725,17 @@ tracking_server <- function(input, output, session) {
         if (is.finite(med_expv))  sprintf("median segment velocity = <b>%.3g µm/s</b> &middot; ", med_expv) else "",
         if (is.finite(med_onset)) sprintf("median segment at <b>%.0f%%</b> of track length &middot; ", 100 * med_onset) else "",
         med_peak)),
+      # Corroboration = evidence from dark cycles and photons, i.e. NOT from the drift
+      # threshold that found the segment. The circularity argument itself is in the
+      # panel's Method box, not reprinted on every run.
       if (ne > 0) htmltools::HTML(sprintf(
-        "<div style='margin-top:6px;'>Corroboration of those candidates (from dark cycles &amp; photons, <i>not</i> from drift velocity): <b style='color:#1B9E5A;'>%d supported</b> &middot; <b style='color:#C0392B;'>%d dark-dominated</b> &middot; <b style='color:#B8860B;'>%d low-photon</b>.</div>",
+        "<div style='margin-top:6px;'>Corroboration (dark cycles &amp; photons, independent of drift): <b style='color:#1B9E5A;'>%d supported</b> &middot; <b style='color:#C0392B;'>%d dark-dominated</b> &middot; <b style='color:#B8860B;'>%d low-photon</b></div>",
         sup, dkd, lowp)),
       if (is.finite(med_ti)) htmltools::HTML(sprintf(
-        "<div style='margin-top:4px; color:#555;'>Median integrated fraction in the final window of a track (tail quality) = <b>%.2f</b>. Low values mean track ends are dominated by the tracker searching rather than by localizations of a present molecule.</div>",
-        med_ti)),
+        "<div style='margin-top:4px; color:#555;'>Median tail integrated fraction = <b>%.2f</b>%s</div>",
+        med_ti, if (med_ti < 0.5) " - track ends are search-dominated" else "")),
       htmltools::HTML(
-        "<div style='margin-top:6px; color:#B8860B; font-size:0.95em;'>&#9888; Segments are found by a drift-velocity threshold, so their velocity is <b>not independent evidence</b> that they are directed - do not use it to argue that fast tracks are fast. A tracker searching after losing a molecule mimics a real excursion (fast, outward, track ends); the corroboration fields above, and a matched negative control, are what separate the two.</div>")
+        "<div style='margin-top:6px; color:#B8860B; font-size:0.95em;'>&#9888; Segment velocity is <b>not independent evidence</b> - the threshold that found it was a speed. Judge on corroboration and a matched negative control.</div>")
     )
   })
 
@@ -10363,9 +10480,9 @@ tracking_server <- function(input, output, session) {
           tags$p(style = "color:#444; font-size:0.9em; margin:2px 0;",
             tags$b("Transition rates (continuous-time, \u0394t-corrected): "), rate_txt),
           tags$p(style = "color:#888; font-size:0.82em; margin:2px 0;",
-            sprintf("Generator Q from the decoded path using real elapsed time (mean dwell = \u22121/q\u2090\u2090); dark cycles no longer bias the rates. Steps spanning > %d cycles are excluded from the counts. ",
+            sprintf("Generator Q on real elapsed time (mean dwell = \u22121/q\u2090\u2090); steps over %d cycles excluded. ",
                     bd$gap_tol_cyc %||% 4L),
-            "State \u03C3/D use \u221A\u0394t-normalised steps and are robust; the per-step matrix A (heatmap) is retained for reference only."))
+            "The per-step matrix A above is reference only."))
       }
     )
   })

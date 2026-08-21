@@ -81,6 +81,25 @@ sigloc <- function(sub = "loc") htmltools::HTML(sprintf("&sigma;<sub>%s</sub>", 
       tags$p(style = "margin:2px 0; color:#7a5c00;", tags$b("Caution: "), caution)))
 }
 
+# Collapsed detail block. The visible text under a control should be one or two
+# sentences saying what it IS; everything else - the reasoning, the caveats, the
+# numbers behind a default - goes in here, closed by default.
+#
+# WHY THIS EXISTS: the Analysis tab had grown ~22,000 characters of always-visible
+# helpText. Every sentence was true and most were worth keeping, but a panel that
+# opens with eight lines of caveats reads as a warning label rather than a tool,
+# and the important sentence gets lost among the merely accurate ones. Collapsing
+# is not deleting: nothing here is dropped, it is one click away.
+#
+# Use .method_box() for the Origin / MINFLUX-adaptation / Caution triple, and
+# .detail() for everything else that does not fit in two sentences.
+.detail <- function(..., label = "More detail") {
+  tags$details(style = "margin:2px 0 8px; font-size:0.8em;",
+    tags$summary(style = "cursor:pointer; color:#5a6b7c;", label),
+    tags$div(style = "padding:4px 4px 2px 10px; color:#666; line-height:1.5; border-left:2px solid #dfe6ec;",
+             ...))
+}
+
 # Lower-case file extension of a path/filename ("Sample.NPY" -> "npy").
 # Used to dispatch an upload to the right reader.
 get_ext <- function(filename) {

@@ -124,6 +124,42 @@ MIN_LOCS_FOR_SPREAD_DEFAULT <- 5L
 # not the software. Both tabs expose it and neither hard-codes it any longer.
 TRK_Z_SCALE_DEFAULT <- 0.7
 
+# ── Trackable-diffusion ceiling (D_max) default ────────────────────────────────
+# Diameter of the FINAL targeted-coordinate-pattern iteration - the one a tracking
+# sequence reiterates continuously once locked on (headstart = -1). That is the
+# pattern the particle must stay inside between consecutive fixes, so it is the L
+# that sets D_max; the coarse search iterations before lock-on do not enter, and
+# neither does the much tighter final iteration an IMAGING sequence uses. SPT stops
+# at a larger L on purpose: precision improves only linearly as L shrinks
+# (σ_CRLB ≈ L/(4√N)) while the escape risk grows quadratically (D_max ∝ L²).
+#
+# 100 nm is the round value of the 100.8 nm (patGeoFactor 0.28) final iteration
+# shared by every stock tracking sequence to hand - Tracking_2D_Oct2022,
+# Tracking_2D_Fast_Oct2022 and seqTrkOctahedron_3D alike, 2D and 3D. Vogler et al.
+# 2025 quote 150 nm because their sequence stops one iteration earlier, at
+# patGeoFactor 0.42; the imaging sequences run down to 39.6 nm, which is why an
+# imaging-derived L reads far too low here.
+#
+# This is only the fallback. When a sequence .json is uploaded the exact L is read
+# from its patGeoFactor and fills the input, which is always preferable: the ceiling
+# scales as L², so L belongs to the SEQUENCE, not to the software.
+# Read by ui_tracking.R's input default and by dmax_estimate()'s fallback, so the
+# two cannot drift apart.
+DMAX_L_TCP_DEFAULT <- 100
+
+# Base TCP diameter (nm) at patGeoFactor = 1. Imspector sequence files do not store
+# the pattern diameter directly; they store `patGeoFactor`, a dimensionless
+# multiplier, and L = patGeoFactor x this constant. It is wavelength-independent -
+# the same factor gives the same L at 642 and 680 nm excitation.
+#
+# Validated against three independent references:
+#   patGeoFactor 0.79 -> 284.4 nm  and  0.84 -> 302.4 nm, the two search-iteration
+#     diameters reported for MINFLUX SPT in Vogler et al. 2025 (284 and 302 nm)
+#   patGeoFactor 0.11 -> 39.6 nm, the final imaging iteration, matching the ~40 nm
+#     final-iteration diameter quoted in the imaging literature
+#   patGeoFactor 0.42 -> 151.2 nm, the tracking iteration Vogler quote as 150 nm
+TCP_L_PER_GEOFACTOR_NM <- 360
+
 # ── Tracking chunking defaults ─────────────────────────────────────────────────
 # Fall back to fst if qs could not be installed (common on macOS without
 # a working C++ toolchain / OpenMP support).

@@ -530,6 +530,27 @@ smlm_ui <- fluidPage(
                        selected = "mutual")
         ),
 
+        # -- CHANNELS ---------------------------------------------------------
+        # Only appears once the data actually has more than one channel (a
+        # 2-colour split or a multiplex build). There is no "pool the channels"
+        # option: merging across a channel is what the channel exists to prevent.
+        conditionalPanel(
+          condition = "output.n_channels > 1",
+          tags$div(style = "margin:8px 0; padding:7px 10px; border-left:4px solid #cfe0ee; background:#f6f9fc;",
+            uiOutput("channel_scope_ui"),
+            helpText("Blinks are only ever merged inside one channel, so no de-blinked ",
+                     "molecule can contain two colours or two multiplex rounds."),
+            checkboxInput("deblink_shared_spread",
+                          "Use one combined trace spread for all channels", value = FALSE),
+            helpText("Off (default): each channel is merged at its own measured spread, ",
+                     "because localization precision is a property of the dye. On: one ",
+                     "pooled spread, which is faster on very large files but under-serves ",
+                     "the tighter channel."),
+            uiOutput("channel_spread_summary"),
+            uiOutput("channel_integrity_summary")
+          )
+        ),
+
         # -- anisotropic metric (see deblink_axis_weights in helpers_smlm.R) --
         checkboxInput("deblink_anisotropic",
                       "Scale axes by their own spread (anisotropic radius)", value = FALSE),
@@ -562,13 +583,21 @@ smlm_ui <- fluidPage(
         ),
         
         sliderInput("distance_range", "NN Distance Range", min = 0, max = 500, value = c(0, 100)),
+        # NN scope is THREE-valued, and unlike clustering "between" is legitimate
+        # here: NN is a distance measure, not a merge. Comparing within against
+        # between is one of the questions this panel exists to answer. One control
+        # covers both a 2-colour split and a multiplex build - they used to be two
+        # separate controls doing the same job.
         conditionalPanel(
-          condition = "output.mplex_active == true",
-          radioButtons("nn_mplex_scope", "Multiplex NN scope",
+          condition = "output.n_channels > 1",
+          radioButtons("nn_mplex_scope", "Channel scope",
                        choices = c("Within channel"   = "within",
-                                   "Between channels" = "across"),
+                                   "Between channels" = "across",
+                                   "All pairs"        = "all"),
                        selected = "within", inline = TRUE),
-          helpText("Within: nearest neighbour searched only inside each channel. Between: nearest neighbour searched only in OTHER channels (cross-channel pairs, never within the same channel).")
+          helpText("Within: the nearest neighbour is searched only inside each channel. ",
+                   "Between: only in OTHER channels (never a same-channel pair). ",
+                   "All: both, which is the distribution the other two partition.")
         ),
         conditionalPanel(
           condition = "input.enable_cluster2 == true",
@@ -896,11 +925,19 @@ smlm_ui <- fluidPage(
         tags$hr()
       ),
 
-            ### 2-Color settings (shared) ===
+            ### Channels: 2-colour split ===
+      # This block DEFINES channels. It sets no clustering parameters - those
+      # live once, in De-blink correction and Median Clustering above, and apply
+      # to every channel. The other source of channels is the Multiplexed MINFLUX
+      # block below.
       tags$details(class = "sim-group",
-      tags$summary(tags$b("2-color MINFLUX")),
-      checkboxInput("enable_two_color", "Enable 2-color (per-trace median)", value = FALSE),
-      helpText("Note: Numeric color modes (z/time/density) override 2-color. Use 'Default' color mode to see 2-color groups."),
+      tags$summary(tags$b("Channels: 2-colour split")),
+      checkboxInput("enable_two_color", "Split into 2 channels by DCR (per-trace median)", value = FALSE),
+      helpText("Splits traces into two channels on their median DCR (or on 'fluo'). ",
+               "Nothing is ever grouped across a channel: de-blinked molecules and ",
+               "Median Clusters each belong to exactly one."),
+      helpText("Note: numeric colour modes (z/time/density) override channel colours. ",
+               "Use 'Default' colour mode to see the channels."),
       conditionalPanel(
         condition = "input.enable_two_color == true",
         # DCR ranges (default mode when not using fluo)
@@ -932,56 +969,17 @@ smlm_ui <- fluidPage(
         colourpicker::colourInput("color_group1", "Color: Group 1", value = "#1f77b4"),
         colourpicker::colourInput("color_group2", "Color: Group 2", value = "#d62728"),
         
-        # Scope pickers for NN/cluster
-        # Shared scope pickers for NN/cluster (works for 2D and 3D)
-        checkboxInput("draw_nn_two_color", "Draw NN lines (2-color mode)", value = FALSE),
+        # NN is NOT duplicated here either. The Nearest Neighbor Analysis panel
+        # above ADAPTS when channels exist: it gains a Within / Between / All
+        # channel scope, and each line is coloured by the channels it joins.
+        # Two NN sections meant two sets of k, distance range and label controls
+        # that could disagree about what a neighbour is.
+        # De-blink and Median Clustering parameters are NOT duplicated here any
+        # more. There is one clustering pipeline, so there is one set of controls
+        # (De-blink correction / Median Clustering, above), and enabling 2-colour
+        # only changes WHICH points may be grouped together - never how.
         conditionalPanel(
-          condition = "input.draw_nn_two_color == true",
-          numericInput("nn_k_two_color", "2-color NN: Neighbors (k)", value = 4, min = 1, step = 1),
-          checkboxInput("show_nn_labels_two_color", "Show distance labels (2-color NN)", value =  TRUE),
-          conditionalPanel(
-            condition = "input.show_nn_labels_two_color == true",
-            numericInput("tc_label_font_size", "2-color NN label font size", value = 12, min = 6, step = 1),
-            numericInput("tc_label_offset", "2-color NN label offset (nm)", value = 5, min = 0, step = 1),
-          ),
-          sliderInput(
-            "distance_range_two_color", "2-color NN Distance Range", min = 0, max = 2000, value = c(0, 100)),
-          selectInput("two_color_scope", "2-color NN scope", choices = c("Between groups" = "between",
-                                                                         "Within groups"  = "within"),
-                      selected = "between"),
-          
-          downloadButton("download_nn_cross_dcr", "Download 2-color NN table"),
-        ),
-        checkboxInput("enable_two_color_cluster1", "2-color de-blink correction", FALSE),
-        conditionalPanel(
-          condition = "input.enable_two_color_cluster1",
-          radioButtons("deblink_method_tc1", "2-color merge criterion",
-                       choices = c("Trace centroid distance" = "centroid",
-                                   "Majority vote of localizations" = "vote"),
-                       selected = "centroid"),
-          conditionalPanel(
-            condition = "input.deblink_method_tc1 == 'centroid'",
-            numericInput("eps_tc1", "2-color centroid distance threshold (nm)", value = 12, min = 0.1),
-            helpText("About 2\u00d7 the trace spread.")
-          ),
-          conditionalPanel(
-            condition = "input.deblink_method_tc1 == 'vote'",
-            numericInput("vote_frac_tc1", "Fraction of localizations that must agree (f)",
-                         value = 0.3, min = 0.02, max = 0.9, step = 0.05),
-            numericInput("vote_rho_tc1", "Distance tolerance (rho)",
-                         value = 3.0, min = 0.5, max = 8, step = 0.1)
-          ),
-          actionButton("suggest_eps_tc1", "Measure threshold from data", class = "btn-sm"),
-          helpText("Measures the trace spread pooled over both channels and sets the threshold. ",
-                   "Merging still happens strictly within a channel."),
-          uiOutput("tc1_suggest_summary"),
-          checkboxInput("view_tc1_gap", "Show 2-color threshold diagnostic", value = FALSE),
-          conditionalPanel(
-            condition = "input.view_tc1_gap == true",
-            plotOutput("tc1_gap_plot", height = "280px"),
-            helpText("The orange curve has two humps: re-blinks of one fluorophore (left) and ",
-                     "separate molecules (right). Your threshold should sit in the gap between them.")
-          ),
+          condition = "input.enable_clustering == true",
           helpText("De-blinked IDs carry their channel: A-1, A-2 for one fluorophore and ",
                    "B-1, B-2 for the other. Only members of the same channel can merge, so ",
                    "two colours can never be de-blinked into one molecule."),
@@ -996,37 +994,12 @@ smlm_ui <- fluidPage(
             ),
           ),
         ),
-        checkboxInput("enable_two_color_cluster2", "2-color Median Clustering (TID medians)", FALSE),
         conditionalPanel(
-          condition = "input.enable_two_color_cluster2",
-          radioButtons("cluster2_method_tc2", "2-color Median Clustering grouping method",
-                       choices = c("DBSCAN" = "dbscan", "HDBSCAN" = "hdbscan", "OPTICS (Xi)" = "optics"),
-                       selected = "dbscan", inline = TRUE),
-          conditionalPanel(
-            condition = "input.cluster2_method_tc2 == 'dbscan'",
-            numericInput("eps_tc2", "2-color eps, trace medians (nm)", value = 150, min = 1)
-          ),
-          conditionalPanel(
-            condition = "input.cluster2_method_tc2 == 'optics'",
-            numericInput("cluster2_xi_tc2", "2-color OPTICS Xi (0-1)", value = 0.05, min = 0.001, max = 0.5, step = 0.005)
-          ),
-          numericInput("minpts_tc2", "2-color MinPts (medians)", value = 8, min = 1),
-          checkboxInput("cluster2_prefilter_tc2", "2-color density prefilter", value = FALSE),
-          conditionalPanel(
-            condition = "input.cluster2_prefilter_tc2 == true",
-            numericInput("cluster2_prefilter_r_tc2", "2-color prefilter radius (nm)", value = 150, min = 1),
-            numericInput("cluster2_prefilter_min_tc2", "2-color min neighbours", value = 3, min = 1)
-          ),
-          conditionalPanel(
-            condition = "input.cluster2_method_tc2 == 'dbscan'",
-            checkboxInput("cluster2_core_only_tc2", "2-color core points only (drop border points)", value = FALSE)
-          ),
-          numericInput("cluster2_min_members_tc2", "2-color min members per Median Cluster", value = 0, min = 0, step = 1),
-          checkboxInput("cluster2_prune_tc2", "2-color prune sparse cluster members", value = FALSE),
-          conditionalPanel(
-            condition = "input.cluster2_prune_tc2 == true",
-            numericInput("cluster2_prune_tol_tc2", "2-color prune tolerance (x local core distance)", value = 2, min = 1.1, step = 0.1)
-          ),
+          condition = "input.enable_cluster2 == true",
+          helpText("Median Clusters belong to one channel: a cluster can never hold ",
+                   "molecules from two colours. The eps and MinPts above apply to every ",
+                   "channel - they are set by the structure, which the choice of dye ",
+                   "does not change."),
           conditionalPanel(
             condition = "input.mode3d == '3D'",
             checkboxInput("show_tc2_alpha", "Wrap 2-color clusters (tc2)", value = FALSE),
@@ -1061,10 +1034,10 @@ smlm_ui <- fluidPage(
           )
         ),
         uiOutput("two_color_settings_file_ui"),
-        downloadButton("download_two_color_settings", "Save 2-color settings"),
-        actionButton("reset_two_color_settings", "Reset 2-color settings", icon = icon("undo"))
+        downloadButton("download_two_color_settings", "Save channel settings"),
+        actionButton("reset_two_color_settings", "Reset channel settings", icon = icon("undo"))
       ),
-      ),  # /2-color MINFLUX
+      ),  # /Channels: 2-colour split
       tags$hr(),
 
 
@@ -1373,7 +1346,8 @@ smlm_ui <- fluidPage(
                 HTML("<b>Independent random thinning</b>: keep each unit with a fixed probability. This leaves the pair correlation g(r) and Ripley's K unchanged in expectation (<b>Illian et&nbsp;al. 2008</b>; <b>Chiu et&nbsp;al. 2013</b>), so genuine clustering survives it while a difference driven only by labelling density does not. Support area comes from a smoothed-density region (<b>Hyndman 1996</b>) or a morphological occupancy estimate (<b>Serra 1982</b>); the area-free density check uses nearest-neighbour distances (<b>Thompson 1956</b>)."),
                 HTML("Whole <b>units</b> are dropped - a trace ID, or a de-blinked molecule with every one of its localizations - never individual localizations, which would shorten traces and corrupt de-blinking and per-trace spread without thinning the pattern. The default unit is the <b>de-blinked molecule</b>: a trace ID is one blink, so trace-ID density mixes expression level with photophysics. Density divides by the estimated support rather than the bounding box, because a MINFLUX field routinely contains the cell edge and interior dark regions. The draw is seeded per file and reproduces on re-run."),
                 HTML("Use this only where density varies for reasons that are <b>not</b> biology - expression level, labelling efficiency, acquisition length. <b>Do not thin when density is itself the biology</b>: for a concentration-dependent process, equalising density removes the effect being measured. <b>Do not thin files already at comparable density</b>, and do not thin for Ripley's L or g(r) - in both cases it discards data and widens the interval without changing the answer. Thinning is one-way (nothing is up-sampled) and can push a small cluster below minPts, turning a real structure into noise. A difference that survives at matched density is evidence; how clustering <i>scales</i> with density is the stronger test.")),
-              helpText(HTML("For when labelling density varies between cells for reasons that are not biology - transient transfection, expression level, labelling efficiency. Nearest-neighbour distances shrink as density rises, and DBSCAN at a fixed eps and minPts is itself a density threshold, so both read a high expresser as more clustered even when nothing has changed. Leave this off if that does not apply to your experiment.")),
+              helpText(HTML("For when labelling density varies between cells for reasons that are not biology. Leave off if that does not apply to your experiment.")),
+              .detail(HTML("Transient transfection, expression level and labelling efficiency all move density independently of the biology. Nearest-neighbour distances shrink as density rises, and DBSCAN at a fixed eps and minPts is itself a density threshold - so both read a high expresser as more clustered even when nothing has changed.")),
               checkboxInput("dens_norm_enable", "Measure density per file", value = FALSE),
               conditionalPanel(
                 condition = "input.dens_norm_enable == true",
@@ -1400,12 +1374,14 @@ smlm_ui <- fluidPage(
                   numericInput("dens_kde_bw", "Smoothing bandwidth (nm)", value = 150, min = 10, step = 25),
                   numericInput("dens_kde_frac", "Fraction of units enclosed", value = 0.99,
                                min = 0.5, max = 1, step = 0.01),
-                  helpText(HTML("Smooths the localizations into a density map and keeps the smallest region containing this share of the units (<b>Hyndman 1996</b>). Dark regions fall below the cut on their own, and there is no fill radius to tune. <b>Keep the fraction and the bandwidth the same across every sample you compare</b> - together they define what \"the sample area\" means, so changing them per file makes the areas incomparable."))
+                  helpText(HTML("Keeps the smallest region containing this share of the units. <b>Keep the fraction and bandwidth identical across every sample you compare.</b>")),
+              .detail(HTML("Smooths the localizations into a density map and takes the highest-density region (<b>Hyndman 1996</b>). Dark regions fall below the cut on their own, so there is no fill radius to tune. The fraction and the bandwidth together define what \"the sample area\" means, which is why changing them per file makes the areas incomparable."))
                 ),
                 conditionalPanel(
                   condition = "input.dens_support_mode == 'grid'",
                   checkboxInput("dens_close_auto", "Auto gap fill", value = TRUE),
-                  helpText(HTML("Gaps in the data have two causes and this radius tells them apart: <b>sparse sampling</b> inside the cell should be filled in, because it is still sample, while a <b>dark region</b> or the space outside the cell should stay excluded. This is the most important setting here - set it too small and the area traces your structures instead of your cell. Auto picks a radius from each file and applies one common value to all of them.")),
+                  helpText(HTML("<b>The most important setting here.</b> Set it too small and the measured area traces your structures instead of your cell.")),
+              .detail(HTML("Gaps have two causes and this radius tells them apart: <b>sparse sampling</b> inside the cell should be filled in, because it is still sample, while a <b>dark region</b> or the space outside the cell should stay excluded. Auto picks a radius from each file and applies one common value to all of them.")),
                   conditionalPanel(
                     condition = "input.dens_close_auto == false",
                     numericInput("dens_close_nm", "Fill gaps up to (nm)", value = 200, min = 0, step = 50)
@@ -1414,7 +1390,8 @@ smlm_ui <- fluidPage(
                   checkboxInput("dens_show_sweep", "Show gap-fill sweep", value = FALSE)
                 ),
                 checkboxInput("dens_show_map", "Show support map", value = FALSE),
-                helpText(HTML("Draws one dataset with the counted area outlined in <b style=\"color:#1a8a1a\">green</b> and the disregarded part shaded <b style=\"color:#c03030\">red</b>. Use it to check that the green region looks like your cell rather than like a tracing of your structures. Works for every support mode; the bounding box is always the most generous and the occupancy grid the least.")),
+                helpText(HTML("Counted area in <b style=\"color:#1a8a1a\">green</b>, disregarded in <b style=\"color:#c03030\">red</b>. Check the green region looks like your cell, not like a tracing of your structures.")),
+              .detail(HTML("Works for every support mode. The bounding box is always the most generous and the occupancy grid the least.")),
                 conditionalPanel(
                   condition = "input.dens_show_map == true",
                   selectInput("dens_map_file", "Dataset to render", choices = NULL)
@@ -1573,13 +1550,12 @@ smlm_ui <- fluidPage(
                        "they group points, they do not identify a molecule.")
             ),
             helpText(style = "font-size:0.78em; color:#888;",
-                     "A cloud centred on the origin means the sample held still - the scatter is ",
-                     "jitter. Points marching away in one direction, further the longer the gap, ",
-                     "mean the sample drifted. The heavy markers are the geometric median ",
-                     "displacement in each time bin, which is the clearest read of the two: ",
-                     "jitter cancels, so under a still sample every bin sits on the origin."),
-            helpText(style = "font-size:0.78em; color:#888;",
-                     "The geometric median is used rather than the mean because a merged molecule ",
+                     "A cloud centred on the origin means the sample held still. Points marching ",
+                     "away in one direction, further the longer the gap, mean it drifted."),
+                   .detail("The heavy markers are the geometric median displacement in each time ",
+                     "bin, which is the clearest read of the two: jitter cancels, so under a still ",
+                     "sample every bin sits on the origin."),
+            .detail("The geometric median is used rather than the mean because a merged molecule ",
                      "occasionally holds two different fluorophores, and rather than a per-axis ",
                      "median because that one changes if x and y are relabelled.")
           )
@@ -1690,11 +1666,22 @@ smlm_ui <- fluidPage(
             ),
             selected = "auto"
           ),
-          helpText(
-            "All modes run on every loaded file using current Display tab filters and clustering settings.",
-            "Auto follows the Display tab's de-blinking switch, so turning de-blinking on applies it here and to every dataset.",
-            "Median Cluster modes require Median Clustering to be enabled."
+          # Channel facet. Appears only once the data has channels; a cross-channel
+          # run ignores it, because a statistic about the PAIR cannot be split by
+          # the members of the pair.
+          conditionalPanel(
+            condition = "output.n_channels > 1",
+            checkboxInput("analysis_by_channel",
+                          "One distribution per channel", value = FALSE),
+            helpText("One distribution per channel, labelled 'file · channel'."),
+            .detail("Ignored for the cross-channel modes below. Ripley's L and g(r) have ",
+                    "their own per-channel option, because they divide by the observed area ",
+                    "and need a shared window.")
           ),
+          helpText("Runs on every loaded file, using the Display tab's filters and clustering settings."),
+          .detail("Auto follows the Display tab's de-blinking switch, so turning de-blinking on ",
+                  "applies it here and to every dataset. Median Cluster modes require Median ",
+                  "Clustering to be enabled."),
           numericInput("nn_batch_k", "Nearest neighbors (k)", value = 1, min = 1, max = 20),
           uiOutput("nn_batch_group_ui"),
           shinyWidgets::numericRangeInput(
@@ -1757,12 +1744,12 @@ smlm_ui <- fluidPage(
             HTML("Ripley's K-function (<b>Ripley 1977</b>) with the variance-stabilising L-transform (<b>Besag 1977</b>). For <i>n</i> points in a window of area <i>A</i>, the (uncorrected) estimator is<br><span style=\"font-family:serif; margin-left:6px;\">K̂(r) = (A / [n(n−1)]) · Σ<sub>i≠j</sub> 𝟙(d<sub>ij</sub> ≤ r)</span><br>i.e. area × (fraction of the n(n−1) ordered point pairs closer than r). The L-transform then linearises it: <span style=\"font-family:serif;\">L(r) = √(K(r)/π)</span> in 2D, <span style=\"font-family:serif;\">L(r) = (3·K(r)/4π)<sup>1/3</sup></span> in 3D. Plotted as L(r)&nbsp;−&nbsp;r: 0 under complete spatial randomness, &gt;0 clustering, &lt;0 dispersion. The SMLM lineage of this statistic runs through PC-PALM (<b>Sengupta et&nbsp;al. 2011</b>; <b>Veatch et&nbsp;al. 2012</b>)."),
             HTML("Runs on <b>de-blinked units</b> (TID or primary-cluster centroids) so that repeated appearances of one molecule do not manufacture a short-r clustering peak. Points are randomly subsampled to ≤2000 per file (pairwise distances are O(n²)); the window is the axis-aligned bounding box. The optional <b>Monte-Carlo CSR envelope</b> simulates n random points in the <i>identical frozen window</i>, so the band and the observed curve carry the same edge bias and it cancels."),
             HTML("There is <b>no analytic edge correction</b>: near the top of the r range points close to the box lose neighbours and L−r bends downward. Read significance as the observed curve leaving the envelope, <b>not</b> as departure from the flat zero line (which is the uncorrected theoretical CSR). Without the envelope, read shape and peak position, not magnitude. The dominant biological confound remains labelling: incomplete labelling flattens real clustering, multivalent labels fake it. In group mode per-file curves are averaged (never pooled coordinates) - pooling would mix windows and invent structure.")),
-          helpText("Spatial point-process statistic. L(r) − r = 0 under complete spatial randomness (CSR);",
-                   "> 0 indicates clustering, < 0 indicates regularity.",
-                   "No confidence envelope is shown - deviations should be interpreted relative to",
-                   "the point density and window size, not as statistically tested. Uses an uncorrected",
-                   "K estimator; curves may dip below zero at large r due to border effects.",
-                   "Large datasets are subsampled to 2000 points per file."),
+          helpText("L(r) − r = 0 under complete spatial randomness; > 0 is clustering, < 0 is regularity."),
+          .detail("Without an envelope, deviations should be read relative to the point density ",
+                  "and window size rather than as a test - switch the CSR envelope on below if you ",
+                  "need significance. The K estimator is uncorrected unless edge correction is on, ",
+                  "so curves may dip below zero at large r from border effects. Large datasets are ",
+                  "subsampled to 2,000 points per file."),
           selectInput("ripley_unit", "Unit",
             choices = c(
               "Auto - molecules if de-blinking is on" = "auto",
@@ -1777,8 +1764,13 @@ smlm_ui <- fluidPage(
           checkboxInput("ripley_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
           helpText("All files: pool every loaded dataset into one curve; uncheck to analyze only the active file."),
           conditionalPanel(
-            condition = "output.mplex_active == true",
-            checkboxInput("ripley_by_channel", "Split by multiplex channel (with 'all files')", value = FALSE)
+            condition = "output.n_channels > 1",
+            checkboxInput("ripley_by_channel", "One curve per channel", value = FALSE),
+            helpText("One curve per channel, both measured in the same observation window."),
+            .detail("Covers a 2-colour DCR split and a multiplex build alike. The window comes ",
+                    "from the pooled file, so a difference between the curves is a difference in ",
+                    "how the two targets are arranged in that field - not an artefact of one ",
+                    "channel having fewer localizations than the other.")
           ),
           checkboxInput("ripley_use_3d", "Use 3-D coordinates (z)", value = FALSE),
           helpText("3-D: measure neighbours in spheres of radius r (uses z) instead of 2-D circles.",
@@ -1801,17 +1793,23 @@ smlm_ui <- fluidPage(
             checkboxInput("ripley_show_files", "Show individual files (shaded by group)", value = FALSE),
             helpText("Draws each file as a thin shade of its group's colour behind the group mean,",
                      "so a group difference can be judged against its own replicate spread."),
-            helpText("In group mode each file's L(r)-r is computed on its own window, then averaged",
-                     "within the group (one mean curve per group); the band shows between-file spread.",
-                     "Curves are interpolated onto a common r-grid (up to the smallest per-file r max).",
-                     "Read a group difference against the band, not as a formal test (no CSR envelope).")
+            helpText("One mean curve per group; the band is between-file spread, not a test."),
+            .detail("Each file's L(r)−r is computed on its own window, then averaged within the ",
+                    "group - coordinates are never pooled. Curves are interpolated onto a common ",
+                    "r-grid, up to the smallest per-file r max.")
           ),
           checkboxInput("ripley_envelope", "Show CSR envelope (Monte-Carlo)", value = FALSE),
-          helpText("Simulates random (CSR) patterns in the same window as the data and shades the",
-                   "2.5–97.5% band. The observed curve leaving the band = clustering (above) or",
-                   "dispersion (below) beyond chance. The band captures the edge bias, so it - not",
-                   "the flat zero line - is the correct reference. In 'all files' mode the envelope",
-                   "is computed for the first few files only (cost = simulations × files)."),
+          helpText("The curve leaving the band is clustering (above) or dispersion (below) beyond chance."),
+          .detail("Simulates CSR patterns in the same window as the data and shades the 2.5–97.5% ",
+                  "band. The band captures the edge bias, so it - not the flat zero line - is the ",
+                  "correct reference. In 'all files' mode the envelope is computed for the first ",
+                  "six files only, since the cost is simulations × files. ",
+                  tags$b("In group mode"), " the envelope is drawn as a dotted outline in the ",
+                  "group's colour - the mean of its files' envelopes - so it is not confused with ",
+                  "the solid between-file spread band. The two answer different questions: the ",
+                  "spread band is how much your cells differ from each other, the envelope is what ",
+                  "randomness would look like. The legend reports how many files the envelope ",
+                  "covers when that is fewer than the group."),
           conditionalPanel(
             condition = "input.ripley_envelope == true",
             numericInput("ripley_nsim", "Envelope simulations", value = 99, min = 19, max = 199)
@@ -1835,7 +1833,8 @@ smlm_ui <- fluidPage(
             HTML("The pair-correlation (radial distribution) function - the <b>derivative</b> form of Ripley's K, counting point pairs in a shell (r−dr/2, r+dr/2] normalized by the shell area (2D) or volume (3D):<br><span style=\"font-family:serif; margin-left:6px;\">ĝ(r) = A · 2·N<sub>pairs</sub>(shell) / [n(n−1) · shell]</span><br>g&nbsp;=&nbsp;1 under complete spatial randomness, &gt;1 clustering at scale r, &lt;1 exclusion. In SMLM this is the PC-PALM statistic (<b>Sengupta et&nbsp;al. 2011</b>; <b>Veatch et&nbsp;al. 2012</b>), developed precisely to separate repeated appearances of one molecule from genuine clustering. Theory: <b>Illian et&nbsp;al. 2008</b>; <b>Stoyan &amp; Stoyan 1994</b>."),
             HTML("The one-colour version of the g₁₂(r) below, run on the same de-blinked units as Ripley's L. Because g divides out the intensity twice over, it does not care how densely the sample is labelled - which makes it the right choice when comparing cells whose expression level differs. And because each radius is measured independently rather than accumulated, you read the aggregate size off <b>where g comes back down to 1</b>, and a short-range blinking or label artefact stays in the first few bins instead of leaking into every larger radius."),
             HTML("Points near the window boundary lose some of the neighbours they would otherwise have, which pulls g downward at larger radii. Switch on edge correction (top of the tab) to remove that; without it, judge the curve against the Monte-Carlo envelope rather than against the flat g&nbsp;=&nbsp;1 line, since the envelope carries the same bias. g is also noisier than L at short radii, because a thin ring holds far fewer pairs than a filled disc - widen the bins or smooth rather than reading much into a single spike. In group mode the per-file curves are averaged; coordinates are never pooled.")),
-          helpText(HTML("Scale-local clustering statistic. The <b>r at which g falls back to 1</b> is the characteristic aggregate size, and the height of g is how many times denser than random the neighbourhood is at that scale. Note a solid (Gaussian) aggregate makes g <i>decrease monotonically</i> from small r - a true interior peak indicates a hollow or shell-like structure, or a characteristic spacing, instead.")),
+          helpText(HTML("The <b>r at which g falls back to 1</b> is the characteristic aggregate size; the height of g is how many times denser than random that neighbourhood is.")),
+          .detail(HTML("A solid aggregate makes g <i>decrease monotonically</i> from the smallest r. An interior peak - g low at short r, rising to a maximum further out - means <b>short-range exclusion</b>: molecules that cannot approach each other closer than some distance, so pairs pile up at that spacing. A steric footprint, a lattice, or a regular array all do this.<br><br>It does <b>not</b> mean a hollow or ring-shaped structure, which is the usual guess. Points spread around a ring still sit arbitrarily close to their neighbours along the arc, so a ring keeps its short-r excess and g still decays monotonically - verified in simulation up to 300 points per ring. Only depletion at short r produces an interior peak.")),
           selectInput("pcf_unit", "Unit",
             choices = c("Auto - molecules if de-blinking is on" = "auto",
                         "TID centroids" = "tid",
@@ -1843,8 +1842,10 @@ smlm_ui <- fluidPage(
             selected = "auto"),
           checkboxInput("pcf_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
           conditionalPanel(
-            condition = "output.mplex_active == true",
-            checkboxInput("pcf_by_channel", "Split by multiplex channel (with 'all files')", value = FALSE)
+            condition = "output.n_channels > 1",
+            checkboxInput("pcf_by_channel", "One curve per channel", value = FALSE),
+            helpText("Splits each file into its channels, both measured in the same ",
+                     "observation window (the pooled file).")
           ),
           checkboxInput("pcf_use_3d", "Use 3-D coordinates (z)", value = FALSE),
           helpText("3-D: count pairs in spherical shells instead of 2-D annuli. Use only for",
@@ -1870,10 +1871,19 @@ smlm_ui <- fluidPage(
             checkboxInput("pcf_show_files", "Show individual files (shaded by group)", value = FALSE)
           ),
           checkboxInput("pcf_envelope", "Show CSR envelope (Monte-Carlo)", value = FALSE),
-          helpText(HTML("<b>Reading the band.</b> It shows how much a purely random pattern would vary, so it is a spread, not an offset - <b>nothing is subtracted from your curve</b>. g already sits at 1 for a random pattern. The band is widest at short radii because a thin ring contains very few pairs there, so a random pattern's g is genuinely noisier; a peak at short range therefore has to clear a wider bar than a modest rise further out. Read significance as the curve leaving the band, and quote strength as g itself, or as the area between g and 1.")),
+          helpText(HTML("<b>Reading the band.</b> It is a spread, not an offset - <b>nothing is subtracted from your curve</b>. Significance is the curve leaving the band.")),
+          .detail(HTML("g already sits at 1 for a random pattern. The band is widest at short radii because a thin ring contains very few pairs there, so a random pattern's g is genuinely noisier - a peak at short range has to clear a wider bar than a modest rise further out. Quote strength as g itself, or as the area between g and 1.")),
           conditionalPanel(
             condition = "input.pcf_envelope == true",
             numericInput("pcf_nsim", "Envelope simulations", value = 99, min = 19, max = 199)
+          ),
+          checkboxInput("pcf_fit_xi", "Fit correlation length ξ", value = FALSE),
+          conditionalPanel(
+            condition = "input.pcf_fit_xi == true",
+            numericInput("pcf_fit_rmin", "Fit from r (nm)", value = 40, min = 0, step = 5),
+            helpText("Fits g(r) - 1 = A·exp(-r/ξ), giving one number per curve. ",
+                     "Start above the labelling floor: below a few tens of nm the curve is ",
+                     "dominated by the label and by residual blinking, not by structure.")
           ),
           actionButton("run_pcf", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_pcf", "Download", class = "btn-sm")
@@ -1881,7 +1891,14 @@ smlm_ui <- fluidPage(
         column(9,
           uiOutput("pcf_stale"),
           plotlyOutput("pcf_plot", height = "540px"),
-          uiOutput("pcf_summary")
+          uiOutput("pcf_summary"),
+          conditionalPanel(
+            condition = "input.pcf_fit_xi == true",
+            tags$div(style = "margin-top:10px;",
+              tags$b("Correlation length ξ"),
+              tableOutput("pcf_xi_table"),
+              uiOutput("pcf_xi_note"))
+          )
         )
       ),
       tags$hr(),
@@ -1899,10 +1916,10 @@ smlm_ui <- fluidPage(
             HTML("Cluster-occupancy counting, in the lineage of SMLM molecular-counting / blink-correction work (<b>Annibale et&nbsp;al. 2011</b>, <i>Nat. Methods</i> - quantitative photo-activated localization microscopy; <b>Sengupta et&nbsp;al. 2011</b>, PC-PALM). The number of units the median cluster contains."),
             HTML("The grouping is always the <b>median cluster</b>. You choose what to count inside it: raw <b>trace IDs</b>, or <b>de-blinked molecules</b> (which collapse one molecule's repeated blinks into one unit - needs de-blinking on). Comparing the two shows how much of the raw count is blinking."),
             HTML("<b>This is an occupancy count, not stoichiometry.</b> A trace-ID count over-counts molecules by an unknown, dye- and buffer-dependent blinking factor; de-blinked molecules partly correct for that but still depend on the de-blink eps. Annibale's blink-correction requires a dark-time distribution that is not calibrated here. Read it as a relative comparison between conditions acquired identically, never as an absolute subunit count.")),
-          helpText("Counts, per median cluster, either distinct trace IDs or distinct primary",
-                   "(de-blinked) clusters, across all loaded files. In MINFLUX one fluorophore",
-                   "produces several trace IDs across blinking cycles, so a trace-ID count reflects",
-                   "blinking events; de-blinked molecules are closer to molecule count."),
+          helpText("Counts trace IDs or de-blinked molecules per Median Cluster, across all loaded files."),
+          .detail("One fluorophore produces several trace IDs across blinking cycles, so a ",
+                  "trace-ID count reflects blinking events. De-blinked molecules are closer to a ",
+                  "molecule count."),
           radioButtons("tid_count_unit", "Count within each Median Cluster",
             choices = c(
               "Trace IDs (blinking events)"          = "tid",
@@ -1916,8 +1933,8 @@ smlm_ui <- fluidPage(
           numericInput("tid_count_bins", "Bins", value = 30, min = 5, max = 200),
           checkboxInput("tid_count_aggregate", "Aggregate all datasets into one", value = FALSE),
           conditionalPanel(
-            condition = "output.mplex_active == true",
-            checkboxInput("tid_count_by_channel", "Split by multiplex channel", value = FALSE)
+            condition = "output.n_channels > 1",
+            checkboxInput("tid_count_by_channel", "One distribution per channel", value = FALSE)
           ),
           actionButton("run_tid_count", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
@@ -1938,11 +1955,11 @@ smlm_ui <- fluidPage(
             HTML("<b>MINFLUXR original.</b> No published MINFLUX detection-timing estimator exists. The building blocks are standard: a detection-rate histogram over acquisition time, and a two-sample <b>Kolmogorov–Smirnov</b> comparison (max distance between two empirical cumulative distributions) of the clustered vs unclustered populations."),
             HTML("Each trace is counted <b>once</b>, at its median <code>tim</code>, so a long trace with many localizations does not dominate the early bins. The split is clustered (inside a median-cluster structure) vs unclustered background <i>within the same file</i>, so acquisition length, laser power and sample differences cancel in the comparison. The normalized modes scale each population to its own total, isolating a difference in <i>shape</i> (timing) from a difference in <i>amount</i> (abundance)."),
             HTML("<b>Descriptive, not causal.</b> The drop-off is a convolution of photobleaching, blinking kinetics, labelling density and the tracker's own re-targeting - crowding is one candidate cause among several. The KS gap is reported as a distance, <b>not as a p-value</b>: the two samples are not independent (they come from the same acquisition and the same molecules compete for the same detection budget), so the KS null does not hold. The empirical trace-detection-rate decay used to calibrate the simulator comes from in-house long acquisitions, not from a publication.")),
-          helpText("Each trace (TID) is counted once at its median acquisition time (tim),",
-                   "split into traces inside Median Cluster structures vs unclustered background.",
-                   "Reveals how detection of structures vs background evolves over the acquisition",
-                   "(e.g. photobleaching drop-off) and feeds the simulator's acquisition model.",
-                   "Requires Median Clustering enabled in the Display tab."),
+          helpText("How detection of clustered vs background traces evolves over the acquisition."),
+          .detail("Each trace is counted once at its median acquisition time (tim), split into ",
+                  "traces inside Median Cluster structures vs unclustered background. Shows ",
+                  "photobleaching drop-off, and feeds the simulator's acquisition model. ",
+                  "Requires Median Clustering."),
           numericInput("det_time_bins", "Time bins", value = 40, min = 5, max = 300),
           radioButtons("det_time_yaxis", "Y axis",
                        choices = c("Count per bin"         = "count",
@@ -1954,6 +1971,13 @@ smlm_ui <- fluidPage(
                    "so a difference in shape reveals detection timing that depends on clustering",
                    "(a crowding signature). The KS gap = max distance between the two cumulative curves."),
           checkboxInput("det_time_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
+          conditionalPanel(
+            condition = "output.n_channels > 1",
+            checkboxInput("det_time_by_channel", "One curve per channel", value = FALSE),
+            helpText("With a TIM-split multiplex build this is where a channel losing ",
+                     "traces over its own window becomes visible, rather than being ",
+                     "averaged into the whole acquisition.")
+          ),
           actionButton("run_det_time", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_det_time", "Download", class = "btn-sm")
         ),
@@ -1972,14 +1996,14 @@ smlm_ui <- fluidPage(
             HTML("<b>MINFLUXR original.</b> A correlational diagnostic built from two standard quantities: a local-density proxy (median k-NN distance among a cluster's de-blinked molecule centroids) and a per-cluster timing offset, with an optional loess trend (<b>Cleveland 1979</b>)."),
             HTML("Both axes are measured <b>per cluster and referenced within the same file</b> - the timing shift subtracts that file's unclustered-background median <code>tim</code>, so between-file differences in acquisition length, bleaching and labelling cancel. Crowding uses <b>de-blinked molecule centroids</b> (or trace-ID centroids when de-blinking is off) - the <i>same</i> unit and k-NN definition as the Within-cluster-NN panel, so the two panels report the same spacing."),
             HTML("<b>A correlation, not a mechanism.</b> Local density co-varies with labelling efficiency, structure size and local photophysics, so a crowding–timing trend is a hypothesis to test with controls (e.g. a labelling-density titration), not a measured crowding effect. The sampling artefact - denser clusters have more members, and a larger sample's median lands later under a decaying detection rate, so a positive trend is partly expected with <i>no</i> crowding - is <b>now corrected for</b> by the permutation null band and its Spearman trend test. What the test cannot rule out is a third variable driving both axes; that still needs a control experiment.")),
-          helpText("One point per Median Cluster structure.",
-                   "Crowding = median k-NN distance among the cluster's de-blinked molecule centroids",
-                   "(or trace-ID centroids if de-blinking is off; smaller = more crowded), ± MAD.",
-                   "Detection-time shift = the cluster's median detection time (tim) minus the unclustered",
-                   "background median in the same file (positive = detected later).",
-                   "If crowding delays detection, denser clusters (small NN distance) show a positive shift.",
-                   "Note: this is a density-correlated timing effect; crowding is the likely but not sole cause.",
-                   "Requires Median Clustering and a tim column."),
+          helpText("One point per Median Cluster: does a denser structure get detected later?"),
+          .detail("Crowding = median k-NN distance among the cluster's de-blinked molecule ",
+                  "centroids (trace-ID centroids if de-blinking is off; smaller = more crowded), ",
+                  "± MAD. Detection-time shift = the cluster's median tim minus the unclustered ",
+                  "background median in the same file, so positive means detected later. If ",
+                  "crowding delays detection, dense clusters show a positive shift. ",
+                  tags$b("This is a density-correlated timing effect"), " - crowding is the likely ",
+                  "but not the only possible cause. Requires Median Clustering and a tim column."),
           numericInput("crowd_min_members", "Min members per cluster", value = 4, min = 3),
           numericInput("crowd_k", "Nearest neighbours (k)", value = 1, min = 1),
           checkboxInput("crowd_use_3d", "Use 3-D coordinates (z)", value = FALSE),
@@ -1990,13 +2014,14 @@ smlm_ui <- fluidPage(
             condition = "input.crowd_null == true",
             numericInput("crowd_nsim", "Permutations", value = 200, min = 49, max = 2000, step = 50),
             helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-              "Shuffles detection times among traces within each file, keeping every cluster's ",
-              tags$b("membership, size and geometry fixed"), ". This reproduces the part of the ",
-              "time-shift that comes purely from cluster size (a larger sample's median lands later ",
-              "under a decaying detection rate) while destroying any real crowding-timing link - so ",
-              "the shaded band is what you would see with ", tags$b("zero"), " crowding effect. ",
-              "Read the points against the band, and the reported Spearman p for the ",
-              tags$b("trend"), " (which is insensitive to a constant clustered-vs-background offset).")
+              "The band is what you would see with ", tags$b("zero"), " crowding effect. Read the ",
+              "points against it, and the Spearman p for the trend."),
+            .detail("Shuffles detection times among traces within each file, keeping every ",
+              "cluster's ", tags$b("membership, size and geometry fixed"), ". That reproduces the ",
+              "part of the time-shift coming purely from cluster size - a larger sample's median ",
+              "lands later under a decaying detection rate - while destroying any real ",
+              "crowding-timing link. The Spearman p tests the trend, so it is insensitive to a ",
+              "constant clustered-vs-background offset.")
           ),
           actionButton("run_crowd", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_crowd", "Download", class = "btn-sm")
@@ -2016,14 +2041,13 @@ smlm_ui <- fluidPage(
             HTML("<b>MINFLUXR original.</b> A scaling diagnostic assembled from standard parts: k-nearest-neighbour spacing (<b>Clark &amp; Evans 1954</b>) inside each cluster, plotted against cluster size measured either as member count or as convex-hull area/volume (<b>quickhull</b>, Barber, Dobkin &amp; Huhdanpaa 1996)."),
             HTML("Spacing is computed on <b>de-blinked centroids</b> (trace medians, or de-blinked-molecule medians when de-blinking is on), so it measures molecule-to-molecule spacing inside a structure rather than the blink footprint - a measurement MINFLUX's nm precision actually supports. Both quantities are per-structure, so each cluster contributes one point regardless of how many localizations it collected."),
             HTML("<b>The slope is confounded by the clustering algorithm.</b> Under DBSCAN every within-cluster NN distance is bounded above by the link radius eps2 (default 200&nbsp;nm), so the curve is <i>censored</i> and cannot rise past it - a flat trend at high size may be the ceiling, not constant spacing. HDBSCAN/OPTICS impose no such bound; re-run under those before reading a slope. Reading the slope as 'ballooning' vs 'densifying' is this tool's interpretation, not a validated model, and convex-hull size is upward-biased by single outlying members.")),
-          helpText("One point per Median Cluster structure across all files.",
-                   "Y = median over members of each member's mean distance to its k nearest member",
-                   "centroids (k = 1 is nearest-neighbour spacing; centroids are trace-ID medians,",
-                   "or de-blinked-molecule medians if de-blinking is on).",
-                   "Flat = constant spacing (grows at fixed density); rising = the structure 'balloons'",
-                   "(members spread apart with size); falling = it densifies.",
-                   "Note: under DBSCAN within-cluster NN is <= eps2 (the link radius, default 200 nm);",
-                   "HDBSCAN/OPTICS impose no such bound. Requires Median Clustering."),
+          helpText("Does a bigger structure pack its members tighter, looser, or the same?"),
+          .detail("One point per Median Cluster across all files. Y = median over members of each ",
+                  "member's mean distance to its k nearest member centroids (k = 1 is ",
+                  "nearest-neighbour spacing). Flat = constant spacing, growing at fixed density; ",
+                  "rising = the structure balloons; falling = it densifies. ",
+                  tags$b("Under DBSCAN within-cluster NN is bounded by eps2"), " (the link radius, ",
+                  "default 200 nm); HDBSCAN and OPTICS impose no such bound. Requires Median Clustering."),
           radioButtons("size_nn_xmode", "X axis (cluster size)",
                        choices = c("Member count" = "count",
                                    "Convex-hull size (nm2 / nm3)" = "hull"),
@@ -2053,11 +2077,23 @@ smlm_ui <- fluidPage(
             HTML("Machinery is standard, dictionary is bespoke. Fits are <b>orthogonal-distance (total least squares) MLE</b> - minimizing the squared point-to-surface distance - ranked by <b>AIC</b> (Akaike 1974), its small-sample correction <b>AICc</b> (Hurvich &amp; Tsai 1989) or <b>BIC</b> (Schwarz 1978). The 2D view is a PCA projection onto PC1×PC2 (Pearson 1901). Under an iid isotropic-Gaussian residual model σ̂²&nbsp;=&nbsp;RMSD², so −2logL&nbsp;=&nbsp;n·log(2πσ̂²)+n and AICc&nbsp;=&nbsp;AIC&nbsp;+&nbsp;2k(k+1)/(n−k−1)."),
             HTML("Fits <b>de-blinked trace centroids</b>, not raw localizations - otherwise the many localizations of one long trace would dominate the residual sum and the fit would describe the brightest molecule rather than the structure. MINFLUX's nm precision is what makes a ~50–200&nbsp;nm shape distinguishable at all. AICc → ∞ when n&nbsp;≤&nbsp;k+1, so the ranking blanks out rather than over-fitting a 5-point cluster."),
             HTML("<b>The shape dictionary is imposed by this tool</b> (sphere / ellipsoid / helix / ring / arc) and 'best' is a model-selection outcome, not proof of biological geometry - the true shape may not be in the list, and the ranking will still name a winner. With few, blinking-inflated points several shapes are statistically indistinguishable; RMSD always favours the most flexible model (prefer AICc). The unequal-precision problem is <b>now addressed</b> by the optional photon (<code>eco</code>) weighting above - with it off, every trace is treated as equally precise, which MINFLUX traces are not.")),
-          helpText("Inspect individual Median Cluster structures in the active (plotted) file.",
-                   "Press Run to load the current clusters, then step through them; view raw 3D or a",
-                   "PCA-normalized 2D projection (PC1 vs PC2 - most differential axes; PCA runs in 3D",
-                   "and reduces to 2D when z exists). Shape fitting is optional - enable it below.",
-                   "Requires Median Clustering; press Plot in the Display tab first."),
+          helpText("Step through individual Median Cluster structures from every loaded file."),
+          .detail("Run loads the clusters from all loaded datasets, using the same de-blinking ",
+                  "and Median Clustering settings as everything else - so an active file that ",
+                  "happens to have no clusters no longer blocks the viewer. Structures are keyed ",
+                  "by file and id, since cluster ids are only unique within a file.",
+                  tags$br(), tags$br(),
+                  tags$b("The plotted points, and the shape fit, follow de-blinking."), " With ",
+                  "de-blinking on you get one point per de-blinked molecule; with it off, one per ",
+                  "trace ID. This matters for the fit: one fluorophore reappears as several trace ",
+                  "IDs, so on trace IDs a molecule that blinked six times pulls the surface six ",
+                  "times as hard as one that blinked once, and the fitted shape tracks blinking as ",
+                  "much as geometry. The header and the legend name whichever unit is in use.",
+                  tags$br(), tags$br(),
+                  "View raw 3D, or a PCA-normalized 2D projection (PC1 vs PC2, the most ",
+                  "differential axes; PCA runs in 3D and reduces to 2D when z exists). Shape ",
+                  "fitting is optional - enable it below. Requires Median Clustering."),
+          checkboxInput("viewer_active_only", "Active file only", value = FALSE),
           actionButton("run_viewer", "Run / Load clusters", icon = icon("play"), class = "btn-primary btn-sm"),
           tags$br(), tags$br(),
           fluidRow(
@@ -2082,12 +2118,13 @@ smlm_ui <- fluidPage(
             checkboxInput("viewer_weight_eco",
                           HTML("Weight fits by photon count (<code>eco</code>)"), value = TRUE),
             helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
-              "MINFLUX localization variance scales as 1/photons, so a trace's centroid has variance ",
-              "∝ 1/Σeco - its total photon count ", tags$b("is"), " its inverse-variance weight. ",
-              "Unweighted (off) treats a 50-photon trace as being as trustworthy as a 5000-photon one. ",
-              "The header reports ", tags$b("n_eff"), " (Kish effective sample size): if it falls far ",
-              "below the trace count, a few very bright traces are carrying the fit. Needs an ",
-              tags$code("eco"), " column; falls back to unweighted silently if absent. ",
+              "Weights each trace by its photon count. Off treats a 50-photon trace as being as ",
+              "trustworthy as a 5,000-photon one."),
+            .detail("MINFLUX localization variance scales as 1/photons, so a trace's centroid has ",
+              "variance ∝ 1/Σeco - its total photon count ", tags$b("is"), " its inverse-variance ",
+              "weight. The header reports ", tags$b("n_eff"), " (Kish effective sample size): if it ",
+              "falls far below the trace count, a few very bright traces are carrying the fit. ",
+              "Needs an ", tags$code("eco"), " column and falls back to unweighted if absent. ",
               "Criterion values are not comparable between weighted and unweighted mode."),
             tags$div(style = "margin-top:2px; padding:5px 8px; border-left:3px solid #b26a00; background:rgba(178,106,0,0.06); font-size:0.8em; color:#7a5c00; line-height:1.45;",
               HTML(paste0(
@@ -2134,8 +2171,8 @@ smlm_ui <- fluidPage(
           numericInput("rog_bins", "Bins", value = 30, min = 5, max = 200),
           checkboxInput("rog_aggregate", "Aggregate all datasets into one", value = FALSE),
           conditionalPanel(
-            condition = "output.mplex_active == true",
-            checkboxInput("rog_by_channel", "Split by multiplex channel", value = FALSE)
+            condition = "output.n_channels > 1",
+            checkboxInput("rog_by_channel", "One distribution per channel", value = FALSE)
           ),
           actionButton("run_rog", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
@@ -2149,9 +2186,25 @@ smlm_ui <- fluidPage(
 
       tags$hr(),
 
-      # -- Two-Color Analysis ------------------------------------------------
+      # -- Cross-Channel Analysis --------------------------------------------
+      # Everything in this section measures a relationship BETWEEN two channels.
+      # That is what separates it from the panels above, which each describe one
+      # distribution and gained a per-channel facet instead. These tools are
+      # pairwise by mathematics - L12, g12 and cross-NN each take exactly two
+      # point patterns - so with more than two channels a pair has to be chosen.
       fluidRow(
-        column(12, h3("Two-Color Analysis"))
+        column(12, h3("Cross-Channel Analysis"))
+      ),
+
+      fluidRow(
+        column(12,
+          tags$div(
+            style = "margin:0 0 10px; padding:7px 12px; border-left:4px solid #cfe0ee; background:#f6f9fc; font-size:0.86em; color:#445;",
+            "These tools measure how two channels sit relative to each other, so ",
+            "distances DO cross the channel boundary here - unlike clustering, which ",
+            "never does. A 2-colour split has exactly two channels and needs no ",
+            "choice; with a multiplex build, pick the pair below.")
+        )
       ),
 
       conditionalPanel(
@@ -2160,8 +2213,8 @@ smlm_ui <- fluidPage(
           column(12,
             tags$div(
               style = "background:#eef6ff; border:1px solid #b8daff; border-radius:4px; padding:8px 12px; margin-bottom:10px;",
-              tags$b("Multiplex channel pair"),
-              helpText("A multiplex dataset is active. Pick two channels to compare; the cross-channel tools below (NN, Ripley L₁₂, PCF g₁₂, KDE) run on this pair instead of the DCR/fluo 2-color split. Group colors come from the 2-color settings in the Display tab."),
+              tags$b("Channel pair"),
+              helpText("Pick two channels to compare; the cross-channel tools below (NN, Ripley L₁₂, PCF g₁₂, KDE) run on this pair instead of the DCR/fluo split. Channel colours come from the Display tab."),
               fluidRow(
                 column(6, selectInput("mplex_cross_a", "Channel A (group 1)", choices = character(0))),
                 column(6, selectInput("mplex_cross_b", "Channel B (group 2)", choices = character(0)))
@@ -2178,15 +2231,22 @@ smlm_ui <- fluidPage(
             HTML("Cross-type nearest-neighbour distance distribution - for every point of channel A, the distance to its k-th nearest channel-B point (<b>Clark &amp; Evans 1954</b> extended to the bivariate case, cf. <b>Dixon 2002</b>). The second panel is the empirical cumulative distribution of those distances: the fraction of A molecules with a B partner within distance d - an object-based co-localization curve in the sense of <b>Lachmanovich et&nbsp;al. 2003</b> / <b>Dunn et&nbsp;al. 2011</b>, rather than a pixel-intensity coefficient."),
             HTML("Object-based co-localization is the <b>right</b> family for MINFLUX: there are no pixels and no intensity image, only coordinates, and nm precision makes the distance axis physically meaningful down to the label size. Cross-NN is computed strictly between channels (never within), on de-blinked centroids, and the Median-Cluster modes restrict pairing to molecules inside the same structure so a partner across the cell cannot be counted."),
             HTML("Cross-NN has <b>no null model built in</b> - every A point has a nearest B point, so the curve is never zero and a small median distance can arise from density alone. Judge it against Ripley&nbsp;L₁₂ or g₁₂ with their CSR envelopes. The dominant two-colour artefact here is <b>DCR crosstalk</b>: the split thresholds an overlapping DCR distribution, and every mis-assigned molecule contributes a near-zero distance - landing in the first histogram bin and the steep part of the co-localization curve. Read the co-localized fraction against the <b>per-group contamination</b> reported by the GMM auto-split, and use <b>pooled DCR</b> rather than raw DCR when available - it usually separates the dyes considerably better.")),
-          helpText("Requires '2-color MINFLUX' to be enabled in the Display tab.",
-                   "Channel assignment and clustering (tc1/tc2) are taken from the 2-color settings.",
-                   "Median  modes restrict comparisons to molecules within the same Median Cluster group."),
+          helpText("Every distance is measured strictly between the two channels."),
+          .detail("Channel assignment comes from the Display tab; clustering uses the single ",
+                  "de-blink / Median Clustering setup, run separately within each channel, so the ",
+                  "channels are never pooled or clustered together. The Median Cluster modes keep ",
+                  "only molecules inside a Median Cluster of their own channel, dropping the ",
+                  "unclustered background from both sides - the question becomes how far channel-1 ",
+                  "structures sit from channel-2 structures rather than from stray background. ",
+                  "'Median Cluster centroids' goes further and collapses each structure to one ",
+                  "point, giving one distance per structure."),
           selectInput("cross_nn_unit", "Unit",
             choices = c(
               "TID centroids"                            = "tid",
               "De-blinked molecule centroids"                = "cluster",
-              "TID centroids within Median Clusters"            = "cluster2_tid",
-              "De-blinked molecule centroids within Median Clusters"= "cluster2_cluster"
+              "TID centroids in Median Clusters (own channel)"            = "cluster2_tid",
+              "De-blinked molecule centroids in Median Clusters (own channel)" = "cluster2_cluster",
+              "Median Cluster centroids (own channel)"                    = "cluster2_centroid"
             ),
             selected = "tid"),
           numericInput("cross_nn_k", "k-th nearest neighbour", value = 1, min = 1, max = 10, step = 1),
@@ -2194,6 +2254,7 @@ smlm_ui <- fluidPage(
                        choices = c("Count" = "count", "Density" = "density"),
                        selected = "density", inline = TRUE),
           numericInput("cross_nn_bins", "Bins", value = 40, min = 5, max = 200),
+          checkboxInput("cross_nn_median_lines", "Show median lines", value = TRUE),
           checkboxInput("cross_nn_aggregate", "Aggregate all datasets into one", value = FALSE),
           actionButton("run_cross_nn", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
@@ -2214,10 +2275,10 @@ smlm_ui <- fluidPage(
             HTML("Cross-type K-function for two point patterns (<b>Lotwick &amp; Silverman 1982</b>; <b>Dixon 2002</b>): K₁₂(r)&nbsp;=&nbsp;area·#{d&nbsp;≤&nbsp;r}/(n₁·n₂) over all A–B pairs, with the same Besag L-transform as the univariate case. L₁₂(r)&nbsp;−&nbsp;r&nbsp;&gt;&nbsp;0 = co-localization at scale r, &lt;&nbsp;0 = exclusion."),
             HTML("Runs on de-blinked centroids of the two channels (DCR/fluorophore split, or a chosen multiplex channel pair) with the ≤2000-point subsample per channel. The <b>CSR envelope randomizes both channels independently in the shared window</b>, which is the correct null for 'these two species are placed without regard to each other' and again cancels the uncorrected edge bias. Median-Cluster modes compute L₁₂ inside each structure and average the curves, so a co-localization signal cannot be produced by the two channels merely occupying the same region of the cell. <b>A MINFLUX advantage applies here:</b> the DCR split excites both dyes with the same laser through the same beam path, so both channels share one coordinate frame - there is <b>no chromatic offset and no channel registration to calibrate</b>, and L₁₂ is trustworthy down to the localization precision."),
             HTML("Same missing analytic edge correction as L(r) - read against the envelope, not the zero line. The real two-colour error is <b>DCR mis-assignment (crosstalk)</b>, not offset: the split thresholds a continuous, overlapping DCR distribution, and a wrongly-assigned molecule sits by construction right next to its true neighbours - so crosstalk biases L₁₂ <b>upward at short r, toward false co-localization</b>, exactly where a real interaction shows. <b>Quantify it before trusting a result:</b> the GMM auto-split in the Display tab now reports d′, the expected mis-assignment rate and the per-group contamination - a co-localization signal is only meaningful if it is large compared with those. <b>Pool DCR at upload</b> (photon-weighted across the iteration sequence) if you have not: it usually separates the two dyes far better than raw DCR, and a better split is worth more here than any statistical correction. (Drift can offset the multiplex-by-files / by-time-window modes, which overlay separate acquisitions - that does not apply to the DCR split.) Asymmetric labelling density also skews the estimator; and nm-scale co-localization is proximity, <b>not</b> evidence of interaction.")),
-          helpText("Requires '2-color MINFLUX' to be enabled in the Display tab.",
-                   "L₁₂(r) − r > 0 indicates co-localization; < 0 indicates spatial exclusion.",
-                   "Median Cluster modes compute L₁₂ within each Median Cluster group and average the curves.",
-                   "Large datasets are subsampled to 2000 points per channel per file/group."),
+          helpText("L₁₂(r) − r > 0 is co-localization; < 0 is spatial exclusion."),
+          .detail("Median Cluster modes compute L₁₂ within each Median Cluster group and average ",
+                  "the curves. Large datasets are subsampled to 2,000 points per channel per ",
+                  "file or group."),
           selectInput("ripley12_unit", "Unit",
             choices = c(
               "TID centroids"             = "tid",
@@ -2256,10 +2317,9 @@ smlm_ui <- fluidPage(
             HTML("The pair-correlation (radial distribution) function - the derivative form of Ripley's K, counting cross pairs in an <b>annulus/shell</b> (r−dr/2, r+dr/2] normalized by its area (2D) or volume (3D). g₁₂&nbsp;=&nbsp;1 under CSR, &gt;1 attraction, &lt;1 repulsion. In SMLM this is the PC-PALM statistic (<b>Sengupta et&nbsp;al. 2011</b>; <b>Veatch et&nbsp;al. 2012</b>), developed precisely to separate multiple appearances of one protein from genuine clustering."),
             HTML("Being <b>scale-local rather than cumulative</b>, g₁₂ is the more informative of the two cross statistics on MINFLUX data: it puts the interaction distance at a peak instead of smearing it into a rising curve, and a short-r blinking/labelling artefact stays confined to the first few bins instead of contaminating every larger r as it does in L₁₂. Same de-blinked units, shared window and independent two-channel CSR envelope as L₁₂."),
             HTML("<b>Noisier than L₁₂</b> - each shell holds few pairs, so short-r bins are unstable and sensitive to the r-step choice (an apparent peak in the first bin is often binning, not biology). Same missing analytic edge correction; read against the envelope, which brackets g&nbsp;=&nbsp;1. DCR crosstalk and asymmetric labelling affect g₁₂ exactly as they affect L₁₂ - and because g₁₂ is scale-local, crosstalk piles into the <i>first shells</i>, which is also where a genuine interaction peak would appear.")),
-          helpText("g₁₂(r) = 1 under CSR; > 1 indicates attraction (co-localization) at scale r;",
-                   "< 1 indicates repulsion. Complements Ripley L₁₂ - shows the",
-                   "interaction scale as a peak rather than a cumulative curve.",
-                   "Requires '2-color MINFLUX' to be enabled in the Display tab."),
+          helpText("g₁₂(r) = 1 under CSR; > 1 is attraction at scale r, < 1 is repulsion."),
+          .detail("Complements Ripley L₁₂ by showing the interaction scale as a peak rather ",
+                  "than a cumulative curve."),
           selectInput("pcf12_unit", "Unit",
             choices = c("TID centroids" = "tid", "De-blinked molecule centroids" = "cluster"),
             selected = "tid"),
@@ -2294,14 +2354,13 @@ smlm_ui <- fluidPage(
             HTML("2D kernel density estimation (<b>Silverman 1986</b>; <code>MASS::kde2d</code>) of each channel on a shared grid, with the auto bandwidth from Silverman's rule bw&nbsp;=&nbsp;0.9·min(sd,&nbsp;IQR/1.34)·n<sup>−1/5</sup>. The co-localization index is the <b>Pearson correlation</b> of the two density surfaces (the coordinate-data analogue of Pearson co-localization on images, cf. <b>Dunn et&nbsp;al. 2011</b>), with an optional randomization test for significance."),
             HTML("MINFLUX has no pixels, so the density surface - and therefore the 'image' the Pearson r is computed on - is <b>manufactured by the bandwidth</b>, which is a free parameter rather than a property of the microscope. Two tools compensate: the <b>r-vs-bandwidth sweep</b> shows the whole family of answers instead of one, and the <b>randomization test</b> gives a p-value at the chosen bandwidth. Its default null is a <b>toroidal random shift</b> of channel 2 (<b>Lotwick &amp; Silverman 1982</b>), which preserves that channel's own clustering and point count and breaks only its registration with channel 1; a uniform-CSR null is selectable for comparison."),
             HTML("<b>The Pearson r is not an absolute quantity.</b> A small bandwidth drives r toward 0 even for perfectly co-localizing molecules (the two surfaces become disjoint spikes); a large one inflates r toward 1 because both channels simply fill the cell. Only compare r values computed at the same bandwidth on similarly dense data, and prefer the sweep to any single number. <b>The p-value is calibrated only when the signal fills the field:</b> both nulls randomize over the bounding box rather than the region the signal occupies, so for a structure confined to a small part of the view they reject too readily - the uniform-CSR null severely so, since p&nbsp;≈&nbsp;0 then mostly reports 'both channels are non-uniform'. For a bandwidth-free, scale-resolved answer use g₁₂(r) above.")),
-          helpText("Kernel density estimate for each channel on the active file's spatial grid.",
-                   "Ch1 shown as red contours, Ch2 as blue contours. Pearson r of the two",
-                   "density surfaces serves as a global co-localization coefficient,",
-                   "but is strongly bandwidth-dependent - a small bandwidth gives near-zero r",
-                   "even for perfectly co-localizing molecules, while a large bandwidth inflates r.",
-                   "Treat the Pearson r as relative rather than absolute.",
-                   "Select the dataset to inspect via 'Active file' in the Display tab.",
-                   "Requires '2-color MINFLUX' to be enabled in the Display tab."),
+          helpText("Density map per channel for the active file. ",
+                   tags$b("Treat the Pearson r as relative, not absolute.")),
+          .detail("Ch1 is drawn as red contours, Ch2 as blue. Pearson r of the two density ",
+                  "surfaces is a global co-localization coefficient, but it is strongly ",
+                  "bandwidth-dependent: a small bandwidth gives near-zero r even for perfectly ",
+                  "co-localizing molecules, and a large one inflates it. Choose the dataset with ",
+                  "'Active file' in the Display tab."),
           selectInput("kde_unit", "Unit",
             choices = c("TID centroids" = "tid", "De-blinked molecule centroids" = "cluster"),
             selected = "tid"),
@@ -2329,7 +2388,8 @@ smlm_ui <- fluidPage(
             choices = c("Random shift of Ch2 (recommended)" = "shift",
                         "Uniform CSR resampling of Ch2"     = "csr"),
             selected = "shift"),
-          helpText(HTML("<b>Random shift</b> translates Ch2 with wrap-around, preserving its own clustering and point count, so only the cross-channel registration is broken (Lotwick &amp; Silverman 1982). <b>Uniform CSR</b> replaces Ch2 with uniform random points, testing against complete spatial randomness instead.<br><b>Limitation:</b> both nulls randomize over the bounding box rather than the region the signal actually occupies. When the signal fills the field the p-value is well calibrated; when it is confined to a small part of the field (a single cell in a wider view) both nulls reject far too readily, CSR much more so. In that case treat a low p as weak evidence and confirm with g₁₂(r) against its envelope.")),
+          helpText(HTML("<b>Random shift</b> breaks only the cross-channel registration; <b>Uniform CSR</b> tests against complete randomness.")),
+          .detail(HTML("Random shift translates Ch2 with wrap-around, preserving its own clustering and point count (Lotwick &amp; Silverman 1982). Uniform CSR replaces Ch2 with uniform random points.<br><b>Limitation:</b> both nulls randomize over the bounding box rather than the region the signal actually occupies. When the signal fills the field the p-value is well calibrated; when it is confined to part of the field - a single cell in a wider view - both reject far too readily, CSR much more so. Treat a low p there as weak evidence and confirm with g₁₂(r) against its envelope.")),
           actionButton("run_kde_coloc", "Run",
                        icon = icon("play"), class = "btn-primary btn-sm"),
           downloadButton("download_kde_coloc", "Download CSV", class = "btn-sm")

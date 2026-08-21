@@ -846,10 +846,12 @@ Accepts `.npy`, `.json`, `.csv` (pyMINFLUX or this app's export), and the fast c
 `.qs` / `.fst` / `.rds`. Multiple files merge into one dataset with track IDs prefixed `F1_`, `F2_`
 so IDs from different files never collide.
 
-Large files are **chunked** on upload - split into per-TID groups written to a manifest directory -
-so playback stays responsive. Chunk size is set by *TIDs per chunk* and only affects Playback mode;
-Full-tracks mode always renders everything. The filter pipeline always reads **every** chunk, so
-filtering is never restricted to the chunk you are viewing.
+Large files are **chunked** on upload - split into blocks of whole TIDs written to a manifest
+directory - so rendering stays responsive on modest hardware. Chunk size is set by *TIDs per chunk*.
+The selected chunk scopes the **playback animation**; tick *Limit Full tracks to the selected chunk*
+to scope the static view as well (off by default, where Full tracks draws every track). The filter
+pipeline and every analysis always read **all** TIDs, so nothing is ever restricted to the chunk you
+are viewing.
 
 **No filter is applied automatically on upload** - CFR in particular is left alone, since it is not a
 strong artefact discriminator for tracking data. Filter it yourself via the CFR range below if you
@@ -895,12 +897,13 @@ a drawn box, keeping only tracks with at least a set percentage of their localiz
 
 Two things to know about how filters apply:
 
-- **Filters do not live-update the plot.** They apply on **Plot Data** (or Filter & Rechunk). The
-  histogram and the read-outs update live so you can see what you are selecting; the rendered tracks
-  stay put until you ask. This is deliberate - re-rendering a WebGL track view on every slider move is
-  slow and makes the filters feel laggy.
-- **Filter & Rechunk** makes the current filtered set the working dataset and re-chunks it, so
-  subsequent operations are faster. *Reset ranges* restores the original manifest.
+- **Filters do not live-update the plot.** They apply on **Plot Data**. The histogram and the
+  read-outs update live so you can see what you are selecting; the rendered tracks stay put until you
+  ask. This is deliberate - re-rendering a WebGL track view on every slider move is slow and makes the
+  filters feel laggy.
+- **Plot Data is the single apply action.** It runs the cleaning stages, applies the filters,
+  re-chunks the surviving tracks at the current *TIDs per chunk*, and re-renders. There is no separate
+  rechunk step. *Reset ranges* restores the original uploaded manifest.
 
 Filter settings save and load as `.json`, and the filtered set exports as `.csv` (carrying
 `z_scale_applied` for exact re-import).
@@ -1008,6 +1011,14 @@ Subtracts the σ_loc noise floor so slow regions are not reported as diffusing.
 
 Per-track inspection: raw coordinates, intervals, per-step displacements and the fits for one
 selected track. The first place to look when an aggregate result seems wrong.
+
+### Where the explanations live
+
+Panels on this tab print **numbers and short verdicts only**. Every method's rationale - what it
+assumes, how it is adapted to MINFLUX, and where it fails - is in the collapsed
+**ℹ Method & MINFLUX adaptation** box at the head of each panel, with the maths in *Key Calculations*
+below. Warnings still appear inline, but as one line each rather than a paragraph, so a result that
+needs attention is visible instead of buried.
 
 ---
 
@@ -1754,9 +1765,43 @@ D_\text{max} = \frac{L_\text{TCP}^2}{16} \cdot \frac{\psi}{N_\text{PL} + \psi \,
 ```
 
 where $L_\text{TCP}$ is the targeted-coordinate-pattern diameter, $\psi$ the photon rate, $N_\text{PL}$
-the photons per localization and $t_\text{hw}$ the hardware overhead. Surfaced as a green/amber/red
-flag. It is a theoretical form, so it may under-warn near the demonstrated practical ceiling of roughly
-2.5–3 µm²/s.
+the photons per localization and $t_\text{hw}$ the hardware overhead. In the app $\psi$ is the median
+**EFO**, $N_\text{PL}$ the median **ECO** (which *is* the photon count per localization), and
+$t_\text{loc} = \text{ECO}/\text{EFO}$ feeds the simpler $L^2/(16\,t_\text{loc})$ fallback used when
+either column is missing. Surfaced as a green/amber/red flag.
+
+**Which $L$ to enter — or rather, don't.** Upload the acquisition sequence `.json` under *Time
+Signature Analysis* and $L_\text{TCP}$ is read from it directly. Sequence files do not store the pattern
+diameter; they store `patGeoFactor`, a dimensionless multiplier, and
+
+```math
+L_\text{TCP} = \text{patGeoFactor} \times 360\ \text{nm}
+```
+
+wavelength-independently. The panel takes the **final iteration** — the one the sequence reiterates
+continuously once locked on (`headstart = -1`) — because that is the pattern the particle has to stay
+inside between consecutive fixes. Coarse search iterations do not enter, and neither does the much
+tighter final iteration an *imaging* sequence uses. SPT stops at a larger $L$ on purpose: precision
+improves only linearly as $L$ shrinks ($\sigma_\text{CRLB} \propto L/4\sqrt{N}$) while the risk of the
+particle escaping the pattern grows quadratically.
+
+Typical ladders, for orientation:
+
+| Sequence | Iteration diameters (nm) | Final |
+|---|---|---|
+| Tracking, 2D | 284 · 302 · 151 · 101 | **100.8** |
+| Tracking, 3D octahedron | 288 · 288 · 288 · 151 · 101 | **100.8** |
+| Imaging, 2D | 288 · 288 · 151 · 76 · 40 | 39.6 |
+
+Without a sequence file the app falls back to 100 nm. Vogler quote 150 nm because their sequence stops
+one iteration earlier; an imaging sequence's 39.6 nm is a different regime entirely. Since the ceiling
+scales as $L^2$, this is the input that most rewards being read from the file rather than assumed.
+$t_\text{hw}$ defaults to 0.05 ms, Vogler's $t_{\text{hw},\eta=1} \approx 52\ \mu\text{s}$ for a
+hexagonal TCP.
+
+It is a theoretical form, so it may under-warn near the demonstrated practical ceiling of roughly
+2.5–3 µm²/s: Vogler compute $D_\text{max} \approx 10\text{–}11$ µm²/s under optimized parameters but
+demonstrate tracking only to $\approx 2.5$ µm²/s on lipid analogues.
 
 ---
 
@@ -1808,8 +1853,8 @@ MINFLUXR/
 - **Multiple datasets**: in the SMLM tab several files can be loaded simultaneously and compared with
   the Active file selector. Lock filters when switching to prevent accidental resets, and use Dataset
   Groups in the Analysis tab to pool and compare conditions.
-- **Filter & Rechunk is non-destructive**: the original chunk set is frozen at upload time. Every
-  Filter & Rechunk reads from that frozen original, so resetting all filters and rechunking recovers
+- **Re-chunking is non-destructive**: the original chunk set is frozen at upload time. Every
+  Plot Data reads from that frozen original, so resetting all filters and pressing it again recovers
   the full dataset.
 - **MSD fit range**: the linear fit uses Michalet & Berglund optimal-point selection for you. If you
   override it, keep to the early lags - later points rest on fewer pairs, have higher variance, and
