@@ -126,17 +126,42 @@ inside-test and normal for ellipsoid & spherocylinder). Repeat until the step la
 
 Subsample the fine ground-truth path the MINFLUX way:
 
-1. **Cycle clock** — base cycle time t_cyc (e.g. 0.5–1 ms). A localization is *attempted* each cycle.
+1. **Cycle clock + SW offset** — base cycle time t_cyc, plus a fixed per-localization overhead SW
+   (settling / window). Real files obey **Δt = k·t_cyc + SW exactly**, so the *modal* Δt is
+   t_cyc + SW, not t_cyc. The generator gives every cycle a duration of t_cyc and adds SW once for
+   each *recorded* cycle, which reproduces that quantisation. The molecule diffuses through the SW
+   too — putting SW on the clock but not in the step duration under-recovers D by t_cyc/(t_cyc+SW).
 2. **Dark cycles → irregular Δt** — each attempted cycle is **integrated** (recorded) with probability
    p_int, else **dark** (skipped). Consecutive darks accumulate, so Δt between recorded localizations =
-   (1 + n_dark)·t_cyc, with n_dark from a geometric (or empirically-calibrated) distribution. This is
+   k·t_cyc + SW, with k geometric (or empirically-calibrated). This is
    what produces the mixed dark-cycle structure across tracks.
-3. **σ_loc (heteroscedastic)** — per recorded localization draw N_photons (∼ Poisson around EFO·t_dwell),
-   σ_loc = L_TCP/(2·√N); add Gaussian noise N(0, σ_loc²) per axis. Record `eco=N`, `efo`.
-4. **Motion blur** — R≈0 (sample the instantaneous position at the cycle time). ⚠ The optional nonzero-R path below is **not implemented**; the sampling overlay has no blur step. Optional:
-   average the path over the acquisition sub-window for a small nonzero R.
+3. **σ_loc (heteroscedastic)** — per recorded localization draw N_photons (∼ Poisson around the mean
+   `eco`), σ_loc = **L_TCP/(4·√N)**; add Gaussian noise N(0, σ_loc²) per axis. Record `eco=N`, `efo`.
+   L_TCP is the final-iteration TCP diameter, read off a sequence .json as `patGeoFactor × 360 nm`
+   (see `TCP_L_PER_GEOFACTOR_NM`); the stock tracking sequences end at 0.28 → **100.8 nm**.
+4. **Motion blur** — implemented, on by default. A localization is the *time-average* of the path over
+   the photon-collection window τ (an input, as a fraction of the cycle). Conditioned on both end
+   points of the step, that average is
+
+   > mean = x_i + (τ/2Δt)·(x_{i+1} − x_i),  var = (2Dτ/3)·(1 − 3τ/4Δt) per axis
+
+   which reduces to the midpoint plus D·Δt/6 when τ = Δt. The corresponding blur coefficient is
+   **R = τ/(6·Δt)**: a full-cycle window gives 1/6, a short burst tends to 0. Exact for free / volume
+   diffusion; on a curved surface the bridge noise is kept in the tangent plane (the average of two
+   surface points sits marginally inside the surface). Switching blur off gives R = 0 snapshot sampling.
 5. **Photobleaching → finite length** — end the track after a photon-budget-limited number of
    localizations (geometric/exponential), so track lengths are short and realistic.
+5b. **Heterogeneous D** — each track may draw its own D from a lognormal whose median is the D input
+   and whose spread is set by a CV input. 0 (the default) gives one D for the whole population. With
+   spread on, the pooled CVE cannot recover the median: it recovers the step-weighted mean of the
+   drawn values, and the summary scores the round-trip against that.
+5c. **Speed-dependent dark cycles** — optionally p_dark = 1 − (1 − p_dark₀)·exp(−d/scale), with d the
+   true displacement over that cycle, decided inside the path loop so it uses the realized step. This
+   is the *population selection* mechanism: fast molecules dark-cycle more, so the surviving gapped
+   steps oversample slow ones.
+5d. **Re-acquisition shrinkage** — optionally the first localization after a dark gap is reported a
+   fixed fraction of the way back toward the previous *reported* position, the estimator-bias
+   mechanism. See §10 for what this predicts and why the real data rejects it in this form.
 6. **Survivorship / re-acquisition radius R_reacq** — if the molecule moves > R_reacq during a dark
    gap, the track **terminates** (lost). *This reproduces the dark-cycle survivorship bias* (long-Δt
    steps preferentially retain small displacements → manufactured apparent confinement). Off by default,
@@ -161,8 +186,11 @@ validation loop of §1 closed in one number.
 is the same integrated-pair restriction the real CVE applies — mixing multi-cycle steps would inflate
 D. Then, per Vestergaard et al. 2014:
 
-> D = ( ⟨|Δr|²⟩ + 2·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / (2·d_mot·t_c)
-> σ_loc = √( −⟨Δrᵢ·Δrᵢ₊₁⟩ / n_cart )
+> D = ( ⟨|Δr|²⟩ + 2·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / (2·d_mot·Δt),  Δt = t_c + SW
+> σ_loc² = ( R·⟨|Δr|²⟩ + (2R−1)·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / n_cart,  R = 1/6 with blur, 0 without
+
+D is blur-independent; σ_loc is not. Reading a blurred acquisition with R = 0 (σ² = −cov₁) is what
+makes a real 4 nm σ_loc read as 1.4 nm.
 
 The consecutive-step covariance is negative for localization noise (an error displaces step *i* one way
 and step *i+1* the other), which is what lets the same two moments separate D from σ_loc without an
@@ -227,3 +255,83 @@ D. It bounds estimator error, not model error.
   export for full HMM scoring.
 
 Everything is labelled a **simulation / validation tool**; it does not alter the standard analysis path.
+
+## 9. Default parameters — where they come from
+
+The Diffusion / Tracking defaults are the measured values of the GP67H tracking test data
+(`251027-200445_GP67H-track-013_filtered…csv`, `251027-202407_GP67H-track-014_filtered…csv`) and of the
+stock 2D tracking sequence (`Test data/Tracking Imaging Sequences/Tracking_2D_Oct2022.json`).
+
+| Field | Default | Source |
+|---|---|---|
+| TCP diameter L | 100.8 nm | sequence .json, final iteration `patGeoFactor` 0.28 × 360 nm |
+| Mean photons/loc | 38 | median `eco` (013: 38, 014: 36) |
+| Cycle time | 0.192 ms | spacing of the Δt levels (013: 0.1939, 014: 0.1923) |
+| SW offset | 0.011 ms | intercept of Δt = k·t_c + SW (013: 11.4 µs, 014: 10.4 µs) |
+| Dark-cycle prob. | 0.28 | Σ(k−1)/Σk on filtered data (013: 0.26, 014: 0.29; unfiltered 014: 0.61) |
+| Median locs/track | 100 | median track length of 014 filtered (013 is a 101-track subset with median 666) |
+| # tracks | 300 | 679 tracks in 014 filtered, 342 of them ≥100 locs |
+| D | 0.3 µm²/s | per-track CVE median (013: 0.28, 014: 0.33); the pooled CVE is 0.21–0.22, weighted toward the long, slower tracks |
+
+σ_loc is *not* an input — it follows from L and N. The cross-check: L/(4·√38) = 4.09 nm, and the
+blur-aware CVE (R = 1/6) on both real files gives 4.13 and 4.08 nm. The R = 0 form reads 1.5 and 1.3 nm
+on the same data, which is the blur term, not a precision difference.
+
+Sequence-file numbers not yet used by the simulator: `patDwellTime` 100 µs, `phtLimit` 20 (final
+iteration), 4 iterations, hexagon pattern, `ctrDwellFactor` 0.16, `stickiness` 4, `damping` 2.
+The dwell and photon limit together imply the cycle time and the photon budget, so they are a route to
+predicting t_cyc and `eco` rather than calibrating them from data.
+
+### Still missing from the sampling overlay
+
+- **Photon budget as the cycle terminator.** N_photons is drawn independently of the cycle; on the
+  instrument the cycle ends when `phtLimit` is reached *or* `patDwellTime` times out, which couples
+  N, t_cyc and brightness. Dim molecules should get longer cycles, not just fewer photons.
+- **`efo` / `cfr` / `dcr`.** `efo` is written as N/t_cyc and the other two are absent, so simulated
+  tracks cannot exercise the quality filters (real medians: efo ≈ 3.0–3.2e5, cfr ≈ 0.40–0.62,
+  dcr ≈ 0.64–1.0).
+- **Track-to-track heterogeneity.** Every simulated molecule gets the same D. Real per-track CVE D
+  spans 0.23–0.43 µm²/s (IQR) on these files, so an estimator that looks unbiased on the simulator can
+  still be biased on a heterogeneous population.
+- **Background / mislocalization.** No off-target or background localizations, so no test of what a
+  stray point does to MSD, JDD or confinement.
+- **Trace ID re-use and re-acquisition.** A molecule lost and re-found gets a new tid on the
+  instrument; the simulator has no re-acquisition model, only the survivorship cut.
+
+## 10. Which mechanism flattens the k-curve?
+
+Real MINFLUX tracking files show per-axis ⟨Δx²⟩ growing far more slowly with the dark-gap length k
+than free diffusion allows (GP67H: 100 / 75 / 53 / 42 / 36 / 30 % of expectation for k = 1…6, see
+`tracking_sigma_and_cve_plan.md` §2.3). The simulator now carries the three candidate mechanisms, and
+the summary panel prints the same k-curve, so they can be told apart. Sweeps at D = 0.3 µm²/s,
+free geometry, 250 tracks:
+
+| model | k = 1…6, % of free expectation | verdict |
+|---|---|---|
+| baseline | 99 100 104 100 107 100 | the null: flat, as it must be |
+| heterogeneous D (CV 0.7) | 100 100 105 107 96 144 | **no effect on its own** |
+| speed-dependent dark (scale 20 nm) | 81 81 88 103 115 114 | depresses *all* k alike, no gradient |
+| gap shrinkage 0.5 | **118** 27 27 25 28 24 | crushes k ≥ 2 but *inflates k = 1* |
+| survivorship R_reacq = 50 nm | 100 96 95 78 66 67 | **matches the real shape** |
+
+Two conclusions:
+
+- **Shrinkage in this form is falsified by the data.** Pulling a post-gap localization back toward
+  the previous one displaces the reported track from the true one, and the following single-cycle step
+  has to repay the difference — so k = 1 goes *up*. Real files show k = 1 fully consistent with the
+  CVE D, so whatever compresses the gapped steps does not leave that footprint. The knob is kept
+  because it is the honest implementation of the mechanism, and because a falsifiable prediction that
+  fails is a result.
+- **Censoring is the surviving candidate.** It is the only mechanism tested that leaves k = 1 intact
+  and produces a *gradient* over k. The earlier objection — "tracks do not preferentially end after a
+  large gap" — was not a valid test: a censored step is **absent** from the file, it does not appear
+  as a track-ending step, so this signature is invisible by construction.
+
+Censoring also reproduces the second real-data signature. With R_reacq = 50 nm and a heterogeneous
+population, the step-weighted mean D drops to 0.231 against a median of 0.428, because fast molecules
+have their tracks cut short and contribute fewer steps. That is the same direction and rough size as
+the real pooled-vs-per-track gap (0.22 pooled against a 0.30 per-track median).
+
+The caveat worth carrying: the R_reacq that reproduces the real k-curve is ~50 nm, well below the
+323 nm search field of the sequence's first iteration. Either the effective re-acquisition range is
+much tighter than the field, or censoring is not the whole story.

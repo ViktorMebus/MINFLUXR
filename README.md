@@ -1518,10 +1518,13 @@ for free diffusion only. Reported units: $D$ in µm²/s, $\sigma_\text{loc}$ in 
 
 ### CVE (Covariance-Based Estimator)
 
-The Data Quality panel estimates $\sigma_\text{loc}$ and $D$ **without fitting an MSD curve**
-(Vestergaard et al. 2014). This is the app's primary precision and free-D readout - the MSD panel is
-the cross-check, not the other way around - and $\sigma_\text{loc}$ from here becomes the app-wide
-noise floor consumed by the D-map, JDD, confinement, HMM, directionality and speed tools.
+The Data Quality panel estimates $D$ **without fitting an MSD curve** (Vestergaard et al. 2014), and
+this is the app's primary free-D readout — the MSD panel is the cross-check, not the other way around.
+
+$\sigma_\text{loc}$ is **not** taken from the CVE. It comes from the photon budget,
+$\sigma_i = L_\text{TCP}/(4\sqrt{N_i})$ with $N$ = ECO, and that is what becomes the app-wide noise
+floor consumed by the D-map, JDD, confinement, HMM, directionality and speed tools. The reasons are
+below, under *Why σ does not come from the CVE*.
 
 #### Why consecutive steps carry the precision
 
@@ -1544,16 +1547,57 @@ That sign is the whole trick. Real motion cannot produce a negative lag-1 covari
 contributions separate cleanly with no model fitting:
 
 ```math
-\sigma_\text{loc}^2 = -\langle \Delta x_i \, \Delta x_{i+1} \rangle, \qquad D_\text{CVE} = \frac{\langle \Delta x^2 \rangle}{2\Delta t} + \frac{\text{cov}_1}{\Delta t}
+D_\text{CVE} = \frac{\langle \Delta x^2 \rangle}{2\Delta t} + \frac{\text{cov}_1}{\Delta t}
 ```
 
 The added $\text{cov}_1$ term (negative in value) is what removes the localization-error inflation from the
-naive $\langle \Delta x^2 \rangle / 2\Delta t$. Both are computed per axis and averaged over x, y and,
-when real z is present, z.
+naive $\langle \Delta x^2 \rangle / 2\Delta t$. It is computed per axis and averaged over x, y and,
+when real z is present, z. **D is independent of motion blur** — the identity above holds for any
+exposure model, which is why D survives the correction below unchanged.
 
 **Only consecutive integrated (single-cycle) step pairs are used.** The derivation assumes constant
 $\Delta t$; admitting dark-gap steps of varying length would bias the covariance. See TSA above for
 what "integrated" means.
+
+#### Why σ does not come from the CVE
+
+The identity $\sigma^2 = -\text{cov}_1$ is the **instantaneous-exposure** case, $R = 0$ in
+Vestergaard's notation. A MINFLUX localization is not a snapshot: photons are collected across the TCP
+cycle, so the reported position is a time-average of the path over that window and the blur term does
+not vanish. The general form is
+
+```math
+\sigma_\text{loc}^2 = R\,\langle \Delta x^2 \rangle + (2R - 1)\,\text{cov}_1,
+\qquad R = \frac{t_c}{6\,\Delta t}
+```
+
+with $R \to 1/6$ for a full-cycle window. Reading MINFLUX data at $R = 0$ under-reports σ about
+threefold: on the two GP67H tracking files it gives 1.5 and 1.3 nm where the blur-aware form gives
+4.0 and 4.0 nm.
+
+Correcting R is necessary but not sufficient. At $R \approx 1/6$ roughly **90% of $\sigma^2$ comes from
+the $R\langle\Delta x^2\rangle$ term**, so the estimate is close to $\sqrt{R} \times \text{rms step}$ —
+a function of the assumed R and of the step-size distribution, which population heterogeneity and any
+residual drift both inflate. What the data contributes independently, $\text{cov}_1$, is a few-percent
+residual ($r_1 \approx -0.02$). So the app uses the photon budget instead:
+
+```math
+\sigma_i = \frac{L_\text{TCP}}{4\sqrt{N_i}}
+```
+
+per localization, with $N$ = ECO and $L_\text{TCP}$ from *Acquisition Parameters* (auto-filled from the
+sequence's `patGeoFactor`). This is a direct instrument model: per-localization rather than pooled, and
+free of any assumption about the motion.
+
+The blur-aware CVE σ is kept beside it as a **cross-check on L** — inverting it as
+$L = 4\hat{\sigma}\sqrt{\bar{N}}$ should return the sequence's diameter. On the GP67H files it returns
+99.4 and 95.6 nm against the sequence's 100.8 nm, from two routes sharing no assumptions.
+
+> ⚠ **What is not yet nailed down.** The prefactor 4 in $\sigma = L/(4\sqrt{N})$ is corroborated by that
+> agreement, on two files from one sample. The clean calibration is an immobile sample acquired with a
+> **tracking** sequence, where within-trace spread measures precision with no motion model in the way.
+> A fiducial recorded with an *imaging* sequence does not settle it: that calibrates a different
+> iteration (L = 39.6 nm rather than 100.8 nm).
 
 #### How well is σ actually resolved?
 
@@ -1565,8 +1609,8 @@ r_1 = \frac{-\sigma_\text{loc}^2}{2D\Delta t + 2\sigma_\text{loc}^2}, \qquad \te
 ```
 
 - $r_1 \to -0.5$: noise dominates the step variance, σ is cleanly resolved
-- $r_1 \to 0$: σ is a marginal residual on top of motion - the **pooled** σ is still the best estimate,
-  but per-track σ differences then mostly track mobility, not precision
+- $r_1 \to 0$: σ is a marginal residual on top of motion, which is the normal regime for MINFLUX
+  tracking - per-track σ differences then mostly track mobility, not precision
 - $r_1 > 0$: correlated or directed motion dominates and σ is not resolvable there
 
 The panel reports this as a percentage and warns below 15%.

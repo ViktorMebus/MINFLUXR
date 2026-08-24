@@ -242,15 +242,25 @@ tracking_server <- function(input, output, session) {
   # ── App-wide localization precision σ_loc (the short-lag noise floor) ────────
   # Two independent sources feed the app-wide value, in priority order:
   #   1. manual override (input$trk_sigma_loc_nm > 0)
-  #   2. the Calibration panel's CVE estimate (MSD-free; trk_sigma_loc_cve)
-  #   3. the unified MSD fit's intercept (trk_sigma_loc_rv)
+  #   2. the photon-budget estimate, L_TCP/(4*sqrt(eco))  (trk_sigma_loc_photon)
+  #   3. the blur-aware CVE estimate                      (trk_sigma_loc_cve)
+  #   4. the unified MSD fit's intercept                  (trk_sigma_loc_rv)
   # Every short-lag tool (D-map, JDD, confinement, HMM, directionality, speed)
   # reads trk_sigma_loc_eff() so the noise floor is consistent everywhere.
-  trk_sigma_loc_rv  <- reactiveVal(NA_real_)   # nm, from the last unified MSD fit
-  trk_sigma_loc_cve <- reactiveVal(NA_real_)   # nm, from the CVE calibration
+  #
+  # WHY THE PHOTON MODEL OUTRANKS THE CVE. The CVE σ is dominated by its
+  # R*⟨Δx²⟩ blur term (~90% of σ² at R ≈ 1/6), so it mostly reports sqrt(R) x rms
+  # step - sensitive to the assumed R, and inflated by population heterogeneity and
+  # drift. L/(4*sqrt(N)) is a per-localization instrument model that assumes nothing
+  # about the motion. The CVE is kept as an independent cross-check on L.
+  trk_sigma_loc_rv     <- reactiveVal(NA_real_)   # nm, from the last unified MSD fit
+  trk_sigma_loc_cve    <- reactiveVal(NA_real_)   # nm, blur-aware CVE (cross-check)
+  trk_sigma_loc_photon <- reactiveVal(NA_real_)   # nm, median L/(4*sqrt(eco))
   trk_sigma_loc_eff <- reactive({
     manual <- suppressWarnings(as.numeric(input$trk_sigma_loc_nm %||% 0))
     if (is.finite(manual) && manual > 0) return(manual)
+    ph <- trk_sigma_loc_photon()
+    if (is.finite(ph) && ph > 0) return(ph)
     cve <- trk_sigma_loc_cve()
     if (is.finite(cve) && cve > 0) return(cve)
     s <- trk_sigma_loc_rv()
@@ -260,7 +270,8 @@ tracking_server <- function(input, output, session) {
   trk_sigma_loc_src <- reactive({
     manual <- suppressWarnings(as.numeric(input$trk_sigma_loc_nm %||% 0))
     if (is.finite(manual) && manual > 0) "manual override"
-    else if (is.finite(trk_sigma_loc_cve())) "calibration (CVE)"
+    else if (is.finite(trk_sigma_loc_photon())) "photon budget"
+    else if (is.finite(trk_sigma_loc_cve())) "CVE (cross-check)"
     else if (is.finite(trk_sigma_loc_rv()))  "MSD fit"
     else "not set"
   })
@@ -473,7 +484,66 @@ tracking_server <- function(input, output, session) {
     shiny::validate(shiny::need(length(vals) >= 20,
       "Too few consecutive integrated steps for a CVE estimate - relax filters or check the cycle time."))
     cov1   <- mean(vals)
-    sigma2 <- -cov1
+    # ── Motion blur (Vestergaard's R) ──────────────────────────────────────────
+    # A MINFLUX localization is not a snapshot: photons are collected across the
+    # whole TCP cycle, so the reported position is a time-average of the molecule's
+    # path over that window. Vestergaard's CVE then reads
+    #     sigma^2 = R*<dx^2> + (2R - 1)*cov1        (D is blur-INDEPENDENT)
+    # with R = t_collect/(6*dt). R = 0 is the instantaneous-exposure special case,
+    # where it collapses to sigma^2 = -cov1 - which is what this used to compute,
+    # and it under-reports sigma by ~3x on real tracking data (1.5 vs 4.1 nm on the
+    # GP67H files). Collection spans the cycle t_c out of a step dt = t_c + SW, so
+    # R = t_c/(6*dt); a full-cycle window at SW = 0 gives the familiar 1/6.
+    dt_int  <- mean(dt[integ_step], na.rm = TRUE)
+    # R is not a single knowable number: it depends on how the cycle's photons are
+    # distributed in time, and only part of that is visible in the data. So bound it.
+    #
+    #   R_hi - collection spans the whole cycle: R = t_c/(6*dt), capped at 1/6.
+    #   R_lo - collection is only the measured ECO/EFO window, delivered as a
+    #          staircase over the pattern's vertices, with the beam moves between
+    #          them and the terminal localization step contributing nothing.
+    #          Closed form for K equal dwells of a, moves of m, terminal r:
+    #            R = [ sum_i a*(s0(1-s0) + d(1-2*s0)/2 - d^2/3) + sum_i m*(i/K)(1-i/K) ] / dt
+    #          with d = 1/K and s0 = (i-1)/K.
+    # Vertex count is a weak lever (triangle 0.131 vs hexagon 0.137 at these
+    # timings); the terminal step is the strong one (0.165 without it, 0.137 with).
+    .blur_R_duty <- function(dt_ms, t_coll_ms, K, t_eod_ms = 0.0053, t_rep_ms = 0.020) {
+      if (!is.finite(dt_ms) || dt_ms <= 0 || !is.finite(t_coll_ms) || t_coll_ms <= 0 ||
+          !is.finite(K) || K < 1) return(NA_real_)
+      t_coll_ms <- min(t_coll_ms, dt_ms)
+      a  <- t_coll_ms / K
+      m  <- max(0, min(t_eod_ms, (dt_ms - t_coll_ms) / K))
+      d  <- 1 / K; i <- seq_len(K); s0 <- (i - 1) / K
+      dwell_part <- sum(a * (s0 * (1 - s0) + d * (1 - 2 * s0) / 2 - d^2 / 3))
+      flat_part  <- sum(m * (i / K) * (1 - i / K))
+      (dwell_part + flat_part) / dt_ms
+    }
+    R_hi <- if (is.finite(t_c) && t_c > 0 && is.finite(dt_int) && dt_int > 0)
+              min(1/6, t_c / (6 * dt_int)) else 1/6
+    # Collection window from the photon budget: t_coll = ECO / EFO.
+    .med_of <- function(cn) if (cn %in% names(df)) {
+                              v <- df[[cn]][is.finite(df[[cn]]) & df[[cn]] > 0]
+                              if (length(v)) stats::median(v) else NA_real_
+                            } else NA_real_
+    eco_m <- .med_of("eco"); efo_m <- .med_of("efo")
+    t_coll <- if (is.finite(eco_m) && is.finite(efo_m) && efo_m > 0) eco_m / efo_m * 1000 else NA_real_
+    n_vert <- {
+      sp <- tryCatch(if (is.null(input$trk_seq_json)) NULL else trk_seq_params(), error = function(e) NULL)
+      v  <- if (!is.null(sp) && isTRUE(sp$ok)) sp$vertices else NA_integer_
+      if (!is.finite(v)) suppressWarnings(as.integer(input$trk_hw_vertices %||% 6L)) else v
+    }
+    if (!is.finite(n_vert) || n_vert < 1L) n_vert <- 6L
+    R_lo <- .blur_R_duty(dt_int, t_coll, n_vert)
+    if (!is.finite(R_lo) || R_lo <= 0 || R_lo > R_hi) R_lo <- R_hi
+    R_blur <- R_lo   # the physically modelled value; R_hi bounds the other side
+    sq_all  <- c(dx[integ_step]^2, dy[integ_step]^2)
+    if (has_z) sq_all <- c(sq_all, dz[integ_step]^2)
+    sq_all  <- sq_all[is.finite(sq_all)]
+    msq     <- if (length(sq_all)) mean(sq_all) else NA_real_
+    .sig_from <- function(msq_v, cov_v)
+      if (!is.finite(msq_v) || !is.finite(cov_v)) NA_real_
+      else sqrt(max(0, R_blur * msq_v + (2 * R_blur - 1) * cov_v))
+    sigma2 <- R_blur * msq + (2 * R_blur - 1) * cov1
     sigma  <- sqrt(max(0, sigma2))
     # ── Per-axis-group σ: LATERAL (x,y) vs AXIAL (z) ────────────────────────────
     # `sigma` above pools all axes into ONE number. In 3D MINFLUX the axial precision
@@ -481,17 +551,18 @@ tracking_server <- function(input, output, session) {
     # under-states σ_z. Several consumers are purely lateral (the D-map is an x–y map;
     # JDD/MSD in 2D mode), and subtracting a z-inflated noise floor from them
     # over-corrects. Report both so the anisotropy is visible and quantified.
-    .sig_of <- function(v) { v <- v[is.finite(v)]
-                             if (length(v) < 10L) NA_real_ else sqrt(max(0, -mean(v))) }
-    sigma_xy <- .sig_of(c(prod_x[pair], prod_y[pair]))
-    sigma_z  <- if (has_z) .sig_of(prod_z[pair]) else NA_real_
+    .sig_of <- function(v, sqv) {
+      v <- v[is.finite(v)]; sqv <- sqv[is.finite(sqv)]
+      if (length(v) < 10L || !length(sqv)) NA_real_ else .sig_from(mean(sqv), mean(v))
+    }
+    sigma_xy <- .sig_of(c(prod_x[pair], prod_y[pair]),
+                        c(dx[integ_step]^2, dy[integ_step]^2))
+    sigma_z  <- if (has_z) .sig_of(prod_z[pair], dz[integ_step]^2) else NA_real_
     # Axial/lateral ratio - > ~1.3 means a single pooled σ_loc is a poor description.
     sig_aniso <- if (is.finite(sigma_xy) && sigma_xy > 0 && is.finite(sigma_z))
                    sigma_z / sigma_xy else NA_real_
-    # Free bonus: bias-corrected D (per axis) = ⟨Δ²⟩/(2Δt) + cov1/Δt.
-    sq     <- c(dx[integ_step]^2, dy[integ_step]^2); if (has_z) sq <- c(sq, dz[integ_step]^2)
-    sq     <- sq[is.finite(sq)]
-    dt_int <- mean(dt[integ_step], na.rm = TRUE)
+    # D is blur-independent: D = ⟨Δ²⟩/(2Δt) + cov1/Δt holds for any R.
+    sq     <- sq_all
     D_cve  <- if (length(sq) && is.finite(dt_int) && dt_int > 0) mean(sq)/(2*dt_int) + cov1/dt_int else NA_real_
 
     # ── How well is σ actually resolved? (drives the photon-weighting gate) ─────
@@ -525,8 +596,25 @@ tracking_server <- function(input, output, session) {
     phot_col <- if ("eco" %in% names(df) && any(is.finite(df$eco) & df$eco > 0)) "eco"
                 else if ("efo" %in% names(df) && any(is.finite(df$efo) & df$efo > 0)) "efo"
                 else NA_character_
+    # Per-track σ carries the same blur correction. Note what it can and cannot
+    # say: at R ≈ 1/6 the R*⟨Δx²⟩ term is ~90% of σ², so per-track differences here
+    # track the per-track STEP SIZE (mobility) far more than the photon budget.
+    # Kept for the outlier/degenerate QC below, not as a precision measurement -
+    # the per-localization photon estimate is what the panel plots.
+    sq_x_pt <- dx^2; sq_y_pt <- dy^2; sq_z_pt <- if (has_z) dz^2 else rep(NA_real_, n)
+    msq_by_tid <- {
+      v <- c(sq_x_pt[integ_post], sq_y_pt[integ_post])
+      t2 <- c(df$tid[integ_post], df$tid[integ_post])
+      if (has_z) { v <- c(v, sq_z_pt[integ_post]); t2 <- c(t2, df$tid[integ_post]) }
+      ok <- is.finite(v); tapply(v[ok], t2[ok], mean)
+    }
     pertrack_sigma <- if (length(pv)) {
-      s2_by  <- tapply(pv, tv, function(v) -mean(v))
+      cov_by <- tapply(pv, tv, mean)                    # per-track cov1
+      s2_by  <- vapply(names(cov_by), function(nm) {
+                  mq <- msq_by_tid[[nm]]
+                  if (is.null(mq) || !is.finite(mq)) -1
+                  else R_blur * mq + (2 * R_blur - 1) * cov_by[[nm]]
+                }, numeric(1))
       n_by   <- tapply(integ_post, df$tid, sum)[names(s2_by)]
       # Photon predictor for the precision model. σ_loc ≈ L_TCP/(2√N) depends on the
       # photon COUNT N, so ECO (effective counts) is the physically correct variable.
@@ -605,7 +693,37 @@ tracking_server <- function(input, output, session) {
       suppressWarnings(stats::cor(pertrack_sigma$phot_med, pertrack_sigma$var_step,
                                   method = "spearman", use = "complete.obs")) else NA_real_
 
+    # ── σ_loc from the photon budget - the value the app actually uses ─────────
+    # σ_i = L_TCP / (4*sqrt(N_i)) per localization, N = eco. This is a direct
+    # instrument model: it needs no assumption about the motion, is per-localization
+    # rather than pooled, and does not inherit the step-size inflation that
+    # population heterogeneity and drift push into the CVE's ⟨Δx²⟩ term.
+    # The CVE σ above is retained as a CROSS-CHECK on L, not as the noise floor.
+    L_tcp <- suppressWarnings(as.numeric(input$trk_L_tcp %||% DMAX_L_TCP_DEFAULT))
+    if (!is.finite(L_tcp) || L_tcp <= 0) L_tcp <- DMAX_L_TCP_DEFAULT
+    ecov  <- if ("eco" %in% names(df)) df$eco[is.finite(df$eco) & df$eco > 0] else numeric(0)
+    sig_phot_i   <- if (length(ecov)) L_tcp / (TCP_CRLB_PREFACTOR * sqrt(ecov)) else numeric(0)
+    sig_phot_med <- if (length(sig_phot_i)) stats::median(sig_phot_i) else NA_real_
+    sig_phot_iqr <- if (length(sig_phot_i) >= 5L)
+                      as.numeric(diff(stats::quantile(sig_phot_i, c(.25, .75)))) else NA_real_
+    eco_med      <- if (length(ecov)) stats::median(ecov) else NA_real_
+    # Invert the blur-aware CVE for L and compare against the sequence's L. The two
+    # routes share no assumptions, so agreement is a real check on the prefactor.
+    sigma_at  <- function(R) sqrt(max(0, R * msq + (2 * R - 1) * cov1))
+    sig_R_lo  <- sigma_at(R_lo); sig_R_hi <- sigma_at(R_hi)
+    L_implied <- if (is.finite(sigma) && sigma > 0 && is.finite(eco_med))
+                   TCP_CRLB_PREFACTOR * sigma * sqrt(eco_med) else NA_real_
+    L_imp_lo  <- if (is.finite(sig_R_lo) && is.finite(eco_med))
+                   TCP_CRLB_PREFACTOR * sig_R_lo * sqrt(eco_med) else NA_real_
+    L_imp_hi  <- if (is.finite(sig_R_hi) && is.finite(eco_med))
+                   TCP_CRLB_PREFACTOR * sig_R_hi * sqrt(eco_med) else NA_real_
+
     list(sigma = sigma, sigma2 = sigma2, cov1 = cov1, n_pairs = length(vals),
+         R_blur = R_blur, R_lo = R_lo, R_hi = R_hi, msq = msq, n_vert = n_vert,
+         sig_R_lo = sig_R_lo, sig_R_hi = sig_R_hi,
+         L_imp_lo = L_imp_lo, L_imp_hi = L_imp_hi, t_coll = t_coll,
+         sig_phot = sig_phot_i, sig_phot_med = sig_phot_med, sig_phot_iqr = sig_phot_iqr,
+         eco_med = eco_med, L_tcp = L_tcp, L_implied = L_implied, n_phot = length(ecov),
          sigma_xy = sigma_xy, sigma_z = sigma_z, sig_aniso = sig_aniso,
          D_cve = D_cve, dt_int = dt_int, t_cycle = t_c, has_z = has_z,
          frac_integ = frac_integ_raw, frac_integ_filt = frac_integ_filt,
@@ -620,16 +738,18 @@ tracking_server <- function(input, output, session) {
          r1_norm = r1_norm, noise_frac = noise_frac, phot_mob_rho = phot_mob_rho)
   })
 
-  # Feed the CVE σ_loc into the app-wide value: prefer the per-track median (robust
-  # to a few bad tracks) when available, else the pooled estimate (skip if
-  # degenerate = drift-dominated).
+  # Publish the calibration result as the app-wide σ_loc.
+  #
+  # The PHOTON estimate is the one used. The CVE σ is not: even with the blur
+  # correction applied, ~90% of its σ² comes from the R*⟨Δx²⟩ term, so it is
+  # essentially sqrt(R) x rms step size - a function of the assumed R and of the
+  # step distribution, which population heterogeneity and drift both inflate. The
+  # data's own contribution, cov1, is a few-percent residual. It stays on screen as
+  # a cross-check on L, not as a precision measurement.
   observeEvent(trk_cve_bundle(), {
     b <- trk_cve_bundle(); if (is.null(b)) return()
-    # Robust per-track median first; else the plain pooled estimate. (No photon-weighted
-    # variant any more - see the diagnostic block in trk_cve_bundle for why.)
-    val <- if (is.finite(b$sig_pt_med) && b$sig_pt_med > 0) b$sig_pt_med
-           else if (is.finite(b$sigma) && b$sigma > 0 && !isTRUE(b$degenerate)) b$sigma
-           else NA_real_
+    if (is.finite(b$sig_phot_med) && b$sig_phot_med > 0) trk_sigma_loc_photon(b$sig_phot_med)
+    val <- if (is.finite(b$sigma) && b$sigma > 0 && !isTRUE(b$degenerate)) b$sigma else NA_real_
     if (is.finite(val)) trk_sigma_loc_cve(val)
   }, ignoreInit = TRUE)
 
@@ -651,17 +771,32 @@ tracking_server <- function(input, output, session) {
     num  <- function(x, fmt, na = "-") if (is.finite(x)) sprintf(fmt, x) else na
 
     # ── sigma_loc ──────────────────────────────────────────────────────────────
-    sigma_line <- if (isTRUE(b$degenerate) && !is.finite(b$sig_pt_med))
-      row(htmltools::span(style = sprintf("color:%s;", RED),
-        sigloc(), " is not resolvable, because consecutive steps are positively correlated and drift dominates them. Enter it manually."))
-    else if (is.finite(b$sig_pt_med))
-      row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sig_pt_med)),
-          dim_(sprintf("  (%sn=%d tracks  \u00b7  CV %s  \u00b7  pooled %.2f)",
-                       if (is.finite(b$sig_pt_lo)) sprintf("95%% CI %.2f-%.2f  \u00b7  ", b$sig_pt_lo, b$sig_pt_hi) else "",
-                       b$n_pt, num(100 * (b$sig_pt_cv %||% NA_real_), "%.0f%%"), b$sigma)))
+    # The PHOTON estimate is the value the app uses; the CVE follows as a check.
+    sigma_line <- if (is.finite(b$sig_phot_med))
+      row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sig_phot_med)),
+          dim_(sprintf("  L/(4\u221aN)  \u00b7  L = %.1f nm  \u00b7  median ECO %.0f  \u00b7  IQR %s  \u00b7  %s locs",
+                       b$L_tcp, b$eco_med %||% NA_real_,
+                       num(b$sig_phot_iqr %||% NA_real_, "%.2f nm"),
+                       format(b$n_phot %||% 0L, big.mark = ","))))
     else
-      row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sigma)),
-          dim_(sprintf("  (pooled, %s integrated pairs)", format(b$n_pairs, big.mark = ","))))
+      row(warn(htmltools::HTML("&#9888; "), "no ECO column, so ", sigloc(),
+               " cannot come from the photon budget; the CVE value below is used instead."))
+
+    # CVE cross-check. Agreement between the implied L and the L in use is the
+    # evidence that the photon prefactor is right; a large gap means one is wrong.
+    cve_line <- if (isTRUE(b$degenerate))
+      row(dim_("CVE cross-check: "), warn("unresolvable, drift dominates the covariance"))
+    else if (is.finite(b$sigma)) {
+      lo <- b$L_imp_lo %||% NA_real_; hi <- b$L_imp_hi %||% NA_real_
+      inside <- is.finite(lo) && is.finite(hi) && is.finite(b$L_tcp) &&
+                b$L_tcp >= min(lo, hi) * 0.98 && b$L_tcp <= max(lo, hi) * 1.02
+      row(dim_(sprintf("CVE cross-check: \u03c3 %.2f\u2013%.2f nm over R = %.3f\u2013%.3f (%d vertices) \u2192 implied L %s\u2013%s",
+                       min(b$sig_R_lo, b$sig_R_hi), max(b$sig_R_lo, b$sig_R_hi),
+                       b$R_lo %||% NA_real_, b$R_hi %||% NA_real_, b$n_vert %||% 6L,
+                       num(min(lo, hi), "%.0f"), num(max(lo, hi), "%.0f nm"))),
+          if (isTRUE(inside)) dim_(sprintf("  \u2713 brackets the %.1f nm in use", b$L_tcp))
+          else warn(htmltools::HTML(sprintf("  &#9888; does not bracket the %.1f nm in use", b$L_tcp))))
+    } else NULL
 
     # ── lateral vs axial (3D only) - a pooled sigma over-states the lateral floor,
     #    which the x-y-only tools (D-map, 2D JDD/MSD) would then over-subtract.
@@ -729,7 +864,7 @@ tracking_server <- function(input, output, session) {
     } else NULL
 
     htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
-      sigma_line, aniso_line, noise_line, eco_line, qual_line, calib_line, qc_line)
+      sigma_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line, qc_line)
   })
 
   # Per-track σ_loc heterogeneity histogram (σ_loc is NOT a single instrument
@@ -2236,7 +2371,7 @@ tracking_server <- function(input, output, session) {
     # D_max ceiling: take L from the sequence rather than a default. The ceiling
     # scales as L^2, so this is the input that most needs to come from the file.
     if (is.finite(sp$L_tcp_nm) && sp$L_tcp_nm > 0)
-      updateNumericInput(session, "trk_dmax_L", value = round(sp$L_tcp_nm, 1))
+      updateNumericInput(session, "trk_L_tcp", value = round(sp$L_tcp_nm, 1))
   }, ignoreInit = TRUE)
 
   output$trk_seq_json_status <- renderUI({
@@ -6183,7 +6318,7 @@ tracking_server <- function(input, output, session) {
     df  <- trk(); req(nrow(df) > 0)
     ub  <- tryCatch(msd_unified_bundle(), error = function(e) NULL)
 
-    L    <- suppressWarnings(as.numeric(input$trk_dmax_L))
+    L    <- suppressWarnings(as.numeric(input$trk_L_tcp))
     t_hw <- suppressWarnings(as.numeric(input$trk_dmax_t_hw))
     if (!is.finite(L)    || L    <= 0) L    <- DMAX_L_TCP_DEFAULT
     if (!is.finite(t_hw) || t_hw <  0) t_hw <- 0.05

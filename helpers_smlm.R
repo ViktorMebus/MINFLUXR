@@ -5890,13 +5890,16 @@ add_cluster_isosurface <- function(fig, pts, color = "#00CED1", opacity = 0.25,
                                    grid_res = 22L, pad = 0, sigma = NULL,
                                    offset = NULL, precision = NULL,
                                    smooth_iter = 8L, close_surface = TRUE,
-                                   sigma_scale = 1, diag_env = NULL) {
+                                   sigma_scale = 1, diag_env = NULL, cache = NULL) {
   # `diag_env` collects one row per surface so the UI can report what the
   # automatic geometry actually chose. An environment rather than a return value
   # because the caller wants the figure back in a pipe; nothing here reads it.
+  cache_row <- NULL
   note <- function(...) {
+    row <- data.frame(..., stringsAsFactors = FALSE)
+    cache_row <<- row
     if (is.null(diag_env)) return(invisible(NULL))
-    diag_env$rows <- c(diag_env$rows, list(data.frame(..., stringsAsFactors = FALSE)))
+    diag_env$rows <- c(diag_env$rows, list(row))
   }
   if (is.null(pts)) return(fig)
   pts <- as.matrix(pts)
@@ -5906,6 +5909,24 @@ add_cluster_isosurface <- function(fig, pts, color = "#00CED1", opacity = 0.25,
          smoothing = NA_real_, voxel = NA_real_, sampling_limited = NA,
          closed = NA, resolved = NA, drawn = FALSE)
     return(fig)
+  }
+
+  # ── geometry cache ──
+  # Colour and opacity do not enter the key, because they do not change the mesh.
+  # A Shiny render re-runs on ANY of its reactive dependencies, so without this a
+  # change of opacity or colour mode rebuilt every field and every mesh from
+  # scratch. The caller clears the cache when the committed geometry changes.
+  ck <- NULL
+  if (!is.null(cache)) {
+    ck <- digest::digest(list(pts, grid_res, pad, sigma, offset, precision,
+                              smooth_iter, close_surface, sigma_scale))
+    hit <- cache[[ck]]
+    if (!is.null(hit)) {
+      if (!is.null(diag_env) && !is.null(hit$diag))
+        diag_env$rows <- c(diag_env$rows, list(hit$diag))
+      if (is.null(hit$msh)) return(fig)
+      return(iso_mesh_trace(fig, hit$msh, color, opacity, name, showlegend))
+    }
   }
 
   fld <- tryCatch(
@@ -5928,20 +5949,28 @@ add_cluster_isosurface <- function(fig, pts, color = "#00CED1", opacity = 0.25,
        sampling_limited = isTRUE(fld$sampling_limited),
        closed = fld$closed, resolved = isTRUE(fld$resolved),
        drawn = !is.null(msh))
+  if (!is.null(ck)) cache[[ck]] <- list(msh = msh, diag = cache_row)
   if (is.null(msh)) return(fig)
 
-  # COLOUR MUST NOT BE PASSED AS `color`. plotly's R wrapper intercepts a `color`
-  # argument and routes it through its own scale-mapping machinery, which has no
-  # output slot for mesh3d - so the attribute is silently DROPPED and every
-  # surface renders in plotly's default. Verified against plotly_build(): both
-  # `color = "#FF0000"` and `color = I("#FF0000")` vanish from the built trace,
-  # while intensity/colorscale, facecolor and vertexcolor all survive.
-  #
-  # A flat intensity against a two-stop colorscale is the lightest of the three:
-  # one number per vertex rather than a hex STRING per vertex (vertexcolor) or
-  # per triangle (facecolor), which matters when a view draws tens of surfaces.
-  # cmin/cmax are pinned because an all-equal intensity would otherwise autoscale
-  # to a degenerate cmin == cmax range.
+  iso_mesh_trace(fig, msh, color, opacity, name, showlegend)
+}
+
+# GOAL: add one finished mesh to a figure. Split out so a cache hit and a fresh
+# build draw through exactly the same code.
+#
+# COLOUR MUST NOT BE PASSED AS `color`. plotly's R wrapper intercepts a `color`
+# argument and routes it through its own scale-mapping machinery, which has no
+# output slot for mesh3d - so the attribute is silently DROPPED and every surface
+# renders in plotly's default. Verified against plotly_build(): both
+# `color = "#FF0000"` and `color = I("#FF0000")` vanish from the built trace,
+# while intensity/colorscale, facecolor and vertexcolor all survive.
+#
+# A flat intensity against a two-stop colorscale is the lightest of the three:
+# one number per vertex rather than a hex STRING per vertex (vertexcolor) or per
+# triangle (facecolor), which matters when a view draws tens of surfaces.
+# cmin/cmax are pinned because an all-equal intensity would otherwise autoscale
+# to a degenerate cmin == cmax range.
+iso_mesh_trace <- function(fig, msh, color, opacity, name, showlegend) {
   nv <- length(msh$x)
   fig %>% plotly::add_trace(
     type = "mesh3d",

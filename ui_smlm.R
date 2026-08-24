@@ -687,6 +687,7 @@ smlm_ui <- fluidPage(
 
             tags$hr(style = "margin:10px 0;"),
             tags$b("Shape"),
+            helpText(tags$em("Applied when you press Plot Data.")),
             sliderInput("cluster2_iso_pad", "Tighten or loosen the wrap (nm)", min = -40, max = 200, value = 0, step = 5),
             helpText("Shifts the wrap distance reported above. Negative tightens, positive loosens."),
             sliderInput("cluster2_iso_smooth_rel", "Smoothing", min = 0.4, max = 2, value = 1, step = 0.05),
@@ -723,6 +724,7 @@ smlm_ui <- fluidPage(
                        "half the spacing between the molecules being wrapped. Smoothing sits at",
                        "0.85 x that spacing. Both are set per axis, so a structure measured more",
                        "precisely along z is wrapped more tightly along z."),
+              helpText(tags$em("Applied when you press Plot Data.")),
               checkboxInput("cluster2_iso_manual_offset", "Set the wrap distance manually", value = FALSE),
               conditionalPanel(
                 condition = "input.cluster2_iso_manual_offset == true",
@@ -1064,6 +1066,7 @@ smlm_ui <- fluidPage(
 
               tags$hr(style = "margin:10px 0;"),
               tags$b("Shape"),
+              helpText(tags$em("Applied when you press Plot Data.")),
               sliderInput("tc2_iso_pad", "Tighten or loosen the wrap (nm)", min = -40, max = 200, value = 0, step = 5),
               helpText("Shifts the wrap distance reported above. Negative tightens, positive loosens."),
               sliderInput("tc2_iso_smooth_rel", "Smoothing", min = 0.4, max = 2, value = 1, step = 0.05),
@@ -1084,6 +1087,7 @@ smlm_ui <- fluidPage(
                          "half the spacing between the molecules being wrapped. Smoothing sits at",
                          "0.85 x that spacing. Both are set per axis, so a structure measured more",
                          "precisely along z is wrapped more tightly along z."),
+                helpText(tags$em("Applied when you press Plot Data.")),
                 checkboxInput("tc2_iso_manual_offset", "Set the wrap distance manually", value = FALSE),
                 conditionalPanel(
                   condition = "input.tc2_iso_manual_offset == true",

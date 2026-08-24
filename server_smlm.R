@@ -3391,6 +3391,48 @@ smlm_server <- function(input, output, session) {
   # report the geometry they picked. See iso_status_ui().
   cluster2_iso_diag <- reactiveVal(NULL)
   tc2_iso_diag      <- reactiveVal(NULL)
+
+  # ==========================================================================
+  # ISOSURFACE: COMMITTED GEOMETRY + MESH CACHE
+  # ==========================================================================
+  # Wrapping every Median Cluster is the most expensive thing the 3-D view does,
+  # and in 2-colour mode it runs over both channels. Two separate problems made
+  # that painful, and they need different fixes:
+  #
+  #   1. DRAGGING A SLIDER re-ran the whole wrap on every intermediate value. The
+  #      geometry sliders are therefore COMMITTED, exactly like the clustering
+  #      parameters: they are snapshotted when Plot Data is pressed and the view
+  #      ignores them until then.
+  #   2. ANY re-render rebuilt the meshes, because a renderPlotly body re-runs on
+  #      all of its reactive dependencies - so changing point size or colour mode,
+  #      which have nothing to do with the surfaces, still paid for them. The
+  #      cache keys each mesh on its geometry alone, so those re-renders reuse it.
+  #
+  # The split follows the control panel: Shape is committed, Appearance is live.
+  # Opacity and colour stay instant because they are cache hits, not rebuilds.
+  iso_mesh_cache <- new.env(parent = emptyenv())
+
+  iso_geom <- eventReactive(plot_trigger(), {
+    # A new commit invalidates every cached mesh. Clearing here rather than on a
+    # timer keeps the cache bounded to one settings epoch.
+    rm(list = ls(iso_mesh_cache), envir = iso_mesh_cache)
+    list(
+      c2_grid_res     = input$cluster2_iso_grid_res,
+      c2_pad          = input$cluster2_iso_pad,
+      c2_smooth_rel   = input$cluster2_iso_smooth_rel,
+      c2_manual_off   = isTRUE(input$cluster2_iso_manual_offset),
+      c2_offset       = input$cluster2_iso_offset,
+      c2_manual_sigma = isTRUE(input$cluster2_iso_manual_sigma),
+      c2_sigma        = input$cluster2_iso_sigma,
+      tc2_grid_res     = input$tc2_iso_grid_res,
+      tc2_pad          = input$tc2_iso_pad,
+      tc2_smooth_rel   = input$tc2_iso_smooth_rel,
+      tc2_manual_off   = isTRUE(input$tc2_iso_manual_offset),
+      tc2_offset       = input$tc2_iso_offset,
+      tc2_manual_sigma = isTRUE(input$tc2_iso_manual_sigma),
+      tc2_sigma        = input$tc2_iso_sigma
+    )
+  })
   output$cluster2_iso_status <- renderUI(iso_status_ui(cluster2_iso_diag()))
   output$tc2_iso_status      <- renderUI(iso_status_ui(tc2_iso_diag()))
   cluster2_table_store <- reactiveVal(NULL)
@@ -6242,18 +6284,20 @@ smlm_server <- function(input, output, session) {
         isTRUE(input$enable_two_color) &&
         "cluster2" %in% names(df)) {
       
-      grid_res <- input$tc2_iso_grid_res %||% 22
-      pad      <- input$tc2_iso_pad %||% 0
+      # Geometry from the committed snapshot (Plot Data); opacity stays live.
+      ig       <- iso_geom()
+      grid_res <- ig$tc2_grid_res %||% 22
+      pad      <- ig$tc2_pad %||% 0
       op       <- input$tc2_iso_opacity %||% 0.25
       # NULL = auto, i.e. 3 x localization precision floored at half the member
       # gap. Anchoring to the microscope rather than to the labelling is what
       # keeps two clusters comparable; see cluster_density_field().
-      iso_off  <- if (!isTRUE(input$tc2_iso_manual_offset)) NULL else {
-        o <- suppressWarnings(as.numeric(input$tc2_iso_offset %||% 30))
+      iso_off  <- if (!isTRUE(ig$tc2_manual_off)) NULL else {
+        o <- suppressWarnings(as.numeric(ig$tc2_offset %||% 30))
         if (!is.finite(o) || o <= 0) NULL else o
       }
-      sigma    <- if (!isTRUE(input$tc2_iso_manual_sigma)) NULL else {
-        s <- suppressWarnings(as.numeric(input$tc2_iso_sigma %||% 30))
+      sigma    <- if (!isTRUE(ig$tc2_manual_sigma)) NULL else {
+        s <- suppressWarnings(as.numeric(ig$tc2_sigma %||% 30))
         if (!is.finite(s) || s <= 0) NULL else s
       }
 
@@ -6316,7 +6360,7 @@ smlm_server <- function(input, output, session) {
                         if (cid < 10000L) cid else cid - 10000L),
           grid_res = grid_res, pad = pad, sigma = sigma, offset = iso_off,
           precision = iso_precision, diag_env = tc2_diag,
-          sigma_scale = input$tc2_iso_smooth_rel %||% 1
+          sigma_scale = ig$tc2_smooth_rel %||% 1, cache = iso_mesh_cache
         )
       }
       tc2_iso_diag(tc2_diag$rows)
@@ -6328,18 +6372,20 @@ smlm_server <- function(input, output, session) {
         nrow(cluster2_medians) > 0 &&
         isTRUE(input$mode3d == "3D")) {
       
-      grid_res <- input$cluster2_iso_grid_res %||% 22
-      pad      <- input$cluster2_iso_pad %||% 0
+      # Geometry from the committed snapshot (Plot Data); opacity stays live.
+      ig       <- iso_geom()
+      grid_res <- ig$c2_grid_res %||% 22
+      pad      <- ig$c2_pad %||% 0
       op       <- input$cluster2_iso_opacity %||% 0.25
       # NULL = auto, i.e. 3 x localization precision floored at half the member
       # gap. Anchoring to the microscope rather than to the labelling is what
       # keeps two clusters comparable; see cluster_density_field().
-      iso_off  <- if (!isTRUE(input$cluster2_iso_manual_offset)) NULL else {
-        o <- suppressWarnings(as.numeric(input$cluster2_iso_offset %||% 30))
+      iso_off  <- if (!isTRUE(ig$c2_manual_off)) NULL else {
+        o <- suppressWarnings(as.numeric(ig$c2_offset %||% 30))
         if (!is.finite(o) || o <= 0) NULL else o
       }
-      sigma    <- if (!isTRUE(input$cluster2_iso_manual_sigma)) NULL else {
-        s <- suppressWarnings(as.numeric(input$cluster2_iso_sigma %||% 30))
+      sigma    <- if (!isTRUE(ig$c2_manual_sigma)) NULL else {
+        s <- suppressWarnings(as.numeric(ig$c2_sigma %||% 30))
         if (!is.finite(s) || s <= 0) NULL else s
       }
 
@@ -6395,7 +6441,7 @@ smlm_server <- function(input, output, session) {
           name = paste0("Median Cluster ", cid),
           grid_res = grid_res, pad = pad, sigma = sigma, offset = iso_off,
           precision = iso_precision, diag_env = c2_diag,
-          sigma_scale = input$cluster2_iso_smooth_rel %||% 1
+          sigma_scale = ig$c2_smooth_rel %||% 1, cache = iso_mesh_cache
         )
       }
       } # end else(!length(ids))

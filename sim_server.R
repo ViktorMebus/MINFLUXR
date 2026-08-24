@@ -3329,21 +3329,54 @@ sim_server <- function(input, output, session) {
     df <- df[as.character(df$tid) %in% keep_tid, ]        # keep only the long traces
     len     <- as.numeric(table(df$tid)); med_len <- stats::median(len)
     photons <- if ("eco" %in% names(df)) stats::median(df$eco[is.finite(df$eco) & df$eco > 0]) else NA_real_
-    o    <- order(df$tid, df$tim); tid <- df$tid[o]; tim <- df$tim[o]; nrw <- length(tid)
+    o    <- order(df$tid, df$tim); df <- df[o, ]
+    tid <- df$tid; tim <- df$tim; nrw <- length(tid)
     same <- c(FALSE, tid[-1] == tid[-nrw]); dt <- c(NA_real_, diff(tim)) * 1000; dt[!same] <- NA_real_  # ms
     dtv  <- dt[is.finite(dt) & dt > 0]
     shiny::validate(shiny::need(length(dtv) > 20, "Too few within-track steps to calibrate."))
-    hb   <- hist(dtv[dtv < stats::quantile(dtv, 0.98)], breaks = 400, plot = FALSE)
-    cyc  <- hb$mids[which.max(hb$counts)]                          # modal Δt = cycle time
-    ncyc <- pmax(1L, as.integer(round(dtv / cyc)))
+    # ── Cycle time and SW from the Δt quantisation ────────────────────────────
+    # Real Δt obey Δt = k·t_c + SW exactly, so the MODAL Δt is t_c + SW, not t_c.
+    # Take the mode as a first guess, assign each Δt its cycle count k, then read
+    # t_c off the SPACING between the levels and SW off the intercept. Taking the
+    # mode for the cycle time inflates it by SW (~5% on the GP67H files).
+    hb    <- hist(dtv[dtv < stats::quantile(dtv, 0.98)], breaks = 400, plot = FALSE)
+    modal <- hb$mids[which.max(hb$counts)]                         # modal Δt = t_c + SW
+    k0    <- round(dtv / modal)
+    ok    <- k0 >= 1 & k0 <= 10 & abs(dtv - k0 * modal) < 0.3 * modal   # on-level Δt only
+    cyc <- modal; sw <- 0
+    if (sum(ok) > 20) {
+      cf <- stats::coef(stats::lm(dtv[ok] ~ k0[ok]))
+      if (is.finite(cf[2]) && cf[2] > 0 && cf[1] >= 0 && cf[1] < cf[2]) {
+        cyc <- unname(cf[2]); sw <- unname(cf[1])
+      }
+    }
+    ncyc <- pmax(1L, as.integer(round((dtv - sw) / cyc)))
     p_dark <- sum(ncyc - 1L) / sum(ncyc); integ <- mean(ncyc == 1L)
+    # ── D and σ_loc from the single-cycle steps (CVE, blur-aware) ─────────────
+    # σ² = R⟨Δx²⟩ + (2R−1)·cov₁ per axis with R = 1/6 (full-cycle integration);
+    # D itself is blur-independent. Lateral axes only: real 2D tracking files
+    # carry a placeholder z.
+    dstep <- same & is.finite(dt) & abs(round((dt - sw) / cyc) - 1) < 1e-6
+    dstep[is.na(dstep)] <- FALSE
+    dx <- c(NA_real_, diff(df$x)); dy <- c(NA_real_, diff(df$y)); dx[!same] <- NA_real_; dy[!same] <- NA_real_
+    pair <- dstep & c(dstep[-1], FALSE)
+    cov1 <- mean(c(dx[pair] * c(dx[-1], NA_real_)[pair],
+                   dy[pair] * c(dy[-1], NA_real_)[pair]), na.rm = TRUE)
+    msq  <- mean(c(dx[dstep]^2, dy[dstep]^2), na.rm = TRUE)
+    D_meas <- if (is.finite(msq) && is.finite(cov1)) (msq / (2 * (cyc + sw)) + cov1 / (cyc + sw)) / 1000 else NA_real_
+    sig_meas <- if (is.finite(msq) && is.finite(cov1)) sqrt(max(0, msq / 6 - (2/3) * cov1)) else NA_real_
     if (is.finite(cyc))     updateNumericInput(session, "sim_trk_cycle",   value = signif(cyc, 3))
+    if (is.finite(sw))      updateNumericInput(session, "sim_trk_sw",      value = signif(sw, 2))
     if (is.finite(p_dark))  updateNumericInput(session, "sim_trk_pdark",   value = round(p_dark, 2))
     if (is.finite(photons)) updateNumericInput(session, "sim_trk_photons", value = round(photons))
     if (is.finite(med_len)) updateNumericInput(session, "sim_trk_meanlen", value = round(med_len))
+    if (is.finite(D_meas) && D_meas > 0)
+      updateNumericInput(session, "sim_trk_D", value = signif(D_meas, 2))
+    if (length(keep_tid) >= 1) updateNumericInput(session, "sim_trk_ntracks", value = length(keep_tid))
     sim_trk_calib_rv(list(file = fi$name, n_tracks = length(keep_tid), n_total = n_total,
       min_len = MIN_LEN, n_loc = nrow(df), med_len = med_len, mean_len = mean(len),
-      photons = photons, cyc = cyc, p_dark = p_dark, integ = integ, med_dt = stats::median(dtv)))
+      photons = photons, cyc = cyc, sw = sw, modal = modal, p_dark = p_dark, integ = integ,
+      D = D_meas, sigma = sig_meas, med_dt = stats::median(dtv)))
     showNotification(sprintf("Calibrated on %d traces (≥%d locs) of %d total.",
                              length(keep_tid), MIN_LEN, n_total), type = "message", duration = 6)
   })
@@ -3359,13 +3392,15 @@ sim_server <- function(input, output, session) {
         rowf(sprintf("Traces used (≥%d locs)", cb$min_len %||% 50L),
              sprintf("%s of %s  ·  %s locs", format(cb$n_tracks, big.mark = ","),
                      format(cb$n_total %||% cb$n_tracks, big.mark = ","), format(cb$n_loc, big.mark = ","))),
-        rowf("Cycle time", sprintf("%.3g ms", cb$cyc)),
+        rowf("Cycle time", sprintf("%.4g ms  (SW %.3g ms · modal Δt %.4g)", cb$cyc, cb$sw %||% 0, cb$modal %||% NA)),
         rowf("Photons/loc (median eco)", if (is.finite(cb$photons)) sprintf("%.0f", cb$photons) else "-"),
         rowf("Dark-cycle prob.", sprintf("%.2f  (%.0f%% integrated)", cb$p_dark, 100 * cb$integ)),
-        rowf("Track length (median)", sprintf("%.0f · mean %.0f", cb$med_len, cb$mean_len))),
+        rowf("Track length (median)", sprintf("%.0f · mean %.0f", cb$med_len, cb$mean_len)),
+        rowf("D (CVE, lateral)", if (is.finite(cb$D %||% NA)) sprintf("%.3g µm²/s", cb$D) else "-"),
+        rowf("σ_loc (CVE, R = 1/6)", if (is.finite(cb$sigma %||% NA)) sprintf("%.2f nm", cb$sigma) else "-")),
       htmltools::tags$p(style = "color:#888; margin-top:3px;",
-        "Auto-filled the sampling fields (mean locs/track uses the robust median). Set geometry, D and ",
-        "the effective TCP L, then Simulate."))
+        "Auto-filled the sampling fields, D and the track count (locs/track uses the robust median). ",
+        "The measured σ_loc is a cross-check on the TCP L you enter: L = 4·σ·√N."))
   })
 
   sim_trk_result <- eventReactive(input$sim_trk_run, {
@@ -3389,10 +3424,28 @@ sim_server <- function(input, output, session) {
     D_nm2ms  <- D_um2_s * 1000                        # µm²/s → nm²/ms
     n_trk    <- max(1L, as.integer(input$sim_trk_ntracks %||% 200L))
     mean_len <- max(5L, as.integer(input$sim_trk_meanlen %||% 80L))
-    cyc      <- max(0.01, as.numeric(input$sim_trk_cycle %||% 0.5))     # ms
-    p_dark   <- min(0.95, max(0, as.numeric(input$sim_trk_pdark %||% 0.2)))
-    photons  <- max(1, as.numeric(input$sim_trk_photons %||% 100))
-    L_tcp    <- max(1, as.numeric(input$sim_trk_Ltcp %||% 150))
+    cyc      <- max(0.01, as.numeric(input$sim_trk_cycle %||% 0.192))   # ms, spacing between cycles
+    # Fixed per-localization overhead (settling / window). Real files obey
+    # Delta-t = k*cycle + SW exactly, so the modal Delta-t is cycle + SW, not cycle.
+    sw       <- max(0, as.numeric(input$sim_trk_sw %||% 0))              # ms
+    p_dark   <- min(0.95, max(0, as.numeric(input$sim_trk_pdark %||% 0.28)))
+    photons  <- max(1, as.numeric(input$sim_trk_photons %||% 38))
+    L_tcp    <- max(1, as.numeric(input$sim_trk_Ltcp %||% 100.8))
+    blur     <- isTRUE(input$sim_trk_blur)                               # integrate over the cycle
+    # Photon collection window as a fraction of the cycle. tau together with the step
+    # duration sets the blur coefficient R = tau/(6*dt): a full-cycle window gives 1/6,
+    # a short burst tends to 0.
+    expfrac  <- min(1, max(0.05, as.numeric(input$sim_trk_expfrac %||% 1)))
+    # Lognormal spread of D between molecules (0 = every track identical). The input D
+    # stays the MEDIAN of the population.
+    D_cv     <- max(0, as.numeric(input$sim_trk_Dcv %||% 0))
+    D_sdlog  <- if (D_cv > 0) sqrt(log(1 + D_cv^2)) else 0
+    # Dark cycles that depend on how far the molecule moved during the cycle.
+    pd_speed <- isTRUE(input$sim_trk_pdark_speed)
+    pd_scale <- max(1, as.numeric(input$sim_trk_pdark_scale %||% 100))    # nm
+    # Re-acquisition shrinkage: the first localization after a dark gap is pulled this
+    # fraction of the way back toward the previous reported position.
+    shrink   <- min(1, max(0, as.numeric(input$sim_trk_shrink %||% 0)))
     proj2d   <- isTRUE(input$sim_trk_project2d)
     sd_step  <- sqrt(2 * D_nm2ms * cyc)               # per-axis step SD per cycle (nm)
     R    <- max(1, as.numeric(input$sim_trk_R %||% 500))
@@ -3443,39 +3496,92 @@ sim_server <- function(input, output, session) {
     L_c     <- max(1, as.numeric(input$sim_trk_Lc %||% 150))         # confinement radius (nm)
     v_nmms  <- max(0, as.numeric(input$sim_trk_vel %||% 0))          # directed speed (µm/s = nm/ms)
     kswitch <- min(1, max(0, as.numeric(input$sim_trk_kswitch %||% 0.03)))  # per-cycle state-switch prob
-    tau_c   <- if (D_nm2ms > 0) L_c^2 / D_nm2ms else Inf             # OU relaxation time (ms)
-    phi_c   <- exp(-cyc / tau_c)                                     # per-cycle mean-reversion factor
+
     drift0  <- if (is_rod) c(1,0,0)                                          # rod drift ∥ long axis
                else if (identical(geom, "membrane")) { a <- runif(1, 0, 2*pi); c(cos(a), sin(a), 0) }  # in-plane
                else { v <- rnorm(3); v/sqrt(sum(v^2)) }
 
     is_free <- identical(geom, "free"); is_mem <- identical(geom, "membrane")
-    gen_path <- function(n_cyc) {
+    # dur[i] = real elapsed time of the step leaving cycle i (ms). The molecule keeps
+    # diffusing through the SW overhead, so SW must enter the step duration and not
+    # only the clock; otherwise D is under-recovered by cyc/(cyc+SW) (~5%).
+    gen_path <- function(n_cyc, D_trk) {
       surface <- identical(mode, "surface")
+      tau_c   <- if (D_trk > 0) L_c^2 / D_trk else Inf                # OU relaxation time (ms)
       p <- if (is_free) c(0,0,0)
            else if (is_mem) c(0, 0, if (mthick > 0) runif(1, -mthick/2, mthick/2) else 0)
            else if (surface) geo_rand_surf() else geo_rand_in()
       home <- p; st <- 1L
       pos <- matrix(NA_real_, n_cyc, 3); pos[1,] <- p; states <- integer(n_cyc); states[1] <- 1L
+      # Recorded/dark and the clock are decided inside the loop: dur[i] (the elapsed
+      # time of the step leaving cycle i) needs to know whether cycle i was recorded,
+      # and a displacement-dependent dark probability needs the step that arrived at
+      # cycle i. Deciding them in the loop keeps both exact.
+      integ <- logical(n_cyc); integ[1] <- TRUE
+      dur   <- rep(cyc, n_cyc); dur[1] <- cyc + sw
       for (i in 2:n_cyc) {
-        Dstep <- if (identical(motion,"twostate") && st == 0L) D_nm2ms * 0.01 else D_nm2ms
-        sdi   <- sqrt(2 * Dstep * cyc)
+        Dstep <- if (identical(motion,"twostate") && st == 0L) D_trk * 0.01 else D_trk
+        dti   <- dur[i - 1L]                                                # this step's duration (ms)
+        sdi   <- sqrt(2 * Dstep * dti)
         if (is_free)      { p2 <- p + rnorm(3, 0, sdi) }                    # unbounded 3D
         else if (is_mem)  { p2 <- p + c(rnorm(2, 0, sdi), 0) }              # 2D lateral (z handled below)
         else if (surface) { g <- rnorm(3,0,sdi); nn <- geo_normal(p); p2 <- p + (g - sum(g*nn)*nn) }  # tangent step
         else              { p2 <- p + rnorm(3,0,sdi) }                      # 3D volume
-        if (identical(motion,"directed")) p2 <- p2 + drift0 * v_nmms * cyc
-        if (identical(motion,"confined")) p2 <- home + (p2 - home) * phi_c  # OU pull to home
+        if (identical(motion,"directed")) p2 <- p2 + drift0 * v_nmms * dti
+        if (identical(motion,"confined")) p2 <- home + (p2 - home) * exp(-dti / tau_c)  # OU pull to home
         p  <- if (is_free) p2
               else if (is_mem) c(p2[1], p2[2],                              # keep z within the membrane thickness
                                  if (mthick > 0) max(-mthick/2, min(mthick/2, p[3] + rnorm(1, 0, sdi * 0.2))) else 0)
               else if (surface) geo_project(p2) else geo_reflect(p2)
         if (identical(motion,"twostate") && runif(1) < kswitch) st <- 1L - st
         pos[i,] <- p; states[i] <- st
+        # Was this cycle recorded? With the speed coupling on, a molecule that moved far
+        # during the cycle is more likely to be missed: p = 1 − (1 − p_dark)·exp(−d/scale).
+        p_i <- if (pd_speed) {
+                 d_i <- sqrt(sum((pos[i, ] - pos[i - 1L, ])^2))
+                 min(0.95, 1 - (1 - p_dark) * exp(-d_i / pd_scale))
+               } else p_dark
+        integ[i] <- runif(1) > p_i
+        dur[i]   <- cyc + sw * integ[i]
       }
-      if (is_rod) pos <- pos[, rod_perm, drop = FALSE]
-      if (is_mem) pos <- pos %*% t(R_mem)              # tilt the flat local sheet into 3D
-      attr(pos, "states") <- states
+      # ── MOTION BLUR ──────────────────────────────────────────────────────────
+      # A MINFLUX localization is the time-average of the path over its cycle, not
+      # the position at the start of it. For Brownian motion the average over one
+      # cycle, conditioned on both end points, is the midpoint plus bridge noise of
+      # variance D·cyc/6 per axis. That is the R = 1/6 blur factor the noise-corrected
+      # CVE / MSD estimators are written for. Computed here, in the canonical frame,
+      # so the bridge noise can be kept in the surface tangent plane; the last cycle
+      # has no successor and stays unblurred.
+      bp <- NULL
+      if (blur) {
+        nxt <- c(seq_len(n_cyc)[-1], n_cyc)
+        mid <- pos + (expfrac * cyc / (2 * dur)) * (pos[nxt, , drop = FALSE] - pos)
+        Dst <- if (identical(motion, "twostate")) ifelse(states == 0L, D_trk * 0.01, D_trk)
+               else rep(D_trk, n_cyc)
+        # Time-average over a window tau <= dur, conditioned on both end points:
+        #   mean = x_i + (tau/(2*dur))*(x_{i+1} - x_i),  var = (2*D*tau/3)*(1 - 3*tau/(4*dur))
+        # which reduces to the midpoint plus D*dur/6 when tau = dur (R = 1/6).
+        tau <- expfrac * cyc
+        br  <- matrix(rnorm(n_cyc * 3), ncol = 3) *
+               sqrt(pmax(0, (2 * Dst * tau / 3) * (1 - 3 * tau / (4 * dur))))
+        if (is_mem) br[, 3] <- 0                                    # in-plane only
+        else if (surface && !is_free) {                             # tangent plane only
+          nrm <- t(vapply(seq_len(n_cyc), function(i) geo_normal(pos[i, ]), numeric(3)))
+          br  <- br - (rowSums(br * nrm)) * nrm
+        }
+        bp <- mid + br
+        bp[n_cyc, ] <- pos[n_cyc, ]
+      }
+      if (is_rod) { pos <- pos[, rod_perm, drop = FALSE]
+                    if (!is.null(bp)) bp <- bp[, rod_perm, drop = FALSE] }
+      if (is_mem) { pos <- pos %*% t(R_mem)            # tilt the flat local sheet into 3D
+                    if (!is.null(bp)) bp <- bp %*% t(R_mem) }
+      attr(pos, "states")  <- states
+      attr(pos, "blurpos") <- bp
+      attr(pos, "integ")   <- integ
+      # Start time of each cycle: cycles last `cyc`, plus SW once per RECORDED cycle, so
+      # two recorded cycles k apart are exactly k·cyc + SW apart.
+      attr(pos, "t_cyc")   <- c(0, cumsum(dur)[-n_cyc])
       pos
     }
     # Survivorship: a molecule that moves > R_reacq during a dark gap is lost - the
@@ -3493,8 +3599,10 @@ sim_server <- function(input, output, session) {
       # so the bleach lifetime in CYCLES has mean = median / (ln2 · (1−p_dark)) to land
       # the recorded MEDIAN on mean_len despite dark-cycling.
       n_cyc <- max(3L, stats::rgeom(1, 1 / (mean_len / (log(2) * max(0.05, 1 - p_dark)))) + 1L)
-      pos   <- gen_path(n_cyc)                          # ground-truth path at cycle resolution
-      integ <- runif(n_cyc) > p_dark; integ[1] <- TRUE  # recorded (integrated) vs dark cycles
+      # Each molecule may carry its own D (lognormal, median = the D input).
+      D_trk <- if (D_sdlog > 0) D_nm2ms * exp(stats::rnorm(1, 0, D_sdlog)) else D_nm2ms
+      pos   <- gen_path(n_cyc, D_trk)                   # ground-truth path at cycle resolution
+      integ <- attr(pos, "integ"); t_cyc <- attr(pos, "t_cyc")
       idx   <- which(integ)
       if (surv && length(idx) > 1L) {                   # survivorship: cut at first over-range dark-gap jump
         jmp  <- sqrt(rowSums((pos[idx[-1], , drop = FALSE] - pos[idx[-length(idx)], , drop = FALSE])^2))
@@ -3503,15 +3611,29 @@ sim_server <- function(input, output, session) {
       }
       if (length(idx) < 5L) next
       N     <- pmax(1L, stats::rpois(length(idx), photons))
-      sig   <- L_tcp / (2 * sqrt(N))                   # per-localization σ_loc (nm)
-      obs   <- pos[idx, , drop = FALSE] +
-               matrix(rnorm(length(idx) * 3), ncol = 3) * sig
+      # MINFLUX CRLB for a hexagonal TCP of diameter L with N detected photons.
+      # Cross-checked on real tracking data: L = 100.8 nm (patGeoFactor 0.28) and the
+      # median eco of ~38 photons give 4.1 nm, exactly the blur-aware CVE sigma of the
+      # GP67H tracking files.
+      sig   <- L_tcp / (TCP_CRLB_PREFACTOR * sqrt(N))  # per-localization σ_loc (nm)
+      bpos  <- attr(pos, "blurpos")                    # blurred path, or NULL when off
+      true_pos <- if (!is.null(bpos)) bpos[idx, , drop = FALSE] else pos[idx, , drop = FALSE]
+      obs   <- true_pos + matrix(rnorm(length(idx) * 3), ncol = 3) * sig
+      # ── RE-ACQUISITION SHRINKAGE ───────────────────────────────────────────────
+      # After a dark gap the molecule sits off the pattern centre, where the estimator
+      # is biased back toward it, so the first localization after a gap is reported
+      # closer to the previous one than it really is. Sequential: the centre is the
+      # PREVIOUS REPORTED position, which is all the instrument has.
+      if (shrink > 0 && length(idx) > 1L) {
+        gap <- c(FALSE, diff(idx) > 1L)                # first loc after a dark gap
+        for (j in which(gap)) obs[j, ] <- obs[j - 1L, ] + (1 - shrink) * (obs[j, ] - obs[j - 1L, ])
+      }
       k <- k + 1L
       rows[[k]] <- data.frame(
-        tid = k, tim = ((idx - 1L) * cyc) / 1000,      # SECONDS (importer ×1000 → ms)
+        tid = k, tim = t_cyc[idx] / 1000,              # SECONDS (importer ×1000 → ms)
         x = obs[, 1], y = obs[, 2], z = obs[, 3],
         efo = N / (cyc / 1000), eco = N, stringsAsFactors = FALSE)
-      gt[[k]] <- data.frame(tid = k, D_true_um2_s = D_um2_s, geometry = geom, mode = mode,
+      gt[[k]] <- data.frame(tid = k, D_true_um2_s = D_trk / 1000, geometry = geom, mode = mode,
                             motion = motion, L_c_nm = if (identical(motion,"confined")) L_c else NA_real_,
                             v_um_s = if (identical(motion,"directed")) v_nmms else NA_real_,
                             n_locs = length(idx), sigma_loc_med = stats::median(sig),
@@ -3522,7 +3644,8 @@ sim_server <- function(input, output, session) {
     df <- dplyr::bind_rows(rows[seq_len(k)])
     if (proj2d) df$z <- NULL
     list(df = df, gt = dplyr::bind_rows(gt[seq_len(k)]),
-         D_um2_s = D_um2_s, cyc = cyc, p_dark = p_dark, proj2d = proj2d,
+         D_um2_s = D_um2_s, cyc = cyc, sw = sw, blur = blur, p_dark = p_dark, proj2d = proj2d,
+         expfrac = expfrac, D_cv = D_cv, shrink = shrink, pd_speed = pd_speed, pd_scale = pd_scale,
          mode = mode, d_mot = d_mot, geom = geom,
          motion = motion, L_c = L_c, v_nmms = v_nmms, surv = surv, R_reacq = R_reacq)
   })
@@ -3536,6 +3659,7 @@ sim_server <- function(input, output, session) {
   sim_trk_cve <- reactive({
     res <- sim_trk_result(); if (is.null(res)) return(NULL)
     df <- res$df; cyc <- res$cyc
+    dt_step <- cyc + (res$sw %||% 0)                    # true single-cycle Δt = cycle + SW
     axes  <- c("x", "y", if (!is.null(df$z)) "z")
     ncart <- length(axes)
     d_mot <- min(res$d_mot %||% 2L, ncart)              # 2 surface / 3 volume, capped by observed axes
@@ -3543,7 +3667,7 @@ sim_server <- function(input, output, session) {
     for (tb in split(df, df$tid)) {
       tb  <- tb[order(tb$tim), ]
       dt  <- c(NA_real_, diff(tb$tim) * 1000)           # ms
-      one <- is.finite(dt) & abs(dt - cyc) < cyc * 0.25 # single-cycle step (ending at this row)
+      one <- is.finite(dt) & abs(dt - dt_step) < cyc * 0.25  # single-cycle step (ending at this row)
       # per-step displacement vector (rows = steps ending at row i)
       dmat <- sapply(axes, function(ax) c(NA_real_, diff(tb[[ax]])))
       if (is.null(dim(dmat))) dmat <- matrix(dmat, ncol = ncart)
@@ -3557,8 +3681,56 @@ sim_server <- function(input, output, session) {
     if (r2_n < 1L) return(NULL)
     r2m  <- r2_sum / r2_n                                # ⟨|Δr|²⟩ (nm²)
     cov1 <- if (cov_n > 0L) cov_sum / cov_n else 0       # ⟨Δr_i·Δr_{i+1}⟩ = −n_cart·σ²
-    list(D_um2_s  = ((r2m + 2 * cov1) / (2 * d_mot * cyc)) / 1000,   # CVE D (µm²/s)
-         sigma_nm = sqrt(max(0, -cov1 / ncart)), n_pairs = cov_n)
+    # Vestergaard's CVE: D is blur-independent, σ is not. With motion blur on, the
+    # localization is a time-average over the collection window τ, so R = τ/(6·Δt) and
+    # σ² = R⟨Δx²⟩ + (2R−1)⟨Δx_i Δx_{i+1}⟩ per axis; σ² = −cov is the R = 0 (snapshot)
+    # special case. Reading it with the wrong R is what makes a real 4 nm σ_loc look
+    # like 1.4 nm.
+    Rblur <- if (isTRUE(res$blur)) (res$expfrac %||% 1) * cyc / (6 * dt_step) else 0
+    sig2  <- Rblur * (r2m / ncart) + (2 * Rblur - 1) * (cov1 / ncart)
+    list(D_um2_s  = ((r2m + 2 * cov1) / (2 * d_mot * dt_step)) / 1000,   # CVE D (µm²/s)
+         sigma_nm = sqrt(max(0, sig2)), R_blur = Rblur, n_pairs = cov_n)
+  })
+
+  # ── sim_trk_kcurve() - displacement vs dark-gap length ──────────────────────
+  # GOAL: the diagnostic the new sampling knobs exist to drive. Mean per-axis ⟨Δx²⟩
+  # against the number of cycles k a step spans, next to the free-diffusion
+  # expectation. Free Brownian motion grows linearly in k; the real GP67H files
+  # flatten out after k = 2 (see docs/tracking_sigma_and_cve_plan.md §2.3), and
+  # re-acquisition shrinkage / speed-dependent dark cycles are the candidate causes
+  # this table is meant to discriminate.
+  # returns: data.frame(k, n, msq, expect, pct) or NULL.
+  sim_trk_kcurve <- reactive({
+    res <- sim_trk_result(); if (is.null(res)) return(NULL)
+    df  <- res$df; cyc <- res$cyc; sw <- res$sw %||% 0
+    axes  <- c("x", "y", if (!is.null(df$z)) "z")
+    ncart <- length(axes)
+    d_mot <- min(res$d_mot %||% 2L, ncart)
+    kk <- list(); dd <- list()
+    for (tb in split(df, df$tid)) {
+      tb <- tb[order(tb$tim), ]; if (nrow(tb) < 2L) next
+      dt <- diff(tb$tim) * 1000
+      kk[[length(kk) + 1L]] <- rep(pmax(1L, round((dt - sw) / cyc)), ncart)
+      dd[[length(dd) + 1L]] <- unlist(lapply(axes, function(a) diff(tb[[a]])))
+    }
+    if (!length(kk)) return(NULL)
+    k <- unlist(kk); dx <- unlist(dd)
+    ok <- is.finite(k) & is.finite(dx) & k >= 1L & k <= 6L
+    if (!any(ok)) return(NULL)
+    agg <- stats::aggregate(list(msq = dx[ok]^2), by = list(k = k[ok]),
+                            FUN = function(v) c(m = mean(v), n = length(v)))
+    out <- data.frame(k = agg$k, msq = agg$msq[, "m"], n = agg$msq[, "n"])
+    # Free-diffusion expectation per axis. Surface motion has d_mot DOF spread over
+    # ncart Cartesian axes, so each axis carries d_mot/ncart of the motion. The blur
+    # term −(2/3)·D·τ is subtracted because the simulated positions are time-averages.
+    w_gt  <- pmax(0, res$gt$n_locs - 1)
+    D_ref <- (if (sum(w_gt) > 0) stats::weighted.mean(res$gt$D_true_um2_s, w_gt) else res$D_um2_s) * 1000
+    sig2  <- stats::median(res$gt$sigma_loc_med, na.rm = TRUE)^2
+    tau   <- if (isTRUE(res$blur)) (res$expfrac %||% 1) * cyc else 0
+    fr    <- d_mot / ncart
+    out$expect <- 2 * D_ref * fr * (out$k * cyc + sw) + 2 * sig2 - (2/3) * D_ref * fr * tau
+    out$pct    <- 100 * out$msq / out$expect
+    out[order(out$k), ]
   })
 
   output$sim_trk_plot <- renderPlotly({
@@ -3586,10 +3758,17 @@ sim_server <- function(input, output, session) {
   output$sim_trk_summary <- renderUI({
     res <- sim_trk_result(); if (is.null(res)) return(NULL)
     df <- res$df; cve <- sim_trk_cve()
+    sig_true <- stats::median(res$gt$sigma_loc_med, na.rm = TRUE)   # ground-truth σ_loc (nm)
     dt_all <- unlist(lapply(split(df$tim, df$tid), function(t) diff(sort(t)) * 1000), use.names = FALSE)
-    frac_int <- if (length(dt_all)) mean(abs(dt_all - res$cyc) < res$cyc * 0.25) else NA_real_
+    frac_int <- if (length(dt_all))
+                  mean(abs(dt_all - (res$cyc + (res$sw %||% 0))) < res$cyc * 0.25) else NA_real_
+    # With a heterogeneous population the pooled CVE cannot recover the median D: it
+    # recovers the STEP-WEIGHTED MEAN of the drawn per-track D's, so that is what the
+    # round-trip is scored against (the two coincide when the spread is 0).
+    w_gt  <- pmax(0, res$gt$n_locs - 1)
+    D_ref <- if (sum(w_gt) > 0) stats::weighted.mean(res$gt$D_true_um2_s, w_gt) else res$D_um2_s
     recov <- if (!is.null(cve)) {
-      rr  <- cve$D_um2_s / res$D_um2_s
+      rr  <- cve$D_um2_s / D_ref
       col <- if (is.finite(rr) && abs(rr - 1) < 0.25) "#228833" else "#BB7700"
       htmltools::tags$span(style = sprintf("color:%s; font-weight:bold;", col),
         sprintf("%.4g µm²/s  (%.0f%% of truth)", cve$D_um2_s, 100 * rr))
@@ -3610,17 +3789,32 @@ sim_server <- function(input, output, session) {
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Tracks / localizations"),
           htmltools::tags$td(sprintf("%d / %s", length(unique(df$tid)), format(nrow(df), big.mark=",")))),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Ground-truth D"),
-          htmltools::tags$td(htmltools::tags$b(sprintf("%.4g µm²/s", res$D_um2_s)))),
+          htmltools::tags$td(htmltools::tags$b(
+            if ((res$D_cv %||% 0) > 0)
+              sprintf("%.4g µm²/s median · CV %.2f · step-weighted mean %.4g · per-track 10–90%% %.3g–%.3g",
+                      res$D_um2_s, res$D_cv, D_ref,
+                      stats::quantile(res$gt$D_true_um2_s, 0.1), stats::quantile(res$gt$D_true_um2_s, 0.9))
+            else sprintf("%.4g µm²/s", res$D_um2_s)))),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Recovered D (CVE round-trip)"),
           htmltools::tags$td(recov)),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Geometric bias factor"),
           htmltools::tags$td(if (!is.null(cve) && is.finite(cve$D_um2_s) && res$D_um2_s > 0) {
-            bf <- cve$D_um2_s / res$D_um2_s
+            bf <- cve$D_um2_s / D_ref
             htmltools::tags$span(style = if (abs(bf - 1) > 0.05) "color:#b26a00;font-weight:bold;" else "",
               sprintf("%.2f×  →  divide apparent D by %.2f to correct", bf, bf))
           } else "-")),
-        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Recovered σ_loc"),
-          htmltools::tags$td(if (!is.null(cve)) sprintf("%.2f nm", cve$sigma_nm) else "-")),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "σ_loc  truth / recovered"),
+          htmltools::tags$td(sprintf("%.2f nm / %s", sig_true,
+            if (!is.null(cve)) sprintf("%.2f nm  (CVE, R = %.2g)", cve$sigma_nm, cve$R_blur %||% 0) else "-"))),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Sampling clock"),
+          htmltools::tags$td(sprintf("Δt = k × %.4g ms + %.3g ms (SW) · blur %s%s%s",
+            res$cyc, res$sw %||% 0,
+            if (isTRUE(res$blur))
+              sprintf("on (τ = %.0f%% of cycle, R = %.3g)", 100 * (res$expfrac %||% 1),
+                      (res$expfrac %||% 1) * res$cyc / (6 * (res$cyc + (res$sw %||% 0))))
+            else "off (snapshot)",
+            if ((res$shrink %||% 0) > 0) sprintf(" · gap shrinkage %.0f%%", 100 * res$shrink) else "",
+            if (isTRUE(res$pd_speed)) sprintf(" · dark rises with displacement (%.0f nm)", res$pd_scale) else ""))),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Integrated (single-cycle) fraction"),
           htmltools::tags$td(if (is.finite(frac_int)) sprintf("%.0f%%", 100 * frac_int) else "-")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Median Δt / median track length"),
@@ -3641,6 +3835,29 @@ sim_server <- function(input, output, session) {
         else
           "Free diffusion: the CVE round-trip should land near 100 % of truth - that is the validation loop.",
         " Download the tracks (CSV) and load them in the Tracking tab to test the full MSD / confinement pipeline against this known ground truth."),
+      # Displacement-vs-gap-length table: the k-curve diagnostic of the plan doc.
+      local({
+        kc <- tryCatch(sim_trk_kcurve(), error = function(e) NULL)
+        if (is.null(kc) || !nrow(kc)) return(NULL)
+        cell <- function(x, b = FALSE) htmltools::tags$td(
+          style = "padding:1px 10px 1px 0; text-align:right;", if (b) htmltools::tags$b(x) else x)
+        htmltools::div(style = "margin-top:8px;",
+          htmltools::tags$div(style = "color:#666; font-size:0.86em;",
+            "Per-axis ⟨Δx²⟩ (nm²) by dark-gap length k"),
+          htmltools::tags$table(style = "border-collapse:collapse; font-size:0.84em;",
+            htmltools::tags$tr(cell("k"), lapply(kc$k, function(v) cell(v, TRUE))),
+            htmltools::tags$tr(cell("steps"), lapply(kc$n, function(v) cell(format(v, big.mark = ",")))),
+            htmltools::tags$tr(cell("⟨Δx²⟩"), lapply(kc$msq, function(v) cell(sprintf("%.0f", v)))),
+            htmltools::tags$tr(cell("free expectation"), lapply(kc$expect, function(v) cell(sprintf("%.0f", v)))),
+            htmltools::tags$tr(cell("% of free"), lapply(kc$pct, function(v)
+              htmltools::tags$td(style = sprintf("padding:1px 10px 1px 0; text-align:right; %s",
+                if (is.finite(v) && abs(v - 100) > 15) "color:#b26a00;font-weight:bold;" else ""),
+                sprintf("%.0f%%", v))))),
+          htmltools::tags$p(style = "color:#888; font-size:0.84em; margin-top:3px;",
+            "Free diffusion holds this row near 100% at every k. The GP67H tracking files fall to ",
+            "~75% at k=2 and ~30% by k=6, which is what the gap-shrinkage and speed-dependent-dark ",
+            "controls are for."))
+      }),
       # Projection artifact: 2D imaging of a CURVED-surface protein under-measures the
       # azimuthal motion (its out-of-plane component is dropped), so the recovered D is a
       # fixed fraction of truth (~75% for a side-on cylinder) - NOT a bug, and the same

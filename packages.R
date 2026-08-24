@@ -30,7 +30,9 @@ pkgs_smlm <- c(
   # misc3d: marching cubes for the Median-Cluster isosurface (computeContour3d).
   # Matrix: the sparse neighbour operator the mesh smoothing uses. Matrix ships
   # with R, but it is named here so the dependency is visible rather than assumed.
-  "misc3d", "Matrix"
+  # digest: keys the isosurface mesh cache on its geometry. Ships with Shiny's
+  # dependency tree, but named here so the dependency is visible rather than assumed.
+  "misc3d", "Matrix", "digest"
 )
 
 # Tracking-specific extra packages
@@ -163,6 +165,22 @@ DMAX_L_TCP_DEFAULT <- 100
 #     final-iteration diameter quoted in the imaging literature
 #   patGeoFactor 0.42 -> 151.2 nm, the tracking iteration Vogler quote as 150 nm
 TCP_L_PER_GEOFACTOR_NM <- 360
+
+# ── MINFLUX localization precision from the photon budget ──────────────────────
+# sigma_loc = L_TCP / (TCP_CRLB_PREFACTOR * sqrt(N)), N = detected photons (eco).
+# The Cramer-Rao bound for a doughnut TCP of diameter L scales as L/sqrt(N); the
+# prefactor depends on pattern geometry and is 4 for the hexagonal TCP used for
+# tracking. Cross-checked on the GP67H files: L = 100.8 nm with a median eco of
+# 36-38 photons gives 4.09 / 4.20 nm, and inverting the blur-aware CVE sigma the
+# other way (L = 4*sigma*sqrt(N)) returns 101.9 / 98.0 nm against the sequence's
+# 100.8 nm. Shared by the tracking sigma_loc estimator and the tracking simulator
+# so the forward and inverse models cannot disagree.
+#
+# NOT the SMLM simulator's constant. That one uses an EFFECTIVE L in
+# sigma = L_eff/(2*sqrt(N)), where L_eff absorbs drift, linker motion and imperfect
+# centring and so runs several times the physical L. Different quantity, different
+# prefactor - see docs/simulator.md.
+TCP_CRLB_PREFACTOR <- 4
 
 # ── Tracking chunking defaults ─────────────────────────────────────────────────
 # Fall back to fst if qs could not be installed (common on macOS without
