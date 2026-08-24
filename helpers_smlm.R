@@ -5228,6 +5228,89 @@ cluster2_member_col <- function(df, member_col = NULL) {
 }
 
 # =============================================================================
+# smlm_loc_precision_nm() - PER-LOCALIZATION PRECISION OF THE CURRENT DATASET
+# =============================================================================
+#
+# GOAL
+#   Give the isosurface a PHYSICAL length scale to hang its geometry on, so the
+#   drawn size of a structure stops depending on how well it happened to be
+#   labelled.
+#
+# HOW
+#   Each trace is one fluorophore sitting still, so the scatter of its own
+#   localizations around their centre IS the localization precision. Take the
+#   per-trace SD on each axis and report the median trace, matching the
+#   convention already used by estimate_gt_positions() (sigma_loc_nm) and by the
+#   de-blinking radius.
+#
+#   The MEDIAN over traces, not the mean: a trace that caught two molecules in
+#   sequence has a spread of tens of nm and would drag a mean far off the real
+#   single-molecule precision.
+#
+# WHY NOT THE REPORTED CRLB
+#   Not every export carries one, and where it does it is a lower bound on a
+#   single localization rather than a measured scatter. The measured spread
+#   already contains whatever residual drift and stage vibration survived, which
+#   is what actually blurs the rendered structure.
+#
+# THE AXES ARE NOT EQUAL, AND NOT IN THE DIRECTION CAMERA SMLM TRAINS YOU TO
+# EXPECT. MINFLUX z is typically TIGHTER than x/y, the opposite of astigmatism
+# or biplane imaging. Measured on the collaborator cond02 files: sx 6.84 / sy 6.81 /
+# sz 4.11 nm on B2-010 and 7.07 / 7.16 / 4.17 nm on B3-008, a z:lateral ratio of
+# 0.60 and 0.59. Anything that wraps a structure isotropically therefore
+# over-wraps it axially by about two thirds, so `per_axis = TRUE` returns the
+# three numbers separately and the isosurface uses them.
+#
+# RETURNS
+#   `per_axis = FALSE`: one number in nm (the RMS over the axes in use).
+#   `per_axis = TRUE` : c(x, y, z) in nm; z is the lateral mean on 2-D data.
+#   `fallback` (recycled) when there are too few multi-localization traces.
+smlm_loc_precision_nm <- function(df, min_n = 3L, fallback = 2, per_axis = FALSE) {
+  bail <- function() if (isTRUE(per_axis)) rep(fallback, 3L) else fallback
+  if (is.null(df) || !is.data.frame(df) || !nrow(df)) return(bail())
+  if (!all(c("tid", "x", "y") %in% names(df))) return(bail())
+
+  # z only counts when the dataset really is 3-D; a 2-D file carries a constant
+  # (or all-zero) z whose SD is 0 and would halve the estimate.
+  use_z <- "z" %in% names(df) && any(is.finite(df$z) & df$z != 0)
+
+  per_tid <- tryCatch(
+    df %>%
+      dplyr::group_by(tid) %>%
+      dplyr::summarise(
+        sx = stats::sd(x, na.rm = TRUE),
+        sy = stats::sd(y, na.rm = TRUE),
+        sz = if (use_z) stats::sd(z, na.rm = TRUE) else NA_real_,
+        n  = dplyr::n(), .groups = "drop"
+      ) %>%
+      dplyr::filter(n >= min_n, is.finite(sx), is.finite(sy)),
+    error = function(e) NULL
+  )
+  if (is.null(per_tid) || !nrow(per_tid)) return(bail())
+
+  # median trace on each axis independently, so a real anisotropy survives
+  ax <- c(
+    x = stats::median(per_tid$sx, na.rm = TRUE),
+    y = stats::median(per_tid$sy, na.rm = TRUE),
+    z = if (use_z) stats::median(per_tid$sz, na.rm = TRUE) else NA_real_
+  )
+  if (!is.finite(ax[["z"]]) || ax[["z"]] <= 0) ax[["z"]] <- mean(ax[c("x", "y")])
+  ax[!is.finite(ax) | ax <= 0] <- fallback
+
+  if (isTRUE(per_axis)) return(ax)
+
+  out <- sqrt(mean(ax^2))                       # RMS over the axes
+  if (!is.finite(out) || out <= 0) fallback else out
+}
+
+# Bandwidth of the isosurface KDE, as a multiple of the member gap. See the
+# `sigma` block inside cluster_density_field() for how this was chosen: it is a
+# compromise between a surface that fragments (too low) and one that has smoothed
+# the structure away (too high), and the mesh smoothing downstream means less
+# bandwidth is needed here than when the voxel grid was rendered directly.
+SIGMA_GAP_FACTOR <- 0.85
+
+# =============================================================================
 # cluster_density_field() - GAUSSIAN KDE OVER A VOXEL GRID + A DENSITY LEVEL
 #                           THAT ENCLOSES A STATED FRACTION OF THE LABELLING
 # =============================================================================
@@ -5255,6 +5338,26 @@ cluster2_member_col <- function(df, member_col = NULL) {
 #   it - sparse patches pull in slightly, dense ones push out slightly, which is
 #   what makes it look like a skin rather than a union of balls.
 #
+# THE OFFSET IS PHYSICAL, THE BANDWIDTH IS COSMETIC
+#   `offset` (AUTO = 3 x localization precision, floored at half the member gap)
+#   sets HOW TIGHT the skin is, in nanometres that mean something on the
+#   microscope. `sigma` (AUTO = SIGMA_GAP_FACTOR x gap) sets HOW SMOOTH it is.
+#   Both are applied PER AXIS, in units of that axis's own precision. They are
+#   independent by construction: the level is re-measured at `offset` using the
+#   current sigma, so smoothing more does not inflate the structure.
+#
+#   This is the property that makes the surface comparable between clusters. The
+#   earlier rule keyed both dials to the member spacing, so a poorly labelled
+#   copy of a structure drew larger than a well labelled one - on an R = 150 nm
+#   shell the realised radius ran from 304 nm at 30 members down to 192 nm at
+#   400, all of it labelling artifact. Anchored to precision the same four cases
+#   land at 166 / 163 / 173 / 169 nm.
+#
+#   `sampling_limited` in the returned list says which regime you are in: TRUE
+#   means the gap floor set the offset, so the surface is as tight as this
+#   labelling density permits and the remaining bulk is missing molecules rather
+#   than real structure.
+#
 #   WHY NOT AN ENCLOSED-DENSITY FRACTION (what this replaced). A Gaussian
 #   spreads its mass over ~3 sigma in every direction, so "enclose 50% of the
 #   labelling density" is already a thick band: measured on an R=150 shell with
@@ -5266,24 +5369,28 @@ cluster2_member_col <- function(df, member_col = NULL) {
 #   shell, peak fraction 0.4 -> 681 voxels, 0.6 -> 122, 0.8 -> 16, i.e. the
 #   surface shatters into fragments before it gets tight.
 #
-# THE TWO DIALS
-#   `offset` (NULL = 2 x member spacing) sets the wrap; `pad` adds to or
-#   subtracts from it, and is the coarser/tighter control. Everything else -
-#   bandwidth, grid extent - is derived, so there is no second knob that can
-#   silently fight the first.
+# THE DIALS
+#   `offset` sets the wrap and `sigma` the smoothing, both defaulting as above;
+#   `pad` adds to or subtracts from the offset and is the coarser tighter/looser
+#   control. Grid extent stays derived, so no knob can silently fight another.
 #
 # BOX
-#   The grid is sized to members + (offset + 2*sigma), just enough to contain
-#   the surface. It is NOT a user control: when padding was a separate box
-#   setting it both overrode a request for a tight box (forced to 3*sigma) and
-#   leaked into the contour.
+#   `grid_res` is a COST BUDGET of grid_res^3 voxels, not a per-axis count. The
+#   voxels are cubic and the box is sized to members + offset + 2 voxels, which
+#   is just enough for marching cubes to close the surface without clipping it.
+#   Spending the budget per-axis instead gave anisotropic voxels on elongated
+#   structures (28 nm along a rod, 10 nm across it, so it broke up lengthwise)
+#   and the old offset + 2*sigma margin left 32-70% of the box empty. The box is
+#   NOT a user control: when padding was a separate box setting it both overrode
+#   a request for a tight box (forced to 3*sigma) and leaked into the contour.
 #
 # NOT A CALIBRATED DENSITY ESTIMATE
 #   The kernel is unnormalised and sampled on a coarse voxel grid, so `value` is
 #   not a density in localizations/nm^3. It is a visualization envelope; use the
 #   Ripley/PCF panels for density statistics.
 cluster_density_field <- function(pts, grid_res = 22L, pad = 0, sigma = NULL,
-                                  offset = NULL) {
+                                  offset = NULL, precision = NULL,
+                                  close_surface = TRUE, sigma_scale = 1) {
   if (is.null(pts)) return(NULL)
   if (!is.matrix(pts)) pts <- as.matrix(pts)
   if (ncol(pts) < 3L) return(NULL)
@@ -5292,56 +5399,212 @@ cluster_density_field <- function(pts, grid_res = 22L, pad = 0, sigma = NULL,
   n <- nrow(pts)
   if (n < 4L) return(NULL)
 
-  # ── member spacing sets every default scale ──
+  # ── work in PRECISION UNITS, not nanometres ──
+  # `precision` may be one number or c(x, y, z). Dividing each axis by its own
+  # precision makes the space isotropic in the only currency that matters here:
+  # how well a molecule's position is known along that axis. Everything below is
+  # then a plain isotropic problem, and the mesh is scaled back to nm on the way
+  # out. The skin that comes back is an ellipsoidal shell in real space, tighter
+  # on whichever axis is measured better.
+  #
+  # For MINFLUX that axis is usually z (measured z:lateral 0.60 on collaborator cond02),
+  # so an isotropic wrap inflates the structure axially by about two thirds. Note
+  # the direction: this is the opposite of astigmatic camera SMLM, and assuming
+  # the camera convention here would make the error worse rather than better.
+  prec_ax <- suppressWarnings(as.numeric(precision %||% NA_real_))
+  if (length(prec_ax) == 1L) prec_ax <- rep(prec_ax, 3L)
+  if (length(prec_ax) != 3L) prec_ax <- rep(prec_ax[1], 3L)
+  prec_ax[!is.finite(prec_ax) | prec_ax <= 0] <- NA_real_
+  if (all(is.na(prec_ax))) prec_ax <- rep(2, 3L)
+  prec_ax[is.na(prec_ax)] <- mean(prec_ax, na.rm = TRUE)
+
+  # nm <-> precision-unit conversion for the dials the user types in nm. The
+  # LATERAL precision is the reference: it is the axis people quote, and it keeps
+  # a manual "30 nm wrap" meaning 30 nm laterally.
+  prec_ref <- mean(prec_ax[1:2])
+  pts_nm   <- pts
+  pts      <- sweep(pts, 2, prec_ax, "/")
+
+  # ── two length scales, and they measure different things ──
+  # `spacing`  = the TYPICAL member separation (median NN). Reported for
+  #              context; it is deliberately NOT what the geometry keys off.
+  # `gap`      = the LARGE member separations (90th percentile NN). A closed
+  #              surface has to bridge the big gaps, not the typical one, so
+  #              this is the scale that decides whether the skin closes.
+  #
+  # WHY THE DISTINCTION IS NOT PEDANTRY. For a quasi-regular point set the two
+  # coincide, but real labelling is Poisson-like, and there the median NN sits
+  # far below the gaps that actually need bridging: measured on random points on
+  # a 600 x 120 nm rod, median NN was 19.8 nm while the 90th percentile was
+  # 39.7 nm, a factor of 2.0. That factor is exactly what the old
+  # `offset = 2 x median spacing` rule was silently paying for. Naming the gap
+  # directly lets the offset shrink to something physical without the surface
+  # shattering.
   nnd <- tryCatch({
     d <- RANN::nn2(pts, pts, k = 2L)$nn.dists[, 2]
     d[is.finite(d) & d > 0]
   }, error = function(e) numeric(0))
   spacing <- if (length(nnd)) stats::median(nnd) else NA_real_
-  if (!is.finite(spacing) || spacing <= 0) {
+  gap     <- if (length(nnd)) as.numeric(stats::quantile(nnd, 0.90, na.rm = TRUE)) else NA_real_
+  if (!is.finite(spacing) || spacing <= 0 || !is.finite(gap) || gap <= 0) {
     diag_nm <- sqrt(sum((apply(pts, 2, max) - apply(pts, 2, min))^2))
     spacing <- if (is.finite(diag_nm) && diag_nm > 0) diag_nm / 10 else 20
+    gap     <- spacing
   }
 
+  # In precision units one unit IS one localization sigma, on every axis.
+  precision <- 1
+
   # ── surface offset: how far outside the members the skin sits ──
-  # AUTO = 2 x member spacing. One spacing is NOT enough: measured on a 250-member
-  # R=150 shell (spacing 15.2 nm) the enclosed region broke into 31, 21 or 9
-  # SEPARATE BLOBS at 1.0x depending on bandwidth - the balls around neighbouring
-  # members barely touch, so it never closes into a surface. Blob counts by
-  # offset: 1.0x -> 31/31/21/9/5, 1.5x -> 1/2/3/3/2, 2.0x -> 1/1/1/2/1,
-  # 2.5x and 3.0x -> all 1. Two spacings is the first setting that reliably
-  # closes while still hugging the structure.
-  offset <- suppressWarnings(as.numeric(offset %||% NA_real_))
-  if (!is.finite(offset) || offset <= 0) offset <- 2 * spacing
+  # AUTO = 3 x localization precision, i.e. a 3-sigma skin around where each
+  # molecule actually is, floored at half the gap.
+  #
+  # WHY 3 x PRECISION AND NOT 2 x SPACING (what this replaced). The old rule read
+  # its scale off the labelling, so the SAME structure drew bigger when it was
+  # sampled worse. Measured on an R = 150 nm shell, the realised outer radius was
+  # 304 nm at 30 members (+103%), 263 nm at 60 (+76%), 216 nm at 150 (+44%) and
+  # 192 nm at 400 (+28%): the drawn size tracked labelling density, and a sparse
+  # shell even rendered hollow where a dense one filled in solid. Anchoring to
+  # precision instead put the same four cases at 166 / 163 / 173 / 169 nm, which
+  # is the truth (150) plus the shell's own thickness plus the offset.
+  #
+  # WHY THE GAP FLOOR IS NOT OPTIONAL. A continuous surface passing outside a set
+  # of points cannot come nearer than half their separation to all of them, so an
+  # offset below gap/2 cannot close whatever the bandwidth is. The floor states
+  # that limit instead of letting the surface shatter into one bead per molecule.
+  # On well-labelled data the precision term wins and the skin is genuinely tight;
+  # on sparse data the floor wins and the offset reports the real sampling limit.
+  offset <- suppressWarnings(as.numeric(offset %||% NA_real_)) / prec_ref  # nm in
+  if (!is.finite(offset) || offset <= 0) offset <- max(3 * precision, 0.5 * gap)
 
   # `pad` adds to (or, negative, subtracts from) that - the coarser/tighter dial.
-  pad <- suppressWarnings(as.numeric(pad %||% 0))
+  pad <- suppressWarnings(as.numeric(pad %||% 0)) / prec_ref                # nm in
   if (!is.finite(pad)) pad <- 0
-  offset <- max(offset + pad, 0.25 * spacing)      # floor: never collapse to nothing
+  offset <- max(offset + pad, 0.5 * precision)     # floor: never collapse to nothing
 
-  # ── bandwidth: smooth at the scale the skin is drawn at, but never below the
-  #    member spacing, or the field breaks into one bump per member. Measured
-  #    roughness (sd/mean of the outer skin radius) is minimised near
-  #    sigma ~ 1 x spacing: at offset 2.5x, sigma 0.5x/0.75x gave 0.069 against
-  #    0.028 at 1.0x.
-  sigma <- suppressWarnings(as.numeric(sigma %||% NA_real_))
-  if (!is.finite(sigma) || sigma <= 0) sigma <- max(0.5 * offset, spacing)
+  # ── bandwidth: the SMOOTHNESS dial, largely independent of the offset ──
+  # AUTO = SIGMA_GAP_FACTOR x gap. Because the contour level is re-measured at
+  # `offset` with the current sigma, raising sigma does not inflate the surface
+  # the way it did when the two were tied together. Measured on collaborator cond02, the
+  # MEDIAN vertex-to-molecule distance moved 25.6 -> 29.0 nm against a 25.3 nm
+  # target across a 5x sigma sweep.
+  #
+  # It is not a perfect invariance and should not be sold as one: the same sweep
+  # took the MAXIMUM distance from 39.8 to 65.7 nm, because a wider kernel
+  # absorbs small protrusions into the body rather than following them. Sigma
+  # holds the typical wrap and trades away fine relief.
+  #
+  # Measured at fixed offset, sweeping sigma over 0.75 to 2.0 x gap on shells, a
+  # solid ball and rods: components fell to 1 by ~1.25x, shells stayed HOLLOW up
+  # to 1.5x and collapsed into a solid ball at 2.0x. The factor now sits BELOW
+  # that closure point on purpose, because two things downstream did not exist
+  # when it was measured: the level search closes the surface without spending
+  # bandwidth on it (see `close_surface`), and the mesh is smoothed as geometry
+  # rather than as density. Carrying enough bandwidth to close the surface on its
+  # own is what made real structures look oversmoothed - it blurs the measurement
+  # to fix what is really a topology problem. Smoothing the mesh instead leaves
+  # the density where it was measured.
+  #
+  # It was previously tied to the offset (max(0.5 * offset, spacing)), so
+  # tightening the wrap also sharpened the field and re-fragmented the surface -
+  # the two dials fought each other.
+  # `sigma_scale` tunes the AUTOMATIC bandwidth only; an explicit `sigma` in nm
+  # is a full override and is left alone. Keeping them separate means the
+  # relative dial stays meaningful no matter what the data does to the auto value.
+  sigma_scale <- suppressWarnings(as.numeric(sigma_scale %||% 1))
+  if (!is.finite(sigma_scale) || sigma_scale <= 0) sigma_scale <- 1
+  sigma <- suppressWarnings(as.numeric(sigma %||% NA_real_)) / prec_ref      # nm in
+  if (!is.finite(sigma) || sigma <= 0)
+    sigma <- max(SIGMA_GAP_FACTOR * sigma_scale * gap, precision)
 
+  # ── box: cubic voxels, spent where the surface actually is ──
+  # `grid_res` is a COST budget (grid_res^3 voxels), not a per-axis count. Two
+  # things were wrong with using it per-axis:
+  #
+  #   1. margin = offset + 2 * sigma padded the box far past anything the surface
+  #      could reach - the skin stops at ~offset from the outermost member - so
+  #      32-70% of the voxels held empty space and coarsened the rest. Measured
+  #      box occupancy on 300 nm structures: 30% at 30 members, 68% at 400.
+  #   2. an equal count per axis gives ANISOTROPIC voxels on anything elongated.
+  #      A 600 x 120 nm rod got 28.2 nm voxels along x and 10 nm across it, so it
+  #      broke up lengthwise while being oversampled across.
+  #
+  # Cubic voxels under a fixed budget fix both at identical cost: the same rod
+  # now gets 11.7 nm voxels on a 59x20x20 grid, and a 300 nm shell goes from 25.6
+  # to 18.3 nm. Two voxels of headroom past the offset keeps marching cubes from
+  # clipping the surface against the wall of the box.
   grid_res <- max(8L, as.integer(round(grid_res)))
-  # box: just enough to contain the surface, derived - never a separate control
-  margin <- offset + 2 * sigma
+  budget   <- as.numeric(grid_res)^3
 
   rng <- apply(pts, 2, range)
-  xs <- seq(rng[1, 1] - margin, rng[2, 1] + margin, length.out = grid_res)
-  ys <- seq(rng[1, 2] - margin, rng[2, 2] + margin, length.out = grid_res)
-  zs <- seq(rng[1, 3] - margin, rng[2, 3] + margin, length.out = grid_res)
+  ext <- pmax(rng[2, ] - rng[1, ], 1e-9)           # guard a flat/degenerate axis
+
+  # margin depends on the voxel size and vice versa; one fixed-point pass from
+  # margin = offset is enough, the correction is a few percent
+  vox_for <- function(budget) {                    # solve vox against its own margin
+    v <- (prod(ext + 2 * offset) / budget)^(1 / 3)
+    for (.i in 1:2) v <- (prod(ext + 2 * (offset + 2 * v)) / budget)^(1 / 3)
+    v
+  }
+  vox <- vox_for(budget)
+
+  # ── resolution floor: the voxel must be able to RESOLVE the skin ──
+  # Marching cubes needs the enclosed shell to be a couple of voxels thick or it
+  # drops pieces of it, and the shell is only ~`offset` thick. Now that the
+  # offset is precision-anchored it is often 10-13 nm, well under the ~19 nm
+  # voxel that grid_res = 22 buys - measured, that alone broke a closed shell
+  # into 3 fragments purely as a sampling artifact, with nothing wrong with the
+  # field. Refine until the skin is ~1.5 voxels thick.
+  #
+  # This raises the user's grid_res, so it is capped: VOXEL_CAP bounds the redraw
+  # at roughly two seconds for the largest clusters. Beyond that the surface is
+  # under-resolved and `resolved` comes back FALSE rather than the app quietly
+  # spending ten seconds on one cluster.
+  VOXEL_CAP <- 2e5
+  vox_max   <- offset / 1.5
+  resolved  <- TRUE
+  if (vox > vox_max) {
+    need <- prod(ext + 2 * (offset + 2 * vox_max)) / (vox_max^3)
+    if (need <= VOXEL_CAP) {
+      vox <- vox_max
+    } else {
+      vox      <- vox_for(VOXEL_CAP)
+      resolved <- vox <= vox_max
+    }
+  }
+  margin <- offset + 2 * vox
+
+  n_ax <- pmax(6L, as.integer(ceiling((ext + 2 * margin) / vox)) + 1L)
+  xs <- seq(rng[1, 1] - margin, rng[2, 1] + margin, length.out = n_ax[1])
+  ys <- seq(rng[1, 2] - margin, rng[2, 2] + margin, length.out = n_ax[2])
+  zs <- seq(rng[1, 3] - margin, rng[2, 3] + margin, length.out = n_ax[3])
   grid <- as.matrix(expand.grid(x = xs, y = ys, z = zs))
 
   # ── truncated KDE: a Gaussian is numerically dead past 3 sigma, so only the
-  #    nearest members can contribute. k is capped for cost, not for accuracy -
-  #    if more than `kmax` members sit within 3 sigma the tail they add is
-  #    negligible against the ones already counted.
-  kmax <- min(n, 512L)
+  #    nearest members can contribute.
+  #
+  # k IS MEASURED, NOT ASSUMED. It used to be min(n, 512), which sets the cost of
+  # every grid point by the SIZE OF THE CLUSTER rather than by how many members
+  # can actually reach a probe. The nn2 result is a (grid points x k) matrix, so
+  # at k = 512 a 280k-voxel grid allocates 145M distances (~1.2 GB) to multiply
+  # almost all of them by a weight of zero: measured 22.8 s for one 1500-member
+  # cluster where the real neighbour count within 3 sigma was a few dozen.
+  #
+  # Instead, count how many members genuinely fall within 3 sigma of a member and
+  # size k from that, with headroom. The probe subset is a deterministic stride,
+  # never sample() - drawing at random here would advance the GLOBAL RNG stream
+  # and silently perturb every downstream random draw (the permutation nulls, the
+  # alpha-surface subsample), and a redraw could jitter the surface.
+  k_probe <- as.integer(round(seq(1, n, length.out = min(n, 256L))))
+  k_probe <- unique(k_probe)
+  k_need <- tryCatch({
+    kn <- RANN::nn2(pts, pts[k_probe, , drop = FALSE], k = min(n, 512L))
+    max(rowSums(kn$nn.dists <= 3 * sigma))
+  }, error = function(e) min(n, 512L))
+  # 1.5x headroom covers members denser than anywhere in the probe subset; the
+  # floor keeps small clusters exact. Truncation past this is not an
+  # approximation being traded away - those weights are already numerically 0.
+  kmax <- min(n, max(8L, as.integer(ceiling(1.5 * k_need)) + 4L))
   nn <- tryCatch(RANN::nn2(pts, grid, k = kmax), error = function(e) NULL)
   if (is.null(nn)) return(NULL)
   w <- exp(-(nn$nn.dists^2) / (2 * sigma * sigma))
@@ -5373,7 +5636,7 @@ cluster_density_field <- function(pts, grid_res = 22L, pad = 0, sigma = NULL,
   mi    <- rep_len(seq_len(n), n_probe)
   probes <- pts[mi, , drop = FALSE] + dir * offset
 
-  pn <- tryCatch(RANN::nn2(pts, probes, k = min(n, 512L)), error = function(e) NULL)
+  pn <- tryCatch(RANN::nn2(pts, probes, k = kmax), error = function(e) NULL)
   if (is.null(pn)) return(NULL)
   # keep probes that are genuinely at the offset - the rest landed back inside
   # the structure, where the field says nothing about where the skin belongs
@@ -5388,10 +5651,402 @@ cluster_density_field <- function(pts, grid_res = 22L, pad = 0, sigma = NULL,
   if (!is.finite(level) || level <= 0) level <- vmax * 1e-3
   if (level >= vmax) level <- vmax * 0.999
 
-  list(grid = grid, value = val, level = level, sigma = sigma,
-       offset = offset, spacing = spacing, margin = margin, n_members = n)
+  # ── solve the level down until the surface is ONE body ──
+  # The offset fixes where the skin belongs; this asks the far cheaper question
+  # of whether that level actually yields a connected surface, and if not, how
+  # far it has to give. Lowering the level grows the surface, which is the exact
+  # inflation the offset rewrite removed, so the search is BOUNDED and the cost
+  # is reported rather than absorbed: `closed` says whether it succeeded and
+  # `level_relaxed` how many times the level had to step down.
+  #
+  # The field is computed once; only the threshold moves. Connectivity is tested
+  # on the voxel mask by label propagation, which is a few vectorised array
+  # shifts over a grid this size.
+  lvl_components <- function(thr) {
+    mask <- array(val >= thr, n_ax)
+    if (!any(mask)) return(.Machine$integer.max)
+    lab <- array(0L, n_ax); idx <- which(mask); lab[idx] <- idx
+    repeat {
+      prev <- lab
+      for (ax in 1:3) for (sh in c(-1L, 1L)) {
+        sl <- switch(ax,
+          lab[if (sh == 1L) c(1L, seq_len(n_ax[1] - 1L)) else c(2:n_ax[1], n_ax[1]), , , drop = FALSE],
+          lab[, if (sh == 1L) c(1L, seq_len(n_ax[2] - 1L)) else c(2:n_ax[2], n_ax[2]), , drop = FALSE],
+          lab[, , if (sh == 1L) c(1L, seq_len(n_ax[3] - 1L)) else c(2:n_ax[3], n_ax[3]), drop = FALSE])
+        hit <- mask & sl > 0L & (lab == 0L | sl < lab)
+        lab[hit] <- sl[hit]
+      }
+      lab[!mask] <- 0L
+      if (identical(lab, prev)) break
+    }
+    length(unique(lab[mask]))
+  }
+
+  # NA, not TRUE: when the search is off nothing has checked connectivity, and
+  # reporting an untested surface as closed is worse than reporting nothing
+  closed <- NA; level_relaxed <- 0L
+  if (isTRUE(close_surface)) {
+    ncomp <- lvl_components(level)
+    # 0.85 per step, at most 6 steps: the level can fall to ~0.38 of the
+    # offset-calibrated value and no further. Past that the surface has stopped
+    # describing the offset at all and a fragmented honest answer beats a
+    # connected invented one.
+    while (ncomp > 1L && level_relaxed < 6L) {
+      level <- level * 0.85
+      level_relaxed <- level_relaxed + 1L
+      ncomp <- lvl_components(level)
+    }
+    closed <- ncomp == 1L
+  }
+
+  # ── back to nanometres ──
+  # Everything above ran in precision units. `grid` is scaled per axis (so the
+  # caller gets real coordinates); the scalar diagnostics are reported against
+  # the lateral precision, which is the axis they are quoted in.
+  grid_nm <- sweep(grid, 2, prec_ax, "*")
+
+  list(grid = grid_nm, value = val, level = level,
+       sigma = sigma * prec_ref, offset = offset * prec_ref,
+       spacing = spacing * prec_ref, gap = gap * prec_ref,
+       precision = prec_ax, precision_ref = prec_ref,
+       margin = margin * prec_ref, voxel = vox * prec_ref,
+       # axis scale factors, so a caller can rebuild the anisotropic geometry
+       axis_scale = prec_ax, dims = n_ax, n_members = n,
+       # grid/level in the isotropic working space, for the mesh builder
+       grid_units = grid, breaks_units = list(x = xs, y = ys, z = zs),
+       # FALSE when the voxel cap stopped the grid short of resolving the skin;
+       # the surface is then under-sampled and may show gaps that are not real
+       resolved = resolved,
+       # did the level search reach a single connected body, and at what cost
+       closed = closed, level_relaxed = level_relaxed,
+       # TRUE when the sampling, not the microscope, set the wrap distance -
+       # i.e. the surface is as tight as this labelling density allows, no tighter
+       sampling_limited = (0.5 * gap) > (3 * precision))
 }
 
+
+# =============================================================================
+# density_field_mesh() - MARCHING CUBES OVER A DENSITY FIELD, WELDED + SMOOTHED
+# =============================================================================
+#
+# GOAL
+#   Turn the voxel field from cluster_density_field() into a genuine triangle
+#   mesh that renders as a smooth skin, instead of handing the raw voxels to
+#   plotly's `isosurface` trace.
+#
+# WHY NOT plotly's OWN isosurface TRACE (what this replaced)
+#   plotly runs marching cubes per cell and shades the result FLAT, so every
+#   voxel face is visible as its own facet. That is the blocky look: at the
+#   default grid the voxels were tens of nm across, so the structure was drawn
+#   with tens-of-nm flat plates regardless of how good the underlying data was.
+#   It also had to be driven with a hairline isomin/isomax band around the level,
+#   which renders a thin SLAB with an inner and an outer wall - under a
+#   translucent opacity those two walls shade separately and read as bulk.
+#
+# THE THREE STEPS THAT MAKE IT LOOK LIKE A SURFACE
+#   1. MARCHING CUBES (misc3d::computeContour3d) on the field. This is the same
+#      algorithm plotly uses; the point is what happens next.
+#   2. WELD. computeContour3d emits independent triangles, so a shared corner
+#      appears once per triangle touching it - measured 83% duplicate vertex rows
+#      on a test sphere. plotly can only average normals across triangles that
+#      literally share a vertex INDEX, so without welding `flatshading = FALSE`
+#      has nothing to work with and the mesh shades flat no matter what. Welding
+#      is what buys smooth shading; it also cuts the payload about six-fold.
+#   3. TAUBIN SMOOTH. Marching cubes leaves a staircase at the voxel scale.
+#      Taubin's lambda/mu pass (a positive smoothing step followed by a slightly
+#      larger negative one) removes it WITHOUT the shrinkage that plain Laplacian
+#      smoothing causes - a Laplacian-only mesh creeps inward every iteration and
+#      would quietly undo the offset calibration the field just established.
+#
+# WHY SMOOTH THE MESH RATHER THAN THE DENSITY
+#   Both remove the staircase, but they are not the same operation. Raising the
+#   KDE bandwidth blurs the MEASUREMENT: it merges neighbouring molecules and
+#   pulls real detail out of the structure. Smoothing the mesh only regularises
+#   the ISOSURFACE EXTRACTION, which is a rendering artifact to begin with. That
+#   split is why SIGMA_GAP_FACTOR could be lowered from 1.25 to 0.85 here.
+#
+# NOT A VOLUME ESTIMATOR
+#   The mesh is for looking at. Use cluster_alpha_volume() for enclosed volume;
+#   the smoothing step alone moves this surface by a few percent.
+#
+# RETURNS
+#   list(x, y, z, i, j, k) with 0-based i/j/k ready for plotly::add_trace(type =
+#   "mesh3d"), plus n_vertices / n_triangles, or NULL when the level yields no
+#   surface at all.
+density_field_mesh <- function(fld, smooth_iter = 8L, lambda = 0.5, mu = -0.53,
+                               weld_tol = 1e-6) {
+  if (is.null(fld) || is.null(fld$value) || is.null(fld$dims)) return(NULL)
+  if (!requireNamespace("misc3d", quietly = TRUE)) return(NULL)
+
+  n_ax <- fld$dims
+  vol  <- array(fld$value, n_ax)
+  br   <- fld$breaks_units          # isotropic working space (precision units)
+  if (is.null(br)) return(NULL)
+
+  # ── 1. marching cubes ──
+  tri <- tryCatch(
+    misc3d::computeContour3d(vol, level = fld$level, x = br$x, y = br$y, z = br$z),
+    error = function(e) NULL
+  )
+  if (is.null(tri) || !is.matrix(tri) || nrow(tri) < 3L) return(NULL)
+
+  # ── 2. weld ──
+  # Quantise to a tolerance relative to the voxel, so vertices that marching
+  # cubes computed independently but that ARE the same point collapse together.
+  # match() on the packed key is the vectorised way to do this; paste() of three
+  # rounded numbers is stable because they came from the same interpolation.
+  vox_u <- if (length(br$x) > 1L) abs(br$x[2] - br$x[1]) else 1
+  q     <- round(tri / (vox_u * weld_tol))
+  key   <- paste(q[, 1], q[, 2], q[, 3], sep = ",")
+  first <- !duplicated(key)
+  verts <- tri[first, , drop = FALSE]
+  idx   <- match(key, key[first])            # every row -> its welded vertex
+
+  faces <- matrix(idx, ncol = 3L, byrow = TRUE)
+  # marching cubes can emit slivers where two corners welded together; a triangle
+  # with a repeated vertex has no area and no normal, and would poison the
+  # averaged normal of every vertex it touches
+  keep_f <- faces[, 1] != faces[, 2] & faces[, 2] != faces[, 3] & faces[, 1] != faces[, 3]
+  faces  <- faces[keep_f, , drop = FALSE]
+  if (!nrow(faces)) return(NULL)
+
+  # ── 3. Taubin smoothing ──
+  if (smooth_iter > 0L && nrow(verts) > 3L) {
+    # Undirected edge list, each edge once per direction so the neighbour average
+    # is symmetric. Built once and reused for every iteration.
+    e_from <- c(faces[, 1], faces[, 2], faces[, 3], faces[, 2], faces[, 3], faces[, 1])
+    e_to   <- c(faces[, 2], faces[, 3], faces[, 1], faces[, 1], faces[, 2], faces[, 3])
+    ord    <- !duplicated(paste(e_from, e_to, sep = ","))
+    e_from <- e_from[ord]; e_to <- e_to[ord]
+    deg    <- tabulate(e_from, nbins = nrow(verts))
+    deg[deg == 0L] <- 1L                     # isolated vertex: leave it alone
+
+    # Neighbour-averaging operator as a sparse matrix, built once. Each
+    # iteration is then one sparse matvec instead of three tapply() calls over
+    # tens of thousands of edges, which is what made this the slow step.
+    A <- Matrix::sparseMatrix(i = e_from, j = e_to, x = 1 / deg[e_from],
+                              dims = c(nrow(verts), nrow(verts)))
+    for (it in seq_len(smooth_iter)) {
+      verts <- verts + lambda * (as.matrix(A %*% verts) - verts)   # shrink
+      verts <- verts + mu     * (as.matrix(A %*% verts) - verts)   # push back out
+    }
+  }
+
+  # ── back to nanometres: undo the per-axis precision scaling ──
+  sc <- fld$axis_scale %||% c(1, 1, 1)
+  verts <- sweep(verts, 2, sc, "*")
+
+  list(x = verts[, 1], y = verts[, 2], z = verts[, 3],
+       i = faces[, 1] - 1L, j = faces[, 2] - 1L, k = faces[, 3] - 1L,   # plotly is 0-based
+       n_vertices = nrow(verts), n_triangles = nrow(faces))
+}
+
+
+# GOAL: one hex colour for a set of members, or NA when they carry none.
+# Used by the isosurface so a surface is coloured by the SAME channel_color the
+# localizations inside it use. Returns NA (not a guess) when the members span
+# more than one channel colour, because a two-channel structure has no single
+# honest colour and the caller should fall back to its own palette.
+iso_channel_color <- function(members) {
+  if (!is.data.frame(members) || !nrow(members)) return(NA_character_)
+  if (!"channel_color" %in% names(members)) return(NA_character_)
+  cc <- unique(members$channel_color[!is.na(members$channel_color)])
+  if (length(cc) == 1L) as.character(cc) else NA_character_
+}
+# =============================================================================
+# add_cluster_isosurface() - ONE ISOSURFACE TRACE, USED BY EVERY VIEWING MODE
+# =============================================================================
+#
+# GOAL
+#   Wrap one structure in one smooth skin and add it to a plotly 3-D figure.
+#   Normal mode, the 2-colour split and multiplex channels all call this; they
+#   differ only in which points they hand over and which colour they ask for.
+#
+# WHY IT EXISTS
+#   The cluster2 and tc2 render blocks were near-duplicates that had already
+#   drifted apart: only one of them had been switched to de-blinked molecule
+#   centroids, and only one honoured channel colours. A wrapping rule that lives
+#   in two places is a wrapping rule that will disagree with itself.
+#
+# COLOUR IS THE CALLER'S DECISION
+#   This takes a single hex colour and does not know what it means. The caller
+#   picks it from the cluster palette, the channel table or a fixed user colour,
+#   which is what keeps "colour by channel" from having to be re-implemented per
+#   viewing mode.
+#
+# RENDERING NOTES
+#   The trace is a `mesh3d`, not plotly's `isosurface`. flatshading = FALSE plus
+#   the welded vertices from density_field_mesh() is what produces smooth shading;
+#   either alone gives flat facets. Lighting is deliberately low-specular: a
+#   translucent skin with a hot highlight reads as a plastic bead rather than as
+#   a density envelope.
+#
+# RETURNS
+#   The figure, with one trace added. On any failure (too few members, no
+#   surface at that level) the figure comes back UNCHANGED rather than erroring,
+#   because one bad cluster must not blank the whole plot.
+add_cluster_isosurface <- function(fig, pts, color = "#00CED1", opacity = 0.25,
+                                   name = NULL, showlegend = FALSE,
+                                   grid_res = 22L, pad = 0, sigma = NULL,
+                                   offset = NULL, precision = NULL,
+                                   smooth_iter = 8L, close_surface = TRUE,
+                                   sigma_scale = 1, diag_env = NULL) {
+  # `diag_env` collects one row per surface so the UI can report what the
+  # automatic geometry actually chose. An environment rather than a return value
+  # because the caller wants the figure back in a pipe; nothing here reads it.
+  note <- function(...) {
+    if (is.null(diag_env)) return(invisible(NULL))
+    diag_env$rows <- c(diag_env$rows, list(data.frame(..., stringsAsFactors = FALSE)))
+  }
+  if (is.null(pts)) return(fig)
+  pts <- as.matrix(pts)
+  pts <- pts[stats::complete.cases(pts), , drop = FALSE]
+  if (nrow(pts) < 4L || ncol(pts) < 3L) {
+    note(name = name %||% NA_character_, n_members = nrow(pts), wrap = NA_real_,
+         smoothing = NA_real_, voxel = NA_real_, sampling_limited = NA,
+         closed = NA, resolved = NA, drawn = FALSE)
+    return(fig)
+  }
+
+  fld <- tryCatch(
+    cluster_density_field(pts, grid_res = grid_res, pad = pad, sigma = sigma,
+                          offset = offset, precision = precision,
+                          close_surface = close_surface, sigma_scale = sigma_scale),
+    error = function(e) NULL
+  )
+  if (is.null(fld)) {
+    note(name = name %||% NA_character_, n_members = nrow(pts), wrap = NA_real_,
+         smoothing = NA_real_, voxel = NA_real_, sampling_limited = NA,
+         closed = NA, resolved = NA, drawn = FALSE)
+    return(fig)
+  }
+
+  msh <- tryCatch(density_field_mesh(fld, smooth_iter = smooth_iter),
+                  error = function(e) NULL)
+  note(name = name %||% NA_character_, n_members = nrow(pts),
+       wrap = fld$offset, smoothing = fld$sigma, voxel = fld$voxel,
+       sampling_limited = isTRUE(fld$sampling_limited),
+       closed = fld$closed, resolved = isTRUE(fld$resolved),
+       drawn = !is.null(msh))
+  if (is.null(msh)) return(fig)
+
+  # COLOUR MUST NOT BE PASSED AS `color`. plotly's R wrapper intercepts a `color`
+  # argument and routes it through its own scale-mapping machinery, which has no
+  # output slot for mesh3d - so the attribute is silently DROPPED and every
+  # surface renders in plotly's default. Verified against plotly_build(): both
+  # `color = "#FF0000"` and `color = I("#FF0000")` vanish from the built trace,
+  # while intensity/colorscale, facecolor and vertexcolor all survive.
+  #
+  # A flat intensity against a two-stop colorscale is the lightest of the three:
+  # one number per vertex rather than a hex STRING per vertex (vertexcolor) or
+  # per triangle (facecolor), which matters when a view draws tens of surfaces.
+  # cmin/cmax are pinned because an all-equal intensity would otherwise autoscale
+  # to a degenerate cmin == cmax range.
+  nv <- length(msh$x)
+  fig %>% plotly::add_trace(
+    type = "mesh3d",
+    x = msh$x, y = msh$y, z = msh$z,
+    i = msh$i, j = msh$j, k = msh$k,
+    intensity = rep(0, nv),
+    colorscale = list(list(0, color), list(1, color)),
+    cmin = 0, cmax = 1, showscale = FALSE,
+    opacity = opacity,
+    flatshading = FALSE,
+    lighting = list(ambient = 0.55, diffuse = 0.8, specular = 0.12,
+                    roughness = 0.9, fresnel = 0.1),
+    lightposition = list(x = 1e4, y = 1e4, z = 1e4),
+    name = name %||% "Isosurface",
+    showlegend = isTRUE(showlegend),
+    hoverinfo = "skip",
+    inherit = FALSE
+  )
+}
+
+# =============================================================================
+# iso_status_ui() - WHAT THE AUTOMATIC ISOSURFACE GEOMETRY ACTUALLY CHOSE
+# =============================================================================
+#
+# GOAL
+#   Report, under the isosurface controls, the numbers the surface was built
+#   with and anything that stopped it being drawn properly.
+#
+# WHY THIS IS NOT OPTIONAL POLISH
+#   The wrap distance, the smoothing and the grid are all derived from the data,
+#   so "Tighten / loosen" adjusts a value the user cannot otherwise see. Without
+#   this readout, -20 nm is a blind edit. It also separates the two ways a
+#   surface can look wrong that would otherwise be indistinguishable on screen:
+#   a structure that is genuinely fragmented, and one that is merely
+#   under-resolved by the voxel grid.
+#
+# THE TWO REGIMES
+#   The wrap is 3 x localization precision unless that falls below half the
+#   molecule spacing, in which case spacing wins. Which one bound it is the
+#   single most useful thing to know about a surface: a spacing-bound surface is
+#   as tight as this labelling density permits and its remaining bulk is missing
+#   molecules, not structure.
+#
+# RETURNS
+#   A shiny tag, or NULL when nothing has been drawn yet.
+iso_status_ui <- function(rows) {
+  if (is.null(rows) || !length(rows)) return(NULL)
+  d <- if (is.data.frame(rows)) rows else do.call(rbind, rows)
+  if (is.null(d) || !nrow(d)) return(NULL)
+
+  ok  <- d[isTRUE_vec(d$drawn), , drop = FALSE]
+  n_f <- sum(!isTRUE_vec(d$drawn))
+  if (!nrow(ok)) {
+    return(shiny::div(class = "iso-status",
+      shiny::tags$span(style = "color:#b45309;",
+        sprintf("No surface drawn (%d cluster%s too small or too sparse).",
+                n_f, if (n_f == 1L) "" else "s"))))
+  }
+
+  rng <- function(v, digits = 0) {
+    v <- v[is.finite(v)]
+    if (!length(v)) return("n/a")
+    if (diff(range(v)) < 0.5) sprintf("%.*f nm", digits, v[1])
+    else sprintf("%.*f to %.*f nm", digits, min(v), digits, max(v))
+  }
+
+  n_samp <- sum(isTRUE_vec(ok$sampling_limited))
+  n_prec <- nrow(ok) - n_samp
+  regime <- if (n_samp == 0L) "Wrap set by localization precision."
+    else if (n_prec == 0L)   "Wrap set by molecule spacing."
+    else sprintf("Wrap set by localization precision on %d, by molecule spacing on %d.",
+                 n_prec, n_samp)
+
+  warn <- character(0)
+  n_open <- sum(!is.na(ok$closed) & !ok$closed)
+  if (n_open) warn <- c(warn, sprintf(
+    "%d surface%s did not close into one body. The structure is sampled too sparsely to wrap this tightly; loosen the wrap or raise smoothing.",
+    n_open, if (n_open == 1L) "" else "s"))
+  n_unres <- sum(!isTRUE_vec(ok$resolved))
+  if (n_unres) warn <- c(warn, sprintf(
+    "%d surface%s hit the voxel cap and %s under-resolved. Gaps in %s may not be real.",
+    n_unres, if (n_unres == 1L) "" else "s",
+    if (n_unres == 1L) "is" else "are", if (n_unres == 1L) "it" else "them"))
+  if (n_f) warn <- c(warn, sprintf(
+    "%d cluster%s had too few molecules to wrap.", n_f, if (n_f == 1L) "" else "s"))
+
+  shiny::div(
+    class = "iso-status",
+    style = paste("margin:6px 0 10px 0; padding:8px 10px; border-radius:4px;",
+                  "background:rgba(127,127,127,0.10); font-size:12px; line-height:1.45;"),
+    shiny::tags$div(shiny::tags$b(sprintf("%d surface%s drawn.", nrow(ok),
+                                          if (nrow(ok) == 1L) "" else "s")),
+                    sprintf(" Wrap %s, smoothing %s, voxel %s.",
+                            rng(ok$wrap), rng(ok$smoothing), rng(ok$voxel, 1))),
+    shiny::tags$div(style = "opacity:0.8;", regime),
+    if (length(warn)) shiny::tags$div(
+      style = "margin-top:5px; color:#b45309;",
+      lapply(warn, function(w) shiny::tags$div(w))
+    )
+  )
+}
+
+# isTRUE() is not vectorised; these columns can carry NA (a diagnostic that was
+# never tested), and NA must read as FALSE rather than propagate.
+isTRUE_vec <- function(v) !is.na(v) & v
 # =============================================================================
 # cluster_alpha_volume() - ENCLOSED VOLUME OF ONE STRUCTURE, ALPHA CHOSEN FROM
 #                          THAT STRUCTURE'S OWN SPACING

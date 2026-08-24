@@ -653,7 +653,7 @@ tracking_server <- function(input, output, session) {
     # ── sigma_loc ──────────────────────────────────────────────────────────────
     sigma_line <- if (isTRUE(b$degenerate) && !is.finite(b$sig_pt_med))
       row(htmltools::span(style = sprintf("color:%s;", RED),
-        sigloc(), " not resolvable - consecutive steps are positively correlated (drift dominates). Enter it manually."))
+        sigloc(), " is not resolvable, because consecutive steps are positively correlated and drift dominates them. Enter it manually."))
     else if (is.finite(b$sig_pt_med))
       row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sig_pt_med)),
           dim_(sprintf("  (%sn=%d tracks  \u00b7  CV %s  \u00b7  pooled %.2f)",
@@ -669,7 +669,7 @@ tracking_server <- function(input, output, session) {
       row(dim_(sprintf("lateral %.2f  \u00b7  axial %.2f nm", b$sigma_xy, b$sigma_z)),
           if (is.finite(b$sig_aniso) && b$sig_aniso > 1.3)
             warn(htmltools::HTML(sprintf(
-              "  &#9888; axial %.1f\u00d7 worse \u2014 enter %.2f nm for the D-map / 2D JDD",
+              "  &#9888; axial is %.1f\u00d7 wider. Enter %.2f nm for the D-map and 2D JDD.",
               b$sig_aniso, b$sigma_xy))) else NULL)
     else NULL
 
@@ -677,13 +677,13 @@ tracking_server <- function(input, output, session) {
     noise_line <- if (is.finite(b$noise_frac))
       row(dim_(sprintf("noise %.0f%% of step variance (r\u2081 = %.3f)", 100 * max(0, b$noise_frac), b$r1_norm)),
           if (b$noise_frac < 0.15) warn(htmltools::HTML("  &#9888; "), sigloc(),
-                                          " spread is motion-dominated, indicative only") else NULL)
+                                          " spread is dominated by motion, so read it as indicative only") else NULL)
     else NULL
 
     # ── photon channel = mobility proxy, so an ECO/EFO filter is a mobility filter ──
     eco_line <- if (is.finite(b$phot_mob_rho) && b$phot_mob_rho <= -0.35)
       row(warn(htmltools::HTML(sprintf(
-        "&#9888; %s tracks mobility (&rho; = %.2f) \u2014 %s filters bias D",
+        "&#9888; %s correlates with mobility (&rho; = %.2f), so filtering on %s removes the faster molecules and lowers D",
         toupper(b$phot_col %||% "photon"), b$phot_mob_rho, toupper(b$phot_col %||% "photon")))))
     else NULL
 
@@ -725,7 +725,7 @@ tracking_server <- function(input, output, session) {
         if (is.finite(b$n_implaus)) sprintf("%s implausible jumps (%.2f%%)", format(b$n_implaus, big.mark = ","), 100 * b$frac_implaus),
         if (is.finite(b$n_suspect)) sprintf("%d/%d suspicious tracks", b$n_suspect, b$n_tracks_pt)), collapse = "  \u00b7  ")
       row(htmltools::span(style = sprintf("color:%s;", if (bad) AMB else DIM),
-        htmltools::tags$b("Linking QC "), txt, if (bad) "  \u2014 check mis-links at high density / long gaps" else ""))
+        htmltools::tags$b("Linking QC "), txt, if (bad) ". Check for mis-links at high density or across long gaps." else ""))
     } else NULL
 
     htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
@@ -6240,7 +6240,7 @@ tracking_server <- function(input, output, session) {
             # patterns are legitimate for slow targets, so the threshold sits well
             # below the 100-300 nm a tracking iteration normally uses.
             if (is.finite(L) && L < 60) htmltools::span(style = "font-weight:normal; color:#B8860B;",
-              htmltools::HTML(" &#9888; tight for tracking \u2014 confirm this is the reiterated iteration"))
+              htmltools::HTML(" &#9888; tight for tracking. Confirm this is the reiterated iteration."))
             else NULL)
         ),
         htmltools::tags$tr(
@@ -7530,7 +7530,7 @@ tracking_server <- function(input, output, session) {
             col <- if (isTRUE(bad)) "#b26a00" else "#3a7d3a"
             htmltools::div(style = sprintf("color:%s; font-size:0.86em; margin-top:2px;", col),
               htmltools::HTML(sprintf(
-                "Simulated free diffusion on this %s (%s, %s) %s &mdash; %s",
+                "Simulated free diffusion on this %s (%s, %s) %s, %s",
                 attr(gm, "geom"), attr(gm, "dims"), attr(gm, "mode"), say,
                 if (isTRUE(bad))
                   "geometry, not biology: shorten the upper fit limit."

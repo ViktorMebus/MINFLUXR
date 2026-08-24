@@ -1193,12 +1193,14 @@ smlm_server <- function(input, output, session) {
       cluster2_iso_id = 1,
       cluster2_iso_color = "#00CED1",
       cluster2_iso_unicolor = FALSE,
+      cluster2_iso_by_channel = FALSE,
       cluster2_iso_grid_res = 22,
       cluster2_iso_pad = 0,
       cluster2_iso_manual_offset = FALSE,
       cluster2_iso_offset = 30,
       cluster2_iso_opacity = 0.25,
       cluster2_iso_manual_sigma = FALSE,
+      cluster2_iso_smooth_rel = 1,
       cluster2_iso_sigma = 30,
       
       # 2D wrapper
@@ -1268,6 +1270,7 @@ smlm_server <- function(input, output, session) {
       tc2_iso_manual_offset = FALSE,
       tc2_iso_offset = 30,
       tc2_iso_manual_sigma = FALSE,
+      tc2_iso_smooth_rel = 1,
       tc2_iso_sigma = 30,
       tc2_iso_opacity = 0.25
     )
@@ -1385,6 +1388,7 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("tc2_iso_sigma"))) updateSliderInput(session, "tc2_iso_sigma", value = as.numeric(getv("tc2_iso_sigma")))
     if (!is.null(getv("tc2_iso_opacity"))) updateSliderInput(session, "tc2_iso_opacity", value = as.numeric(getv("tc2_iso_opacity")))
     if (!is.null(getv("tc2_iso_manual_sigma"))) updateCheckboxInput(session, "tc2_iso_manual_sigma", value = isTRUE(getv("tc2_iso_manual_sigma")))
+    if (!is.null(getv("tc2_iso_smooth_rel"))) updateSliderInput(session, "tc2_iso_smooth_rel", value = as.numeric(getv("tc2_iso_smooth_rel")))
   }
   
   
@@ -1525,6 +1529,7 @@ smlm_server <- function(input, output, session) {
       # master toggle first, so the restored parameters actually take effect
       "enable_cluster2", "show_cluster2_knn",
       "show_cluster2_shape", "show_cluster2_isosurface", "cluster2_iso_selected_only",
+      "cluster2_iso_by_channel",
       "show_cluster2_shape_2D", "show_cluster2_metrics",
       "show_cluster2_pca_axes",
       "show_cluster2_labels", "show_cluster2_plane_angle", "show_cluster2_plane_distance",
@@ -1556,8 +1561,10 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("cluster2_iso_opacity")))  updateSliderInput(session, "cluster2_iso_opacity", value = as.numeric(getv("cluster2_iso_opacity")))
     if (!is.null(getv("cluster2_iso_sigma")))    updateSliderInput(session, "cluster2_iso_sigma", value = as.numeric(getv("cluster2_iso_sigma")))
     if (!is.null(getv("cluster2_iso_manual_sigma"))) updateCheckboxInput(session, "cluster2_iso_manual_sigma", value = isTRUE(getv("cluster2_iso_manual_sigma")))
+    if (!is.null(getv("cluster2_iso_smooth_rel"))) updateSliderInput(session, "cluster2_iso_smooth_rel", value = as.numeric(getv("cluster2_iso_smooth_rel")))
     if (!is.null(getv("cluster2_iso_color")))    colourpicker::updateColourInput(session, "cluster2_iso_color", value = as.character(getv("cluster2_iso_color")))
     if (!is.null(getv("cluster2_iso_unicolor"))) updateCheckboxInput(session, "cluster2_iso_unicolor", value = isTRUE(getv("cluster2_iso_unicolor")))
+    if (!is.null(getv("cluster2_iso_by_channel"))) updateCheckboxInput(session, "cluster2_iso_by_channel", value = isTRUE(getv("cluster2_iso_by_channel")))
     
     # color
     if (!is.null(getv("fit_color_2d"))) colourpicker::updateColourInput(session, "fit_color_2d", value = as.character(getv("fit_color_2d")))
@@ -1948,6 +1955,7 @@ smlm_server <- function(input, output, session) {
         cluster2_iso_id = input$cluster2_iso_id,
         cluster2_iso_color = input$cluster2_iso_color,
         cluster2_iso_unicolor = isTRUE(input$cluster2_iso_unicolor),
+        cluster2_iso_by_channel = isTRUE(input$cluster2_iso_by_channel),
         cluster2_iso_grid_res = input$cluster2_iso_grid_res,
         cluster2_iso_pad = input$cluster2_iso_pad,
         cluster2_iso_manual_offset = isTRUE(input$cluster2_iso_manual_offset),
@@ -1955,6 +1963,7 @@ smlm_server <- function(input, output, session) {
         cluster2_iso_opacity = input$cluster2_iso_opacity,
         cluster2_iso_sigma = input$cluster2_iso_sigma,
         cluster2_iso_manual_sigma = isTRUE(input$cluster2_iso_manual_sigma),
+        cluster2_iso_smooth_rel = input$cluster2_iso_smooth_rel,
         
         show_cluster2_shape_2D = isTRUE(input$show_cluster2_shape_2D),
         
@@ -2446,7 +2455,8 @@ smlm_server <- function(input, output, session) {
         tc2_iso_offset = input$tc2_iso_offset,
         tc2_iso_manual_sigma = isTRUE(input$tc2_iso_manual_sigma),
         tc2_iso_sigma = input$tc2_iso_sigma,
-        tc2_iso_opacity = input$tc2_iso_opacity
+        tc2_iso_opacity = input$tc2_iso_opacity,
+        tc2_iso_smooth_rel = input$tc2_iso_smooth_rel
       )
       
       jsonlite::write_json(s, path = file, auto_unbox = TRUE, pretty = TRUE)
@@ -3377,6 +3387,12 @@ smlm_server <- function(input, output, session) {
   plot_trigger <- reactiveVal(NULL)
   smlm_diag      <- reactiveVal(NULL)   # list(data_clusters, img_blobs) in data coords
   smlm_diag_mats <- reactiveVal(NULL)  # list(raw=mat_c, smooth=mat_cs) for debug plot
+  # One row per isosurface drawn in the last 3-D render, so the controls can
+  # report the geometry they picked. See iso_status_ui().
+  cluster2_iso_diag <- reactiveVal(NULL)
+  tc2_iso_diag      <- reactiveVal(NULL)
+  output$cluster2_iso_status <- renderUI(iso_status_ui(cluster2_iso_diag()))
+  output$tc2_iso_status      <- renderUI(iso_status_ui(tc2_iso_diag()))
   cluster2_table_store <- reactiveVal(NULL)
   # Cache of clustered data per file - populated whenever a file is plotted.
   # Enables batch analysis across all previously-plotted files.
@@ -6052,6 +6068,10 @@ smlm_server <- function(input, output, session) {
           y = stats::median(y, na.rm = TRUE),
           z = stats::median(z, na.rm = TRUE),
           cluster2 = dplyr::first(cluster2),
+          # carried so the isosurface can be coloured by channel; the member unit
+          # never spans channels, so first() is the channel, not a sample of it
+          channel_color = if ("channel_color" %in% names(df))
+                            dplyr::first(channel_color) else NA_character_,
           .groups = "drop"
         ) %>%
         dplyr::filter(is.finite(x), is.finite(y), is.finite(z), is.finite(cluster2), cluster2 != 0)
@@ -6214,6 +6234,9 @@ smlm_server <- function(input, output, session) {
         )
       }
     }
+    if (!isTRUE(input$show_tc2_isosurface)) tc2_iso_diag(NULL)
+    if (!isTRUE(input$show_cluster2_isosurface)) cluster2_iso_diag(NULL)
+
     # ── 2-color tc2 isosurface ──────────────────────────────────────────────
     if (isTRUE(input$show_tc2_isosurface) &&
         isTRUE(input$enable_two_color) &&
@@ -6222,8 +6245,9 @@ smlm_server <- function(input, output, session) {
       grid_res <- input$tc2_iso_grid_res %||% 22
       pad      <- input$tc2_iso_pad %||% 0
       op       <- input$tc2_iso_opacity %||% 0.25
-      # NULL = derive from this structure's own member spacing (2x), which is
-      # the setting that reliably closes into one surface.
+      # NULL = auto, i.e. 3 x localization precision floored at half the member
+      # gap. Anchoring to the microscope rather than to the labelling is what
+      # keeps two clusters comparable; see cluster_density_field().
       iso_off  <- if (!isTRUE(input$tc2_iso_manual_offset)) NULL else {
         o <- suppressWarnings(as.numeric(input$tc2_iso_offset %||% 30))
         if (!is.finite(o) || o <= 0) NULL else o
@@ -6241,6 +6265,15 @@ smlm_server <- function(input, output, session) {
       # then tracked trace length rather than labelling.
       tc2_unit <- if ("cluster" %in% names(df) &&
                       any(!is.na(df$cluster) & df$cluster != 0L)) "cluster" else "tid"
+
+      # Physical scale for the surface geometry: measured once for the whole
+      # dataset, not per cluster, so two clusters in one view are drawn on the
+      # same ruler. Per-cluster it would reintroduce exactly the sampling
+      # dependence the precision anchor exists to remove.
+      # Per-axis: MINFLUX z is usually TIGHTER than x/y (measured z:lateral 0.60
+      # on the collaborator cond02 files), so an isotropic wrap over-wraps axially.
+      iso_precision <- smlm_loc_precision_nm(df, per_axis = TRUE)
+      tc2_diag <- new.env(parent = emptyenv()); tc2_diag$rows <- list()
 
       # choose which clusters to draw
       ids <- sort(unique(df$cluster2))
@@ -6266,37 +6299,27 @@ smlm_server <- function(input, output, session) {
         pts <- pts[stats::complete.cases(pts), , drop = FALSE]
         if (nrow(pts) < 4) next
 
-        fld <- cluster_density_field(pts, grid_res = grid_res, pad = pad,
-                                     sigma = sigma, offset = iso_off)
-        if (is.null(fld)) next
-        grid      <- fld$grid
-        val       <- fld$value
-        iso_level <- fld$level
-
-        # group A = ids < 10000, group B = ids >= 10000
-        tc2_iso_col <- if (cid < 10000L) {
+        # Colour follows the channel the members are in, taken from the same
+        # channel_color column the points use, so a surface can never disagree
+        # with the localizations inside it. Falls back to the group split
+        # (A = ids < 10000, B = ids >= 10000) when no channel colour is present.
+        tc2_iso_col <- iso_channel_color(sub)
+        if (is.na(tc2_iso_col)) tc2_iso_col <- if (cid < 10000L) {
           input$color_group1 %||% "#1f77b4"
         } else {
           input$color_group2 %||% "#d62728"
         }
 
-        fig <- fig %>% plotly::add_trace(
-          type = "isosurface",
-          x = grid[,1], y = grid[,2], z = grid[,3],
-          value = val,
-          isomin = iso_level,
-          isomax = iso_level * 1.001,
-          surface = list(count = 1),
-          opacity = op,
-          colorscale = list(list(0, tc2_iso_col), list(1, tc2_iso_col)),
-          caps = list(x = list(show = FALSE),
-                      y = list(show = FALSE),
-                      z = list(show = FALSE)),
-          showscale = FALSE,
-          hoverinfo = "skip",
-          inherit = FALSE
+        fig <- add_cluster_isosurface(
+          fig, pts, color = tc2_iso_col, opacity = op,
+          name = paste0("tc2 ", if (cid < 10000L) "A-" else "B-",
+                        if (cid < 10000L) cid else cid - 10000L),
+          grid_res = grid_res, pad = pad, sigma = sigma, offset = iso_off,
+          precision = iso_precision, diag_env = tc2_diag,
+          sigma_scale = input$tc2_iso_smooth_rel %||% 1
         )
       }
+      tc2_iso_diag(tc2_diag$rows)
     }
     # ── cluster2 isosurface (3D) ────────────────────────────────────────────
     if (isTRUE(input$show_cluster2_isosurface) &&
@@ -6308,9 +6331,9 @@ smlm_server <- function(input, output, session) {
       grid_res <- input$cluster2_iso_grid_res %||% 22
       pad      <- input$cluster2_iso_pad %||% 0
       op       <- input$cluster2_iso_opacity %||% 0.25
-      # NULL = derive from this structure's own member spacing (2x), the setting
-      # that reliably closes into one surface. A fixed nm value cannot serve a
-      # 30 nm molecule and a 500 nm vesicle in the same field of view.
+      # NULL = auto, i.e. 3 x localization precision floored at half the member
+      # gap. Anchoring to the microscope rather than to the labelling is what
+      # keeps two clusters comparable; see cluster_density_field().
       iso_off  <- if (!isTRUE(input$cluster2_iso_manual_offset)) NULL else {
         o <- suppressWarnings(as.numeric(input$cluster2_iso_offset %||% 30))
         if (!is.finite(o) || o <= 0) NULL else o
@@ -6319,6 +6342,13 @@ smlm_server <- function(input, output, session) {
         s <- suppressWarnings(as.numeric(input$cluster2_iso_sigma %||% 30))
         if (!is.finite(s) || s <= 0) NULL else s
       }
+
+      # See the tc2 block: one dataset-wide precision, so every Median Cluster in
+      # the view is wrapped on the same physical ruler.
+      # Per-axis: MINFLUX z is usually TIGHTER than x/y (measured z:lateral 0.60
+      # on the collaborator cond02 files), so an isotropic wrap over-wraps axially.
+      iso_precision <- smlm_loc_precision_nm(df, per_axis = TRUE)
+      c2_diag <- new.env(parent = emptyenv()); c2_diag$rows <- list()
 
       ids <- sort(unique(cluster2_medians$cluster2))
       ids <- ids[is.finite(ids) & ids != 0]
@@ -6343,46 +6373,33 @@ smlm_server <- function(input, output, session) {
         pts <- pts[stats::complete.cases(pts), , drop = FALSE]
         if (nrow(pts) < 4) next
 
-        # Gaussian KDE over the member centroids + a level enclosing `qlvl` of
-        # the labelling density. See cluster_density_field() for why this
-        # replaced the old nearest-distance field (it was blind to density, so
-        # every straggler grew its own bubble) and the old quantile-of-voxels
-        # level (sigma cancelled exactly; the view padding set the geometry).
-        fld <- cluster_density_field(pts, grid_res = grid_res, pad = pad,
-                                     sigma = sigma, offset = iso_off)
-        if (is.null(fld)) next
-        grid      <- fld$grid
-        val       <- fld$value
-        iso_level <- fld$level
-
+        # Gaussian KDE over the member centroids, contoured at the level that
+        # sits `offset` nm outside them. See cluster_density_field() for why the
+        # field is a density rather than a nearest-distance transform, and why
+        # the offset is anchored to localization precision rather than spacing.
+        # Colour precedence: an explicit single colour the user picked, then the
+        # channel the members belong to, then the cluster palette. Channel colour
+        # is what makes this usable in multiplex mode, where the cluster palette
+        # says nothing about which target a structure is.
         iso_col <- if (isTRUE(input$cluster2_iso_unicolor)) {
           input$cluster2_iso_color %||% "#00CED1"
+        } else if (isTRUE(input$cluster2_iso_by_channel)) {
+          cc <- iso_channel_color(sub)
+          if (is.na(cc)) pal_iso[(cid %% length(pal_iso)) + 1] else cc
         } else {
           pal_iso[(cid %% length(pal_iso)) + 1]
         }
 
-        fig <- fig %>% plotly::add_trace(
-          type = "isosurface",
-          x = grid[,1], y = grid[,2], z = grid[,3],
-          value = val,
-          isomin = iso_level,
-          isomax = iso_level * 1.001,
-          surface = list(count = 1),
-          opacity = op,
-
-          colorscale = list(list(0, iso_col), list(1, iso_col)),
-
-          caps = list(
-            x = list(show = FALSE),
-            y = list(show = FALSE),
-            z = list(show = FALSE)
-          ),
-          showscale = FALSE,
-          hoverinfo = "skip",
-          inherit = FALSE
+        fig <- add_cluster_isosurface(
+          fig, pts, color = iso_col, opacity = op,
+          name = paste0("Median Cluster ", cid),
+          grid_res = grid_res, pad = pad, sigma = sigma, offset = iso_off,
+          precision = iso_precision, diag_env = c2_diag,
+          sigma_scale = input$cluster2_iso_smooth_rel %||% 1
         )
       }
       } # end else(!length(ids))
+      cluster2_iso_diag(c2_diag$rows)
     }
 
 

@@ -26,7 +26,11 @@ pkgs_smlm <- c(
   "dplyr", "rlang",
   "dbscan", "RANN",
   "MASS", "mclust", "openxlsx", "viridisLite",
-  "magick", "fields", "base64enc", "geometry", "alphashape3d", "pracma", "Gmedian", "minpack.lm"
+  "magick", "fields", "base64enc", "geometry", "alphashape3d", "pracma", "Gmedian", "minpack.lm",
+  # misc3d: marching cubes for the Median-Cluster isosurface (computeContour3d).
+  # Matrix: the sparse neighbour operator the mesh smoothing uses. Matrix ships
+  # with R, but it is named here so the dependency is visible rather than assumed.
+  "misc3d", "Matrix"
 )
 
 # Tracking-specific extra packages
