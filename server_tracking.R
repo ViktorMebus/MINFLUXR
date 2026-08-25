@@ -6825,6 +6825,9 @@ tracking_server <- function(input, output, session) {
     n_trk_lag <- rowSums(!is.na(track_msd))
     msd_q25   <- apply(track_msd, 1L, quantile, probs = 0.25, na.rm = TRUE)
     msd_q75   <- apply(track_msd, 1L, quantile, probs = 0.75, na.rm = TRUE)
+    # Median of the same per-track TAMSDs, so the plotted band has a central line
+    # that is commensurable with it (the eMSD is a mean of a skewed distribution).
+    msd_med   <- apply(track_msd, 1L, stats::median, na.rm = TRUE)
 
     min_trk <- max(2L, floor(0.10 * max(n_trk_lag)))
     keep_lag <- n_trk_lag >= min_trk
@@ -6836,7 +6839,7 @@ tracking_server <- function(input, output, session) {
          msd = msd_pair,
          npairs = np_lag, n_trk_lag = n_trk_lag, keep_lag = keep_lag,
          track_msd = track_msd, tk_names = tk_names,
-         msd_q25 = msd_q25, msd_q75 = msd_q75,
+         msd_q25 = msd_q25, msd_q75 = msd_q75, msd_med = msd_med,
          t_cycle = t_c, has_z = has_z, ndim = if (has_z) 3L else 2L,
          # MSD = 2*d_eff*D*tau. d_eff follows the MOTION and its projection, not the
          # recorded coordinate count -- see .msd_d_eff.
@@ -7224,7 +7227,11 @@ tracking_server <- function(input, output, session) {
         type = "scatter", mode = "lines", fill = "toself",
         fillcolor = "rgba(70,130,200,0.18)",
         line = list(color = "rgba(0,0,0,0)", width = 0),
-        hoverinfo = "skip", name = "IQR", showlegend = TRUE)
+        # Named for what it is: the spread of per-track TAMSDs, NOT a confidence
+        # band on the plotted ensemble value. The line is a MEAN of that same
+        # distribution, and per-track TAMSD is strongly right-skewed, so the mean
+        # sits high in the band - near Q3 - with Q1 far below it.
+        hoverinfo = "skip", name = "IQR across tracks", showlegend = TRUE)
     }
     fig <- fig %>% add_trace(x = tau, y = msd, type = "scatter", mode = "lines+markers",
         marker = list(size = 5, color = "steelblue"), line = list(color = "steelblue", width = 2),
@@ -7232,6 +7239,18 @@ tracking_server <- function(input, output, session) {
         # (track-weighted), otherwise the pair-weighted ensemble average.
         name = if (isTRUE(ub$track_weighted)) "eMSD (track-weighted)"
                else "Ensemble MSD (pair-weighted)")
+    # Median of the same per-track TAMSDs. The eMSD above is a MEAN of a strongly
+    # right-skewed distribution, so it sits high inside the IQR band - near Q3, with
+    # Q1 far below. Without the median next to it the line looks like it is sitting
+    # outside its own band. Legend-toggleable, like every other trace.
+    if (show_band && !is.null(ub$msd_med)) {
+      mm <- ub$msd_med[ok] / 1e6
+      okm <- is.finite(mm)
+      if (any(okm)) fig <- fig %>% add_trace(
+        x = tau[okm], y = mm[okm], type = "scatter", mode = "lines",
+        line = list(color = "rgba(70,130,200,0.95)", width = 1.6, dash = "dot"),
+        name = "median track")
+    }
     # Free-diffusion-on-the-cell reference. Drawn in the same green as the geometry
     # band in Displacement vs Diffusion, since it is the same idea applied to the MSD.
     gm <- tryCatch(msd_geom_null(), error = function(e) NULL)
@@ -7257,8 +7276,30 @@ tracking_server <- function(input, output, session) {
         directed  = sprintf("Directed: D=%.3g µm²/s, v=%.3g µm/s", fr$D / 1e3, fr$v_um_s),
         anomalous = sprintf("Anomalous: D=%.3g, α=%.2f", fr$D / 1e3, fr$alpha),
         sprintf("OLSF D=%.3g µm²/s (%d pts)", fr$D / 1e3, fr$n_points %||% NA))
-      fig <- fig %>% add_trace(x = fx, y = fy, type = "scatter", mode = "lines",
+      # Draw the fit SOLID only across the lags it was fitted to, and faint beyond.
+      # OLSF picks an optimal (usually small) number of low lags, but the fitted
+      # curve was being drawn across the whole axis - on a bending MSD that puts the
+      # line far above the data at long lags and reads as a failed fit rather than an
+      # extrapolation. Splitting the trace makes the fitted range explicit.
+      # OLSF fits the first n_points of the WINDOWED curve, i.e. lags starting at the
+      # lower cutoff (regime_x in tau), so the fitted range runs from there. The
+      # non-linear models use the whole window, so they fall back to the upper limit.
+      fit_hi <- {
+        v_lag  <- suppressWarnings(as.numeric(input$trk_uni_max_lag))
+        tau_hi <- if (is.finite(v_lag) && v_lag > 0) v_lag * ub$t_cycle else max(fx, na.rm = TRUE)
+        n_used <- suppressWarnings(as.integer(fr$n_points %||% NA))
+        if (is.finite(n_used) && n_used > 0)
+          min(tau_hi, (if (is.finite(regime_x)) regime_x else 0) + n_used * ub$t_cycle)
+        else tau_hi
+      }
+      in_fit <- is.finite(fx) & fx <= fit_hi
+      if (any(in_fit)) fig <- fig %>% add_trace(
+        x = fx[in_fit], y = fy[in_fit], type = "scatter", mode = "lines",
         line = list(color = "#E03020", width = 2.5, dash = "dash"), name = fit_name)
+      if (any(!in_fit)) fig <- fig %>% add_trace(
+        x = fx[!in_fit], y = fy[!in_fit], type = "scatter", mode = "lines",
+        line = list(color = "rgba(224,48,32,0.35)", width = 1.2, dash = "dot"),
+        name = "fit, extrapolated", showlegend = TRUE)
     }
 
     # Per-cluster eMSD: track-weighted mean TAMSD of each cluster's tracks, labelled
@@ -7304,10 +7345,15 @@ tracking_server <- function(input, output, session) {
                 paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
                 # Legend BELOW the plot: the right-hand side is occupied by the N(τ)
                 # axis, and plotly's default right-hand legend sits on top of it.
+                # y is in paper coordinates (a fraction of the plotting area), so it
+                # is derived from the element height rather than hard-coded: the gap
+                # below the axes then stays put when TRK_MSD_PLOT_PX changes.
                 legend = list(font = list(color = fg, size = 10),
                               orientation = "h", x = 0, xanchor = "left",
-                              y = -0.34, yanchor = "top"),
-                margin = list(l = 55, r = 60, t = 10, b = 110),
+                              y = -TRK_MSD_LEGEND_GAP /
+                                   max(60, TRK_MSD_PLOT_PX - TRK_MSD_MARGIN_T - TRK_MSD_MARGIN_B),
+                              yanchor = "top"),
+                margin = list(l = 55, r = 60, t = TRK_MSD_MARGIN_T, b = TRK_MSD_MARGIN_B),
                 shapes = regime_shapes, uirevision = "msd_unified")
     if (is.finite(regime) && regime > 0)
       lay$annotations <- list(list(

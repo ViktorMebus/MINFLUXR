@@ -902,7 +902,7 @@ tracking_ui <- fluidPage(
             # MSD sub-panel (cycle-based, always shown when MSD is enabled)
             conditionalPanel(
               condition = "input.trk_msd_unified == true",
-              plotlyOutput("trk_msd_unified_plot", height = "300px"),
+              plotlyOutput("trk_msd_unified_plot", height = paste0(TRK_MSD_PLOT_PX, "px")),
               uiOutput("trk_msd_unified_estimates")
             ),
             conditionalPanel(

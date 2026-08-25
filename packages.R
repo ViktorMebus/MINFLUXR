@@ -182,6 +182,17 @@ TCP_L_PER_GEOFACTOR_NM <- 360
 # prefactor - see docs/simulator.md.
 TCP_CRLB_PREFACTOR <- 4
 
+# ── MSD plot height (px) ───────────────────────────────────────────────────────
+# Change this one number to make the MSD curve taller or shorter. The server reads
+# it too: the legend sits BELOW the axes at a paper-coordinate offset, which is a
+# FRACTION of the plotting area, so a taller plot would push the legend past the
+# fixed bottom margin and clip it. Deriving the offset from this constant keeps the
+# legend the same distance below the axes at any height.
+TRK_MSD_PLOT_PX <- 460
+TRK_MSD_MARGIN_T <- 10    # px, top margin used by the MSD layout
+TRK_MSD_MARGIN_B <- 110   # px, bottom margin reserved for the legend
+TRK_MSD_LEGEND_GAP <- 61  # px, gap from the x-axis down to the legend
+
 # ── Tracking chunking defaults ─────────────────────────────────────────────────
 # Fall back to fst if qs could not be installed (common on macOS without
 # a working C++ toolchain / OpenMP support).
