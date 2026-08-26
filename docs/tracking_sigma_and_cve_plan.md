@@ -44,16 +44,25 @@ The conditions that make this hold are load-bearing:
 Vestergaard's σ estimator is σ² = R·⟨Δx²⟩ + (2R−1)·cov₁ per axis. On file 013:
 
 ```
-⟨Δx²⟩ = 92.95 nm²      cov₁ = −2.38 nm²
-R = 0    (app today)   σ² =        2.38   → σ = 1.54 nm
-R = 1/6  (correct)     σ² = 15.49 + 1.59  → σ = 4.13 nm
+⟨Δx²⟩ = 92.95 nm²          cov₁ = −2.38 nm²
+R = 0      (app today)     σ² =        2.38   → σ = 1.54 nm
+R = 0.087  (measured τ)    σ² =  8.09 + 1.97  → σ = 3.17 nm
+R = 1/6    (τ = full cycle) σ² = 15.49 + 1.59  → σ = 4.13 nm
 ```
+
+**Correction to an earlier draft of this document.** It reported σ = 4.13 nm and treated its agreement
+with L/(4√N) as a confirmation of the prefactor 4. That agreement was contingent on assuming the
+collection window fills the whole cycle. It does not: eco/efo says τ is 55% of the cycle, which moves
+the covariance estimate to 3.1 nm and the implied prefactor to ≈ 5.3. **The prefactor is not pinned by
+this data** — it sits somewhere between 4 and 5.3 depending on the blur model, which is the argument
+for §6's immobile-sample calibration, not against it.
 
 Three separate problems, in increasing order of severity:
 
-1. **The app assumes the wrong R.** A MINFLUX localization integrates photons across the cycle, so
-   R = τ/(6·Δt) ≈ 0.158, not 0. Using R = 0 under-reports σ_loc by ~3× on both GP67H files
-   (1.5 and 1.3 nm against 4.13 and 4.08 nm). This is blur, not precision.
+1. **The app assumes the wrong R.** A MINFLUX localization integrates photons over its collection
+   window, so R = τ/(6·Δt) > 0. **τ is measurable, not assumable: τ = eco/efo**, which on both GP67H
+   files is 0.1061 ms of a 0.192 ms cycle — 55%, giving **R ≈ 0.087**. Using R = 0 under-reports
+   σ_loc by ~2.4× (1.5 and 1.3 nm against **3.17 and 3.09 nm**). This is blur, not precision.
 2. **The estimate is dominated by the assumption, not by the data.** At R = 1/6, 91% of σ² comes
    from the R·⟨Δx²⟩ term. σ̂ ≈ √R · rms_step is therefore close to a deterministic function of the
    step size and the assumed R. The actual noise signature — the part cov₁ carries — is a 4%
@@ -61,9 +70,11 @@ Three separate problems, in increasing order of severity:
 3. **It inherits every motion-model error.** ⟨Δx²⟩ is inflated by population heterogeneity, by drift,
    and by any confinement structure, and all of that flows straight into σ̂.
 
-The photon route has none of these properties: **σ_i = L/(4·√N_i)** with L = 100.8 nm from the
-sequence `patGeoFactor` and N = `eco` gives **4.09 / 4.20 nm** median on the two files — agreeing with
-the blur-aware CVE to within 3%, per-localization rather than pooled, and with no motion model at all.
+The photon route has none of these properties: **σ_i = L/(a·√N_i)** with L = 100.8 nm from the
+sequence `patGeoFactor` and N = `eco` is per-localization rather than pooled, and assumes nothing about
+the motion. Its one free parameter is the prefactor a, and the covariance route brackets it at 4–5.3
+rather than fixing it. `TCP_CRLB_PREFACTOR` in `packages.R` currently holds 4; settling it needs the
+experiment in §6.
 
 ### 2.3 A separate finding: multi-cycle steps are badly biased
 
@@ -86,7 +97,16 @@ Candidate mechanisms, all now implemented in the simulator and swept in `simulat
 | speed-dependent dark cycles | 81 81 88 103 115 114 | depresses all k alike, no gradient |
 | post-gap estimator shrinkage | **118** 27 27 25 28 24 | inflates k = 1 — **rejected** |
 | survivorship / censoring (R_reacq 50 nm) | 100 96 95 78 66 67 | matches the real shape |
+| longer integration over gaps (τ×k, cap 3) | 92 80 75 79 81 94 | real, measured — explains part |
 | *real data* | 100 75 53 42 36 30 | |
+
+A fifth mechanism turned up while auditing the simulator against the raw file and is now implemented:
+**a dark cycle is not a skipped cycle, it is a longer integration.** τ = eco/efo before a single-cycle
+step is one repeat; before a two-cycle step it is two, in 98% of cases, saturating near three. The
+longer window blurs away part of the displacement. It is a genuine contributor, but a joint blur-aware
+fit using the measured per-step τ across k = 1…6 returns D = 0.05–0.06 µm²/s at R² = 0.78 — four times
+below the single-cycle CVE D and a poor fit — so it is not the whole story either. τ saturates at
+three repeats while free diffusion keeps growing, which is why the k ≥ 4 deficit survives it.
 
 **Censoring is the surviving candidate.** It is the only mechanism that leaves k = 1 intact while
 producing a gradient over k, and with a heterogeneous population it also reproduces the second
@@ -107,6 +127,20 @@ lag built from gapped steps. This should be checked before the next round of D n
 
 Ordered by value; each is independently shippable.
 
+### Phase 0 — read what the file already tells you
+
+Three quantities the app currently infers or assumes are written in the data:
+
+| quantity | where it is | value on GP67H |
+|---|---|---|
+| collection window τ | **eco / efo**, per localization | 0.1061 ms, quantised in units of 0.1061 |
+| blur coefficient R | τ / (6·Δt) | 0.087 |
+| repeats used | τ / τ₀ | 1 before a k=1 step, 2 before k=2, saturating at 3 |
+
+τ = eco/efo is exact and per-localization. Any estimator that needs R should take it from there
+rather than assuming a value. This is a small change with a large effect: R = 0 versus R = 0.087
+versus R = 1/6 moves the σ_loc estimate over a factor of 2.7.
+
 ### Phase 1 — make σ_loc photon-based (the actual fix)
 
 - Add a **photon-CRLB σ_loc** as the app's primary estimate: σ_i = L/(4√N_i) per localization, with
@@ -119,8 +153,12 @@ Ordered by value; each is independently shippable.
 
 ### Phase 2 — fix, demote and label the CVE σ
 
-- Add the R term: σ² = R⟨Δx²⟩ + (2R−1)cov₁ with R = τ/(6Δt), τ from the sequence
-  (`patDwellTime` × pattern positions) and Δt = t_c + SW. Default R = 1/6 when no sequence is loaded.
+- Add the R term: σ² = R⟨Δx²⟩ + (2R−1)cov₁ with R = τ/(6Δt) and Δt = t_c + SW. **Take τ from the data
+  as eco/efo per localization** — it is quantised and unambiguous — rather than from the sequence or a
+  default. Fall back to τ = t_c only when efo is missing.
+- Because τ grows over a gap, the single-cycle steps adjacent to a gap have mismatched windows, which
+  the CVE assumes away. In the simulator this biases D high by ~7% when the repeat behaviour is on;
+  expect the same on real data.
 - Present it as a **cross-check on L**, not as the σ_loc: report the implied L = 4·σ̂·√N̄ next to the
   sequence's L. Agreement validates the photon model; a gap is a real finding about the acquisition.
 - State the r₁ noise fraction next to it so its (lack of) resolving power is visible.
@@ -166,6 +204,40 @@ estimator of §3 does track the true R.
 | censoring on/off at fixed D | how much apparent confinement does it manufacture in the Tracking tab's confinement tools? |
 | heterogeneous D × censoring | does it reproduce the real 0.22 pooled vs 0.30 per-track gap quantitatively? |
 | D sweep at fixed σ | at what D does CVE σ become unusable (r₁ → 0)? Predicted: already, here. |
+| α sweep 0.6 → 1.0 at fixed D, σ | how much of the app's D deficit on GP67H is subdiffusion rather than slowness? |
+| hop corral size / permeability | can an α-matched hop model be told apart from fBm by any statistic the app computes? |
+
+## 6b. Estimator failure modes, measured in the simulator
+
+Each of these was produced by simulating data with a known ground truth and running the app's own
+estimator over it. They are properties of the estimator, so they transfer to real acquisitions with
+the same character — and GP67H has all three characters.
+
+| condition | effect on D | effect on σ_loc | why |
+|---|---|---|---|
+| **subdiffusion** (fBm, α = 0.78) | **≈ 65% of truth** | **inflated, 4.4 → 4.9 nm** | CVE reads the anti-correlated increments of subdiffusion as localization noise. The lag-1 covariance is meant to carry only σ², but α < 1 adds its own negative term |
+| **wrong R** (τ assumed, not measured) | unaffected | 1.5 / 3.1 / 4.1 nm at R = 0 / 0.087 / 1/6 | σ² = R⟨Δx²⟩ + (2R−1)cov₁ is dominated by the R term whenever D·Δt ≫ σ² |
+| **τ growing over a gap** | **≈ +7%** | small | single-cycle steps next to a gap have mismatched averaging windows; the CVE assumes they are equal |
+| population heterogeneity | pooled D ≠ per-track median | inflated | ⟨Δx²⟩ pools molecules of different D |
+
+**The three σ_loc errors stack, and they all point the same way.** On GP67H the app reports 1.3–1.5 nm.
+Correcting R to the measured value takes it to ≈ 3.1 nm. Correcting for α = 0.78 subdiffusion would
+take it lower again, ≈ 2.7 nm. Each correction is itself model-dependent, which is the point: the
+covariance route cannot deliver a trustworthy σ_loc on data like this, at any level of care.
+
+### So what *should* estimate σ_loc
+
+1. **Photon CRLB, σ_i = L/(a·√N_i).** L from the sequence, N from `eco`. Per-localization, no motion
+   model, immune to every row of the table above. This is the one to ship as primary.
+2. **Pin `a` with an immobile acquisition** (§6). This is the only measurement in the chain that is
+   motion-free. Until it exists, `a` is bracketed at 4 (theory, current `TCP_CRLB_PREFACTOR`) to about
+   5.3–6 (covariance route with measured τ, corrected for subdiffusion), and the app should say so
+   rather than print a bare number.
+3. **Keep the covariance σ as a labelled cross-check only**, with R from eco/efo, and print the r₁
+   noise fraction next to it so its resolving power is visible. Never let it feed `trk_sigma_loc()`.
+
+Because eco varies within a track (brightness fades to ~50% by a molecule's last decile), σ_loc is
+**not constant along a track**. The photon route gives that for free; a single pooled σ cannot.
 
 ## 6. Experiment worth requesting
 

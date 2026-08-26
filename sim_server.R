@@ -3290,6 +3290,35 @@ sim_server <- function(input, output, session) {
     }
   )
 
+  # ── .sim_fgn() - fractional Gaussian noise (Davies-Harte) ───────────────────
+  # GOAL: increments for fractional Brownian motion, the standard model of
+  # ANOMALOUS diffusion. Successive increments are correlated (anti-correlated for
+  # H < 0.5), which makes MSD grow as t^alpha with alpha = 2H instead of t^1.
+  # A cell-wall protein in a crowded peptidoglycan mesh is subdiffusive: the GP67H
+  # files measure alpha ~ 0.78.
+  # n: number of increments. H: Hurst exponent (alpha/2), 0 < H < 1.
+  # returns: numeric(n), unit variance per increment, correlated.
+  # Exact via circulant embedding; falls back to white noise at H = 0.5 (Brownian).
+  .sim_fgn <- function(n, H) {
+    if (n < 2L) return(stats::rnorm(n))
+    if (abs(H - 0.5) < 1e-6) return(stats::rnorm(n))
+    k <- 0:(n - 1)
+    g <- 0.5 * (abs(k + 1)^(2*H) - 2 * abs(k)^(2*H) + abs(k - 1)^(2*H))  # fGn autocovariance
+    cc  <- c(g, g[n:2])                       # circulant first row, length m = 2n-2
+    m   <- length(cc)
+    lam <- Re(stats::fft(cc))
+    if (any(lam < 0)) lam <- pmax(lam, 0)     # embedding not non-negative: clip (rare)
+    half <- m / 2
+    w <- complex(length.out = m)
+    w[1]        <- sqrt(lam[1] / m) * stats::rnorm(1)
+    w[half + 1] <- sqrt(lam[half + 1] / m) * stats::rnorm(1)
+    j  <- 2:half
+    zr <- stats::rnorm(length(j)); zi <- stats::rnorm(length(j))
+    w[j]         <- sqrt(lam[j] / (2 * m)) * complex(real = zr, imaginary = zi)
+    w[m - j + 2] <- Conj(w[j])
+    Re(stats::fft(w))[1:n]
+  }
+
   # ══════════════════════════════════════════════════════════════════════════
   # Diffusion / Tracking ground-truth simulator (Phase 1)
   # See docs/simulation_module.md. Free surface Brownian on a sphere or rod,
@@ -3365,6 +3394,71 @@ sim_server <- function(input, output, session) {
     msq  <- mean(c(dx[dstep]^2, dy[dstep]^2), na.rm = TRUE)
     D_meas <- if (is.finite(msq) && is.finite(cov1)) (msq / (2 * (cyc + sw)) + cov1 / (cyc + sw)) / 1000 else NA_real_
     sig_meas <- if (is.finite(msq) && is.finite(cov1)) sqrt(max(0, msq / 6 - (2/3) * cov1)) else NA_real_
+    # -- Photon budget: collection window, photon limit, repeats ---------------
+    # tau = eco/efo is the collection window, written in the file per localization and
+    # quantised in units of one pattern repeat. It gives the blur coefficient and the
+    # repeat structure without any assumption.
+    pht_lim <- NA_real_; expf <- NA_real_; nrep <- NA_real_
+    if (all(c("eco","efo") %in% names(df))) {
+      good <- is.finite(df$eco) & is.finite(df$efo) & df$efo > 0 & df$eco > 0
+      if (sum(good) > 100) {
+        tau_v   <- df$eco[good] / df$efo[good] * 1000                  # ms
+        tau0    <- unname(stats::quantile(tau_v, 0.05))                # one pattern repeat
+        pht_lim <- unname(stats::quantile(df$eco[good], 0.001))        # hard floor = phtLimit
+        expf    <- tau0 / cyc
+        nrep    <- unname(stats::quantile(tau_v / tau0, 0.999))
+      }
+    }
+    # -- Brightness: between molecules, within a track, correlation, fade ------
+    b_btw <- NA_real_; b_wth <- NA_real_; b_phi <- NA_real_; b_dec <- NA_real_
+    if ("efo" %in% names(df)) {
+      dd  <- df[is.finite(df$efo) & df$efo > 0, ]
+      spl <- split(log(dd$efo), dd$tid)
+      spl <- spl[vapply(spl, length, 1L) >= 20L]
+      if (length(spl) >= 5L) {
+        b_btw <- stats::sd(vapply(spl, stats::median, 0))              # molecule to molecule
+        b_wth <- stats::median(vapply(spl, stats::sd, 0))              # inside one track
+        b_phi <- stats::median(vapply(spl, function(v)
+                   suppressWarnings(stats::cor(v[-length(v)], v[-1])), 0), na.rm = TRUE)
+        # Fade: log drop from the first tenth of a track to the last, POOLED over
+        # localizations rather than averaged over tracks. The per-track median measures
+        # something else - short tracks mostly end by being lost rather than by
+        # bleaching, so they barely fade - and calibrating on it under-states the fade
+        # by a factor of about seven on this data.
+        dec <- unlist(lapply(spl, function(v) {
+                 f <- (seq_along(v) - 1) / max(1, length(v) - 1); pmin(9L, floor(f * 10)) }))
+        vv  <- unlist(spl, use.names = FALSE)
+        b_dec <- stats::median(vv[dec == 0L]) - stats::median(vv[dec == 9L])
+      }
+    }
+    # -- Track-length heterogeneity --------------------------------------------
+    # The generator compounds a geometric lifetime with a lognormal mean; mean/median of
+    # the resulting lengths is a monotone function of that spread, inverted here.
+    ratio  <- mean(len) / stats::median(len)
+    lifecv <- stats::approx(c(1.45, 1.68, 2.14, 2.82, 3.60, 5.01), c(0, 0.5, 1, 1.5, 2, 3),
+                            xout = ratio, rule = 2)$y
+    # -- D-lifetime coupling ----------------------------------------------------
+    # Per-track D against track length. Both are noisy, so the correlation the simulator
+    # reproduces is weaker than the one measured; the value filled in is de-attenuated.
+    rho_meas <- NA_real_; rho_set <- NA_real_
+    if (all(c("x","y") %in% names(df))) {
+      pt <- data.frame(tid = df$tid, dx = dx, dy = dy,
+                       st = dstep, pr = dstep & c(dstep[-1], FALSE))
+      sp <- split(pt, pt$tid)
+      dd <- vapply(sp, function(z) {
+              ii <- which(z$st); jj <- which(z$pr)
+              if (length(ii) < 30 || length(jj) < 10) return(NA_real_)
+              (mean(c(z$dx[ii]^2, z$dy[ii]^2), na.rm = TRUE) / (2*(cyc+sw)) +
+               mean(c(z$dx[jj]*z$dx[jj+1], z$dy[jj]*z$dy[jj+1]), na.rm = TRUE) / (cyc+sw)) / 1000
+            }, 0)
+      nn <- vapply(sp, nrow, 1L)
+      gd <- is.finite(dd) & dd > 0
+      if (sum(gd) >= 10) {
+        rho_meas <- suppressWarnings(stats::cor(log(nn[gd]), log(dd[gd]), method = "spearman"))
+        rho_set  <- max(-0.95, min(0.95, 2 * rho_meas))
+      }
+    }
+    setn <- function(id, v, dig = 2) if (is.finite(v)) updateNumericInput(session, id, value = round(v, dig))
     if (is.finite(cyc))     updateNumericInput(session, "sim_trk_cycle",   value = signif(cyc, 3))
     if (is.finite(sw))      updateNumericInput(session, "sim_trk_sw",      value = signif(sw, 2))
     if (is.finite(p_dark))  updateNumericInput(session, "sim_trk_pdark",   value = round(p_dark, 2))
@@ -3373,10 +3467,17 @@ sim_server <- function(input, output, session) {
     if (is.finite(D_meas) && D_meas > 0)
       updateNumericInput(session, "sim_trk_D", value = signif(D_meas, 2))
     if (length(keep_tid) >= 1) updateNumericInput(session, "sim_trk_ntracks", value = length(keep_tid))
+    setn("sim_trk_phtlimit", pht_lim, 0); setn("sim_trk_expfrac", expf)
+    setn("sim_trk_taurep",   nrep, 0)
+    setn("sim_trk_phtbtw",   b_btw); setn("sim_trk_phtcv", b_wth)
+    setn("sim_trk_phtphi",   max(0, b_phi)); setn("sim_trk_phtdecay", max(0, b_dec))
+    setn("sim_trk_lifecv",   lifecv); setn("sim_trk_Dlife", rho_set)
     sim_trk_calib_rv(list(file = fi$name, n_tracks = length(keep_tid), n_total = n_total,
       min_len = MIN_LEN, n_loc = nrow(df), med_len = med_len, mean_len = mean(len),
       photons = photons, cyc = cyc, sw = sw, modal = modal, p_dark = p_dark, integ = integ,
-      D = D_meas, sigma = sig_meas, med_dt = stats::median(dtv)))
+      D = D_meas, sigma = sig_meas, med_dt = stats::median(dtv),
+      pht_lim = pht_lim, expf = expf, nrep = nrep, b_btw = b_btw, b_wth = b_wth,
+      b_phi = b_phi, b_dec = b_dec, lifecv = lifecv, rho_meas = rho_meas, rho_set = rho_set))
     showNotification(sprintf("Calibrated on %d traces (≥%d locs) of %d total.",
                              length(keep_tid), MIN_LEN, n_total), type = "message", duration = 6)
   })
@@ -3397,10 +3498,19 @@ sim_server <- function(input, output, session) {
         rowf("Dark-cycle prob.", sprintf("%.2f  (%.0f%% integrated)", cb$p_dark, 100 * cb$integ)),
         rowf("Track length (median)", sprintf("%.0f · mean %.0f", cb$med_len, cb$mean_len)),
         rowf("D (CVE, lateral)", if (is.finite(cb$D %||% NA)) sprintf("%.3g µm²/s", cb$D) else "-"),
-        rowf("σ_loc (CVE, R = 1/6)", if (is.finite(cb$sigma %||% NA)) sprintf("%.2f nm", cb$sigma) else "-")),
+        rowf("σ_loc (CVE, measured R)", if (is.finite(cb$sigma %||% NA)) sprintf("%.2f nm", cb$sigma) else "-"),
+        rowf("Collection window", if (is.finite(cb$expf %||% NA))
+               sprintf("%.0f%% of the cycle · up to %.0f repeats · photon limit %.0f",
+                       100*cb$expf, cb$nrep, cb$pht_lim) else "-"),
+        rowf("Brightness", if (is.finite(cb$b_btw %||% NA))
+               sprintf("spread %.2f between / %.2f within · correlation %.2f · fades to %.0f%%",
+                       cb$b_btw, cb$b_wth, cb$b_phi, 100*exp(-cb$b_dec)) else "-"),
+        rowf("Length spread", sprintf("CV %.1f  (mean/median = %.2f)", cb$lifecv, cb$mean_len/cb$med_len)),
+        rowf("D vs track length", if (is.finite(cb$rho_meas %||% NA))
+               sprintf("%+.2f measured → %+.2f set (noise attenuates it)", cb$rho_meas, cb$rho_set) else "-")),
       htmltools::tags$p(style = "color:#888; margin-top:3px;",
-        "Auto-filled the sampling fields, D and the track count (locs/track uses the robust median). ",
-        "The measured σ_loc is a cross-check on the TCP L you enter: L = 4·σ·√N."))
+        "Every acquisition field is filled from this file. Set the sample geometry, the motion model ",
+        "and the TCP diameter, then Simulate."))
   })
 
   sim_trk_result <- eventReactive(input$sim_trk_run, {
@@ -3435,17 +3545,43 @@ sim_server <- function(input, output, session) {
     # Photon collection window as a fraction of the cycle. tau together with the step
     # duration sets the blur coefficient R = tau/(6*dt): a full-cycle window gives 1/6,
     # a short burst tends to 0.
-    expfrac  <- min(1, max(0.05, as.numeric(input$sim_trk_expfrac %||% 1)))
+    expfrac  <- min(1, max(0.05, as.numeric(input$sim_trk_expfrac %||% 0.55)))
+    # A localization followed by a dark gap integrates ACROSS that gap (repeated pattern
+    # passes) instead of skipping it, up to this many repeats. Measured on real files as
+    # tau = eco/efo: 1 repeat before a single-cycle step, 2 before a two-cycle step,
+    # saturating near 3. 1 disables it.
+    tau_rep  <- max(1L, as.integer(input$sim_trk_taurep %||% 1L))
     # Lognormal spread of D between molecules (0 = every track identical). The input D
     # stays the MEDIAN of the population.
     D_cv     <- max(0, as.numeric(input$sim_trk_Dcv %||% 0))
     D_sdlog  <- if (D_cv > 0) sqrt(log(1 + D_cv^2)) else 0
-    # Dark cycles that depend on how far the molecule moved during the cycle.
-    pd_speed <- isTRUE(input$sim_trk_pdark_speed)
-    pd_scale <- max(1, as.numeric(input$sim_trk_pdark_scale %||% 100))    # nm
     # Re-acquisition shrinkage: the first localization after a dark gap is pulled this
     # fraction of the way back toward the previous reported position.
     shrink   <- min(1, max(0, as.numeric(input$sim_trk_shrink %||% 0)))
+    # Photon model: the cycle ends once phtLimit photons are in, so eco has a hard
+    # floor there; brightness differences between molecules give the long right tail.
+    # Rate is lognormal (median = the photons input) and the count Poisson around it,
+    # so sdlog = 0 reduces to plain Poisson.
+    pht_min  <- max(1L, as.integer(input$sim_trk_phtlimit %||% 1L))
+    pht_sd   <- max(0, as.numeric(input$sim_trk_phtcv %||% 0))       # within-track sdlog
+    pht_btw  <- max(0, as.numeric(input$sim_trk_phtbtw %||% 0))      # between-molecule sdlog
+    pht_phi  <- min(0.95, max(0, as.numeric(input$sim_trk_phtphi %||% 0)))  # AR(1) on log rate
+    # Emission fades over a molecule's lifetime: real tracks end at ~44% of their
+    # starting rate, and their gap fraction climbs from 18% to 43% as they fade.
+    pht_dec  <- max(0, as.numeric(input$sim_trk_phtdecay %||% 0))
+    # Photon budget: the tracker repeats the pattern until phtLimit photons are in, and
+    # each extra repeat costs a cycle. Dark cycles then FOLLOW from brightness instead of
+    # being drawn from p_dark, and eco gets its hard floor at the limit for free.
+    budget   <- isTRUE(input$sim_trk_budget)
+    # Spread of the bleaching lifetime between molecules. 0 = one geometric lifetime
+    # for the whole population; above 0 the per-molecule mean lifetime is lognormal,
+    # which makes the recorded-length distribution heavy-tailed like a real file.
+    life_cv  <- max(0, as.numeric(input$sim_trk_lifecv %||% 0))
+    life_sd  <- if (life_cv > 0) sqrt(log(1 + life_cv^2)) else 0
+    # Correlation between a molecule's D and its lifetime. Real files anticorrelate at
+    # about −0.4: the slow molecules are the ones tracked longest, which is exactly why
+    # a step-weighted pooled D lands below the per-track median.
+    D_life   <- min(0.95, max(-0.95, as.numeric(input$sim_trk_Dlife %||% 0)))
     proj2d   <- isTRUE(input$sim_trk_project2d)
     sd_step  <- sqrt(2 * D_nm2ms * cyc)               # per-axis step SD per cycle (nm)
     R    <- max(1, as.numeric(input$sim_trk_R %||% 500))
@@ -3460,6 +3596,27 @@ sim_server <- function(input, output, session) {
     # image plane. Generated in canonical coords (axis ∥ X) then permuted to the choice.
     rod_axis <- input$sim_trk_rod_axis %||% "x"
     rod_perm <- switch(rod_axis, x = c(1L,2L,3L), y = c(2L,1L,3L), z = c(2L,3L,1L))
+    # ── FIELD OF VIEW ──────────────────────────────────────────────────────────
+    # More than one cell: scatter them over the field at random positions and random
+    # in-plane orientations, and give each track a cell. Placement is rejection-based
+    # so cells do not sit on top of each other. A single cell stays at the origin, so
+    # the estimator-validation view is unchanged.
+    n_cells  <- max(1L, as.integer(input$sim_trk_ncells %||% 1L))
+    fov_nm   <- max(1, as.numeric(input$sim_trk_fov %||% 10)) * 1000
+    cell_len <- if (identical(geom, "rod")) Lcyl + 2 * rr else 2 * max(abc)
+    cell_pos <- matrix(0, n_cells, 2); cell_ang <- numeric(n_cells)
+    if (n_cells > 1L) {
+      for (ci in seq_len(n_cells)) {
+        for (try in 1:200) {
+          cand <- c(runif(1, -fov_nm/2, fov_nm/2), runif(1, -fov_nm/2, fov_nm/2))
+          if (ci == 1L) break
+          dmin <- min(sqrt(rowSums((cell_pos[seq_len(ci-1), , drop = FALSE] -
+                                    rep(cand, each = ci-1))^2)))
+          if (dmin > cell_len) break
+        }
+        cell_pos[ci, ] <- cand; cell_ang[ci] <- runif(1, 0, 2*pi)
+      }
+    }
 
     # ── unified geometry operators (rod = spherocylinder body + hemispherical caps;
     #    else ellipsoid, sphere = a=b=c). project = nearest surface point; reflect =
@@ -3493,6 +3650,15 @@ sim_server <- function(input, output, session) {
     #    twostate (mobile↔immobile CTMC). Applied to the proposed 3D point, then the
     #    geometry constraint re-projects/reflects it. ──────────────────────────────
     motion  <- input$sim_trk_motion  %||% "free"
+    # Anomalous diffusion: MSD grows as t^alpha via correlated fBm increments. D still
+    # sets the single-cycle MSD, so only the growth with lag changes.
+    alpha   <- min(1.95, max(0.05, as.numeric(input$sim_trk_alpha %||% 1)))
+    is_anom <- identical(motion, "anomalous")
+    # Hop diffusion: free inside a corral, reflecting off its barrier, crossing into the
+    # neighbour with probability p_perm per encounter. Free at short lags, slower at long
+    # ones, so alpha < 1 in between without any long-range memory.
+    L_hop   <- max(1, as.numeric(input$sim_trk_Lhop %||% 60))
+    p_perm  <- min(1, max(0, as.numeric(input$sim_trk_pperm %||% 0.05)))
     L_c     <- max(1, as.numeric(input$sim_trk_Lc %||% 150))         # confinement radius (nm)
     v_nmms  <- max(0, as.numeric(input$sim_trk_vel %||% 0))          # directed speed (µm/s = nm/ms)
     kswitch <- min(1, max(0, as.numeric(input$sim_trk_kswitch %||% 0.03)))  # per-cycle state-switch prob
@@ -3513,36 +3679,83 @@ sim_server <- function(input, output, session) {
            else if (surface) geo_rand_surf() else geo_rand_in()
       home <- p; st <- 1L
       pos <- matrix(NA_real_, n_cyc, 3); pos[1,] <- p; states <- integer(n_cyc); states[1] <- 1L
+      # Anomalous motion draws its increments up-front: fBm increments are CORRELATED,
+      # so they cannot be generated one step at a time like Brownian ones.
+      inc <- if (is_anom)
+               cbind(.sim_fgn(n_cyc, alpha/2), .sim_fgn(n_cyc, alpha/2), .sim_fgn(n_cyc, alpha/2))
+             else NULL
       # Recorded/dark and the clock are decided inside the loop: dur[i] (the elapsed
       # time of the step leaving cycle i) needs to know whether cycle i was recorded,
       # and a displacement-dependent dark probability needs the step that arrived at
       # cycle i. Deciding them in the loop keeps both exact.
+      # ── BRIGHTNESS (photons/ms) over the molecule's life ────────────────────
+      # log-rate = median + between-molecule offset − fade over the lifetime + an
+      # AR(1) wobble, so brightness is correlated from one localization to the next.
+      tau0  <- expfrac * cyc                                  # one pattern repeat (ms)
+      lrate <- log(max(1e-6, photons / tau0))
+      if (pht_btw > 0) lrate <- lrate + stats::rnorm(1, 0, pht_btw)
+      frac  <- if (n_cyc > 1L) (seq_len(n_cyc) - 1L) / (n_cyc - 1L) else 0
+      lr    <- lrate - pht_dec * frac
+      if (pht_sd > 0) {
+        e <- numeric(n_cyc); z <- stats::rnorm(n_cyc)
+        e[1] <- pht_sd * z[1]
+        if (n_cyc > 1L) for (i in 2:n_cyc)
+          e[i] <- pht_phi * e[i-1] + sqrt(1 - pht_phi^2) * pht_sd * z[i]
+        lr <- lr + e
+      }
+      rate <- exp(lr)                                          # photons per ms
+
       integ <- logical(n_cyc); integ[1] <- TRUE
       dur   <- rep(cyc, n_cyc); dur[1] <- cyc + sw
+      eco_i <- rep(NA_real_, n_cyc); rep_i <- rep(NA_integer_, n_cyc)
+      if (budget) {
+        # Repeat the pattern until the photon limit is reached, up to tau_rep repeats.
+        # A window that never reaches the limit is abandoned: those cycles are dark and
+        # the gap simply grows. This is what makes eco floor at the limit exactly.
+        integ[] <- FALSE
+        i <- 1L
+        while (i <= n_cyc) {
+          pend <- 0; j <- 0L
+          while (j < tau_rep && i + j <= n_cyc) {
+            j <- j + 1L
+            pend <- pend + stats::rpois(1, rate[i + j - 1L] * tau0)
+            if (pend >= pht_min) break
+          }
+          if (pend >= pht_min) { integ[i] <- TRUE; eco_i[i] <- pend; rep_i[i] <- j }
+          i <- i + j
+        }
+        dur <- cyc + sw * integ
+      }
       for (i in 2:n_cyc) {
         Dstep <- if (identical(motion,"twostate") && st == 0L) D_trk * 0.01 else D_trk
         dti   <- dur[i - 1L]                                                # this step's duration (ms)
         sdi   <- sqrt(2 * Dstep * dti)
-        if (is_free)      { p2 <- p + rnorm(3, 0, sdi) }                    # unbounded 3D
-        else if (is_mem)  { p2 <- p + c(rnorm(2, 0, sdi), 0) }              # 2D lateral (z handled below)
-        else if (surface) { g <- rnorm(3,0,sdi); nn <- geo_normal(p); p2 <- p + (g - sum(g*nn)*nn) }  # tangent step
-        else              { p2 <- p + rnorm(3,0,sdi) }                      # 3D volume
+        g0 <- if (is_anom) inc[i, ] * sdi else rnorm(3, 0, sdi)             # correlated when anomalous
+        if (is_free)      { p2 <- p + g0 }                                  # unbounded 3D
+        else if (is_mem)  { p2 <- p + c(g0[1:2], 0) }                        # 2D lateral (z handled below)
+        else if (surface) { nn <- geo_normal(p); p2 <- p + (g0 - sum(g0*nn)*nn) }  # tangent step
+        else              { p2 <- p + g0 }                                  # 3D volume
         if (identical(motion,"directed")) p2 <- p2 + drift0 * v_nmms * dti
         if (identical(motion,"confined")) p2 <- home + (p2 - home) * exp(-dti / tau_c)  # OU pull to home
+        if (identical(motion,"hop")) {                       # corral with a permeable barrier
+          dv <- p2 - home; nd <- sqrt(sum(dv^2))
+          if (nd > L_hop) {
+            if (runif(1) < p_perm) home <- home + (dv / nd) * (2 * L_hop)   # cross into the neighbour
+            else                   p2   <- home + (dv / nd) * (2 * L_hop - nd)  # reflect off the barrier
+          }
+        }
         p  <- if (is_free) p2
               else if (is_mem) c(p2[1], p2[2],                              # keep z within the membrane thickness
                                  if (mthick > 0) max(-mthick/2, min(mthick/2, p[3] + rnorm(1, 0, sdi * 0.2))) else 0)
               else if (surface) geo_project(p2) else geo_reflect(p2)
         if (identical(motion,"twostate") && runif(1) < kswitch) st <- 1L - st
         pos[i,] <- p; states[i] <- st
-        # Was this cycle recorded? With the speed coupling on, a molecule that moved far
-        # during the cycle is more likely to be missed: p = 1 − (1 − p_dark)·exp(−d/scale).
-        p_i <- if (pd_speed) {
-                 d_i <- sqrt(sum((pos[i, ] - pos[i - 1L, ])^2))
-                 min(0.95, 1 - (1 - p_dark) * exp(-d_i / pd_scale))
-               } else p_dark
-        integ[i] <- runif(1) > p_i
-        dur[i]   <- cyc + sw * integ[i]
+        # Was this cycle recorded? Under the photon budget that was already decided from
+        # brightness above; otherwise fall back to a flat per-cycle probability.
+        if (!budget) {
+          integ[i] <- runif(1) > p_dark
+          dur[i]   <- cyc + sw * integ[i]
+        }
       }
       # ── MOTION BLUR ──────────────────────────────────────────────────────────
       # A MINFLUX localization is the time-average of the path over its cycle, not
@@ -3554,23 +3767,33 @@ sim_server <- function(input, output, session) {
       # has no successor and stays unblurred.
       bp <- NULL
       if (blur) {
-        nxt <- c(seq_len(n_cyc)[-1], n_cyc)
-        mid <- pos + (expfrac * cyc / (2 * dur)) * (pos[nxt, , drop = FALSE] - pos)
+        t_cyc <- c(0, cumsum(dur)[-n_cyc])
+        # Each recorded cycle is averaged over its own window, ending at the NEXT
+        # recorded cycle. A gap makes both the window (up to tau_rep repeats) and the
+        # step longer, which is the structure real files show through tau = eco/efo.
+        rec  <- which(integ)
+        nxt  <- seq_len(n_cyc); Tstep <- rep(cyc, n_cyc); taui <- rep(expfrac * cyc, n_cyc)
+        if (length(rec) > 1L) {
+          nxt[rec[-length(rec)]]   <- rec[-1]
+          Tstep[rec[-length(rec)]] <- diff(t_cyc[rec])
+          reps_used <- if (budget) rep_i[rec[-length(rec)]] else pmin(diff(rec), tau_rep)
+          taui[rec[-length(rec)]]  <- reps_used * expfrac * cyc
+        }
+        mid <- pos + (taui / (2 * Tstep)) * (pos[nxt, , drop = FALSE] - pos)
         Dst <- if (identical(motion, "twostate")) ifelse(states == 0L, D_trk * 0.01, D_trk)
                else rep(D_trk, n_cyc)
-        # Time-average over a window tau <= dur, conditioned on both end points:
-        #   mean = x_i + (tau/(2*dur))*(x_{i+1} - x_i),  var = (2*D*tau/3)*(1 - 3*tau/(4*dur))
-        # which reduces to the midpoint plus D*dur/6 when tau = dur (R = 1/6).
-        tau <- expfrac * cyc
+        # Time-average over a window tau <= T, conditioned on both end points:
+        #   mean = x_i + (tau/(2T))*(x_j - x_i),  var = (2*D*tau/3)*(1 - 3*tau/(4T))
+        # which reduces to the midpoint plus D*T/6 when tau = T (R = 1/6).
         br  <- matrix(rnorm(n_cyc * 3), ncol = 3) *
-               sqrt(pmax(0, (2 * Dst * tau / 3) * (1 - 3 * tau / (4 * dur))))
+               sqrt(pmax(0, (2 * Dst * taui / 3) * (1 - 3 * taui / (4 * Tstep))))
         if (is_mem) br[, 3] <- 0                                    # in-plane only
         else if (surface && !is_free) {                             # tangent plane only
           nrm <- t(vapply(seq_len(n_cyc), function(i) geo_normal(pos[i, ]), numeric(3)))
           br  <- br - (rowSums(br * nrm)) * nrm
         }
         bp <- mid + br
-        bp[n_cyc, ] <- pos[n_cyc, ]
+        bp[n_cyc, ] <- pos[n_cyc, ]                  # no successor: unblurred
       }
       if (is_rod) { pos <- pos[, rod_perm, drop = FALSE]
                     if (!is.null(bp)) bp <- bp[, rod_perm, drop = FALSE] }
@@ -3579,6 +3802,8 @@ sim_server <- function(input, output, session) {
       attr(pos, "states")  <- states
       attr(pos, "blurpos") <- bp
       attr(pos, "integ")   <- integ
+      attr(pos, "eco")     <- eco_i
+      attr(pos, "reps")    <- rep_i
       # Start time of each cycle: cycles last `cyc`, plus SW once per RECORDED cycle, so
       # two recorded cycles k apart are exactly k·cyc + SW apart.
       attr(pos, "t_cyc")   <- c(0, cumsum(dur)[-n_cyc])
@@ -3598,9 +3823,15 @@ sim_server <- function(input, output, session) {
       # geometric, whose median ≈ ln(2)·mean, and only (1−p_dark) of cycles are recorded,
       # so the bleach lifetime in CYCLES has mean = median / (ln2 · (1−p_dark)) to land
       # the recorded MEDIAN on mean_len despite dark-cycling.
-      n_cyc <- max(3L, stats::rgeom(1, 1 / (mean_len / (log(2) * max(0.05, 1 - p_dark)))) + 1L)
+      # D and lifetime are drawn as a correlated pair, so a sample where the slow
+      # molecules are the ones tracked longest can be reproduced.
+      z1 <- stats::rnorm(1)
+      z2 <- D_life * z1 + sqrt(1 - D_life^2) * stats::rnorm(1)
+      life  <- mean_len / (log(2) * max(0.05, 1 - p_dark))
+      if (life_sd > 0) life <- life * exp(life_sd * z2)
+      n_cyc <- max(3L, stats::rgeom(1, 1 / max(2, life)) + 1L)
       # Each molecule may carry its own D (lognormal, median = the D input).
-      D_trk <- if (D_sdlog > 0) D_nm2ms * exp(stats::rnorm(1, 0, D_sdlog)) else D_nm2ms
+      D_trk <- if (D_sdlog > 0) D_nm2ms * exp(D_sdlog * z1) else D_nm2ms
       pos   <- gen_path(n_cyc, D_trk)                   # ground-truth path at cycle resolution
       integ <- attr(pos, "integ"); t_cyc <- attr(pos, "t_cyc")
       idx   <- which(integ)
@@ -3610,7 +3841,13 @@ sim_server <- function(input, output, session) {
         if (length(lost)) idx <- idx[seq_len(lost[1])]  # keep up to (and incl.) the pre-jump loc
       }
       if (length(idx) < 5L) next
-      N     <- pmax(1L, stats::rpois(length(idx), photons))
+      # Photons per localization: the budget already counted them (floored at the limit
+      # by construction); otherwise draw them from the brightness model directly.
+      N <- if (budget) attr(pos, "eco")[idx] else {
+             r <- if (pht_sd > 0) photons * exp(stats::rnorm(length(idx), 0, pht_sd)) else photons
+             pmax(pht_min, stats::rpois(length(idx), r))
+           }
+      tau_i <- if (budget) attr(pos, "reps")[idx] * expfrac * cyc else rep(expfrac * cyc, length(idx))
       # MINFLUX CRLB for a hexagonal TCP of diameter L with N detected photons.
       # Cross-checked on real tracking data: L = 100.8 nm (patGeoFactor 0.28) and the
       # median eco of ~38 photons give 4.1 nm, exactly the blur-aware CVE sigma of the
@@ -3628,11 +3865,21 @@ sim_server <- function(input, output, session) {
         gap <- c(FALSE, diff(idx) > 1L)                # first loc after a dark gap
         for (j in which(gap)) obs[j, ] <- obs[j - 1L, ] + (1 - shrink) * (obs[j, ] - obs[j - 1L, ])
       }
+      # Place the track on its cell: rotate in-plane, then offset to the cell centre.
+      if (n_cells > 1L) {
+        ci <- 1L + (ti - 1L) %% n_cells
+        ca <- cos(cell_ang[ci]); sa <- sin(cell_ang[ci])
+        ctr <- if (identical(geom, "rod")) c(Lcyl/2, 0, 0)[rod_perm] else c(0,0,0)
+        ox <- obs[, 1] - ctr[1]; oy <- obs[, 2] - ctr[2]
+        obs[, 1] <- ox * ca - oy * sa + cell_pos[ci, 1]
+        obs[, 2] <- ox * sa + oy * ca + cell_pos[ci, 2]
+        obs[, 3] <- obs[, 3] - ctr[3]
+      }
       k <- k + 1L
       rows[[k]] <- data.frame(
         tid = k, tim = t_cyc[idx] / 1000,              # SECONDS (importer ×1000 → ms)
         x = obs[, 1], y = obs[, 2], z = obs[, 3],
-        efo = N / (cyc / 1000), eco = N, stringsAsFactors = FALSE)
+        efo = N / (tau_i / 1000), eco = N, stringsAsFactors = FALSE)
       gt[[k]] <- data.frame(tid = k, D_true_um2_s = D_trk / 1000, geometry = geom, mode = mode,
                             motion = motion, L_c_nm = if (identical(motion,"confined")) L_c else NA_real_,
                             v_um_s = if (identical(motion,"directed")) v_nmms else NA_real_,
@@ -3645,7 +3892,11 @@ sim_server <- function(input, output, session) {
     if (proj2d) df$z <- NULL
     list(df = df, gt = dplyr::bind_rows(gt[seq_len(k)]),
          D_um2_s = D_um2_s, cyc = cyc, sw = sw, blur = blur, p_dark = p_dark, proj2d = proj2d,
-         expfrac = expfrac, D_cv = D_cv, shrink = shrink, pd_speed = pd_speed, pd_scale = pd_scale,
+         expfrac = expfrac, D_cv = D_cv, shrink = shrink,
+         life_cv = life_cv, pht_min = pht_min, pht_sd = pht_sd, n_cells = n_cells, fov_nm = fov_nm,
+         tau_rep = tau_rep, budget = budget, alpha = if (is_anom) alpha else NA_real_,
+         pht_dec = pht_dec, L_hop = L_hop, p_perm = p_perm,
+         D_life = D_life,
          mode = mode, d_mot = d_mot, geom = geom,
          motion = motion, L_c = L_c, v_nmms = v_nmms, surv = surv, R_reacq = R_reacq)
   })
@@ -3687,6 +3938,7 @@ sim_server <- function(input, output, session) {
     # special case. Reading it with the wrong R is what makes a real 4 nm σ_loc look
     # like 1.4 nm.
     Rblur <- if (isTRUE(res$blur)) (res$expfrac %||% 1) * cyc / (6 * dt_step) else 0
+    # (single-cycle steps only, so the window is one repeat regardless of tau_rep)
     sig2  <- Rblur * (r2m / ncart) + (2 * Rblur - 1) * (cov1 / ncart)
     list(D_um2_s  = ((r2m + 2 * cov1) / (2 * d_mot * dt_step)) / 1000,   # CVE D (µm²/s)
          sigma_nm = sqrt(max(0, sig2)), R_blur = Rblur, n_pairs = cov_n)
@@ -3774,6 +4026,8 @@ sim_server <- function(input, output, session) {
         sprintf("%.4g µm²/s  (%.0f%% of truth)", cve$D_um2_s, 100 * rr))
     } else "-"
     motion_lbl <- switch(res$motion %||% "free",
+      anomalous = sprintf("anomalous fBm (α = %.2f)", res$alpha),
+      hop = sprintf("hop diffusion (corral %.0f nm, permeability %.2f)", res$L_hop, res$p_perm),
       confined = sprintf("confined (OU tether, L_c = %.0f nm)", res$L_c),
       directed = sprintf("directed (v = %.3g µm/s)", res$v_nmms),
       twostate = "two-state (mobile↔immobile)",
@@ -3813,8 +4067,13 @@ sim_server <- function(input, output, session) {
               sprintf("on (τ = %.0f%% of cycle, R = %.3g)", 100 * (res$expfrac %||% 1),
                       (res$expfrac %||% 1) * res$cyc / (6 * (res$cyc + (res$sw %||% 0))))
             else "off (snapshot)",
-            if ((res$shrink %||% 0) > 0) sprintf(" · gap shrinkage %.0f%%", 100 * res$shrink) else "",
-            if (isTRUE(res$pd_speed)) sprintf(" · dark rises with displacement (%.0f nm)", res$pd_scale) else ""))),
+            if ((res$shrink %||% 0) > 0) sprintf(" · gap shrinkage %.0f%%", 100 * res$shrink) else "", ""))),
+        htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Photons / dark cycles"),
+          htmltools::tags$td(sprintf("eco median %.0f (limit %d) · %s",
+            stats::median(df$eco, na.rm = TRUE), res$pht_min %||% 1L,
+            if (isTRUE(res$budget))
+              sprintf("dark %.0f%%, emergent from the photon budget", 100 * (1 - frac_int))
+            else sprintf("dark %.0f%% as set", 100 * res$p_dark)))),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Integrated (single-cycle) fraction"),
           htmltools::tags$td(if (is.finite(frac_int)) sprintf("%.0f%%", 100 * frac_int) else "-")),
         htmltools::tags$tr(htmltools::tags$td(style="padding:2px 14px 2px 0;color:#666;", "Median Δt / median track length"),

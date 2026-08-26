@@ -151,6 +151,14 @@ Subsample the fine ground-truth path the MINFLUX way:
    surface points sits marginally inside the surface). Switching blur off gives R = 0 snapshot sampling.
 5. **Photobleaching → finite length** — end the track after a photon-budget-limited number of
    localizations (geometric/exponential), so track lengths are short and realistic.
+4b. **Anomalous motion** — optional fractional Brownian motion (`.sim_fgn`, Davies-Harte circulant
+   embedding) with MSD ∝ t^α. Increments are correlated, so they are drawn up-front for the whole
+   track rather than step by step. D keeps its meaning at the single-cycle lag.
+4c. **Brightness** — per-molecule lognormal offset, exponential fade over the molecule's lifetime, and
+   an AR(1) wobble within the track. Drives eco, σ_loc, efo and (under the photon budget) the gaps.
+4d. **Photon budget** — the pattern repeats until phtLimit photons are collected, each repeat costing
+   a cycle. Dark cycles, the eco floor, the τ quantisation and the rising gap fraction along a track
+   all follow from this one rule. See §11.
 5b. **Heterogeneous D** — each track may draw its own D from a lognormal whose median is the D input
    and whose spread is set by a CV input. 0 (the default) gives one D for the whole population. With
    spread on, the pooled CVE cannot recover the median: it recovers the step-weighted mean of the
@@ -335,3 +343,205 @@ the real pooled-vs-per-track gap (0.22 pooled against a 0.30 per-track median).
 The caveat worth carrying: the R_reacq that reproduces the real k-curve is ~50 nm, well below the
 323 nm search field of the sequence's first iteration. Either the effective re-acquisition range is
 much tighter than the field, or censoring is not the whole story.
+
+## 11. Audit against GP67H-track-014 (2026-08-26)
+
+Every statistic below is measured the same way on the real file and on simulator output.
+GP67H is a cell-wall protein on the E. coli surface, so the reference model is surface diffusion on a
+rod with little freedom.
+
+| statistic | REAL filtered | REAL raw | SIM before | SIM after |
+|---|---|---|---|---|
+| track length, mean/median | 5.79 | 21.9 | 1.56 | 4.73 |
+| longest 5% hold | 66% of locs | 75% | 24% | 49% |
+| eco var/mean | 18.9 | 16.0 | 1.00 | 15.2 |
+| eco floor | 20 (= phtLimit) | 20 | none | 20 |
+| σ_loc q10–q90 | 2.87–5.25 nm | 3.13–5.50 | 3.72–4.60 | 2.85–5.63 |
+| per-track D | 0.329 µm²/s | 0.335 | 0.219 | 0.31 (GP67H preset) |
+| MSD α (3–30 cycles) | 0.78 | 0.67 | 0.97 | 0.88 |
+| ⟨Δx²⟩ decline k=1→6 | ×3.0 | ×3.0 | ×1.05 | ×1.44 |
+| length-vs-D (Spearman) | −0.42 | −0.36 | 0.00 | −0.18 |
+| field of view | 9.2 × 3.7 µm, 2 cells | 10.8 × 5.6 | 2.4 × 0.8, 1 cell | multi-cell |
+| cell size | ~4.0–4.9 µm long, ~0.96 µm wide | | 2.8 × 0.8 µm | 3.96 × 0.96 µm |
+
+### Fixed in this pass
+
+- **Photon model.** Real `eco` has a hard floor at exactly 20 — the sequence's `phtLimit` — with a long
+  right tail from brightness differences (var/mean 19, not 1). The old Poisson draw could not produce
+  either. Now the rate is lognormal and the count Poisson around it, floored at the photon limit, which
+  reproduces the measured σ_loc spread almost exactly. This matters because σ_loc heterogeneity was
+  understated roughly two-fold.
+- **Track-length heterogeneity.** Real lengths are extremely heavy-tailed: the longest 5% of tracks
+  carry two thirds of all localizations, so every pooled estimator is dominated by a handful of
+  molecules. A single geometric lifetime cannot do this. Per-molecule lifetime spread (CV ≈ 3) gets
+  most of the way there.
+- **Collection window τ, measured not assumed.** Real files report τ directly as **eco/efo**: 0.1061 ms
+  of a 0.192 ms cycle, i.e. **55%**, quantised in units of 0.1061 ms. So R = τ/(6Δt) ≈ **0.087**, not
+  1/6. τ is now an input, defaulted to 0.55.
+- **Gapped localizations integrate for longer.** τ before a single-cycle step is 1 repeat; before a
+  two-cycle step it is 2 (98% of cases); it saturates near 3. **A dark cycle is not a skipped cycle —
+  it is a longer integration.** The simulator now extends the averaging window across a gap, up to a
+  repeat cap.
+- **Multi-cell field of view** with random placement and in-plane orientation, and rod defaults moved
+  to the measured cell size (radius 480 nm, cylinder 3000 nm).
+
+### What the k-curve now looks like
+
+Longer integration over gaps explains part of the flat k-curve but not all of it. A joint blur-aware
+fit using the *measured* per-step τ over k = 1…6 gives D = 0.05–0.06 µm²/s and σ = 6.2 nm at R² = 0.78
+— a poor fit, and four times below the single-cycle CVE D. Blur is a contributor, not the cause. τ
+itself saturates near 3 repeats while the free-diffusion growth keeps going, so the deficit at k ≥ 4
+survives. Censoring remains the leading explanation for the remainder (§10).
+
+### Second pass: brightness, the photon budget, and anomalous diffusion
+
+**The dark-cycle probability is not a free parameter.** `efo` falls monotonically along a track — to
+44–56% of its starting rate by the last decile — and the gap fraction climbs with it, from 18% at the
+start of a track to 43% at the end. Both follow from one mechanism: **the tracker repeats the pattern
+until phtLimit photons are in, and each extra repeat costs a cycle.** A bright molecule finishes in one
+repeat; a faded one needs two or three, and those extra cycles are exactly what appears in the file as
+a "dark cycle". This is now the default (`Dark cycles come from the photon budget`), and p_dark becomes
+an *output* rather than an input.
+
+| | REAL filtered | SIM photon budget |
+|---|---|---|
+| eco median / mean | 36 / 45.3 | 36 / 45.5 |
+| eco var/mean | 18.9 | 18.7 |
+| eco floor | 20 | 20 |
+| τ = 1 / 2 / 3 repeats | 0.72 / 0.23 / 0.05 | 0.74 / 0.23 / 0.04 |
+| dark-cycle fraction | 0.28 | **0.26, emergent** |
+| efo fade over a track | to 56% | to 52% |
+| gap fraction, first → last decile | 0.19 → 0.39 | 0.11 → 0.46 |
+
+The brightness model behind it: a per-molecule lognormal offset (sdlog 0.45), an exponential fade over
+the molecule's lifetime, and an AR(1) wobble within the track (sdlog 0.45, lag-1 correlation 0.4) —
+all three measured off the real files. Because eco drives σ_loc, σ_loc now also grows along a track,
+as it does in the real data.
+
+`efo` is written as N/τ rather than N/cycle, so simulated files carry the same τ = eco/efo
+quantisation the real ones do and can be read back with the same measurement.
+
+**Anomalous diffusion** is implemented as fractional Brownian motion (Davies–Harte circulant
+embedding, exact), parameterised by α with Hurst = α/2. D still sets the MSD at the single-cycle lag,
+so only the growth with lag changes. Round-trip through the whole sampling overlay, 2D projection
+included: α = 0.78 in → 0.75 out.
+
+This exposes an estimator failure worth carrying to the tracking tab: **on subdiffusive tracks the CVE
+mis-attributes the anti-correlated fBm increments to localization noise.** Across all geometries at
+α = 0.78 it returns D about 65% of truth while inflating σ_loc from 4.4 to ~4.9 nm. Both errors point
+the same way the real data does, which is a reason to be careful about reading a low CVE D on GP67H as
+a slow molecule rather than a subdiffusive one.
+
+### Hop diffusion, and the length-vs-D coupling
+
+**Hop diffusion** is now the second route to α < 1: the molecule diffuses freely inside a corral,
+reflects off its barrier, and crosses into the neighbour with a set probability per encounter. Unlike
+fBm it has no long-range memory — the subdiffusion comes from a crossover between free motion inside
+a corral and slower motion between them. Measured α over 3–40 cycles:
+
+| corral radius / permeability | 40 / 0.05 | 60 / 0.05 | 60 / 0.12 | 60 / 0.20 | 100 / 0.10 |
+|---|---|---|---|---|---|
+| α | 0.61 | 0.69 | 0.81 | 0.88 | 0.86 |
+
+So a 60 nm corral at ~12% permeability sits on the measured GP67H α of 0.78, and is at least as
+plausible for a cell-wall protein in a peptidoglycan mesh as fBm is. **The two are not distinguished
+by α alone** — telling them apart is a question for the tracking tab, not the simulator.
+
+**The length-vs-D anticorrelation** is now an explicit knob: D and lifetime are drawn as a correlated
+pair. It is a phenomenological coupling, not a mechanism, and that is deliberate — the mechanisms that
+could produce it (censoring, or a genuinely bound-versus-mobile population) are separately available
+and neither reproduces the observed size on its own.
+
+| D–lifetime correlation | 0 | −0.4 | −0.7 | −0.9 | −0.7 + censoring |
+|---|---|---|---|---|---|
+| recovered Spearman(length, D) | +0.01 | −0.23 | −0.24 | −0.33 | −0.05 |
+
+Real is −0.42. The recovered value is attenuated because both quantities are noisy — short tracks give
+noisy per-track D — so the latent coupling has to be much stronger than the number it produces. Worth
+noting from the last column: **censoring does not add to the anticorrelation, it destroys it**, because
+truncating the fast tracks compresses the length range that the correlation lives on.
+
+Why it matters at all: this coupling is what decides whether a pooled D and a per-track median D
+agree. Pooling weights by step count, so when the slow molecules are the long ones they dominate the
+pooled number. On GP67H that gap is 0.22 against 0.33, a 40% disagreement between two defensible ways
+of reporting one D.
+
+### Remaining gaps
+
+- **The k-curve is still only half reproduced.** Real declines ×3.0 from k=1 to k=6; the closest
+  preset manages ×1.5. Blur over gaps, censoring, heterogeneity, hop diffusion and the photon budget
+  have all been tried; each contributes and none closes it.
+- **Full anticorrelation strength.** −0.33 against −0.42, and only with a near-maximal coupling.
+- `cfr` and `dcr` remain absent — deliberately out of scope.
+
+### A GP67H-like parameter set
+
+Rod surface, radius 480 nm, cylinder 3000 nm, 2 cells; D 0.45 µm²/s with CV 0.35; confined,
+L_c 60 nm; cycle 0.192 ms, SW 0.011, p_dark 0.28; photons 38, limit 20, spread 0.55; τ 0.55 with
+3 repeats over gaps; lifetime CV 3; survivorship on at R_reacq 60 nm; project to 2D. This lands
+per-track D at 0.31 against 0.329, Rg at 53 nm against 46, and α at 0.88 against 0.78.
+
+## 12. Control-surface review (2026-08-26)
+
+The panel had grown to 47 controls. Each was put to one test: **does the user both have a reason to
+change it and a way to know what to set it to?** A control that fails the second half is not a
+control, it is a constant with a text box around it.
+
+That splits them three ways.
+
+**The question you are asking** — geometry and cell size, number of cells, surface vs volume, motion
+model and its parameter, D and its spread, track count and length, the D–lifetime coupling, 2D
+projection, seed. These stay in the open. They are the reason to run the simulator at all.
+
+**The microscope run** — cycle time, overhead, photons, photon limit, collecting fraction, cycles
+before giving up, the four brightness parameters, dark-cycle probability. Every one is measurable from
+a real file, so **Calibrate now fills all of them** and they live in a collapsed group. A user should
+not be typing a number the data already knows.
+
+**Instrument artifacts** — motion blur, survivorship, post-gap shrinkage. Deliberate distortions with
+a known size, used to measure what an estimator does when the data misbehaves. Collapsed and labelled
+as such, rather than mixed in with settings that describe reality.
+
+### Removed
+
+- **Brightness loss from motion.** A dimensionless coupling with no measurable value. The real
+  evidence for it is a −0.14 correlation between per-track D and efo, it defaulted to 0, and nobody
+  could know what to set it to. Deleted rather than left as decoration.
+- **Dark probability rises with displacement.** Superseded by the photon budget, which is the actual
+  mechanism, is measurable, and is on by default. Keeping a second, phenomenological route to the same
+  effect only invites setting both.
+
+### What Calibrate now reads from a file
+
+| field | measured as | GP67H |
+|---|---|---|
+| cycle time, SW | regression of Δt on cycle count | 0.192 ms, 0.0103 ms |
+| photons | median eco | 37 |
+| photon limit | 0.1st percentile of eco | 20 |
+| collecting fraction | (eco/efo) ÷ cycle time | 0.55 |
+| cycles before giving up | 99.9th percentile of τ/τ₀ | 3 |
+| brightness spread, between / within | SD of per-track median log efo / median within-track SD | 0.39 / 0.42 |
+| brightness carry-over | median within-track lag-1 autocorrelation of log efo | 0.29 |
+| fading over a track | pooled log drop, first decile to last | 0.59 |
+| length spread | mean/median of track lengths, inverted through the generator | CV 3.0 |
+| D–lifetime correlation | Spearman(log length, log per-track D), de-attenuated ×2 | −0.45 → −0.90 |
+| D | CVE on single-cycle steps | 0.22 µm²/s |
+
+Two of these needed care:
+
+- **Fading must be pooled over localizations, not averaged over tracks.** The per-track median fade is
+  0.12 where the pooled figure is 0.59, a factor of seven, because short tracks mostly end by being
+  lost rather than by bleaching and so barely fade at all. The pooled figure is the one that
+  reproduces the observable.
+- **The D–lifetime correlation is filled de-attenuated.** Both quantities are noisy, so a simulation
+  set to ρ reproduces a visibly weaker correlation; the report shows the measured and the set value
+  side by side rather than hiding the adjustment.
+
+Fading and eco dispersion trade off against each other in the current model: the fade that reproduces
+the real efo decline (0.59–0.85) compresses eco var/mean below what the file shows, because faint
+localizations get merged into multi-repeat windows that accumulate more photons. The model cannot hit
+both at once, and that is a genuine limitation rather than a tuning failure.
+
+**The one acquisition setting Calibrate cannot fill is the TCP diameter L**, because it lives in the
+sequence .json rather than the data. It stays in the open with its provenance in the help text.
+
