@@ -68,9 +68,27 @@ MINFLUXR requires **R ≥ 4.1**. All dependencies are installed automatically on
 source("packages.R")   # install dependencies (only needed once)
 ```
 
-Key dependencies include: `shiny`, `shinyWidgets`, `shinyjs`, `plotly`, `dplyr`, `dbscan`, `RANN`, `mclust`, `magick`, `alphashape3d`, `data.table`, `qs`, `fst`, `readr`, `changepoint`, `minpack.lm`.
+Key dependencies include: `shiny`, `shinyWidgets`, `shinyjs`, `plotly`, `DT`, `dplyr`, `dbscan`, `RANN`, `mclust`, `magick`, `alphashape3d`, `data.table`, `fst`, `readr`, `changepoint`, `minpack.lm`.
 
-> **macOS note:** `qs` and `fst` use C++/OpenMP. If they fail to compile, install Xcode Command Line Tools (`xcode-select --install`) and retry, or the app will fall back to `fst`-only chunk storage automatically.
+To check that every package the code calls is actually declared:
+
+```sh
+Rscript tools/check_dependencies.R
+```
+
+It parses the sourced files and reports anything referenced as `pkg::` or `library(pkg)` that
+`packages.R` does not install, and exits non-zero if there is a gap.
+
+`qs` is **optional**. It needs a C++ toolchain plus `RcppParallel` and `stringfish` and often fails to
+install; the app therefore writes its tracking chunks with `fst`, which is a hard dependency and needs
+no special toolchain. `qs` is only used to *read* a chunk set produced on a machine that had it, and
+its absence is reported rather than thrown.
+
+> **macOS note:** `fst` uses C++/OpenMP. If it fails to compile, install Xcode Command Line Tools
+> (`xcode-select --install`) and retry.
+
+> **If a package fails to install:** restart R before retrying. The installer skips anything already
+> loaded in the session, because replacing a loaded package's files can leave it half-removed.
 
 ---
 
@@ -925,11 +943,11 @@ first.
 
 ### Data Quality & Calibration
 
-The foundation panel. Estimates **σ_loc** (localization precision) and **D** by the CVE method
-(Vestergaard 2014), using only single-cycle steps. Both come from two moments of the displacement
-series - ⟨|Δr|²⟩ and the covariance of consecutive steps - so no MSD fit is needed and the two are
-separated cleanly. The covariance is negative for localization noise, which is what makes the
-separation possible.
+The foundation panel. Estimates **D** by the CVE method (Vestergaard 2014), using only single-cycle
+steps, so no MSD fit is needed. It reads two moments of the displacement series, ⟨|Δr|²⟩ and the
+covariance of consecutive steps, and the covariance is negative for localization noise, which is what
+separates motion from noise. The panel also sets the app-wide **σ_loc**, which comes from the photon
+budget rather than from the covariance, and holds the instrument constants everything else reads.
 
 Reports cycle time, free D, σ_loc and the step count. The D shown is corrected for the **motion
 degrees of freedom** set below, and says so when the correction is active.
@@ -1522,8 +1540,8 @@ The Data Quality panel estimates $D$ **without fitting an MSD curve** (Vestergaa
 this is the app's primary free-D readout — the MSD panel is the cross-check, not the other way around.
 
 $\sigma_\text{loc}$ is **not** taken from the CVE. It comes from the photon budget,
-$\sigma_i = L_\text{TCP}/(4\sqrt{N_i})$ with $N$ = ECO, and that is what becomes the app-wide noise
-floor consumed by the D-map, JDD, confinement, HMM, directionality and speed tools. The reasons are
+$\sigma_i = L_\text{TCP}/(a\sqrt{N_i})$ with $N$ = ECO and $a$ an adjustable
+instrument constant, and that is what becomes the app-wide noise floor consumed by the D-map, JDD, confinement, HMM, directionality and speed tools. The reasons are
 below, under *Why σ does not come from the CVE*.
 
 #### Why consecutive steps carry the precision
@@ -1571,33 +1589,69 @@ not vanish. The general form is
 \qquad R = \frac{t_c}{6\,\Delta t}
 ```
 
-with $R \to 1/6$ for a full-cycle window. Reading MINFLUX data at $R = 0$ under-reports σ about
-threefold: on the two GP67H tracking files it gives 1.5 and 1.3 nm where the blur-aware form gives
-4.0 and 4.0 nm.
+with $R \to 1/6$ for a full-cycle window. Reading MINFLUX data at $R = 0$ under-reports σ roughly
+threefold.
 
-Correcting R is necessary but not sufficient. At $R \approx 1/6$ roughly **90% of $\sigma^2$ comes from
-the $R\langle\Delta x^2\rangle$ term**, so the estimate is close to $\sqrt{R} \times \text{rms step}$ —
-a function of the assumed R and of the step-size distribution, which population heterogeneity and any
-residual drift both inflate. What the data contributes independently, $\text{cov}_1$, is a few-percent
-residual ($r_1 \approx -0.02$). So the app uses the photon budget instead:
+Correcting R is necessary but not sufficient. At $R \approx 1/6$ roughly **90% of $\sigma^2$ comes
+from the $R\langle\Delta x^2\rangle$ term**, so the estimate is close to
+$\sqrt{R} \times \text{rms step}$, a function of the assumed R and of the step-size distribution,
+which population heterogeneity and any residual drift both inflate. What the data contributes
+independently, $\text{cov}_1$, is a few-percent residual. On an immobile sample the increments can
+even come out *positively* correlated, at which point the estimator returns no solution at all.
+
+This is an identifiability limit rather than a poor estimator: within one trajectory, blur and
+precision enter the covariance in the same place. MSD-intercept and MLE fits inherit it.
+
+So σ comes from the photon budget instead:
 
 ```math
-\sigma_i = \frac{L_\text{TCP}}{4\sqrt{N_i}}
+\sigma_i = \frac{L_\text{TCP}}{a\sqrt{N_i}}\left[1 + 2\left(\frac{x}{L}\right)^2\right],
+\qquad x = \sqrt{2 D\, t_\text{loc}}
 ```
 
 per localization, with $N$ = ECO and $L_\text{TCP}$ from *Acquisition Parameters* (auto-filled from the
 sequence's `patGeoFactor`). This is a direct instrument model: per-localization rather than pooled, and
-free of any assumption about the motion.
+free of any assumption about the motion. The bracketed term is the one place motion enters. It is the
+distance the emitter covers during one localization, so precision degrades for fast molecules and
+tightens under confinement.
 
-The blur-aware CVE σ is kept beside it as a **cross-check on L** — inverting it as
-$L = 4\hat{\sigma}\sqrt{\bar{N}}$ should return the sequence's diameter. On the GP67H files it returns
-99.4 and 95.6 nm against the sequence's 100.8 nm, from two routes sharing no assumptions.
+The blur-aware CVE σ is still shown beside it as a sanity read on the covariance. It is not the
+app-wide value and nothing downstream consumes it.
 
-> ⚠ **What is not yet nailed down.** The prefactor 4 in $\sigma = L/(4\sqrt{N})$ is corroborated by that
-> agreement, on two files from one sample. The clean calibration is an immobile sample acquired with a
-> **tracking** sequence, where within-trace spread measures precision with no motion model in the way.
-> A fiducial recorded with an *imaging* sequence does not settle it: that calibrates a different
-> iteration (L = 39.6 nm rather than 100.8 nm).
+> **σ ∝ L, or steeper?** The full doughnut CRLB carries a denominator
+> $\left|1 + \ln 2\,(L/\nu)^2\left((2x/L)^2 - 1\right)\right|$, with ν the excitation-doughnut FWHM,
+> which makes σ rise faster than $L$ as $L$ approaches ν. It is reached through the **ν** field and is
+> **off by default**, since $\sigma \propto L$ holds unless an L-series on the instrument shows
+> otherwise.
+
+#### Instrument constants, and porting to another microscope
+
+Three values in *Acquisition Parameters* describe the microscope rather than the software. The
+defaults are starting points, not universal constants: measure them on the system that produced the
+data, or state in the methods that the defaults were used.
+
+| field | what it is | how to measure |
+|---|---|---|
+| **σ prefactor a** | absorbs background and estimator losses on top of the ideal Cramér-Rao bound | immobile sample, damping off, two or more TCP diameters; fit $\text{MSD}(\tau) = 4\sigma^2 + 4D_w\tau$ on short lags, then $a = L\sqrt{\bar{N}}\,/\,\sigma$ |
+| **patGeoFactor base** | converts the sequence's pattern factor to a diameter, $L = \text{patGeoFactor} \times \text{base}$ | check one diameter against a figure the vendor quotes |
+| **wander floor $D_w$** | apparent diffusion the tracking loop produces on a stationary target | the slope of the same MSD fit |
+
+Fixed cells labelled as usual are a better calibration sample than dye on glass, because $a$ should
+absorb the background of the real optical environment.
+
+#### The wander floor
+
+The reported position wanders even on a genuinely immobile target, so any measured D carries an
+instrumental floor. It is **photon-driven**, shrinking as the photon budget grows, and it worsens at
+larger TCP diameters.
+
+Entering it as $D_w$ makes the calibration panel report $D - D_w$ beside D, and warn when the floor
+exceeds 20% or 50% of the measured value. It is never subtracted silently: $D_w$ scales with the
+photon budget, so one constant would over-correct dim tracks and under-correct bright ones.
+
+A D of the same order as the floor is not resolved above the instrument. Because the floor falls
+faster than the photon count rises, the effective lever is to **raise the photon limit**, trading
+$D_\text{max}$ headroom for a floor you can get under.
 
 #### How well is σ actually resolved?
 
@@ -1916,7 +1970,8 @@ MINFLUX data specifically** (green / amber / red) - the more important read befo
 
 | Method | Follows |
 |---|---|
-| [CVE - σ_loc and D](#cve-covariance-based-estimator) | Vestergaard 2014 [12] |
+| [CVE - D](#cve-covariance-based-estimator) | Vestergaard 2014 [12] |
+| [σ_loc - photon budget](#cve-covariance-based-estimator) | MINFLUX CRLB for a doughnut TCP; Balzarotti 2017 [1], Vogler 2025 [7] |
 | [TSA & cycle time](#time-signature-analysis-tsa--cycle-time) | Vogler 2025 [7] (MFX-TSA / MinSpt) |
 | [MSD computation](#msd-computation) | Qian 1991 [22]; Michalet 2010 [10]; **Vogler 2025 [7]** - cycle-index binning and ensemble convention |
 | [MSD fit-range selection](#diffusion-coefficient-fitting) | Michalet & Berglund 2012 [11]; **Vogler 2025 [7]** - OLSF as adapted to MINFLUX cycle lags |

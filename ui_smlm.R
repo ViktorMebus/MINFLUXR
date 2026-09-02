@@ -909,7 +909,7 @@ smlm_ui <- fluidPage(
                    tags$p("Pixel size must be set first. Results are a starting point - nudge to refine.",
                           style = "font-size:11px; color:#888; margin:0 0 6px 0;"),
                    checkboxInput("img_invert_y", "Image origin at top-left (invert Y)", TRUE),
-                   checkboxInput("img_flip_x", "Mirror horizontally (left↔right)", FALSE),
+                   checkboxInput("img_flip_x", "Mirror horizontally (left↔right)", TRUE),
                    sliderInput("img_opacity", "Image opacity", min = 0, max = 1, value = 0.6, step = 0.05),
                    selectInput("img_lut", "Colour (LUT)",
                                choices = c("Original (as uploaded)" = "original",
@@ -934,7 +934,7 @@ smlm_ui <- fluidPage(
                                min = 10, max = 300, value = 100, step = 5),
                    sliderInput("img_contrast", "Image contrast",
                                min = 0, max = 90, value = 0, step = 5),
-                   selectInput("img_rotation", "Rotate image", choices = c("0","90","180","270"), selected = "0"),
+                   selectInput("img_rotation", "Rotate image", choices = c("0","90","180","270"), selected = "180"),
                    downloadButton("download_overlay_settings", "Download Overlay Settings"),
                    fileInput("load_overlay_settings", "Load Overlay Settings (.json)", accept = ".json"),
                    actionButton("reset_overlay", "Reset Overlay", icon = icon("undo"))

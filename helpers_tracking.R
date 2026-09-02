@@ -372,6 +372,38 @@ decimate_per_tid <- function(df, max_pts = 400, tcol = "tim0", extra_cols = char
 # tids_per_chunk : how many whole TIDs per chunk file (global default)
 # fmt            : "qs" (smaller on disk) or "fst" (faster partial reads)
 # returns        : invisibly, the path to the written manifest.csv
+# ── read_chunk_file() ─────────────────────────────────────────────────────────
+# GOAL: one place that turns a chunk path into a data.frame, whatever it was
+# written as, so the extension dispatch cannot drift between call sites.
+#
+# WHY IT MATTERS: `qs` needs a C++ toolchain plus RcppParallel and stringfish, and
+# fails to install on a lot of machines. `fst` is a hard dependency already, reads
+# a COLUMN SUBSET without touching the rest of the file, and needs no special
+# toolchain - so it is what the app writes. qs is only ever needed to READ a chunk
+# set produced elsewhere, and its absence is reported rather than thrown.
+#
+# columns : names to read. fst does this natively; qs must read the whole object
+#           and subset afterwards.
+# returns : a data.frame, or NULL if the file is missing or unreadable.
+read_chunk_file <- function(f, columns = NULL) {
+  if (!length(f) || is.na(f) || !nzchar(f) || !file.exists(f)) return(NULL)
+  if (grepl("[.]qs$", f, ignore.case = TRUE) && !requireNamespace("qs", quietly = TRUE)) {
+    warning("Chunk '", basename(f), "' is a .qs file but the 'qs' package is not ",
+            "installed. Re-upload the source file so it is re-chunked with 'fst', ",
+            "or install qs. Skipping this chunk.", call. = FALSE)
+    return(NULL)
+  }
+  tryCatch({
+    if (grepl("[.]fst$", f, ignore.case = TRUE)) {
+      as.data.frame(if (is.null(columns)) fst::read_fst(f)
+                    else fst::read_fst(f, columns = columns))
+    } else if (grepl("[.]qs$", f, ignore.case = TRUE)) {
+      d <- as.data.frame(qs::qread(f))
+      if (is.null(columns)) d else d[, intersect(columns, names(d)), drop = FALSE]
+    } else NULL
+  }, error = function(e) NULL)
+}
+
 split_by_tid_to_dir <- function(df, out_dir,
                                 tids_per_chunk = TIDS_PER_CHUNK_DEFAULT,
                                 fmt = CHUNK_FORMAT) {
@@ -395,7 +427,7 @@ split_by_tid_to_dir <- function(df, out_dir,
       incProgress(1/length(chunks), detail = paste("Chunk", i, "of", length(chunks)))
       sub <- df[df$tid %in% chunks[[i]], , drop = FALSE]   # all rows for this chunk's TIDs
       f <- file.path(out_dir, sprintf("chunk_%03d.%s", i, fmt))  # zero-padded => sorts correctly
-      if (identical(fmt, "qs")) {
+      if (identical(fmt, "qs") && requireNamespace("qs", quietly = TRUE)) {
         qs::qsave(sub, f, preset = "high")             # "high" = smaller file, slower write
       } else if (identical(fmt, "fst")) {
         fst::write_fst(sub, f, compress = 50)          # 50 = balanced size vs speed

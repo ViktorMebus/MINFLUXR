@@ -699,31 +699,65 @@ tracking_server <- function(input, output, session) {
     # rather than pooled, and does not inherit the step-size inflation that
     # population heterogeneity and drift push into the CVE's ⟨Δx²⟩ term.
     # The CVE σ above is retained as a CROSS-CHECK on L, not as the noise floor.
+    # ── Are the increments consistent with ANY motion model? ───────────────────
+    # A subdiffusive walk already has anti-correlated increments before any noise:
+    # for fBm with Hurst H = alpha/2, fGn gives cov1/var = 2^(alpha-1) - 1.
+    # Localization noise and blur can only push r1 MORE negative, so
+    #     r1_observed <= 2^(alpha-1) - 1
+    # must hold. A violation means something is adding POSITIVE increment
+    # correlation, i.e. the trajectory was smoothed before it was written - galvo
+    # damping (DMP > 0) being the obvious candidate. No estimator can recover
+    # sigma from filtered increments, so this is a data-quality flag, not a knob.
+    alpha_short <- {
+      msd_at <- function(kk) {
+        m <- n - kk
+        if (m < 10L) return(NA_real_)
+        sm2 <- df$tid[(kk + 1):n] == df$tid[1:m]
+        gp  <- df$tim[(kk + 1):n] - df$tim[1:m]
+        okg <- sm2 & is.finite(gp) & abs(gp - kk * t_c) < 0.5 * t_c
+        if (sum(okg, na.rm = TRUE) < 20L) return(NA_real_)
+        v <- (df$x[(kk + 1):n][okg] - df$x[1:m][okg])^2 +
+             (df$y[(kk + 1):n][okg] - df$y[1:m][okg])^2
+        mean(v, na.rm = TRUE)
+      }
+      m1 <- msd_at(1L); m8 <- msd_at(8L)
+      if (is.finite(m1) && is.finite(m8) && m1 > 0 && m8 > 0)
+        log(m8 / m1) / log(8) else NA_real_
+    }
+    r1_fgn <- if (is.finite(alpha_short)) 2^(alpha_short - 1) - 1 else NA_real_
+
     L_tcp <- suppressWarnings(as.numeric(input$trk_L_tcp %||% DMAX_L_TCP_DEFAULT))
     if (!is.finite(L_tcp) || L_tcp <= 0) L_tcp <- DMAX_L_TCP_DEFAULT
     ecov  <- if ("eco" %in% names(df)) df$eco[is.finite(df$eco) & df$eco > 0] else numeric(0)
-    sig_phot_i   <- if (length(ecov)) L_tcp / (TCP_CRLB_PREFACTOR * sqrt(ecov)) else numeric(0)
+    # Vogler Eq. 1 rather than its large-beam limit. x is the offset the emitter
+    # reaches between re-centrings, sqrt(2 D t_loc) with D from the CVE above -
+    # small here (~9 nm against L = 100.8) but it grows with D and shrinks with L.
+    nu_beam <- suppressWarnings(as.numeric(input$trk_beam_fwhm %||% TCP_BEAM_FWHM_NM))
+    if (!is.finite(nu_beam) || nu_beam <= 0) nu_beam <- TCP_BEAM_FWHM_NM
+    x_off <- if (is.finite(D_cve) && D_cve > 0 && is.finite(dt_int) && dt_int > 0)
+               sqrt(2 * D_cve * dt_int) else 0
+    a_pref <- suppressWarnings(as.numeric(input$trk_crlb_pref %||% TCP_CRLB_PREFACTOR))
+    if (!is.finite(a_pref) || a_pref <= 0) a_pref <- TCP_CRLB_PREFACTOR
+    sig_phot_i   <- if (length(ecov)) .crlb_doughnut(L_tcp, nu_beam, ecov, x_off, a_pref) else numeric(0)
     sig_phot_med <- if (length(sig_phot_i)) stats::median(sig_phot_i) else NA_real_
     sig_phot_iqr <- if (length(sig_phot_i) >= 5L)
                       as.numeric(diff(stats::quantile(sig_phot_i, c(.25, .75)))) else NA_real_
     eco_med      <- if (length(ecov)) stats::median(ecov) else NA_real_
     # Invert the blur-aware CVE for L and compare against the sequence's L. The two
     # routes share no assumptions, so agreement is a real check on the prefactor.
-    sigma_at  <- function(R) sqrt(max(0, R * msq + (2 * R - 1) * cov1))
-    sig_R_lo  <- sigma_at(R_lo); sig_R_hi <- sigma_at(R_hi)
-    L_implied <- if (is.finite(sigma) && sigma > 0 && is.finite(eco_med))
-                   TCP_CRLB_PREFACTOR * sigma * sqrt(eco_med) else NA_real_
-    L_imp_lo  <- if (is.finite(sig_R_lo) && is.finite(eco_med))
-                   TCP_CRLB_PREFACTOR * sig_R_lo * sqrt(eco_med) else NA_real_
-    L_imp_hi  <- if (is.finite(sig_R_hi) && is.finite(eco_med))
-                   TCP_CRLB_PREFACTOR * sig_R_hi * sqrt(eco_med) else NA_real_
+    # (An implied-L cross-check used to sit here: invert the CVE sigma to recover L,
+    # as a proxy for calibrating the prefactor. The prefactor is now measured directly
+    # on a fixed sample, so it was removed rather than left to rot. See
+    # docs/tracking_sigma_and_cve_plan.md sections 10-12.)
 
     list(sigma = sigma, sigma2 = sigma2, cov1 = cov1, n_pairs = length(vals),
-         R_blur = R_blur, R_lo = R_lo, R_hi = R_hi, msq = msq, n_vert = n_vert,
-         sig_R_lo = sig_R_lo, sig_R_hi = sig_R_hi,
-         L_imp_lo = L_imp_lo, L_imp_hi = L_imp_hi, t_coll = t_coll,
+         R_blur = R_blur, msq = msq, n_vert = n_vert, t_coll = t_coll,
          sig_phot = sig_phot_i, sig_phot_med = sig_phot_med, sig_phot_iqr = sig_phot_iqr,
-         eco_med = eco_med, L_tcp = L_tcp, L_implied = L_implied, n_phot = length(ecov),
+         eco_med = eco_med, L_tcp = L_tcp, n_phot = length(ecov),
+         nu_beam = nu_beam, x_off = x_off,
+         sig_simple = if (length(ecov)) stats::median(L_tcp / (a_pref * sqrt(ecov))) else NA_real_,
+         a_pref = a_pref,
+         alpha_short = alpha_short, r1_fgn = r1_fgn,
          sigma_xy = sigma_xy, sigma_z = sigma_z, sig_aniso = sig_aniso,
          D_cve = D_cve, dt_int = dt_int, t_cycle = t_c, has_z = has_z,
          frac_integ = frac_integ_raw, frac_integ_filt = frac_integ_filt,
@@ -774,29 +808,44 @@ tracking_server <- function(input, output, session) {
     # The PHOTON estimate is the value the app uses; the CVE follows as a check.
     sigma_line <- if (is.finite(b$sig_phot_med))
       row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sig_phot_med)),
-          dim_(sprintf("  L/(4\u221aN)  \u00b7  L = %.1f nm  \u00b7  median ECO %.0f  \u00b7  IQR %s  \u00b7  %s locs",
-                       b$L_tcp, b$eco_med %||% NA_real_,
-                       num(b$sig_phot_iqr %||% NA_real_, "%.2f nm"),
-                       format(b$n_phot %||% 0L, big.mark = ","))))
+          dim_(sprintf("  CRLB (Vogler Eq. 1)  \u00b7  L = %.1f nm  \u00b7  \u03bd = %.0f nm  \u00b7  x = %.1f nm  \u00b7  median ECO %.0f  \u00b7  %s locs",
+                       b$L_tcp, b$nu_beam %||% NA_real_, b$x_off %||% 0,
+                       b$eco_med %||% NA_real_, format(b$n_phot %||% 0L, big.mark = ","))),
+          if (is.finite(b$sig_simple %||% NA_real_))
+            dim_(sprintf("  \u00b7  %.2f before the motion term", b$sig_simple)) else NULL)
     else
       row(warn(htmltools::HTML("&#9888; "), "no ECO column, so ", sigloc(),
                " cannot come from the photon budget; the CVE value below is used instead."))
 
+    # Consistency of the increments with ANY motion model. Subdiffusion alone gives
+    # r\u2081 = 2^(\u03b1\u22121) \u2212 1; noise and blur only push r\u2081 further negative. If the observed
+    # r\u2081 sits ABOVE that, the trajectory was smoothed before it was written (galvo
+    # damping), and no estimator can recover \u03c3 from it.
+    smooth_line <- if (is.finite(b$r1_fgn %||% NA_real_) && is.finite(b$r1_norm %||% NA_real_)) {
+      viol <- b$r1_norm > b$r1_fgn + 0.01
+      row(htmltools::span(style = sprintf("color:%s;", if (viol) AMB else DIM),
+        sprintf("increments: \u03b1 = %.2f \u2192 r\u2081 should be \u2264 %+.3f, observed %+.3f",
+                b$alpha_short %||% NA_real_, b$r1_fgn, b$r1_norm),
+        if (viol) htmltools::HTML(sprintf(
+          "  &#9888; %.1f\u00d7 too weak \u2014 the trajectory looks smoothed (check galvo damping, DMP)",
+          b$r1_fgn / b$r1_norm)) else "  \u2713 consistent"))
+    } else NULL
+
     # CVE cross-check. Agreement between the implied L and the L in use is the
     # evidence that the photon prefactor is right; a large gap means one is wrong.
+    # CVE sigma, kept only as a sanity read on the covariance. It is NOT a precision
+    # measurement: ~90% of it is the assumed blur term, and on immobile samples the
+    # increments come out positively correlated so it fails outright. The prefactor
+    # it used to cross-check is now measured directly on a fixed sample, so the old
+    # implied-L / R-range readout was retired.
     cve_line <- if (isTRUE(b$degenerate))
-      row(dim_("CVE cross-check: "), warn("unresolvable, drift dominates the covariance"))
-    else if (is.finite(b$sigma)) {
-      lo <- b$L_imp_lo %||% NA_real_; hi <- b$L_imp_hi %||% NA_real_
-      inside <- is.finite(lo) && is.finite(hi) && is.finite(b$L_tcp) &&
-                b$L_tcp >= min(lo, hi) * 0.98 && b$L_tcp <= max(lo, hi) * 1.02
-      row(dim_(sprintf("CVE cross-check: \u03c3 %.2f\u2013%.2f nm over R = %.3f\u2013%.3f (%d vertices) \u2192 implied L %s\u2013%s",
-                       min(b$sig_R_lo, b$sig_R_hi), max(b$sig_R_lo, b$sig_R_hi),
-                       b$R_lo %||% NA_real_, b$R_hi %||% NA_real_, b$n_vert %||% 6L,
-                       num(min(lo, hi), "%.0f"), num(max(lo, hi), "%.0f nm"))),
-          if (isTRUE(inside)) dim_(sprintf("  \u2713 brackets the %.1f nm in use", b$L_tcp))
-          else warn(htmltools::HTML(sprintf("  &#9888; does not bracket the %.1f nm in use", b$L_tcp))))
-    } else NULL
+      row(dim_("CVE σ: "), warn("unresolvable — consecutive steps are positively correlated"))
+    else if (is.finite(b$sigma))
+      row(dim_(sprintf("CVE σ %.2f nm (blur-aware, R = %.3f) — sanity read only, %s",
+                       b$sigma, b$R_blur %||% NA_real_,
+                       if (is.finite(b$noise_frac) && b$noise_frac < 0.15)
+                         "the covariance carries little of it" else "not the app-wide value")))
+    else NULL
 
     # ── lateral vs axial (3D only) - a pooled sigma over-states the lateral floor,
     #    which the x-y-only tools (D-map, 2D JDD/MSD) would then over-subtract.
@@ -851,6 +900,22 @@ tracking_server <- function(input, output, session) {
       if (d_mot != d_obs) sprintf(" (%d/%d for %s)", d_obs, d_mot, input$trk_motion %||% "volume") else "",
       format(b$n_steps, big.mark = ","))))
 
+    # Tracker wander floor: the apparent diffusion the loop produces on an immobile
+    # target. Reported beside D, never subtracted silently - D_w scales with the
+    # photon budget, so a single constant would over-correct dim tracks.
+    dw_line <- {
+      dw <- suppressWarnings(as.numeric(input$trk_dw_floor %||% 0))
+      if (!is.finite(dw) || dw <= 0 || !is.finite(d_use)) NULL else {
+        frac <- dw / d_use
+        row(dim_(sprintf("wander floor %.3g µm²/s  →  D − Dw = %.3g",
+                         dw / 1e3, max(0, d_use - dw) / 1e3)),
+            if (frac > 0.5) warn(htmltools::HTML(sprintf(
+              "  &#9888; floor is %.0f%% of D — not resolved above the tracker", 100 * frac)))
+            else if (frac > 0.2) warn(sprintf("  (%.0f%% of D)", 100 * frac))
+            else dim_(sprintf("  (%.0f%% of D)", 100 * frac)))
+      }
+    }
+
     # ── linking QC: implausible jumps and per-track sigma outliers ──────────────
     qc_line <- if (is.finite(b$frac_implaus %||% NA_real_) || is.finite(b$n_suspect %||% NA_real_)) {
       bad <- (is.finite(b$frac_implaus) && b$frac_implaus > 0.01) ||
@@ -864,36 +929,45 @@ tracking_server <- function(input, output, session) {
     } else NULL
 
     htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
-      sigma_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line, qc_line)
+      sigma_line, smooth_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line,
+      dw_line, qc_line)
   })
 
   # Per-track σ_loc heterogeneity histogram (σ_loc is NOT a single instrument
   # constant - this shows the spread; a tight peak justifies one global value).
+  # Distribution of the sigma_loc the app actually uses: one value per localization,
+  # sigma_i = L/(a*sqrt(N_i)). Plotting this rather than the per-track CVE sigma keeps
+  # the curve and the headline number the same quantity - the dashed median IS the
+  # figure reported above, so the two can never disagree.
   output$trk_sigma_pertrack_plot <- renderPlotly({
-    b  <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
-    ps <- if (!is.null(b)) b$pertrack_sigma else NULL
-    shiny::validate(shiny::need(!is.null(ps) && nrow(ps) >= 5,
-      "Run the calibration on data with enough long, integrated tracks to see the per-track σ spread."))
-    s  <- ps$sigma[is.finite(ps$sigma) & !ps$degenerate]
-    shiny::validate(shiny::need(length(s) >= 5, "Too few resolvable per-track σ values."))
+    b <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
+    sg <- if (!is.null(b)) b$sig_phot else NULL
+    sg <- sg[is.finite(sg) & sg > 0]
+    shiny::validate(shiny::need(length(sg) >= 20,
+      "Needs an ECO column: sigma_loc is computed per localization from the photon count."))
     dark <- isTRUE(isolate(input$trk_dark_mode))
     bg <- if (dark) "#000000" else "#FFFFFF"; fg <- if (dark) "#FFFFFF" else "#333333"
-    med <- stats::median(s)
+    med <- stats::median(sg); q <- stats::quantile(sg, c(.25, .75))
     plot_ly() %>%
-      add_histogram(x = s, nbinsx = min(40L, max(10L, round(length(s)/4))),
+      add_histogram(x = sg, nbinsx = 60,
                     marker = list(color = "rgba(120,160,220,0.7)",
-                                  line = list(color = "rgba(80,120,180,0.9)", width = 0.5)),
-                    name = "per-track σ<sub>loc</sub>") %>%
+                                  line = list(color = "rgba(80,120,180,0.9)", width = 0.4)),
+                    hovertemplate = "%{x:.2f} nm<br>%{y} localizations<extra></extra>",
+                    name = "sigma") %>%
       layout(
-        xaxis = list(title = "per-track σ<sub>loc</sub> (nm)", color = fg, zeroline = FALSE),
-        yaxis = list(title = "tracks", color = fg),
-        shapes = list(list(type = "line", x0 = med, x1 = med, y0 = 0, y1 = 1, yref = "paper",
-                           line = list(color = "#c03030", width = 2, dash = "dash"))),
-        annotations = list(list(x = med, y = 1, yref = "paper", yanchor = "bottom",
-                                text = sprintf("median %.2f nm", med), showarrow = FALSE,
-                                font = list(color = "#c03030", size = 11))),
+        xaxis = list(title = "σ<sub>loc</sub> per localization (nm)", color = fg, zeroline = FALSE),
+        yaxis = list(title = "localizations", color = fg),
+        shapes = list(
+          list(type = "rect", x0 = q[1], x1 = q[2], y0 = 0, y1 = 1, yref = "paper",
+               fillcolor = "rgba(120,160,220,0.13)", line = list(width = 0), layer = "below"),
+          list(type = "line", x0 = med, x1 = med, y0 = 0, y1 = 1, yref = "paper",
+               line = list(color = "#c03030", width = 2, dash = "dash"))),
+        annotations = list(list(
+          x = med, y = 1, yref = "paper", yanchor = "bottom", showarrow = FALSE,
+          text = sprintf("median %.2f nm  ·  IQR %.2f–%.2f", med, q[1], q[2]),
+          font = list(color = "#c03030", size = 11))),
         paper_bgcolor = bg, plot_bgcolor = bg, font = list(color = fg),
-        showlegend = FALSE, bargap = 0.04, uirevision = "sigma_pt")
+        showlegend = FALSE, bargap = 0.04, uirevision = "sigma_pl")
   })
 
   # Transparency funnel: how many localizations / tracks survive each pipeline
@@ -1187,10 +1261,11 @@ tracking_server <- function(input, output, session) {
         d <- data.table::fread(p, showProgress = FALSE, nThread = max(1, parallel::detectCores()-1)) |>
              as.data.frame()
         d <- canonicalize_minflux_df(d)
-      } else if (grepl("\\.qs$", nm)) {
-        d <- qs::qread(p)
-      } else if (grepl("\\.fst$", nm)) {
-        d <- fst::read_fst(p) |> as.data.frame()
+      } else if (grepl("\\.(qs|fst)$", nm)) {
+        # read_chunk_file reports a missing 'qs' rather than throwing, so a machine
+        # without it degrades to "this file was skipped" instead of a stack trace.
+        d <- read_chunk_file(p)
+        if (is.null(d)) return(NULL)
       } else if (grepl("\\.rds$", nm)) {
         d <- readRDS(p)
         if (!is.data.frame(d)) return(NULL)
@@ -1312,11 +1387,16 @@ tracking_server <- function(input, output, session) {
           type = "message", duration = 8
         )
       } else {
-        # Fallback: compress to a single .qs chunk
-        out_qs <- file.path(out_dir, paste0(safe_base, ".qs"))
+        # Fallback: compress to a single chunk, in whatever format the app writes.
+        # This used to call qs::qsave() unconditionally, which crashed the upload on
+        # any machine without qs even though CHUNK_FORMAT had already fallen back.
+        out_one <- file.path(out_dir, paste0(safe_base, ".", CHUNK_FORMAT))
         dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-        qs::qsave(df, out_qs, preset = "high")
-        man <- data.frame(chunk = 1L, n_tids = length(unique(df$tid)), file = out_qs)
+        if (identical(CHUNK_FORMAT, "qs") && requireNamespace("qs", quietly = TRUE))
+          qs::qsave(df, out_one, preset = "high")
+        else
+          fst::write_fst(as.data.frame(df), out_one, compress = 50)
+        man <- data.frame(chunk = 1L, n_tids = length(unique(df$tid)), file = out_one)
         readr::write_csv(man, file.path(out_dir, "manifest.csv"))
         readr::write_csv(tid_sum, file.path(out_dir, "tid_summary.csv"))
         rv$manifest_dir          <- out_dir
@@ -1392,13 +1472,7 @@ tracking_server <- function(input, output, session) {
       if (file.exists(manf)) {
         man <- tryCatch(readr::read_csv(manf, show_col_types = FALSE), error = function(e) NULL)
         if (!is.null(man) && nrow(man) > 0 && "file" %in% names(man)) {
-          read_chunk <- function(f) tryCatch(
-            if (grepl("\\.qs$",  f, TRUE)) qs::qread(f)
-            else if (grepl("\\.fst$", f, TRUE)) fst::read_fst(f) |> as.data.frame()
-            else NULL,
-            error = function(e) NULL
-          )
-          dfs <- lapply(man$file, read_chunk)
+          dfs <- lapply(man$file, read_chunk_file)
           df  <- dplyr::bind_rows(Filter(Negate(is.null), dfs))
         }
       }
@@ -1408,10 +1482,12 @@ tracking_server <- function(input, output, session) {
     } else {
       path <- input$trk_file$datapath[1]
       name <- tolower(input$trk_file$name[1])
-      df <- if (grepl("\\.qs$", name)) {
-        qs::qread(path)
-      } else if (grepl("\\.fst$", name)) {
-        fst::read_fst(path) |> as.data.frame()
+      df <- if (grepl("\\.(qs|fst)$", name)) {
+        d1 <- read_chunk_file(path)
+        shiny::validate(shiny::need(!is.null(d1),
+          paste("Could not read this file. A .qs file needs the 'qs' package installed;",
+                "re-export it as .csv or .fst if qs will not build on this machine.")))
+        d1
       } else if (grepl("\\.rds$", name)) {
         obj <- readRDS(path); shiny::validate(shiny::need(is.data.frame(obj), "RDS must contain a data.frame")); obj
       } else if (grepl("\\.csv(\\.gz)?$", name)) {
@@ -1509,11 +1585,7 @@ tracking_server <- function(input, output, session) {
     man <- tryCatch(readr::read_csv(file.path(dir, "manifest.csv"), show_col_types = FALSE),
                     error = function(e) NULL)
     if (is.null(man) || !nrow(man) || !"file" %in% names(man)) return(NULL)
-    read_chunk <- function(f) tryCatch(
-      if (grepl("\\.qs$",  f, TRUE)) qs::qread(f)
-      else if (grepl("\\.fst$", f, TRUE)) fst::read_fst(f) |> as.data.frame()
-      else NULL, error = function(e) NULL)
-    df <- dplyr::bind_rows(Filter(Negate(is.null), lapply(man$file, read_chunk)))
+    df <- dplyr::bind_rows(Filter(Negate(is.null), lapply(man$file, read_chunk_file)))
     if (is.null(df) || !nrow(df) || !all(c("tid","tim") %in% names(df))) return(NULL)
     df$tid <- as.character(df$tid)
     for (cc in intersect(c("x","y","tim"), names(df))) df[[cc]] <- as.numeric(df[[cc]])
@@ -2274,6 +2346,37 @@ tracking_server <- function(input, output, session) {
            NA_integer_)
   }
 
+  # ── Doughnut CRLB, Vogler et al. 2025 Eq. 1 ─────────────────────────────────
+  # sigma(x) = L/(4 sqrt(N)) * [1 + 2(x/L)^2] * |cosh(a) - (x/L) sinh(a)|
+  #            / |1 + ln2 (L/nu)^2 ((2x/L)^2 - 1)| ,   a = 4 ln2 x L / nu^2
+  #
+  # L  TCP diameter of the reiterated iteration
+  # nu FWHM of the excitation doughnut (instrument constant)
+  # N  detected photons for this localization (eco)
+  # x  emitter offset from the TCP centre. Zero for an immobile emitter; while
+  #    tracking, Vogler model it as the 1D diffusive spread over one localization,
+  #    x = sqrt(2 D t_loc), which is why SPT precision is worse than imaging.
+  #
+  # Vectorised over N. Returns L/(4 sqrt(N)) when nu is not usable, i.e. the
+  # nu -> infinity limit, so a missing constant degrades to the old behaviour.
+  .crlb_doughnut <- function(L, nu, N, x = 0, pref = TCP_CRLB_PREFACTOR) {
+    if (!length(N)) return(numeric(0))
+    if (!is.finite(pref) || pref <= 0) pref <- TCP_CRLB_PREFACTOR
+    base <- L / (pref * sqrt(N))
+    if (!is.finite(L) || L <= 0) return(base)
+    if (!is.finite(x) || x < 0) x <- 0
+    # nu off (0) = the large-beam limit. The denominator goes to 1 and cosh/sinh to
+    # 1/0, so Eq. 1 collapses to base * [1 + 2(x/L)^2] - the moving-emitter term
+    # SURVIVES. That term is what makes the estimate mode-aware: x = sqrt(2 D t_loc)
+    # is smaller under confinement and larger under directed or fast motion.
+    if (!is.finite(nu) || nu <= 0) return(base * (1 + 2 * (x / L)^2))
+    a   <- 4 * log(2) * x * L / nu^2
+    num <- (1 + 2 * (x / L)^2) * abs(cosh(a) - (x / L) * sinh(a))
+    den <- abs(1 + log(2) * (L / nu)^2 * ((2 * x / L)^2 - 1))
+    if (!is.finite(num) || !is.finite(den) || den <= 0) return(base)
+    base * num / den
+  }
+
   # TCP diameter of one iteration, in nm. Sequence files store the pattern size as
   # the dimensionless `patGeoFactor`; L = patGeoFactor x TCP_L_PER_GEOFACTOR_NM.
   # A 3D iteration may carry a [lateral, axial] pair (e.g. zline gives [0.8, 4.0]);
@@ -2285,7 +2388,9 @@ tracking_server <- function(input, output, session) {
     pg <- suppressWarnings(as.numeric(unlist(pg)))
     pg <- pg[is.finite(pg) & pg > 0]
     if (!length(pg)) return(NA_real_)
-    pg[1] * TCP_L_PER_GEOFACTOR_NM
+    base <- suppressWarnings(as.numeric(input$trk_geofactor_base %||% TCP_L_PER_GEOFACTOR_NM))
+    if (!is.finite(base) || base <= 0) base <- TCP_L_PER_GEOFACTOR_NM
+    pg[1] * base
   }
 
   # ── trk_seq_params() - read the Imspector imaging sequence JSON ─────────────
@@ -2512,10 +2617,7 @@ tracking_server <- function(input, output, session) {
     if (input$trk_chunk_sel == "__all__") {
       return(tags$div(style = "color:#555;", "All TIDs selected  -  loading full file."))
     }
-    df <- tryCatch({
-      if (grepl("\\.qs$", input$trk_chunk_sel, TRUE)) qs::qread(input$trk_chunk_sel) else
-        if (grepl("\\.fst$", input$trk_chunk_sel, TRUE)) fst::read_fst(input$trk_chunk_sel) |> as.data.frame() else NULL
-    }, error = function(e) NULL)
+    df <- read_chunk_file(input$trk_chunk_sel)
     if (is.null(df)) return(NULL)
     tids <- length(unique(as.character(df$tid)))
     tags$div(style="color:#555;",
@@ -2635,12 +2737,7 @@ tracking_server <- function(input, output, session) {
       for (i in seq_len(n_chunks)) {
         incProgress(i / (n_chunks * 2), detail = paste("Reading chunk", i))
         f <- man$file[i]
-        ch <- tryCatch(
-          if (grepl("\\.qs$",  f, TRUE)) qs::qread(f)
-          else if (grepl("\\.fst$", f, TRUE)) fst::read_fst(f) |> as.data.frame()
-          else NULL,
-          error = function(e) NULL
-        )
+        ch <- read_chunk_file(f)
         if (is.null(ch) || !nrow(ch)) next
         # Same post-processing as trk_raw_df
         ch$tid <- as.character(ch$tid)
@@ -3784,12 +3881,7 @@ tracking_server <- function(input, output, session) {
   trk_playback_chunk_tids <- reactive({
     sel <- input$trk_chunk_sel
     if (!isTruthy(sel) || identical(sel, "__all__") || !file.exists(sel)) return(NULL)
-    ch <- tryCatch(
-      if (grepl("\\.qs$",  sel, TRUE)) qs::qread(sel)
-      else if (grepl("\\.fst$", sel, TRUE)) fst::read_fst(sel, columns = "tid") |> as.data.frame()
-      else NULL,
-      error = function(e) NULL
-    )
+    ch <- read_chunk_file(sel, columns = "tid")
     if (is.null(ch) || !"tid" %in% names(ch) || !nrow(ch)) return(NULL)
     unique(as.character(ch$tid))
   })

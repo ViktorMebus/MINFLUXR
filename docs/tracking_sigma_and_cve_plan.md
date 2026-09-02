@@ -247,3 +247,294 @@ within-trace spread *is* σ_loc with no motion model in the way. Fitting σ agai
 acquisition gives the constant in σ = a/√N empirically, which is the one number the entire photon
 route rests on. The existing fiducial pair is imaged with an SMLM sequence (L = 39.6 nm), so it
 calibrates the imaging iteration, not the tracking one.
+
+---
+
+## 7. Mode-invariance, measured on GP67H (added 2026-08-27)
+
+**Question:** does the photon route work for directed, free *and* confined motion, given these tracks
+are confined?
+
+**They are confined.** Per-track TAMSD(k=100)/TAMSD(k=10) against the free-diffusion expectation of
+10x: median **0.35** (013) and **0.37** (014), 10th-90th percentile 0.13-1.09. Strongly sub-linear,
+consistent with the alpha < 1 of section 6b.
+
+**Answer: yes, and it is the only one of the options that does.** Per track, on the 84 (013) and 200
+(014) tracks with >= 120 localizations and >= 40 single-cycle steps, split into mobility terciles:
+
+| 013 | D (nm2/ms) | confinement | sigma_CVE | sigma_phot |
+|---|---|---|---|---|
+| slow | 201.5 | 0.37 | 3.33 | 4.20 |
+| mid  | 282.7 | 0.28 | 4.47 | 4.68 |
+| fast | 402.7 | 0.39 | 4.78 | 4.76 |
+| **swing slow->fast** | 2.0x | | **+44%** | **+13%** |
+
+014 behaves the same: sigma_CVE +34%, sigma_phot +7%. Spread across tracks: **CV 37% for sigma_CVE
+against 9-14% for sigma_phot**.
+
+**The CVE sigma is tracking sqrt(D), not precision.** The blur term gives sigma^2 ~ R<dx^2> ~ 2R*D*dt,
+so sigma ~ sqrt(D). D doubles across the terciles (201 -> 403), predicting a 1.41x rise; the observed
+sigma_CVE rise is **1.44x** on 013 and 1.34x on 014. It is a mobility readout wearing a precision
+label, and on confined tracks it is contaminated a second time because anti-correlated increments
+mimic localization noise (section 6b).
+
+**sigma_phot is not perfectly flat either, and should not be.** Its residual 7-13% swing is the real
+mobility-photon coupling: a faster molecule leaves the TCP sooner, collects fewer photons, and *is*
+localized less precisely. Spearman rho[sigma_phot, ECO] = -1.00 by construction; the D and confinement
+correlations (+0.28, -0.26) are that coupling seen indirectly, not a motion-model dependence.
+
+**Caveat if Vogler's full Eq. 1 is adopted.** The x-term makes precision depend on the emitter's offset
+from the TCP centre, x = sqrt(2*D*t_loc), which *is* mode-dependent: smaller under confinement, larger
+under directed motion. That dependence is physically correct rather than a bias, and on this data it is
+worth +0.6%. The simple L/(a*sqrt(N)) form has no motion dependence at all.
+
+**Consequence.** The prefactor a is still unpinned (section 6), but a is a common scale factor - it
+shifts free, confined and directed alike and cannot break mode-invariance. So the immobile-sample
+calibration and the mode-invariance property are independent: the route is already the right one for
+confined data, the experiment only fixes its scale.
+
+---
+
+## 8. The increments are smoothed - independent confirmation of damping (2026-08-27)
+
+A subdiffusive walk has anti-correlated increments *before* any localization noise. For fBm with
+Hurst H (alpha = 2H), fractional Gaussian noise gives cov1/var = 2^(2H-1) - 1. Localization noise and
+blur can only make r1 **more** negative. So for any combination of subdiffusion + noise + blur:
+
+    r1_observed  <=  r1_motion-only  <  0
+
+Measured on single-cycle steps, with alpha fitted on cycle-lags 1-10 (dark-gap pairs excluded):
+
+| file | alpha | H | r1 predicted by motion alone | r1 observed | |
+|---|---|---|---|---|---|
+| 013 | 0.799 | 0.400 | **-0.130** | **-0.026** | 5.0x too weak |
+| 014 | 0.774 | 0.387 | **-0.145** | **-0.019** | 7.6x too weak |
+
+(The alpha values independently reproduce section 6b's 0.78.)
+
+**The inequality is violated, and not marginally.** The observed anti-correlation is 5-7x weaker than
+the motion alone demands. No choice of sigma_loc, R, or blur model can produce that - all of them push
+r1 the other way. Something is injecting *positive* increment correlation, which is what a smoothing
+filter does. `damping: 2`.
+
+This is a second, independent line of evidence for the damping hypothesis of
+`sigma_loc_estimation.md` section 1b, reached without touching the sigma ceiling argument.
+
+### What it rules out
+
+It is not only that the CVE sigma is imprecise on this data. **The increments have been filtered
+before the file was written**, so the information the covariance route needs is not present to be
+recovered. That kills the obvious "more correct model" upgrades:
+
+- an **alpha-aware CVE** (correcting cov1 for the fGn term) would fit a motion model to filtered
+  increments and return a confident wrong answer;
+- likewise **MLE**, for the same reason - a better estimator of a quantity the data no longer carries.
+
+The fix is at acquisition (DMP = 0), not in the estimator.
+
+### Cheap QC that would have caught this
+
+r1 and alpha are both already computed. Flagging `r1 > 2^(alpha-1) - 1` (i.e. less anti-correlated
+than the fitted alpha demands) detects instrument smoothing directly, and costs two lines. Worth
+shipping regardless of what happens to the sigma model.
+
+---
+
+## 9. Implemented 2026-08-27
+
+**Vogler Eq. 1 is now the sigma_loc model.** `.crlb_doughnut(L, nu, N, x)` in `server_tracking.R`;
+verified against their Table 2 at L = 150 nm, x = 0: PL 10/20/50 give 20.03 / 14.17 / 8.96 nm against
+the paper's 20.03 / 14.35 / 9.08 (within 1.3%).
+
+- `TCP_BEAM_FWHM_NM <- 195.5` in `packages.R`, exposed as **Excitation doughnut FWHM nu** under
+  Acquisition Parameters. Fitted from Vogler, **not measured on this microscope**.
+- x = sqrt(2 D t_loc) from the CVE D, so the estimate is mode-aware in the physically correct
+  direction (smaller under confinement, larger under directed motion).
+- Degrades to L/(4 sqrt(N)) if nu is cleared - the nu -> infinity limit.
+
+**Effect on GP67H: sigma_loc 4.09 -> 5.04 nm (013) and 4.20 -> 5.18 nm (014), +23%.** Every downstream
+noise floor moves with it: D-map, JDD bias term, confinement correction, HMM noise state,
+directionality and speed. Results quoted before this change are not comparable.
+
+**The app now prints a value its own covariance check calls impossible** (section 1b of
+`sigma_loc_estimation.md`: the data caps sigma at 4.13 nm). That is intended - the disagreement is the
+finding, and section 8 says why the covariance side is the untrustworthy one here.
+
+**Smoothing check shipped.** The status line reports alpha (from cycle-lags 1 and 8), the fGn bound
+r1 <= 2^(alpha-1) - 1, and the observed r1, flagging a violation as probable galvo damping.
+
+Still open: nu is transferred, not measured. The immobile run should be done **at two or three
+different L** so nu is over-determined and Eq. 1's L-dependence is tested rather than assumed.
+
+---
+
+## 10. The fixed-cell calibration, measured (2026-09-02)
+
+24 files, `Test data/Fixed Tracking datasets/`, fixed E. coli + 4 nM JF646, three strains
+(GP67H, GP170H, HaloCtrl) across TrkSeq2D (DMP 2) and cal_L101 / L151 / L302 (DMP 0).
+Naming verified against the data: iteration count identifies the sequence (4/3/2 -> L101/L151/L302)
+and cfr ceiling separates CFR-on from CFR-off. **All 24 filenames are consistent with their contents.**
+
+### 10.1 The sample is not stationary, and it is the tracker
+
+MSD on a fixed sample should be FLAT at 4 sigma^2. It is not:
+
+| L | sigma from MSD intercept | wander D_w (nm^2/ms) |
+|---|---|---|
+| 100.8 | 5.1 nm | 83-186 |
+| 151.2 | 7.2 nm | 330-508 |
+| 302.4 | fit fails | 10300-12300 |
+
+r1 of the increments is **positive** (+0.05 to +0.18). For a stationary emitter with independent
+noise r1 = -0.5 exactly, and any damped feedback loop gives r1 in [-0.5, 0]. Positive r1 is
+impossible for a stationary process - so the reported position genuinely wanders.
+
+It is **not biology**: the three strains agree at the same L (within ~10%), and D_w scales
+super-quadratically with L (80 -> 400 -> 11000 across L = 101 -> 151 -> 302). No biological
+process tracks the TCP diameter. It is the loop re-centring on its own estimation noise.
+
+### 10.2 sigma_loc: the prefactor is ~3.7, and there is NO L-dependence
+
+Fitting MSD(tau) = 4 sigma^2 + 4 D_w tau on lags 1-5 (the curve saturates, so a 1-20 fit
+extrapolates a concave curve and returns an intercept above MSD(1) - impossible):
+
+| L | a = sigma*sqrt(N)/L, intercept | a, from MSD(1) (upper bound) |
+|---|---|---|
+| 100.8 | **0.265** | 0.336 |
+| 151.2 | **0.272** | 0.360 |
+
+**measured a(151)/a(101) = 1.03.** Vogler Eq. 1 at nu = 195.5 predicts **1.39**; the simple
+`L/(4 sqrt(N))` predicts **1.00**. The flatness holds on the upper-bound column too (ratio 1.07),
+so it is not an artefact of how the wander was handled.
+
+**Conclusions:**
+
+1. **The simple form wins on this instrument.** Eq. 1's L-dependence is not present. nu = 195.5 nm,
+   transferred from Vogler's microscope, does not describe this one - effectively nu is large and the
+   `nu -> infinity` limit is the right model here.
+2. **The prefactor is 1/0.27 = 3.7**, against the app's `TCP_CRLB_PREFACTOR = 4`. The app is ~8% low.
+   That is within the spread across strains and files, so 4 is defensible; 3.7 is the point estimate.
+3. **L302 is unusable** - the loop cannot hold at that diameter (D_w ~ 11000 nm^2/ms, intercept fit
+   collapses). As predicted for a diameter past Eq. 1's singularity.
+
+### 10.3 The damping cost, measured
+
+Same L = 100.8, same strains, DMP 2 vs DMP 0:
+
+| | sigma (nm) | D_w (nm^2/ms) |
+|---|---|---|
+| TrkSeq2D, DMP 2 | 4.3-4.8 | 70-125 |
+| cal_L101, DMP 0 | 4.7-6.6 | 83-186 |
+
+Damping suppresses the apparent sigma by ~13% and the wander by roughly 2x - exactly the direction
+section 8 inferred from the r1 violation, now measured directly.
+
+### 10.4 The finding that matters most for the biology
+
+**D_w on FIXED cells with the live-cell sequence (DMP 2, L = 100.8) is 70-125 nm^2/ms
+= 0.07-0.125 um^2/s.** The live GP67H D_CVE is 0.215 um^2/s. So an instrumental floor accounts for
+**roughly a third to a half** of the diffusion coefficient measured on the live data.
+
+This is not a sigma_loc issue - it is a D issue, and it is larger than any of the sigma corrections
+argued about in sections 1-9. Any quoted D from this instrument needs this floor subtracted or at
+minimum reported alongside. It should be re-measured per sequence, since D_w scales steeply with L.
+
+---
+
+## 11. Through the cleaning pipeline, and what shipped (2026-09-02)
+
+Section 10 analysed raw final-iteration data. Re-run through the app's cleaning - split at time gaps
+(>7 cycles), trim dark-gap-separated ends (>=3 cycles), continuity gate (H=3, >=0.6), and long
+segments only (>=200 localizations, 60-90% of localizations retained) - the numbers barely move:
+
+| | raw | cleaned |
+|---|---|---|
+| a(151)/a(101) | 1.03 | **1.04** |
+| prefactor 1/a | 3.7 | **3.62** |
+
+So the conclusion is not an artefact of dirty traces. Per L, calibration sequences, excluding
+HaloCtrl (whose larger wander makes its intercept extrapolation unreliable): a = 0.276 (L=100.8),
+0.304 (L=151.2).
+
+L302 survives cleaning with only **3% of localizations** - confirmed unusable.
+
+### Shipped
+
+- `TCP_CRLB_PREFACTOR` 4 -> **3.6** (measured, not assumed). The app ran ~10% low.
+- `TCP_BEAM_FWHM_NM` 195.5 -> **0 = off**. Eq. 1's beam-size denominator predicts a 39% rise in
+  a from L=101 to L=151; the measurement says 4%. nu does not transfer from Vogler's instrument.
+- `.crlb_doughnut()` now keeps the **moving-emitter term when nu is off**: the large-beam limit is
+  `sigma = L/(a sqrt(N)) * [1 + 2(x/L)^2]`, x = sqrt(2 D t_loc). Verified: a = 0.278 at both L, and
+  the x-term adds +2% at D = 0.21 um2/s (GP67H), +8% at 1.0, **+39% at 5.0** (a fast cytosolic
+  protein). That is the mode-awareness - smaller under confinement, larger under fast/directed motion.
+
+### The mounting caveat on D_w
+
+The samples are on a 2% agarose pad in a Gene Frame, not adsorbed to a coverslip, so part of the
+wander may be genuine sample movement rather than tracker jitter. The L-scaling (D_w 160 -> 408 ->
+6075 nm2/ms across L = 101 -> 151 -> 302) is far too steep for agarose creep, so an instrumental
+component certainly exists at large L. But at L = 100.8 an L-independent mounting term could dominate,
+and these data cannot separate the two.
+
+**Either way it is a floor on D, not on sigma**, and it applies to the live-cell data because the
+mounting is the same. A rigid target (surface-adsorbed dye or beads) run with the same sequences
+would separate mounting from instrument.
+
+---
+
+## 12. Rigid beads on a coverslip - the wander is the tracker (2026-09-02)
+
+8 files, `Test data/Fixed beads dataset/`, 40 nm red beads dried on a coverslip (no agarose), same
+cleaning pipeline and short-lag MSD intercept as sections 10-11.
+
+### 12.1 L302 is dead
+
+Nothing survives cleaning on either L302 bead file. It failed on cells (3% retained) and it fails on
+a bright, rigid, non-bleaching target - so the 2-iteration 302 nm sequence is broken in itself, not
+starved of photons. **Drop it.** The earlier prediction that a bead would rescue it was wrong.
+
+### 12.2 The stage is excellent, and the wander is NOT drift
+
+Per-bead drift velocity from a linear fit over traces of >=2000 localizations, spans up to 10 min:
+
+| file | beads | median drift | direction concentration R | random R |
+|---|---|---|---|---|
+| L101 CalL101B_002 | 33 | **0.2 nm/s** | 0.71 | 0.17 |
+| L151 CAL151B_002 | 45 | 0.3 nm/s | 0.07 | 0.15 |
+| L151 L151B_006 | 64 | 0.7 nm/s | 0.05 | 0.12 |
+| L151 L151B_007 | 43 | 0.3 nm/s | 0.30 | 0.15 |
+
+**Drift is 0.2-0.7 nm/s** - over a 9 s trace that is 2-6 nm total, below sigma. Negligible.
+
+And the directions are **incoherent** (R at or near the random expectation in three of four files; the
+one coherent case, R = 0.71, has a mean vector of only 0.3 nm/s, so it is coherent and irrelevant).
+Beads do not move together. **The wander is generated per target, by the tracking loop - not by the
+stage and not by the sample mount.**
+
+### 12.3 The instrument floor
+
+| target / mounting | L = 100.8 | L = 151.2 |
+|---|---|---|
+| beads on coverslip (rigid) | **D_w = 36 nm^2/ms** | 395 |
+| fixed cells on agarose | 160 | 408 |
+
+At L = 100.8 the tracker's own floor is 36 nm^2/ms = **0.036 um^2/s**; the fixed cells show 160, so
+~124 is contributed by the agarose mount, incomplete fixation, single-molecule photophysics, or some
+mixture. These data cannot split those further.
+
+**Against a live GP67H D of 0.215 um^2/s: the instrument floor alone is ~17%, and the full fixed-cell
+floor would be ~74%.** The latter is an upper bound - it includes anything the fixation failed to
+immobilise.
+
+### 12.4 Do NOT take the prefactor from beads
+
+Bead sigma comes out *higher* than cell sigma at the same L and comparable ECO: a = 0.389 / 0.555
+(L101 / L151) against 0.276 / 0.304 from the cells. Two reasons not to trust it:
+
+- a **40 nm bead is not a point emitter** against a 100.8 nm TCP - 40% of the pattern diameter.
+- at L151 the wander is so large (D_w ~ 400) that extrapolating lags 1-5 back to tau = 0 is a long
+  extrapolation, and it inflates the intercept.
+
+**The cell-derived `TCP_CRLB_PREFACTOR = 3.6` stands.** Beads answered the wander question, not the
+sigma question, and that is the right division of labour: a rigid target tells you about the
+instrument, a real sample tells you about the measurement.

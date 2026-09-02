@@ -32,13 +32,32 @@ pkgs_smlm <- c(
   # with R, but it is named here so the dependency is visible rather than assumed.
   # digest: keys the isosurface mesh cache on its geometry. Ships with Shiny's
   # dependency tree, but named here so the dependency is visible rather than assumed.
-  "misc3d", "Matrix", "digest"
+  "misc3d", "Matrix", "digest",
+  # DT: the sortable data tables in the SMLM tab (DT::datatable / DTOutput). Nothing
+  # else in the tree pulls it, so a clean machine fails with
+  # "there is no package called 'DT'" the first time a table renders.
+  "DT",
+  # scales: axis/label formatting helpers used directly as scales::.
+  "scales",
+  # htmltools: called explicitly as htmltools:: in ~160 places across the tracking
+  # and simulator servers. It arrives with shiny in practice, but the code does not
+  # go through shiny to reach it, so it is named rather than assumed.
+  "htmltools",
+  # stringi: string handling in helpers_shared.R. Comes with stringr, which is NOT
+  # otherwise a dependency here, so it has to be named.
+  "stringi"
 )
 
 # Tracking-specific extra packages
 pkgs_tracking <- c(
-  "data.table", "readr", "fst", "qs", "zip", "later", "changepoint"
+  "data.table", "readr", "fst", "zip", "later", "changepoint"
 )
+
+# Optional: nice to have, never required. `qs` needs a C++ toolchain plus
+# RcppParallel and stringfish and fails to install on many machines, so the app
+# writes chunks with `fst` instead. qs is only used to READ a chunk set that was
+# produced on a machine that had it. Install failures here are not an error.
+pkgs_optional <- c("qs")
 
 # jsonlite: must be INSTALLED but NOT attached via library().
 # jsonlite exports validate(txt) which shadows shiny::validate(), breaking all
@@ -53,9 +72,28 @@ pkgs_all <- unique(c(pkgs_smlm, pkgs_tracking, pkgs_install_only))
 # abort the rest.  On macOS, a second attempt using pre-built binaries is made
 # for packages that fail from source (qs and fst use C++/OpenMP and often fail
 # to compile on macOS without Xcode command-line tools or gfortran).
+# DEPENDENCY SCOPE: `dependencies = TRUE` also pulls **Suggests**, which for
+# plotly/dplyr is dozens of unrelated packages (nycflights13, lobstr, ...) and, worse,
+# lets the installer UPGRADE packages that are already loaded in this session.
+# Replacing a loaded package's files leaves it half-removed - observed here: an
+# install of plotly upgraded `rlang` underneath a running session and broke every
+# package that imports it. DEP_SCOPE keeps it to what the app actually needs.
+DEP_SCOPE <- c("Depends", "Imports", "LinkingTo")
+
 install_if_missing <- function(pkgs) {
   missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
   if (!length(missing)) return(invisible(TRUE))
+
+  # Never try to (re)install something already loaded - on Windows especially, the
+  # files are locked and a failed replace corrupts the installed copy.
+  loaded <- intersect(missing, loadedNamespaces())
+  if (length(loaded)) {
+    message("[MINFLUXR] Already loaded, not reinstalling: ", paste(loaded, collapse = ", "),
+            "
+           Restart R first if one of these really needs updating.")
+    missing <- setdiff(missing, loaded)
+    if (!length(missing)) return(invisible(TRUE))
+  }
 
   message("\n[MINFLUXR] Installing missing packages: ",
           paste(missing, collapse = ", "), "\n")
@@ -65,7 +103,7 @@ install_if_missing <- function(pkgs) {
 
   for (pkg in missing) {
     installed <- tryCatch({
-      install.packages(pkg, dependencies = TRUE, quiet = FALSE)
+      install.packages(pkg, dependencies = DEP_SCOPE, quiet = FALSE)
       requireNamespace(pkg, quietly = TRUE)
     }, error   = function(e) FALSE,
        warning = function(w) requireNamespace(pkg, quietly = TRUE))
@@ -75,7 +113,7 @@ install_if_missing <- function(pkgs) {
       message("[MINFLUXR] Source install of '", pkg,
               "' failed — retrying with binary build (macOS)...")
       installed <- tryCatch({
-        install.packages(pkg, dependencies = TRUE, type = "binary", quiet = FALSE)
+        install.packages(pkg, dependencies = DEP_SCOPE, type = "binary", quiet = FALSE)
         requireNamespace(pkg, quietly = TRUE)
       }, error   = function(e) FALSE,
          warning = function(w) requireNamespace(pkg, quietly = TRUE))
@@ -180,7 +218,52 @@ TCP_L_PER_GEOFACTOR_NM <- 360
 # sigma = L_eff/(2*sqrt(N)), where L_eff absorbs drift, linker motion and imperfect
 # centring and so runs several times the physical L. Different quantity, different
 # prefactor - see docs/simulator.md.
-TCP_CRLB_PREFACTOR <- 4
+# MEASURED 2026-09-02 on fixed E. coli (agarose pad + Gene Frame), three strains,
+# through the cleaning pipeline on long traces: a = sigma*sqrt(N)/L = 0.276 (L=100.8)
+# and 0.304 (L=151.2) from the short-lag MSD intercept, i.e. prefactor 1/a = 3.6.
+# Was 4 (the textbook value); the app therefore ran ~10% low.
+TCP_CRLB_PREFACTOR <- 3.6
+
+# ── Excitation doughnut FWHM (nm), the nu of Vogler Eq. 1 ─────────────────────
+# sigma = L/(4*sqrt(N)) is only the nu -> infinity limit of the doughnut CRLB. The
+# full form carries a denominator |1 + ln2*(L/nu)^2*((2x/L)^2 - 1)| that grows the
+# estimate as L approaches nu, plus an x-dependence on the emitter's offset from
+# the TCP centre.
+#
+# 195.5 nm is fitted from Vogler et al. 2025 Table 1/2: their listed sigma_CRLB of
+# 20.03 / 14.35 / 9.08 nm at PL 10 / 20 / 50 with a 150 nm final iteration are
+# reproduced by Eq. 1 at x = 0 to within 1.3%. It implies sigma = L/(2.35*sqrt(N))
+# at that L, not L/(4*sqrt(N)).
+#
+# CAVEAT: this is transferred from THEIR microscope. nu is set by the objective and
+# wavelength, so it belongs to the instrument, not the software. It is exposed as
+# an Acquisition Parameter for exactly that reason. An immobile-sample run at two or
+# three different L over-determines nu and tests the model - see
+# docs/tracking_sigma_and_cve_plan.md section 7.
+# 0 = OFF, i.e. the large-beam (nu -> infinity) limit, which is what this microscope
+# measures. Vogler Eq. 1's denominator predicts sigma*sqrt(N)/L rising 39% from
+# L = 100.8 to 151.2 nm; the fixed-cell series measured a ratio of **1.04**. The
+# nu = 195.5 nm fitted from their Table 2 does not transfer to this instrument.
+# Set a finite value here only if a future measurement shows an L-dependence.
+TCP_BEAM_FWHM_NM <- 0
+
+# ── Tracker wander floor, D_w (nm^2/ms) ───────────────────────────────────────
+# The reported position wanders even on a genuinely immobile target, so a measured
+# D contains an instrumental term. Measured 2026-09-02:
+#   40 nm beads on glass, L = 100.8   D_w =  36 nm^2/ms   (ideal rigid target)
+#   fixed E. coli on agarose, L=100.8 D_w = 160 nm^2/ms   (real photon budget)
+#   fixed E. coli on agarose, L=151.2 D_w = 408 nm^2/ms
+#
+# It is PHOTON-DRIVEN, not sample motion: binning fixed-cell segments by their own
+# ECO gives D_w = 444 -> 159 nm^2/ms as ECO goes 25 -> 34, i.e. falling FASTER than
+# 1/N (0.36 observed against 0.74 for pure 1/N). Agarose motion would be flat in ECO.
+# Bead wander is also incoherent between beads, so it is not stage drift either.
+#
+# 0 = off. It is NOT subtracted automatically: D_w depends on the photon budget, so a
+# single constant would over-correct dim tracks and under-correct bright ones. Set it
+# to a value measured on YOUR fixed sample at the same L and photon budget, and read
+# the corrected D as an estimate with that caveat attached.
+TRK_DW_FLOOR_DEFAULT <- 0
 
 # ── MSD plot height (px) ───────────────────────────────────────────────────────
 # Change this one number to make the MSD curve taller or shorter. The server reads
@@ -194,10 +277,13 @@ TRK_MSD_MARGIN_B <- 110   # px, bottom margin reserved for the legend
 TRK_MSD_LEGEND_GAP <- 61  # px, gap from the x-axis down to the legend
 
 # ── Tracking chunking defaults ─────────────────────────────────────────────────
-# Fall back to fst if qs could not be installed (common on macOS without
-# a working C++ toolchain / OpenMP support).
+# Chunks are written with `fst`, always.
+#
+# It used to prefer `qs` and fall back to `fst`, which made the on-disk format
+# depend on whether a given machine had managed to compile qs - so a chunk set was
+# not reliably portable between people. fst is the better fit anyway: it is a hard
+# dependency already, needs no special toolchain, and can read a COLUMN SUBSET
+# without touching the rest of the file, which the playback path uses to pull just
+# the tid column. Existing .qs chunk sets are still READ, via read_chunk_file().
 TIDS_PER_CHUNK_DEFAULT <- 100L
-CHUNK_FORMAT <- if (requireNamespace("qs", quietly = TRUE)) "qs" else {
-  message("[MINFLUXR] 'qs' unavailable — using 'fst' for chunk storage.")
-  "fst"
-}
+CHUNK_FORMAT <- "fst"

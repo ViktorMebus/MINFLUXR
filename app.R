@@ -23,8 +23,6 @@ I## ─────────────────────────�
 # desired plugin to the /plugins/ folder. Follow the guide from the plugin_readme.md
 # to correctly assemble the plugin to the rest of the app.
 
-
 source("global.R")
 
 shinyApp(ui, server)
-
