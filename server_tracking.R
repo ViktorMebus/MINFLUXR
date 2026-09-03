@@ -7380,18 +7380,31 @@ tracking_server <- function(input, output, session) {
         v_lag  <- suppressWarnings(as.numeric(input$trk_uni_max_lag))
         tau_hi <- if (is.finite(v_lag) && v_lag > 0) v_lag * ub$t_cycle else max(fx, na.rm = TRUE)
         n_used <- suppressWarnings(as.integer(fr$n_points %||% NA))
-        if (is.finite(n_used) && n_used > 0)
-          min(tau_hi, (if (is.finite(regime_x)) regime_x else 0) + n_used * ub$t_cycle)
+        # The fitted range ends at the n_used-th point OF THE WINDOWED CURVE, so read
+        # it off the tau grid itself. Adding n_used * t_cycle to the cutoff is only
+        # right on the linearized axis; on the mean-Delta-t axis the bins are spaced
+        # wider than one cycle (they carry dark cycles), so that arithmetic lands
+        # short and the solid segment renders far shorter than the range it stands for.
+        tw <- sort(tau[is.finite(tau)])
+        if (is.finite(n_used) && n_used > 0 && length(tw))
+          min(tau_hi, tw[min(n_used, length(tw))])
         else tau_hi
       }
       in_fit <- is.finite(fx) & fx <= fit_hi
+      # One curve, two segments: solid-dashed over the lags actually fitted, lighter
+      # dotted beyond. Extrapolating an OLSF fit past its optimal point count is what
+      # the method warns against, so the split stays - but both halves share a legend
+      # group, so they read (and toggle) as a single trace.
       if (any(in_fit)) fig <- fig %>% add_trace(
         x = fx[in_fit], y = fy[in_fit], type = "scatter", mode = "lines",
+        legendgroup = "msdfit",
         line = list(color = "#E03020", width = 2.5, dash = "dash"), name = fit_name)
       if (any(!in_fit)) fig <- fig %>% add_trace(
         x = fx[!in_fit], y = fy[!in_fit], type = "scatter", mode = "lines",
-        line = list(color = "rgba(224,48,32,0.35)", width = 1.2, dash = "dot"),
-        name = "fit, extrapolated", showlegend = TRUE)
+        legendgroup = "msdfit", showlegend = FALSE,
+        line = list(color = "rgba(224,48,32,0.55)", width = 2, dash = "dot"),
+        name = "fit, extrapolated",
+        hovertemplate = "extrapolated beyond fitted lags<br>tau %{x:.4g} ms<br>MSD %{y:.4g} um2<extra></extra>")
     }
 
     # Per-cluster eMSD: track-weighted mean TAMSD of each cluster's tracks, labelled

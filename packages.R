@@ -207,22 +207,29 @@ TCP_L_PER_GEOFACTOR_NM <- 360
 # ── MINFLUX localization precision from the photon budget ──────────────────────
 # sigma_loc = L_TCP / (TCP_CRLB_PREFACTOR * sqrt(N)), N = detected photons (eco).
 # The Cramer-Rao bound for a doughnut TCP of diameter L scales as L/sqrt(N); the
-# prefactor depends on pattern geometry and is 4 for the hexagonal TCP used for
-# tracking. Cross-checked on the GP67H files: L = 100.8 nm with a median eco of
-# 36-38 photons gives 4.09 / 4.20 nm, and inverting the blur-aware CVE sigma the
-# other way (L = 4*sigma*sqrt(N)) returns 101.9 / 98.0 nm against the sequence's
-# 100.8 nm. Shared by the tracking sigma_loc estimator and the tracking simulator
-# so the forward and inverse models cannot disagree.
+# prefactor depends on pattern geometry and on the instrument. Shared by the
+# tracking sigma_loc estimator and the tracking simulator so the forward and
+# inverse models cannot disagree.
 #
 # NOT the SMLM simulator's constant. That one uses an EFFECTIVE L in
 # sigma = L_eff/(2*sqrt(N)), where L_eff absorbs drift, linker motion and imperfect
 # centring and so runs several times the physical L. Different quantity, different
 # prefactor - see docs/simulator.md.
-# MEASURED 2026-09-02 on fixed E. coli (agarose pad + Gene Frame), three strains,
-# through the cleaning pipeline on long traces: a = sigma*sqrt(N)/L = 0.276 (L=100.8)
-# and 0.304 (L=151.2) from the short-lag MSD intercept, i.e. prefactor 1/a = 3.6.
-# Was 4 (the textbook value); the app therefore ran ~10% low.
-TCP_CRLB_PREFACTOR <- 3.6
+# The prefactor is the IDEAL Cramer-Rao value, derived in docs/sigma_loc_model.md:
+# for two beams at +/- L/2 on a doughnut zero the photon split is binomial, and its
+# Fisher information at the TCP centre is 16*N/L^2, so a = sqrt(16) = 4. Everything
+# the ideal omits - background, finite beam depth, 2D TCP geometry, mLMS estimator
+# loss - can only make sigma WORSE, so 4 is a hard ceiling on a and sigma computed
+# with it is a stated LOWER BOUND on the localization error.
+#
+# Do not default this to a fitted number. Calibrating a from the short-lag MSD
+# intercept of an immobile sample returns a FLOOR, not an estimate: the tracker
+# wander is sub-diffusive (log-log slope 0.80 on our fixed cells), the MSD is
+# concave, and a straight-line fit extrapolated to zero lag therefore lands above
+# the true intercept, inflating sigma and deflating a. That measurement gave 3.6 at
+# L = 100.8 nm, which brackets the truth to 3.6 <= a <= 4.0 rather than fixing it.
+# Users measuring their own value should enter it as an upper bound on sigma.
+TCP_CRLB_PREFACTOR <- 4
 
 # ── Excitation doughnut FWHM (nm), the nu of Vogler Eq. 1 ─────────────────────
 # sigma = L/(4*sqrt(N)) is only the nu -> infinity limit of the doughnut CRLB. The
