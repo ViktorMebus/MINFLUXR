@@ -197,8 +197,21 @@ D. Then, per Vestergaard et al. 2014:
 > D = ( ⟨|Δr|²⟩ + 2·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / (2·d_mot·Δt),  Δt = t_c + SW
 > σ_loc² = ( R·⟨|Δr|²⟩ + (2R−1)·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / n_cart,  R = 1/6 with blur, 0 without
 
-D is blur-independent; σ_loc is not. Reading a blurred acquisition with R = 0 (σ² = −cov₁) is what
-makes a real 4 nm σ_loc read as 1.4 nm.
+D is blur-independent. σ_loc is not, and reading a blurred acquisition with R = 0 (σ² = −cov₁)
+under-reports it roughly threefold.
+
+> **Scope of the σ_loc half (2026-09-03).** The Tracking tab no longer takes σ_loc from the CVE
+> (see `sigma_loc_model.md`), which narrows what this part of the round-trip can tell you.
+> Simulated positions are perturbed with the same photon-budget expression the Tracking tab applies,
+> so recovering σ from them checks that the forward and inverse arithmetic agree, and says nothing
+> about whether that expression fits a real microscope. It is also gentler than the instrument: each
+> simulated position is drawn independently around the truth, with no tracking feedback loop, whereas
+> the real TCP is recentred on its own noisy estimate and turns part of the error into a correlated
+> wander (log-log MSD slope 0.80 on immobile cells). That correlation is what defeats covariance-based
+> σ estimation on real data, so a σ round-trip can succeed here and still fail on the microscope.
+> Treat the σ number as a unit test under ideal noise. **The D round-trip is unaffected and now
+> carries more weight, since D is the one quantity the CVE still supplies.** Adding a recentring loop
+> to the simulator is the change that would make the σ half informative again.
 
 The consecutive-step covariance is negative for localization noise (an error displaces step *i* one way
 and step *i+1* the other), which is what lets the same two moments separate D from σ_loc without an

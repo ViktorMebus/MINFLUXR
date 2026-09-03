@@ -191,12 +191,12 @@ smlm_server <- function(input, output, session) {
         loaded <- switch(
           ext,
           "csv" = {
-            incProgress(0.20, detail = "Reading CSV")
+            incProgress(0.20, detail = "Reading CSV...")
             read.csv(path, check.names = FALSE)
           },
 
           "json" = {
-            incProgress(0.10, detail = "Reading JSON (can take a while)")
+            incProgress(0.10, detail = "Reading JSON...")
             read_minflux_json_as_df(
               path,
               keep_final_only = TRUE,
@@ -4489,6 +4489,53 @@ smlm_server <- function(input, output, session) {
           "The labeling-displacement inverse (candidate-GT estimation, complex-radius merge, inward linkage displacement, stoichiometric cross-check) is a heuristic developed in this tool and validated in&nbsp;silico against the simulator - treat quantitatively with care and cite as exploratory.")))
   }
 
+  # ── GT counting-standard calibration ───────────────────────────────────────
+  # Populate the standard-dataset selector from loaded files.
+  observeEvent(smlm_file_store(), {
+    fs  <- names(smlm_file_store())
+    sel <- isolate(input$gt_calib_file)
+    updateSelectInput(session, "gt_calib_file", choices = fs,
+      selected = if (!is.null(sel) && sel %in% fs) sel else (isolate(input$active_file) %||% fs[1]))
+  }, ignoreNULL = FALSE)
+
+  # Measure observed TIDs-per-molecule from the chosen standard: apply the SAME
+  # metadata filters + clustering settings the sample uses, then measure per
+  # Median Cluster (each = one standard structure of known stoichiometry).
+  gt_calib <- reactiveVal(NULL)
+  observeEvent(input$gt_calib_run, {
+    store <- smlm_file_store(); fn <- input$gt_calib_file
+    if (is.null(fn) || !nzchar(fn %||% "") || !fn %in% names(store)) {
+      showNotification("Pick a loaded standard dataset first.", type = "warning"); return()
+    }
+    k <- max(1L, as.integer(input$gt_calib_k %||% 1L))
+    res <- tryCatch({
+      df <- apply_clustering_pipeline(apply_meta_filters_batch(store[[fn]], input), input)
+      measure_label_multiplicity(df, k_per_structure = k)
+    }, error = function(e) { message("[GT-calib] ", conditionMessage(e)); NULL })
+    if (is.null(res) || !isTRUE(res$ok)) {
+      gt_calib(NULL)
+      showNotification("No Median Clusters in the standard. Enable de-blinking and Median Clustering, then re-run.",
+                       type = "warning", duration = 6); return()
+    }
+    res$file <- fn; gt_calib(res)
+    showNotification(sprintf("Standard '%s': %.1f TIDs/molecule over %d structure(s).",
+                             fn, res$m_tid, res$n_struct), type = "message", duration = 5)
+  })
+
+  output$gt_calib_readout <- renderUI({
+    r <- gt_calib()
+    if (is.null(r) || !isTRUE(r$ok))
+      return(helpText(style = "color:#888;", "Measure a standard to calibrate the count."))
+    active <- isTRUE(input$gt_use_calib)
+    div(style = sprintf("font-size:12px; margin:4px 0; padding:5px 8px; border-left:3px solid %s; background:%s;",
+                        if (active) "#1a8a1a" else "#b0b8c0", if (active) "rgba(26,138,26,0.06)" else "#f6f7f8"),
+      HTML(sprintf("Measured <b>%.1f</b> TIDs / molecule (MAD %.1f, IQR %.0f&ndash;%.0f) from <b>%d</b> structure%s in <b>%s</b>%s. %s",
+        r$m_tid, r$m_tid_mad, r$m_tid_iqr[1], r$m_tid_iqr[2], r$n_struct,
+        if (r$n_struct == 1) "" else "s", r$file,
+        if (r$k > 1) sprintf(" (÷ %d molecules each)", r$k) else "",
+        if (active) "<b style=\"color:#1a8a1a\">In use for the count.</b>" else "Tick the box below to use it.")))
+  })
+
   # ── Inverse GT-position estimate (labeling-aware) ───────────────────────────
   # Shared by the 2D/3D overlays and the readout panel. Returns NULL when the
   # feature is off or there is nothing to estimate.
@@ -4529,7 +4576,10 @@ smlm_server <- function(input, output, session) {
         displace_inward = isTRUE(input$gt_displace_inward %||% TRUE),
         displace_nm     = dn,
         guided_merge    = isTRUE(input$gt_guided_merge),
-        support_strength = { v <- suppressWarnings(as.numeric(input$gt_support_strength)); if (is.finite(v)) v else 1 }
+        support_strength = { v <- suppressWarnings(as.numeric(input$gt_support_strength)); if (is.finite(v)) v else 1 },
+        m_tid_override  = if (isTRUE(input$gt_use_calib)) {
+          g <- gt_calib(); if (!is.null(g) && isTRUE(g$ok)) g$m_tid else NULL
+        } else NULL
       ),
       error = function(e) { message("[GT-est] ", conditionMessage(e)); NULL }
     )
@@ -4618,11 +4668,13 @@ smlm_server <- function(input, output, session) {
           HTML("The two independent counts disagree in ≥1 structure - the merge radius or the labeling assumption is off. Try the stoichiometry-guided merge, adjust the merge radius, or re-check the preset/efficiency.")),
       div(style = "font-size:12px;color:#7f8c8d;line-height:1.45;",
           HTML(sprintf(
-            "Modeled from %s. Units pooled within <b>%.0f nm</b> (label-complex radius)%s into one molecule%s. Position floor <b>±%.0f nm</b> (linker, irreducible) · ~%.1f TIDs/molecule expected · detection η=%.0f%% · σ<sub>loc</sub>≈%.1f nm.<br>Marker colour = position uncertainty, combining the linker floor, localization sampling (σ<sub>loc</sub>/√n<sub>loc</sub>), a <b>support penalty</b> (fewer TIDs → less certain), inward-displacement direction error, and a fusion penalty.<br><i>Counts are conditional on the labeling calibration; positions cannot be resolved below the linker floor. The two counts bracket the honest range.%s</i>",
+            "Modeled from %s. Units pooled within <b>%.0f nm</b> (label-complex radius)%s into one molecule%s. Position floor <b>±%.0f nm</b> (linker, irreducible) · <b>%.1f TIDs/molecule (%s)</b> · detection η=%.0f%% · σ<sub>loc</sub>≈%.1f nm.<br>Marker colour = position uncertainty, combining the linker floor, localization sampling (σ<sub>loc</sub>/√n<sub>loc</sub>), a <b>support penalty</b> (fewer TIDs → less certain), inward-displacement direction error, and a fusion penalty.<br><i>Counts are conditional on the labeling calibration; positions cannot be resolved below the linker floor. The two counts bracket the honest range.%s</i>",
             lvl_lbl, m$complex_r_nm %||% 0,
             if (isTRUE(m$guided_merge)) " (stoichiometry-guided)" else "",
             if ((m$displace_nm %||% 0) > 0) sprintf(", then displaced <b>%.0f nm</b> inward toward the structure", m$displace_nm) else "",
-            m$link_nm, m$m_tid, 100 * m$eta, m$sigma_loc_nm,
+            m$link_nm, m$tids_per_mol %||% m$m_tid,
+            if (identical(m$m_tid_source, "measured")) "measured from a standard" else "from preset",
+            100 * m$eta, m$sigma_loc_nm,
             ifelse(any_crowd, " Crowded structures undercount - treat those counts as lower bounds.", ""))),
       gt_exploratory_note())
     )

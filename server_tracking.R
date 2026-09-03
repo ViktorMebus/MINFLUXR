@@ -839,9 +839,9 @@ tracking_server <- function(input, output, session) {
     # it used to cross-check is now measured directly on a fixed sample, so the old
     # implied-L / R-range readout was retired.
     cve_line <- if (isTRUE(b$degenerate))
-      row(dim_("CVE σ: "), warn("unresolvable — consecutive steps are positively correlated"))
+      row(dim_("CVE σ: "), warn("unresolvable (consecutive steps are positively correlated)"))
     else if (is.finite(b$sigma))
-      row(dim_(sprintf("CVE σ %.2f nm (blur-aware, R = %.3f) — sanity read only, %s",
+      row(dim_(sprintf("CVE σ %.2f nm (blur-aware, R = %.3f), %s",
                        b$sigma, b$R_blur %||% NA_real_,
                        if (is.finite(b$noise_frac) && b$noise_frac < 0.15)
                          "the covariance carries little of it" else "not the app-wide value")))
@@ -910,7 +910,7 @@ tracking_server <- function(input, output, session) {
         row(dim_(sprintf("wander floor %.3g µm²/s  →  D − Dw = %.3g",
                          dw / 1e3, max(0, d_use - dw) / 1e3)),
             if (frac > 0.5) warn(htmltools::HTML(sprintf(
-              "  &#9888; floor is %.0f%% of D — not resolved above the tracker", 100 * frac)))
+              "  &#9888; floor is %.0f%% of D (not resolved above the tracker)", 100 * frac)))
             else if (frac > 0.2) warn(sprintf("  (%.0f%% of D)", 100 * frac))
             else dim_(sprintf("  (%.0f%% of D)", 100 * frac)))
       }

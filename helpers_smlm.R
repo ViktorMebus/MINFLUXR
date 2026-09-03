@@ -7805,6 +7805,53 @@ apply_clustering_pipeline <- function(df, input) {
   df
 }
 
+## ── Empirical label-multiplicity calibration (counting standard) ──────────────
+# Measures the observed labelling multiplicity from a CALIBRATION STANDARD of
+# known stoichiometry, so the count estimator can divide by a measured value
+# instead of the preset guess m_tid = n_fluor * eff * (1 + blink_lambda).
+#
+# The standard is a sparse sample of isolated structures each holding a KNOWN
+# number of true molecules (`k_per_structure`; 1 for single, well-separated
+# molecules such as sparse DNA docking strands). It MUST be imaged with the same
+# label and acquisition as the sample being counted, and clustered with the same
+# settings, so each secondary structure (cluster2 > 0) is one standard object.
+#
+# Observed TIDs per molecule = median over structures of (TIDs in the structure)
+# / k. That IS the m_tid the count divides by, measured rather than assumed. The
+# per-structure spread (MAD) reports how reproducible the label is.
+#
+# Returns a list; ok = FALSE (never an error) when nothing is measurable.
+measure_label_multiplicity <- function(df, k_per_structure = 1L, minpts = 3L) {
+  out <- list(ok = FALSE, n_struct = 0L, k = as.integer(k_per_structure),
+              m_tid = NA_real_, m_tid_mad = NA_real_, m_tid_iqr = c(NA_real_, NA_real_),
+              m_prim = NA_real_, m_loc = NA_real_, per_struct = data.frame())
+  if (is.null(df) || !nrow(df) || !"tid" %in% names(df) || !"cluster2" %in% names(df))
+    return(out)
+  k <- max(1L, as.integer(k_per_structure))
+  has_prim <- "cluster" %in% names(df)
+  d <- df[!is.na(df$cluster2) & df$cluster2 > 0L, , drop = FALSE]
+  if (!nrow(d)) return(out)
+  per <- d %>%
+    dplyr::group_by(cluster2) %>%
+    dplyr::summarise(
+      n_loc  = dplyr::n(),
+      n_tid  = dplyr::n_distinct(tid),
+      n_prim = if (has_prim) dplyr::n_distinct(cluster[!is.na(cluster) & cluster > 0L]) else NA_integer_,
+      .groups = "drop") %>%
+    dplyr::filter(n_loc >= minpts)
+  if (!nrow(per)) return(out)
+  out$ok         <- TRUE
+  out$n_struct   <- nrow(per)
+  out$k          <- k
+  out$m_tid      <- stats::median(per$n_tid, na.rm = TRUE) / k
+  out$m_tid_mad  <- stats::mad(per$n_tid / k, na.rm = TRUE)
+  out$m_tid_iqr  <- as.numeric(stats::quantile(per$n_tid / k, c(0.25, 0.75), na.rm = TRUE))
+  out$m_prim     <- if (has_prim) stats::median(per$n_prim, na.rm = TRUE) / k else NA_real_
+  out$m_loc      <- stats::median(per$n_loc, na.rm = TRUE) / k
+  out$per_struct <- as.data.frame(per)
+  out
+}
+
 ## ── Inverse GT-position estimator (labeling-aware) ────────────────────────────
 # Reverse-engineers the Simulator's forward labeling model to turn observed
 # traces/clusters back into CANDIDATE ground-truth molecule positions, an
@@ -7853,7 +7900,8 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
                                       displace_inward = TRUE,
                                       displace_nm = NULL,
                                       guided_merge = FALSE,
-                                      support_strength = 1) {
+                                      support_strength = 1,
+                                      m_tid_override = NULL) {
   level <- match.arg(level)
   empty_pts <- data.frame(x = numeric(0), y = numeric(0), z = numeric(0),
                           pos_sd_nm = numeric(0), n_loc = integer(0),
@@ -7980,7 +8028,10 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
 
   # `m_tid` = expected TIDs per molecule from the labeling strategy; the
   # stoichiometric molecule count of a structure is (its TID count) / m_tid.
-  tids_per_mol <- max(1e-6, m_tid)
+  # A measured multiplicity from a counting standard (m_tid_override) replaces the
+  # preset guess when supplied, so the count divides by a calibrated value.
+  m_tid_measured <- !is.null(m_tid_override) && is.finite(m_tid_override) && m_tid_override > 0
+  tids_per_mol <- if (m_tid_measured) as.numeric(m_tid_override) else max(1e-6, m_tid)
 
   units$mol <- NA_integer_
   next_mol  <- 1L
@@ -8208,6 +8259,8 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
     n_fluor      = n_fluor, link_nm = link_nm, dye_spread_nm = dye_spread,
     footprint_nm = footprint, blink_lambda = blink_lambda, eff_pct = eff_pct,
     m_tid        = m_tid, eta = eta, sigma_loc_nm = sigma_loc_nm,
+    tids_per_mol = tids_per_mol,
+    m_tid_source = if (m_tid_measured) "measured" else "preset",
     r_single_nm  = r_single, complex_r_nm = complex_r,
     displace_nm  = meta_disp, guided_merge = isTRUE(guided_merge), use_z = use_z,
     preset_note = preset_note, scoped_to_cluster2 = isTRUE(scope_cluster2) && has_c2

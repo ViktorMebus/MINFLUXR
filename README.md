@@ -1537,7 +1537,7 @@ for free diffusion only. Reported units: $D$ in µm²/s, $\sigma_\text{loc}$ in 
 ### CVE (Covariance-Based Estimator)
 
 The Data Quality panel estimates $D$ **without fitting an MSD curve** (Vestergaard et al. 2014), and
-this is the app's primary free-D readout — the MSD panel is the cross-check, not the other way around.
+this is the app's primary free-D readout, with the MSD panel serving as its cross-check.
 
 $\sigma_\text{loc}$ is **not** taken from the CVE. It comes from the photon budget,
 $\sigma_i = L_\text{TCP}/(a\sqrt{N_i})$ with $N$ = ECO and $a$ an adjustable
@@ -1570,8 +1570,8 @@ D_\text{CVE} = \frac{\langle \Delta x^2 \rangle}{2\Delta t} + \frac{\text{cov}_1
 
 The added $\text{cov}_1$ term (negative in value) is what removes the localization-error inflation from the
 naive $\langle \Delta x^2 \rangle / 2\Delta t$. It is computed per axis and averaged over x, y and,
-when real z is present, z. **D is independent of motion blur** — the identity above holds for any
-exposure model, which is why D survives the correction below unchanged.
+when real z is present, z. **D is independent of motion blur** (the identity above holds for any exposure model), so D
+survives the correction below unchanged.
 
 **Only consecutive integrated (single-cycle) step pairs are used.** The derivation assumes constant
 $\Delta t$; admitting dark-gap steps of varying length would bias the covariance. See TSA above for
@@ -1599,8 +1599,8 @@ which population heterogeneity and any residual drift both inflate. What the dat
 independently, $\text{cov}_1$, is a few-percent residual. On an immobile sample the increments can
 even come out *positively* correlated, at which point the estimator returns no solution at all.
 
-This is an identifiability limit rather than a poor estimator: within one trajectory, blur and
-precision enter the covariance in the same place. MSD-intercept and MLE fits inherit it.
+The limit is identifiability. Within one trajectory, blur and precision enter the covariance in the
+same place, so MSD-intercept and MLE fits inherit the same degeneracy.
 
 So σ comes from the photon budget instead:
 
@@ -1610,8 +1610,8 @@ So σ comes from the photon budget instead:
 ```
 
 per localization, with $N$ = ECO and $L_\text{TCP}$ from *Acquisition Parameters* (auto-filled from the
-sequence's `patGeoFactor`). This is a direct instrument model: per-localization rather than pooled, and
-free of any assumption about the motion. The bracketed term is the one place motion enters. It is the
+sequence's `patGeoFactor`). This is a direct instrument model, evaluated per localization and free of any assumption about the
+motion. The bracketed term is the one place motion enters. It is the
 distance the emitter covers during one localization, so precision degrades for fast molecules and
 tightens under confinement.
 
@@ -1626,9 +1626,9 @@ app-wide value and nothing downstream consumes it.
 
 #### Instrument constants, and porting to another microscope
 
-Three values in *Acquisition Parameters* describe the microscope rather than the software. The
-defaults are starting points, not universal constants: measure them on the system that produced the
-data, or state in the methods that the defaults were used.
+Three values in *Acquisition Parameters* describe the microscope itself. The
+Treat the defaults as starting points. Measure them on the system that produced the data, or state
+in the methods that the defaults were used.
 
 | field | what it is | how to measure |
 |---|---|---|
@@ -1652,6 +1652,34 @@ photon budget, so one constant would over-correct dim tracks and under-correct b
 A D of the same order as the floor is not resolved above the instrument. Because the floor falls
 faster than the photon count rises, the effective lever is to **raise the photon limit**, trading
 $D_\text{max}$ headroom for a floor you can get under.
+
+#### What the simulator round-trip still covers
+
+The simulator generates tracks with a dialled-in D and then runs the same CVE over them
+(`docs/simulation_module.md` §6a). Demoting the CVE for σ_loc leaves that loop in place, and if
+anything it now carries more weight, because D is the one quantity the CVE still supplies to the rest
+of the app. It remains the check on the parts of the D path that are easy to get wrong and hard to
+see: the single-cycle step restriction, the Δt = t_c + SW convention, and the motion-dimensionality
+denominator (2 for surface diffusion, 3 for volume) that would otherwise under-report D by a third on
+membrane and rod geometries.
+
+The σ_loc half of the same scorecard has narrowed in scope, for two reasons.
+
+Its target moved. Simulated positions are now perturbed with the same photon-budget expression the
+Tracking tab applies ($\sigma = L/(a\sqrt{N})$), so recovering σ from those tracks confirms the
+arithmetic is consistent between the forward and inverse paths, and confirms nothing about whether
+the expression describes a real microscope. Only immobile-sample data can speak to that.
+
+Its conditions are gentler than reality. The simulator draws each position independently around the
+true one, with no model of the tracking feedback loop. On the instrument the TCP is recentred on its
+own noisy estimate, which turns part of that error into a correlated wander (§ *The wander floor*),
+and it is precisely that correlation which defeats covariance-based σ estimation on real data. A
+covariance σ estimator can therefore round-trip well in simulation while failing on the microscope,
+which is roughly what happened here.
+
+Read a σ_loc round-trip as a unit test on the estimator arithmetic under ideal noise. Read the D
+round-trip as the validation of the D path it has always been. Adding a recentring loop to the
+simulator would close the gap, and is the change that would make the σ half informative again.
 
 #### How well is σ actually resolved?
 
@@ -1868,7 +1896,7 @@ the photons per localization and $t_\text{hw}$ the hardware overhead. In the app
 $t_\text{loc} = \text{ECO}/\text{EFO}$ feeds the simpler $L^2/(16\,t_\text{loc})$ fallback used when
 either column is missing. Surfaced as a green/amber/red flag.
 
-**Which $L$ to enter — or rather, don't.** Upload the acquisition sequence `.json` under *Time
+**Which $L$ to enter (and how to avoid entering it).** Upload the acquisition sequence `.json` under *Time
 Signature Analysis* and $L_\text{TCP}$ is read from it directly. Sequence files do not store the pattern
 diameter; they store `patGeoFactor`, a dimensionless multiplier, and
 
@@ -1876,9 +1904,9 @@ diameter; they store `patGeoFactor`, a dimensionless multiplier, and
 L_\text{TCP} = \text{patGeoFactor} \times 360\ \text{nm}
 ```
 
-wavelength-independently. The panel takes the **final iteration** — the one the sequence reiterates
-continuously once locked on (`headstart = -1`) — because that is the pattern the particle has to stay
-inside between consecutive fixes. Coarse search iterations do not enter, and neither does the much
+wavelength-independently. The panel takes the **final iteration**, the one the sequence reiterates continuously once locked on
+(`headstart = -1`), because that is the pattern the particle has to stay inside between consecutive
+fixes. Coarse search iterations do not enter, and neither does the much
 tighter final iteration an *imaging* sequence uses. SPT stops at a larger $L$ on purpose: precision
 improves only linearly as $L$ shrinks ($\sigma_\text{CRLB} \propto L/4\sqrt{N}$) while the risk of the
 particle escaping the pattern grows quadratically.
@@ -1917,13 +1945,17 @@ MINFLUXR/
 `global.R` auto-discovers and loads every `plugins/*/plugin.R` at startup. Each plugin receives `.plugin_dir` (the path to its own folder) for loading relative resources. Plugin tabs are appended to the navbar after the three built-in tabs.
 
 ---
+## AI declaration
+
+This app was in parts coded by the author, in collaboration with Claude Code Opus 4.6 and 4.8. Claude Code was used to optimize, research and design experiments to uncover various implementation possibilities. Claude Code has been implemented in our workflow, to create or revise code, where various functionalities were tested by the authors, before being refined. I started this as a simple MINFLUX viewer, yet AI enabled expansion of the tool to be more profound. We hope this app can be used as a way to explore MINFLUX data, without having to have extensive coding experience.  
+
 
 ## Further Documentation
 
 | File | Contents |
 |------|----------|
 | `docs/MINFLUX_analysis_methods.md` | Part I: the implementation and maths of every analysis, taken from the source. Part II: a literature review of whether each method is appropriate for MINFLUX data, with GREEN / AMBER / RED verdicts |
-| `docs/simulation_module.md` | The ground-truth diffusion simulator: model, validation and CVE round-trip |
+| `docs/simulation_module.md` | The ground-truth diffusion simulator: model, validation, and the CVE round-trip on D |
 | `docs/arch/` | Architecture overview |
 
 ---
