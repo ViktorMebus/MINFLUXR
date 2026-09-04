@@ -204,7 +204,9 @@ smlm_ui <- fluidPage(
         radioButtons("view_plane_2d", "Viewing plane",
                      choices = c("XY", "XZ", "YZ"), inline = TRUE, selected = "XY")
       ),
-      uiOutput("z_axes_note"),
+        downloadButton("download_filtered_csv", "Export MINFLUX data (.csv)"),
+        helpText("Exports data with current filters applied."),
+        uiOutput("z_axes_note"),
       ),  # /Data Upload
       tags$hr(),
 
@@ -248,6 +250,20 @@ smlm_ui <- fluidPage(
                  uiOutput("fluo_range_ui"),
                  
                  checkboxInput("hist_show_raw", "Show raw data (grey)", value = TRUE),
+
+                  # -- Outlier localization trimming --------------------------
+                 checkboxInput("trim_outliers",
+                               "Trim outlier localizations within traces", value = FALSE),
+                 conditionalPanel(
+                   condition = "input.trim_outliers == true",
+                   numericInput("trim_k", "Reject beyond k × σ of the trace",
+                                value = 4, min = 2, max = 10, step = 0.5),
+                   uiOutput("trim_summary_ui")
+                 ),
+                 helpText("Flags single localizations sitting far from the rest of their own trace ",
+                          "and excludes them from the spread, the trace length and every downstream ",
+                          "analysis. The distance is measured per axis in units of that trace's own ",
+                          "spread."),
                  
                  downloadButton("download_ui_settings", "Download Filter Settings"),
                  
@@ -264,22 +280,7 @@ smlm_ui <- fluidPage(
                               "Min localizations per trace for spread (σ̃)",
                               value = MIN_LOCS_FOR_SPREAD_DEFAULT, min = 2, step = 1),
                  helpText("Traces shorter than this are excluded from the spread histogram, ",
-                          "the median-spread labels, the allowable-spread ranges, and the σ filters. ",
-                          "Literature typically uses ≥ 5 (a SD needs ≥ 2 points to exist)."),
-                 # -- Outlier localization trimming --------------------------
-                 checkboxInput("trim_outliers",
-                               "Trim outlier localizations within traces", value = FALSE),
-                 conditionalPanel(
-                   condition = "input.trim_outliers == true",
-                   numericInput("trim_k", "Reject beyond k × σ of the trace",
-                                value = 4, min = 2, max = 10, step = 0.5),
-                   uiOutput("trim_summary_ui")
-                 ),
-                 helpText("Flags single localizations sitting far from the rest of their own trace ",
-                          "and excludes them from the spread, the trace length and every downstream ",
-                          "analysis. The distance is measured per axis in units of that trace's own ",
-                          "spread, so a uniformly broad trace loses nothing - judging whole traces ",
-                          "stays the job of the σ ranges and the rogue rules below."),
+                          "the median-spread labels, the allowable-spread ranges, and the σ filters. "),
                  uiOutput("sd_summary_ui"),
                  uiOutput("sd_hist_ui"),
                  sliderInput("sd_bins", "Histogram bins", min = 5, max = 500, value = 100, step = 1),
@@ -326,9 +327,8 @@ smlm_ui <- fluidPage(
                    helpText("k applies to whichever rule is selected above.")
                  )
                ),
-               actionButton("reset_filters", "Reset Filters", icon = icon("refresh")),
-               downloadButton("download_filtered_csv", "Export MINFLUX data (.csv)"),
-               helpText("Exports data with current filters applied.")
+               actionButton("reset_filters", "Reset Filters", icon = icon("refresh"))
+
 
 
       ),
@@ -426,15 +426,23 @@ smlm_ui <- fluidPage(
           conditionalPanel(
             condition = "input.enable_trimmer == true",
             radioButtons(
-              "trim_mode", "Trimmer shape",
+              "trim_mode", "Crop shape",
               choices = c("Axis-aligned box" = "box",
-                          "Sphere"           = "sphere",
-                          "Ellipsoid (PCA)"  = "ellip"),
+                          "Sphere"           = "sphere"),
               selected = "box"
             ),
             conditionalPanel(condition = "input.trim_mode == 'box'",   uiOutput("trim_box_ui")),
             conditionalPanel(condition = "input.trim_mode == 'sphere'", uiOutput("trim_sphere_ui")),
-            conditionalPanel(condition = "input.trim_mode == 'ellip'",  uiOutput("trim_ellip_ui"))
+            checkboxInput("trim_preview", "Preview region in 3D", value = TRUE),
+            helpText(style = "font-size:0.78em; color:#888;",
+                     "The coordinates draw a low-opacity shape for you to check against the points.",
+                     "Nothing is cropped until you press Apply."),
+            fluidRow(
+              column(7, actionButton("trim_apply", "Apply crop",
+                                     class = "btn-primary btn-sm", style = "width:100%;")),
+              column(5, actionButton("trim_clear", "Clear",
+                                     class = "btn-default btn-sm", style = "width:100%;"))
+            )
           ),
           ### 3D Auto-rotate / Record ===
           checkboxInput("show_rotate_opt","Auto-Rotate & Record Options", value = FALSE),

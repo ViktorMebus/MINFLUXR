@@ -97,6 +97,10 @@ smlm_server <- function(input, output, session) {
   smlm_axis_x_span  <- reactiveVal(NULL)
   smlm_zoom_ranges  <- reactiveVal(NULL)   # list(x=c(x0,x1), y=c(y0,y1)) from 2D plot zoom
   smlm_2d_crop_rv   <- reactiveVal(NULL)   # active 2D crop box: list(x=c(x0,x1), y=c(y0,y1))
+  # Committed 3D crop region. The box/sphere inputs are only a PREVIEW; the crop
+  # is applied when the user presses "Apply crop", which commits the region here.
+  # list(mode="box", x=c(lo,hi), y=..., z=...) or list(mode="sphere", c=c(cx,cy,cz), r=r).
+  trim_applied_rv   <- reactiveVal(NULL)
 
   smlm_default_x_span <- function() {
     df <- isolate(plottable_data())
@@ -1119,6 +1123,47 @@ smlm_server <- function(input, output, session) {
         heatmap_gamma     = input$heatmap_gamma,
         heatmap_log       = input$heatmap_log,
         heatmap_showlegend= input$heatmap_showlegend
+      ),
+
+      # ── Spatial crop / trimmer - CHANGES THE DATA (the point set) ──────────
+      # Both the 2D "Crop to view" box and the 3D box/sphere crop
+      # remove localizations, so a reload without them analyses a wider region
+      # than the ranges were set on. Saved so a round-trip keeps the same crop.
+      crop = {
+        c2d <- smlm_2d_crop_rv()
+        list(
+          crop2d_x       = if (!is.null(c2d)) c2d$x else NULL,
+          crop2d_y       = if (!is.null(c2d)) c2d$y else NULL,
+          enable_trimmer = isTRUE(input$enable_trimmer),
+          trim_mode      = input$trim_mode,
+          trim_x_range   = input$trim_x_range,
+          trim_y_range   = input$trim_y_range,
+          trim_z_range   = input$trim_z_range,
+          trim_cx = input$trim_cx, trim_cy = input$trim_cy,
+          trim_cz = input$trim_cz, trim_r  = input$trim_r,
+          # the committed region is what actually crops (inputs above are the editor)
+          trim_applied   = trim_applied_rv()
+        )
+      },
+
+      # ── Fiducial-scan exclusion - CHANGES THE DATA when on ─────────────────
+      # The thresholds are saved too so re-running the scan reproduces the flags.
+      fiducial = list(
+        fid_exclude   = isTRUE(input$fid_exclude),
+        fid_efo_z     = input$fid_efo_z,
+        fid_len_z     = input$fid_len_z,
+        fid_recur_r   = input$fid_recur_r,
+        fid_recur_min = input$fid_recur_min,
+        fid_all_files = isTRUE(input$fid_all_files)
+      ),
+
+      # ── Analysis options that change results ───────────────────────────────
+      analysis = list(
+        use_pooled_dcr       = isTRUE(input$use_pooled_dcr),
+        spatial_edge_correct = isTRUE(input$spatial_edge_correct),
+        spatial_use_support  = isTRUE(input$spatial_use_support),
+        dens_norm_enable     = isTRUE(input$dens_norm_enable),
+        dens_thin_enable     = isTRUE(input$dens_thin_enable)
       )
     )
   })
@@ -2551,6 +2596,60 @@ smlm_server <- function(input, output, session) {
         if (length(v) == 1 && is.finite(v)) updateNumericInput(session, "trim_k", value = v)
       }
 
+      # ── Restore spatial crop / trimmer (changes the point set) ─────────────
+      cr <- raw$crop %||% list()
+      # 2D crop box: a server-side reactiveVal, so no DOM round-trip needed.
+      cx <- suppressWarnings(as.numeric(unlist(cr$crop2d_x)))
+      cy <- suppressWarnings(as.numeric(unlist(cr$crop2d_y)))
+      if (length(cx) == 2 && length(cy) == 2 && all(is.finite(c(cx, cy))))
+        smlm_2d_crop_rv(list(x = cx, y = cy)) else smlm_2d_crop_rv(NULL)
+      # 3D box/sphere crop: static inputs restore directly.
+      updateCheckboxInput(session, "enable_trimmer", value = isTRUE(cr$enable_trimmer))
+      if (!is.null(cr$trim_mode)) updateRadioButtons(session, "trim_mode", selected = cr$trim_mode)
+      for (nm in c("trim_cx", "trim_cy", "trim_cz", "trim_r")) {
+        v <- suppressWarnings(as.numeric(cr[[nm]]))
+        if (length(v) == 1 && is.finite(v)) updateNumericInput(session, nm, value = v)
+      }
+      # Re-activate the committed crop region so the reloaded file is cropped as saved.
+      ta <- cr$trim_applied
+      if (!is.null(ta) && !is.null(ta$mode)) {
+        if (identical(ta$mode, "sphere")) {
+          cc <- suppressWarnings(as.numeric(unlist(ta$c))); rr <- suppressWarnings(as.numeric(ta$r))
+          trim_applied_rv(if (length(cc) == 3 && all(is.finite(cc)) && is.finite(rr))
+            list(mode = "sphere", c = cc, r = rr) else NULL)
+        } else {
+          num2 <- function(v) { v <- suppressWarnings(as.numeric(unlist(v))); if (length(v) == 2 && all(is.finite(v))) v else NULL }
+          trim_applied_rv(list(mode = "box", x = num2(ta$x), y = num2(ta$y), z = num2(ta$z)))
+        }
+      } else trim_applied_rv(NULL)
+      # Box ranges live in a renderUI (trim_box_ui); set them after it rebuilds.
+      if (isTRUE(cr$enable_trimmer) && identical(cr$trim_mode %||% "box", "box")) {
+        bx <- suppressWarnings(as.numeric(unlist(cr$trim_x_range)))
+        by <- suppressWarnings(as.numeric(unlist(cr$trim_y_range)))
+        bz <- suppressWarnings(as.numeric(unlist(cr$trim_z_range)))
+        later::later(function() {
+          if (length(bx) == 2 && all(is.finite(bx))) shinyWidgets::updateNumericRangeInput(session, "trim_x_range", value = bx)
+          if (length(by) == 2 && all(is.finite(by))) shinyWidgets::updateNumericRangeInput(session, "trim_y_range", value = by)
+          if (length(bz) == 2 && all(is.finite(bz))) shinyWidgets::updateNumericRangeInput(session, "trim_z_range", value = bz)
+          plot_trigger(Sys.time())
+        }, delay = 0.4)
+      }
+
+      # ── Restore fiducial-scan exclusion + its thresholds ───────────────────
+      fd <- raw$fiducial %||% list()
+      updateCheckboxInput(session, "fid_exclude",   value = isTRUE(fd$fid_exclude))
+      updateCheckboxInput(session, "fid_all_files", value = isTRUE(fd$fid_all_files))
+      for (nm in c("fid_efo_z", "fid_len_z", "fid_recur_r", "fid_recur_min")) {
+        v <- suppressWarnings(as.numeric(fd[[nm]]))
+        if (length(v) == 1 && is.finite(v)) updateNumericInput(session, nm, value = v)
+      }
+
+      # ── Restore analysis options that change results ───────────────────────
+      an <- raw$analysis %||% list()
+      for (nm in c("use_pooled_dcr", "spatial_edge_correct", "spatial_use_support",
+                   "dens_norm_enable", "dens_thin_enable"))
+        if (!is.null(an[[nm]])) updateCheckboxInput(session, nm, value = isTRUE(an[[nm]]))
+
       # Update sd_filt so the actual spread filter reflects the loaded settings.
       # NA in the upper bound means the filter was at full range when saved
       # (Inf serialises to null/NA in JSON); restore it as Inf.
@@ -2584,6 +2683,9 @@ smlm_server <- function(input, output, session) {
 
       apply_overlay(ov)
       apply_heatmap(hm)
+      # Re-run the plotted/exported pipeline so a restored 2D crop or trimmer
+      # takes effect (plottable_data is gated on plot_trigger).
+      plot_trigger(Sys.time())
     }, once = TRUE)
   })
   cluster2_file_reset_key <- reactiveVal(0)
@@ -5359,40 +5461,98 @@ smlm_server <- function(input, output, session) {
   })
   
     
+  # Applies the COMMITTED 3D crop region (from trim_applied_rv, set by "Apply
+  # crop"), gated by the master "Crop to region (3D)" checkbox. The live box/
+  # sphere inputs drive only the preview, never the data, so tweaking coordinates
+  # never crops until the user applies.
   apply_trimmer <- function(df, input) {
     if (!isTRUE(input$enable_trimmer) || nrow(df) == 0) return(df)
-    
-    mode <- if (is.null(input$trim_mode)) "box" else input$trim_mode
+    ar <- trim_applied_rv()
+    if (is.null(ar)) return(df)
     keep <- rep(TRUE, nrow(df))
-    
-    if (mode == "box") {
-      xr <- input$trim_x_range; yr <- input$trim_y_range; zr <- input$trim_z_range
-      if (!is.null(xr)) keep <- keep & df$x >= xr[1] & df$x <= xr[2]
-      if (!is.null(yr)) keep <- keep & df$y >= yr[1] & df$y <= yr[2]
-      if (!is.null(zr)) keep <- keep & df$z >= zr[1] & df$z <= zr[2]
-      
-    } else if (mode == "sphere") {
-      cx <- input$trim_cx; cy <- input$trim_cy; cz <- input$trim_cz; r <- input$trim_r
-      if (all(is.finite(c(cx,cy,cz,r))) && r >= 0) {
-        d2 <- (df$x - cx)^2 + (df$y - cy)^2 + (df$z - cz)^2
-        keep <- keep & (d2 <= r^2)
-      }
-      
-    } else if (mode == "ellip") {
-      X <- as.matrix(df[,c("x","y","z")])
-      c0 <- colMeans(X, na.rm = TRUE)
-      Xc <- sweep(X, 2, c0)
-      pc <- tryCatch(prcomp(Xc, center = FALSE), error = function(e) NULL)
-      if (!is.null(pc)) {
-        Q  <- Xc %*% pc$rotation
-        sdv <- apply(Q, 2, stats::sd, na.rm = TRUE)
-        sdv[sdv <= 1e-12] <- 1e-12
-        d2 <- rowSums((Q / matrix(sdv, nrow(Q), 3, TRUE))^2)
-        thr <- stats::qchisq(ifelse(is.null(input$trim_ellip_q), 0.95, input$trim_ellip_q), df = 3)
-        keep <- keep & (d2 <= thr)
-      }
+    if (identical(ar$mode, "sphere")) {
+      cc <- ar$c; r <- ar$r
+      if (length(cc) == 3 && all(is.finite(c(cc, r))) && r >= 0)
+        keep <- (df$x - cc[1])^2 + (df$y - cc[2])^2 + (df$z - cc[3])^2 <= r^2
+    } else {
+      if (!is.null(ar$x)) keep <- keep & df$x >= ar$x[1] & df$x <= ar$x[2]
+      if (!is.null(ar$y)) keep <- keep & df$y >= ar$y[1] & df$y <= ar$y[2]
+      if (!is.null(ar$z)) keep <- keep & df$z >= ar$z[1] & df$z <= ar$z[2]
     }
     df[keep, , drop = FALSE]
+  }
+
+  # Commit the current box/sphere inputs as the active crop region.
+  trim_region_from_inputs <- function() {
+    mode <- input$trim_mode %||% "box"
+    num2 <- function(v) { v <- suppressWarnings(as.numeric(unlist(v))); if (length(v) == 2 && all(is.finite(v))) v else NULL }
+    if (identical(mode, "sphere")) {
+      cc <- suppressWarnings(as.numeric(c(input$trim_cx, input$trim_cy, input$trim_cz)))
+      r  <- suppressWarnings(as.numeric(input$trim_r))
+      if (length(cc) == 3 && all(is.finite(cc)) && is.finite(r) && r >= 0)
+        list(mode = "sphere", c = cc, r = r) else NULL
+    } else {
+      list(mode = "box", x = num2(input$trim_x_range),
+           y = num2(input$trim_y_range), z = num2(input$trim_z_range))
+    }
+  }
+  observeEvent(input$trim_apply, {
+    reg <- trim_region_from_inputs()
+    if (is.null(reg)) { showNotification("Set the crop coordinates first.", type = "warning"); return() }
+    trim_applied_rv(reg); plot_trigger(Sys.time())
+    showNotification(if (identical(reg$mode, "sphere"))
+      sprintf("3D crop applied: sphere r %.0f nm at (%.0f, %.0f, %.0f).", reg$r, reg$c[1], reg$c[2], reg$c[3])
+      else "3D crop applied (box).", type = "message", duration = 4)
+  }, ignoreInit = TRUE)
+  observeEvent(input$trim_clear, {
+    trim_applied_rv(NULL); plot_trigger(Sys.time())
+    showNotification("3D crop cleared.", type = "message", duration = 3)
+  }, ignoreInit = TRUE)
+
+  # Redraw the preview shape a short moment after the coordinates change (only
+  # while previewing in 3D), so the low-opacity box/sphere tracks the inputs
+  # without re-rendering on every keystroke.
+  trim_preview_tick <- shiny::debounce(reactive({
+    list(input$trim_mode, input$trim_x_range, input$trim_y_range, input$trim_z_range,
+         input$trim_cx, input$trim_cy, input$trim_cz, input$trim_r, input$trim_preview)
+  }), 400)
+  observeEvent(trim_preview_tick(), {
+    if (isTRUE(input$enable_trimmer) && isTRUE(input$trim_preview) && identical(input$mode3d, "3D"))
+      plot_trigger(Sys.time())
+  }, ignoreInit = TRUE)
+
+  # Add the low-opacity crop-region preview to a 3D figure from the LIVE inputs.
+  add_3d_crop_preview <- function(fig) {
+    if (!isTRUE(input$enable_trimmer) || !isTRUE(input$trim_preview)) return(fig)
+    reg <- trim_region_from_inputs(); if (is.null(reg)) return(fig)
+    col <- "#2c7fb8"
+    if (identical(reg$mode, "sphere")) {
+      cc <- reg$c; r <- reg$r
+      nu <- 20L; nv <- 14L
+      th <- seq(0, 2 * pi, length.out = nu); ph <- seq(0, pi, length.out = nv)
+      g  <- expand.grid(iu = seq_len(nu), iv = seq_len(nv))
+      vx <- cc[1] + r * sin(ph[g$iv]) * cos(th[g$iu])
+      vy <- cc[2] + r * sin(ph[g$iv]) * sin(th[g$iu])
+      vz <- cc[3] + r * cos(ph[g$iv])
+      idx <- function(iu, iv) (iv - 1L) * nu + iu
+      ii <- jj <- kk <- integer(0)
+      for (iv in seq_len(nv - 1L)) for (iu in seq_len(nu - 1L)) {
+        a <- idx(iu, iv); b <- idx(iu + 1L, iv); c2 <- idx(iu, iv + 1L); d <- idx(iu + 1L, iv + 1L)
+        ii <- c(ii, a - 1L, b - 1L); jj <- c(jj, b - 1L, d - 1L); kk <- c(kk, c2 - 1L, c2 - 1L)
+      }
+      return(fig %>% plotly::add_trace(type = "mesh3d", x = vx, y = vy, z = vz,
+        i = ii, j = jj, k = kk, opacity = 0.15, color = I(col), facecolor = rep(col, length(ii)),
+        flatshading = TRUE, hoverinfo = "skip", showlegend = FALSE, showscale = FALSE, name = "crop preview"))
+    }
+    x <- reg$x; y <- reg$y; z <- reg$z
+    if (is.null(x) || is.null(y) || is.null(z)) return(fig)
+    vx <- c(x[1], x[2], x[2], x[1], x[1], x[2], x[2], x[1])
+    vy <- c(y[1], y[1], y[2], y[2], y[1], y[1], y[2], y[2])
+    vz <- c(z[1], z[1], z[1], z[1], z[2], z[2], z[2], z[2])
+    ii <- c(0,0,4,4,0,0,3,3,0,0,1,1); jj <- c(1,2,5,6,1,5,2,6,3,7,2,6); kk <- c(2,3,6,7,5,4,6,7,7,4,6,5)
+    fig %>% plotly::add_trace(type = "mesh3d", x = vx, y = vy, z = vz,
+      i = ii, j = jj, k = kk, opacity = 0.15, color = I(col), facecolor = rep(col, length(ii)),
+      flatshading = TRUE, hoverinfo = "skip", showlegend = FALSE, showscale = FALSE, name = "crop preview")
   }
   
   assign_analysis_group_local <- function(df, input) {
@@ -6143,8 +6303,10 @@ smlm_server <- function(input, output, session) {
         xanchor = "left", yanchor = "bottom"
       )
     )
-    
-    
+
+    # Low-opacity preview of the 3D crop region (box / sphere) from the live inputs.
+    fig <- add_3d_crop_preview(fig)
+
     cluster2_medians <- NULL
     if (isTRUE(input$enable_cluster2) && "cluster2" %in% names(df)) {
       # Member unit follows de-blinking, matching the two-colour isosurface and
