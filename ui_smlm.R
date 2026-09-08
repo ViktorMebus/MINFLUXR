@@ -1987,6 +1987,138 @@ smlm_ui <- fluidPage(
       tags$hr(),
 
 
+      # -- Local Density & Hotspots ------------------------------------------
+      fluidRow(
+        column(3,
+          h4("Local Density & Hotspots"),
+          .method_box("green",
+            HTML("Three established descriptors of a point pattern, each computed per cell and expressed relative to that cell's own mean density. <b>Local density</b> comes from the k-th nearest-neighbour distance, &lambda;<sub>i</sub>&nbsp;=&nbsp;k&nbsp;/&nbsp;(&omega;<sub>d</sub>&nbsp;r<sub>k</sub><sup>d</sup>) (<b>Loftsgaarden &amp; Quesenberry 1965</b>). The <b>index of dispersion</b> is the variance-to-mean ratio of quadrat counts, 1 under complete spatial randomness (<b>Fisher, Thornton &amp; Mackenzie 1922</b>). <b>Foci</b> are DBSCAN clusters (<b>Ester et&nbsp;al. 1996</b>) at an eps calibrated per cell against a randomised pattern in that cell's own footprint."),
+            HTML("Every quantity is divided by the cell's own mean density, so a cell that expressed twice as much protein reads the same. The footprint from the density block supplies that mean, and DBSCAN's eps is re-derived per cell instead of being a fixed setting, so a sparse cell and a dense cell are held to the same standard."),
+            HTML("These read the <b>upper tail</b> of the local-density distribution, so they answer whether a minority of units sit in dense spots. They say nothing about the shape or the identity of those spots, and the counts inside them are detected units, which is a lower bound on molecules. <b>Number of foci</b> and <b>fraction of units in foci</b> stay density-sensitive even after calibration; the size of the largest focus does not.")),
+          helpText("Measures each unit's local density as a multiple of its own cell's mean, and finds the dense spots. Density unevenness reads 1.0 for a random pattern."),
+          .detail(HTML(
+            "<b>Local-density enhancement.</b> For each unit, the density of units around it from the k-th nearest neighbour, divided by that cell's units-per-area over the footprint. 1&times; is the cell average, 20&times; is twenty times denser than the cell average.<br><br>",
+            "<b>Density unevenness.</b> How much the local density varies across the cell: the standard deviation of the per-unit local densities divided by their mean, then divided again by the value a random pattern gives. <b>1.0 means random.</b> 2 means twice as uneven as random, 5 means a few dense spots on an otherwise sparse background.<br><br>",
+            "The random baseline depends only on k, not on the density, the area or the number of units, which is what makes the number comparable between cells. It is 1/&radic;(k&minus;2): 1.00 at k&nbsp;=&nbsp;3, 0.577 at k&nbsp;=&nbsp;5, 0.354 at k&nbsp;=&nbsp;10. The raw coefficient of variation is kept in the table and the metric list for anyone who wants it unnormalised.<br><br>",
+            "<b>Index of dispersion.</b> Counts in fixed quadrats, variance over mean. It is 1 for a random pattern by construction, so it reads without a simulation. It is scale-dependent, so set the quadrat near the feature size you are after and quote the size with the number.<br><br>",
+            "<b>Calibrated eps.</b> DBSCAN with a fixed eps is a fixed density threshold, which a dense cell crosses more easily than a sparse one. This picks, per cell, the largest eps at which a randomised pattern in that cell's own footprint still clusters no more than the target fraction.")),
+          selectInput("hot_unit", "Unit",
+            choices = c("Trace ID centroids (one point per blink)" = "tid",
+                        "De-blinked molecule centroids"           = "cluster",
+                        "Auto (molecules if de-blinking is on)"   = "auto"),
+            selected = "tid"),
+          helpText("One point per trace, or per de-blinked molecule. Raw localizations are not offered."),
+          .detail(HTML(
+            "Localizations inside a single trace sit a few nanometres apart, so their local density measures how long that fluorophore stayed on before going dark. On the membrane-protein pair the enhancement then reaches 3,000 to 17,000 times the cell mean and neither the CV nor the 90th percentile separates the two conditions. The same statistics on trace-ID centroids separate them cleanly.<br><br>",
+            "<b>Trace IDs</b> count blinking events, <b>de-blinked molecules</b> merge repeated blinks of one fluorophore. Both work here. Trace IDs gave the wider margin on the membrane-protein pair (90th-percentile enhancement 2.7&ndash;5.0 against 13.1&ndash;72.4, versus 2.1&ndash;5.0 against 6.6&ndash;53.1 for molecules), because de-blinking removes a few points from the densest spots.")),
+          checkboxInput("hot_use_3d", "Use 3-D coordinates (z)", value = FALSE),
+          helpText("3-D measures density in spheres and quadrats as cubes. Use it for genuinely 3-D data; a thin membrane sheet is 2-D."),
+          numericInput("hot_k", "k for local density", value = 5, min = 1, max = 50, step = 1),
+          helpText("Neighbour order for the density estimate. Small k is noisy, large k blurs a focus into its surroundings."),
+          .detail(HTML("k is a smoothing parameter, not a cluster size. A focus holding fewer than about 2k units cannot be resolved at that k. 5 is a reasonable default for foci of tens of units; raise it for large diffuse domains.")),
+          numericInput("hot_enh_thresh", "Enhancement threshold (x cell mean)",
+                       value = 5, min = 1.5, max = 100, step = 0.5),
+          helpText("The multiple that the reported fraction counts, and the dashed line on the distribution plot."),
+          numericInput("hot_quadrat", "Quadrat size (nm)", value = 250, min = 20, step = 10),
+          helpText("Side of the quadrats for the index of dispersion. Set it near the size of the features you are looking for."),
+          tags$hr(style = "margin:10px 0;"),
+          tags$div(style = "font-weight:600; color:#2c3e50; font-size:0.92em;", "Focus detection"),
+          numericInput("hot_minpts", "minPts", value = 5, min = 2, max = 50, step = 1),
+          helpText("Smallest number of units DBSCAN will call a focus. Held fixed across cells."),
+          numericInput("hot_target_frac", "False-cluster target", value = 0.05,
+                       min = 0.005, max = 0.5, step = 0.01),
+          helpText("The fraction of a randomised pattern that may cluster. eps is set to the largest value that stays at or below this."),
+          numericInput("hot_nsim", "Randomisations per eps", value = 15, min = 3, max = 100, step = 1),
+          helpText("Randomised patterns drawn per candidate eps. 15 places the crossing between two grid steps."),
+          tags$hr(style = "margin:10px 0;"),
+          tags$div(style = "font-weight:600; color:#2c3e50; font-size:0.92em;", "Footprint"),
+          numericInput("hot_grid_h", "Grid pitch (nm)", value = 25, min = 5, step = 5),
+          helpText("Bin size for the footprint. A finer pitch gives a cleaner outline and barely moves the area."),
+          numericInput("hot_close_nm", "Gap fill (nm, 0 = auto)", value = 0, min = 0, step = 50),
+          helpText("Radius that bridges the gaps between units so the footprint follows the cell. Auto resolves one radius shared by every loaded file."),
+          .detail(HTML("The gap-fill radius is what sets the area, and the area sets the density every statistic here divides by. It should be a few times the typical spacing between units and well below the size of any dark region you want kept out of the cell. It is shared across files on purpose: a per-file radius would put each cell on its own density scale, which is the comparison this panel exists to make.<br><br>This panel always uses the footprint, whatever the switch at the top of the tab says, because a bounding box would not merely weaken these numbers, it would change them: a cell imaged half in frame reads at half its true density and every enhancement doubles.")),
+          selectInput("hot_palette", "Map colour scale",
+                      choices = NUMERIC_PALETTES,
+                      selected = "Turbo"),
+          checkboxInput("hot_show_foci", "Box the detected foci on the map", value = TRUE),
+          conditionalPanel(
+            condition = "input.hot_show_foci == true",
+            numericInput("hot_box_top", "Box the largest N foci (0 = all)",
+                         value = 5, min = 0, step = 1),
+            helpText("Each box is drawn at the size of the focus it encloses and labelled with its count.")),
+          actionButton("run_hotspot", "Run", icon = icon("play"), class = "btn-primary btn-sm"),
+          downloadButton("download_hotspot", "Per file", class = "btn-sm"),
+          downloadButton("download_hotspot_foci", "Per focus", class = "btn-sm")
+        ),
+        column(9,
+          uiOutput("hotspot_stale"),
+          uiOutput("hotspot_status"),
+          fluidRow(
+            column(7,
+              selectInput("hot_map_file", "Map dataset", choices = NULL, width = "100%"),
+              plotlyOutput("hotspot_map", height = "470px")),
+            column(5,
+              radioButtons("hot_curve_mode", NULL, inline = TRUE,
+                choices = c("Upper tail" = "tail", "Cumulative" = "cdf"),
+                selected = "tail"),
+              plotlyOutput("hotspot_ecdf", height = "430px"))
+          ),
+
+          # This selector drives BOTH plots on the row below it, so it sits on that
+          # row rather than under the curve it has nothing to do with.
+          tags$div(style = "margin:14px 0 4px; padding:8px 12px; background:#f4f6f8; border:1px solid #e3e8ee; border-radius:4px;",
+            fluidRow(
+              column(5, selectInput("hot_metric", "Metric shown in both plots below",
+                choices = c("Density unevenness (x random)"  = "cv_ratio",
+                            "CV of local density (raw)"      = "cv_local",
+                            "Largest focus (n)"              = "max_focus_n",
+                            "Enhancement, 90th percentile"   = "enh_q90",
+                            "Enhancement, 99th percentile"   = "enh_q99",
+                            "Fraction above the threshold"   = "frac_above",
+                            "Index of dispersion (quadrats)" = "vmr",
+                            "Number of foci"                 = "n_foci",
+                            "Fraction in foci"               = "frac_in_foci",
+                            "Largest focus Rg (nm)"          = "max_focus_rg",
+                            "Calibrated eps (nm)"            = "eps_nm",
+                            "Median NN distance (nm)"        = "nn_med",
+                            "Clark-Evans R"                  = "clark_evans",
+                            "Density (per um2)"              = "density"),
+                selected = "cv_ratio", width = "100%")),
+              column(7, tags$div(style = "padding-top:26px; font-size:0.85em; color:#556;",
+                "Left: the metric per cell, grouped. Right: the same metric against that cell's labelling density.")))
+          ),
+          fluidRow(
+            column(6, plotlyOutput("hotspot_metric",     height = "330px")),
+            column(6, plotlyOutput("hotspot_vs_density", height = "330px"))
+          ),
+          tags$div(style = "margin:6px 0 10px; padding:7px 12px; border-left:4px solid #cfe0ee; background:#f6f9fc; font-size:0.85em; color:#445;",
+            tags$b("Reading the pair of plots. "),
+            "Groups that separate vertically at matched density are separated by organisation. Groups that lie along one shared line are separated by expression level. ",
+            tags$b("Median NN distance"), " and ", tags$b("Clark-Evans R"), " are in the metric list as the worked example of the second case."),
+          tags$div(style = "overflow-x:auto;", tableOutput("hotspot_table"))
+        )
+      ),
+      tags$hr(),
+
+      # -- SECTION: Multi-panel view --
+      fluidRow(column(12, tags$h3('Multi-Panel View',
+        style = "border-bottom:2px solid #d7dde3; padding-bottom:4px; margin-top:18px; color:#2c3e50;"))),
+
+      fluidRow(column(12,
+        tags$div(style = "margin:0 0 10px; padding:7px 12px; border-left:4px solid #cfe0ee; background:#f6f9fc; font-size:0.86em; color:#445;",
+          tags$b("Six slots, one analysis each. "),
+          "Each slot draws the same figure its full-size panel draws, using that panel's controls and its stored results. ",
+          "Run a panel before selecting it here; an unrun panel shows its own placeholder message."),
+        fluidRow(uiOutput("panel_slot_pickers")),
+        fluidRow(
+          column(4, numericInput("panel_row_height", "Panel height (px)",
+                                 value = 340, min = 200, max = 900, step = 20)),
+          column(8, helpText("Figures keep their own legends and axes, so a slot is readable on its own."))
+        ),
+        uiOutput("panel_grid")
+      )),
+      tags$hr(),
+
       # -- SECTION: Median-Cluster Analyses --
       fluidRow(column(12, tags$h3('Median-Cluster Analyses',
         style = "border-bottom:2px solid #d7dde3; padding-bottom:4px; margin-top:18px; color:#2c3e50;"))),
