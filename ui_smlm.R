@@ -1459,6 +1459,15 @@ smlm_ui <- fluidPage(
                                         "Bounding box" = "bbox"),
                             selected = "kde"),
                 helpText(HTML("The area density is divided by. A field usually contains the <b>cell edge</b> and interior <b>dark regions</b>; the bounding box counts those as sample.")),
+                radioButtons("dens_support_from", "Outline drawn from",
+                             choices = c("Trace / molecule centroids" = "units",
+                                         "All localizations"          = "locs"),
+                             selected = "units", inline = TRUE),
+                helpText("Which points define the cell edge. Centroids are what the analyses count; localizations are a denser sample of the same region."),
+                .detail(HTML(
+                  "Neither choice is free of a bias, so this is a real setting rather than a default to leave alone.<br><br>",
+                  "<b>Centroids</b> are one point per trace, or per de-blinked molecule, which is what every analysis on this tab counts. A sparsely labelled cell gives a raggeder, smaller footprint, so the area carries a little of the unit count: on synthetic pairs with identical geometry and a 4&times; labelling difference the supports came out 5.01e6 against 3.82e6&nbsp;nm&sup2;, reading a 4.0&times; density ratio as 3.05&times;.<br><br>",
+                  "<b>All localizations</b> sample the same region more densely, so the outline is smoother. But the number of localizations in a trace is how long that fluorophore stayed on before going dark, which is photophysics, and it feeds the gap-filling sweep. On the membrane-protein set this inflated the area enough to loosen the randomisation-calibrated eps, and the largest-focus size stopped separating the two conditions (10&ndash;24 against 19&ndash;52 units, where centroids gave 6&ndash;12 against 19&ndash;51).")),
                 numericInput("dens_grid_h", "Grid cell (nm)", value = 100, min = 10, step = 10),
                 conditionalPanel(
                   condition = "input.dens_support_mode == 'kde'",
@@ -1827,7 +1836,7 @@ smlm_ui <- fluidPage(
           h4("Ripley's L(r)"),
           .method_box("green",
             HTML("Ripley's K-function (<b>Ripley 1977</b>) with the variance-stabilising L-transform (<b>Besag 1977</b>). For <i>n</i> points in a window of area <i>A</i>, the (uncorrected) estimator is<br><span style=\"font-family:serif; margin-left:6px;\">K̂(r) = (A / [n(n−1)]) · Σ<sub>i≠j</sub> 𝟙(d<sub>ij</sub> ≤ r)</span><br>i.e. area × (fraction of the n(n−1) ordered point pairs closer than r). The L-transform then linearises it: <span style=\"font-family:serif;\">L(r) = √(K(r)/π)</span> in 2D, <span style=\"font-family:serif;\">L(r) = (3·K(r)/4π)<sup>1/3</sup></span> in 3D. Plotted as L(r)&nbsp;−&nbsp;r: 0 under complete spatial randomness, &gt;0 clustering, &lt;0 dispersion. The SMLM lineage of this statistic runs through PC-PALM (<b>Sengupta et&nbsp;al. 2011</b>; <b>Veatch et&nbsp;al. 2012</b>)."),
-            HTML("Runs on <b>de-blinked units</b> (TID or primary-cluster centroids) so that repeated appearances of one molecule do not manufacture a short-r clustering peak. Points are randomly subsampled to ≤2000 per file (pairwise distances are O(n²)); the window is the axis-aligned bounding box. The optional <b>Monte-Carlo CSR envelope</b> simulates n random points in the <i>identical frozen window</i>, so the band and the observed curve carry the same edge bias and it cancels."),
+            HTML("Runs on <b>de-blinked units</b> (trace-ID or de-blinked molecule centroids) so that repeated appearances of one molecule do not manufacture a short-r clustering peak. Points are randomly subsampled to ≤2000 per file (pairwise distances are O(n²)); the window is the axis-aligned bounding box. The optional <b>Monte-Carlo CSR envelope</b> simulates n random points in the <i>identical frozen window</i>, so the band and the observed curve carry the same edge bias and it cancels."),
             HTML("There is <b>no analytic edge correction</b>. Near the top of the r range, points close to the box lose neighbours and L−r bends downward. Read significance as the observed curve leaving the envelope. Without the envelope, read shape and peak position; the magnitude is unreliable, since the flat zero line is the uncorrected theoretical CSR. The dominant biological confound is labelling: incomplete labelling flattens real clustering, multivalent labels fake it. In group mode per-file curves are averaged, never pooled coordinates, since pooling would mix windows and invent structure.")),
           helpText("L(r) − r = 0 under complete spatial randomness; > 0 is clustering, < 0 is regularity."),
           .detail("Without an envelope, read deviations relative to the point density and window ",
@@ -2032,11 +2041,12 @@ smlm_ui <- fluidPage(
           helpText("Randomised patterns drawn per candidate eps. 15 places the crossing between two grid steps."),
           tags$hr(style = "margin:10px 0;"),
           tags$div(style = "font-weight:600; color:#2c3e50; font-size:0.92em;", "Footprint"),
-          numericInput("hot_grid_h", "Grid pitch (nm)", value = 25, min = 5, step = 5),
-          helpText("Bin size for the footprint. A finer pitch gives a cleaner outline and barely moves the area."),
-          numericInput("hot_close_nm", "Gap fill (nm, 0 = auto)", value = 0, min = 0, step = 50),
-          helpText("Radius that bridges the gaps between units so the footprint follows the cell. Auto resolves one radius shared by every loaded file."),
-          .detail(HTML("The gap-fill radius is what sets the area, and the area sets the density every statistic here divides by. It should be a few times the typical spacing between units and well below the size of any dark region you want kept out of the cell. It is shared across files on purpose: a per-file radius would put each cell on its own density scale, which is the comparison this panel exists to make.<br><br>This panel always uses the footprint, whatever the switch at the top of the tab says, because a bounding box would not merely weaken these numbers, it would change them: a cell imaged half in frame reads at half its true density and every enhancement doubles.")),
+          tags$div(style = "font-size:0.85em; color:#445; line-height:1.5; margin-bottom:8px;",
+            "The estimator mode, grid pitch and gap-fill radius come from ",
+            tags$b("Density & area normalization"), " at the top of this tab, so this panel, ",
+            "Ripley's L and g(r) all measure the same cell area. The gap-fill radius is resolved ",
+            "once and shared across every loaded file."),
+          .detail(HTML("The gap-fill radius is what sets the area, and the area sets the density every statistic here divides by. It should be a few times the typical spacing between units and well below the size of any dark region you want kept out of the cell. It is shared across files on purpose: a per-file radius would put each cell on its own density scale, which is the comparison this panel exists to make.<br><br>This panel always uses the footprint, whatever the footprint switch at the top of the tab says, because a bounding box would not merely weaken these numbers, it would change them: a cell imaged half in frame reads at half its true density and every enhancement doubles. Setting the estimator mode to <b>bbox</b> or <b>hull</b> has the same effect, since neither produces the cell mask that the calibrated eps and the dispersion index need.")),
           selectInput("hot_palette", "Map colour scale",
                       choices = NUMERIC_PALETTES,
                       selected = "Turbo"),
@@ -2120,7 +2130,7 @@ smlm_ui <- fluidPage(
       tags$hr(),
 
       # -- SECTION: Median-Cluster Analyses --
-      fluidRow(column(12, tags$h3('Median-Cluster Analyses',
+      fluidRow(column(12, tags$h3('Median Cluster Analyses',
         style = "border-bottom:2px solid #d7dde3; padding-bottom:4px; margin-top:18px; color:#2c3e50;"))),
 
       # -- Traces per Cluster ------------------------------------------------
@@ -2137,8 +2147,8 @@ smlm_ui <- fluidPage(
                   "molecule count."),
           radioButtons("tid_count_unit", "Count within each Median Cluster",
             choices = c(
-              "Trace IDs (blinking events)"          = "tid",
-              "De-blinked molecules (primary DBSCAN)" = "pcid"
+              "Trace IDs"          = "tid",
+              "De-blinked molecules" = "pcid"
             ),
             selected = "tid"
           ),

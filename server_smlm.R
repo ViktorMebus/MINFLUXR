@@ -46,16 +46,20 @@
 ##   localizations -> tid -> cluster (primary) -> cluster2 (secondary)
 ##
 ##     tid ....... one continuous blink of one fluorophore
-##     cluster ... primary DBSCAN, SMALL eps (~10-30 nm). Job: DE-BLINKING -
-##                 collapse repeat appearances of one molecule into one object.
-##     cluster2 .. secondary clustering over the medians above, LARGE eps
-##                 (~100-300 nm). Job: STRUCTURE - group molecules into the
-##                 biological object they form.
+##     cluster ... DE-BLINKING. Merges repeat appearances of one molecule into
+##                 one object, at a threshold of a few times the measured trace
+##                 spread (~10-30 nm). Complete-linkage on trace centroids, or
+##                 a majority vote of the localizations - NOT DBSCAN. It merges
+##                 and never removes, so this column has NO id 0.
+##     cluster2 .. MEDIAN CLUSTERING over the medians above, LARGE eps
+##                 (~100-300 nm), by DBSCAN / HDBSCAN / OPTICS. Job: STRUCTURE -
+##                 group molecules into the biological object they form.
 ##
 ##   WHY IT EXISTS: a fluorophore blinks many times, and an antibody carries
 ##   several dyes 10-40 nm from its target. Statistics run on RAW localizations
-##   therefore measure the LABEL, not the biology. Cluster ID 0 ALWAYS means
-##   noise/unassigned and must be excluded before counting.
+##   therefore measure the LABEL, not the biology. In `cluster2`, id 0 means
+##   noise/unassigned and must be excluded before counting; `cluster` has no 0
+##   because de-blinking assigns every trace (see deblink_assign_singletons).
 ##   (Implementation: apply_clustering_pipeline() in helpers_smlm.R.)
 ##
 ## ── 3. MAP OF THE ANALYSES (grep the name; line numbers drift) ───────────────
@@ -1162,6 +1166,7 @@ smlm_server <- function(input, output, session) {
         use_pooled_dcr       = isTRUE(input$use_pooled_dcr),
         spatial_edge_correct = isTRUE(input$spatial_edge_correct),
         spatial_use_support  = isTRUE(input$spatial_use_support),
+        dens_support_from    = input$dens_support_from,
         dens_norm_enable     = isTRUE(input$dens_norm_enable),
         dens_thin_enable     = isTRUE(input$dens_thin_enable)
       ),
@@ -1181,8 +1186,6 @@ smlm_server <- function(input, output, session) {
         hot_minpts      = input$hot_minpts,
         hot_target_frac = input$hot_target_frac,
         hot_nsim        = input$hot_nsim,
-        hot_grid_h      = input$hot_grid_h,
-        hot_close_nm    = input$hot_close_nm,
         hot_palette     = input$hot_palette,
         hot_show_foci   = isTRUE(input$hot_show_foci),
         hot_box_top     = input$hot_box_top,
@@ -2079,7 +2082,7 @@ smlm_server <- function(input, output, session) {
 
   # ── kNN-distance diagnostic for tuning cluster2 eps ──
   # Plots, for the same centroid set cluster2 operates on (trace medians, or
-  # primary-cluster medians when primary clustering is on), the sorted distance
+  # de-blinked molecule medians when de-blinking is on), the sorted distance
   # to the (MinPts-1)-th neighbour. The "elbow" separates dense structures from
   # scattered background = a sensible eps. Red dashed line = current eps2.
   output$cluster2_knn_plot <- renderPlot({
@@ -2087,8 +2090,8 @@ smlm_server <- function(input, output, session) {
     df <- plottable_data()
     req(!is.null(df), nrow(df) > 0)
 
-    use_primary <- isTRUE(input$enable_clustering) && "cluster" %in% names(df)
-    meds <- if (use_primary) {
+    use_deblinked <- isTRUE(input$enable_clustering) && "cluster" %in% names(df)
+    meds <- if (use_deblinked) {
       df %>%
         dplyr::filter(!is.na(.data$cluster) & .data$cluster != 0) %>%
         dplyr::group_by(.data$cluster) %>%
@@ -2673,12 +2676,14 @@ smlm_server <- function(input, output, session) {
       for (nm in c("use_pooled_dcr", "spatial_edge_correct", "spatial_use_support",
                    "dens_norm_enable", "dens_thin_enable"))
         if (!is.null(an[[nm]])) updateCheckboxInput(session, nm, value = isTRUE(an[[nm]]))
+      # Which points draw the observation window changes every area on the tab.
+      if (!is.null(an$dens_support_from))
+        updateRadioButtons(session, "dens_support_from", selected = an$dens_support_from)
 
       # ── Restore Local density & hotspots ──────────────────────────────
       hs <- raw$hotspot %||% list()
       for (nm in c("hot_k", "hot_enh_thresh", "hot_quadrat", "hot_minpts",
-                   "hot_target_frac", "hot_nsim", "hot_grid_h", "hot_close_nm",
-                   "hot_box_top")) {
+                   "hot_target_frac", "hot_nsim", "hot_box_top")) {
         v <- suppressWarnings(as.numeric(hs[[nm]]))
         if (length(v) == 1 && is.finite(v)) updateNumericInput(session, nm, value = v)
       }
@@ -4356,7 +4361,7 @@ smlm_server <- function(input, output, session) {
       shinyWidgets::updateNumericRangeInput(session, "hist_range", value = rng)
     }
   })
-  # Use trace medians (or cluster medians when primary clustering is enabled),
+  # Use trace medians (or de-blinked molecule medians when de-blinking is on),
   # unless the user explicitly requests raw points.
   heatmap_input_df <- function(df, use_raw = FALSE, clustering = FALSE) {
     if (isTRUE(use_raw)) {
@@ -5690,7 +5695,7 @@ smlm_server <- function(input, output, session) {
   #                            crop affects the analyses too and behaves
   #                            identically in 2D and 3D (rather than relying on
   #                            a browser round-trip that only changes the view)
-  #   3. CLUSTERING .......... primary (de-blinking) and/or secondary
+  #   3. CLUSTERING .......... de-blinking and/or median clustering
   #                            (structure) via apply_clustering_pipeline().
   #                            Multiplex datasets are clustered PER CHANNEL.
   #   4. colour columns ...... per-point colour for the chosen colour mode
@@ -5702,7 +5707,7 @@ smlm_server <- function(input, output, session) {
   #   you must press Plot before the numbers update.
   #
   # RETURNS the filtered data.frame plus (when enabled):
-  #   cluster ..... primary cluster ID   (0 = noise, EXCLUDE before counting)
+  #   cluster ..... de-blinked molecule ID (no 0: de-blinking assigns every trace)
   #   cluster2 .... secondary/structure ID (0 = noise)
   #   colour columns, and the multiplex channel/label columns when active
   # ==========================================================================
@@ -6807,7 +6812,7 @@ smlm_server <- function(input, output, session) {
       }
 
       # 3) build representative point set:
-      #    - if primary clustering enabled -> cluster medians
+      #    - if de-blinking enabled -> de-blinked molecule medians
       #    - else -> tid medians
       if (isTRUE(input$enable_clustering) && "cluster" %in% names(df_surface)) {
         df_surface_pts <- df_surface %>%
@@ -7463,7 +7468,7 @@ smlm_server <- function(input, output, session) {
       for (cluster_data in clusters) {
         # medians for distance computation
         if (isTRUE(input$enable_clustering)) {
-          # Use cluster medians (primary DBSCAN)
+          # Use de-blinked molecule medians
           med <- cluster_data %>%
             dplyr::filter(!is.na(cluster) & cluster != 0) %>%
             dplyr::group_by(cluster) %>%
@@ -7750,9 +7755,24 @@ smlm_server <- function(input, output, session) {
     }
   }, ignoreNULL = FALSE)
 
+  ## GOAL: read a numericInput as a whole number inside a range, and survive the
+  ## user emptying the box.
+  ##
+  ## WHY `%||%` IS NOT ENOUGH. An emptied numericInput does not send NULL, it sends
+  ## **NA**, and `%||%` only substitutes for NULL. NA then survives as.integer(),
+  ## and min()/max() propagate it rather than clamping it, so
+  ## `max(1L, min(6L, NA))` is NA and the loop below died on `seq_len(NA)` the
+  ## moment the group-count box was cleared. Anything that SIZES something from a
+  ## user-typed number needs this, not `%||%`.
+  .int_input <- function(x, default, lo = -Inf, hi = Inf) {
+    v <- suppressWarnings(as.integer(x))
+    if (!length(v) || is.na(v[1])) v <- as.integer(default)
+    as.integer(max(lo, min(hi, v[1])))
+  }
+
   # file -> group-name map (only the first n_groups slots, only assigned files)
   file_group_map <- reactive({
-    ng <- max(1L, min(6L, as.integer(input$n_groups %||% 6L)))
+    ng <- .int_input(input$n_groups, 6L, 1L, 6L)
     m <- character(0)
     for (i in seq_len(ng)) {
       files <- input[[paste0("grp_files_", i)]]
@@ -7767,7 +7787,7 @@ smlm_server <- function(input, output, session) {
   # group-name -> colour (from the per-group colour pickers)
   .GROUP_DEFAULT_COLORS <- c("#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf")
   group_color_map <- reactive({
-    ng <- max(1L, min(6L, as.integer(input$n_groups %||% 6L)))
+    ng <- .int_input(input$n_groups, 6L, 1L, 6L)
     cols <- character(0)
     for (i in seq_len(ng)) {
       nm <- input[[paste0("grp_name_", i)]]
@@ -7986,7 +8006,7 @@ smlm_server <- function(input, output, session) {
         r <- tryCatch(compute_unit_density(df, unit = unit, use_3d = use_3d,
                                           support_mode = smode, h_nm = h_nm,
                                           close_nm = close_n, k = kk,
-                                          support_from = "locs",
+                                          support_from = input$dens_support_from %||% "units",
                                           bw_nm = kde_bw, frac = kde_fr),
                       error = function(e) NULL)
         if (is.null(r)) { skipped <- c(skipped, fname); next }
@@ -8583,6 +8603,7 @@ smlm_server <- function(input, output, session) {
     if (!isTRUE(input$spatial_use_support) && !isTRUE(force))
       return(list(ok = TRUE, close_nm = NULL))
     h    <- max(10, as.numeric(h_nm %||% input$dens_grid_h %||% 100))
+    smode <- input$dens_support_mode %||% "grid"
     keep <- if (use_3d) c("x", "y", "z") else c("x", "y")
 
     prep <- function(df) {
@@ -8632,8 +8653,42 @@ smlm_server <- function(input, output, session) {
                     max(per, na.rm = TRUE) / max(min(per[is.finite(per)]), 1e-9) else 1)
   }
 
-  spatial_window_of <- function(df, use_3d = FALSE, close_nm = NULL) {
-    if (!isTRUE(input$spatial_edge_correct) && !isTRUE(input$spatial_use_support))
+  ## ONE WINDOW PER FILE, FOR EVERY PANEL THAT DIVIDES BY AN AREA.
+  ## The estimator settings all come from "Density & area normalization" at the top
+  ## of the tab, so Ripley's L, g(r) and Local Density & Hotspots measure the same
+  ## cell the same way. Three panels resolving three different areas for one cell
+  ## cannot be reconciled afterwards: K(r) scales with the window area and every
+  ## hotspot statistic is per unit of it, so the numbers would silently disagree.
+  ##
+  ## `force` is for the hotspot panel, which needs a footprint UNCONDITIONALLY.
+  ## Elsewhere the footprint is an opt-in that improves an estimate; there it is
+  ## the definition of the quantity, since a bounding box makes a half-framed cell
+  ## read at half its density and doubles every enhancement.
+  ## WHICH POINTS DRAW THE OUTLINE is `dens_support_from`, shared with the density
+  ## panel so all four windows match. Neither choice is free of a bias:
+  ##
+  ##   "units"  (default) - trace / molecule centroids. What the analyses actually
+  ##            count, so the outline is the region those units occupy. Its bias is
+  ##            that a sparsely labelled cell yields a raggeder, smaller footprint,
+  ##            so the area carries some of the unit count (measured on synthetic
+  ##            pairs: 5.01e6 vs 3.82e6 nm2 for identical geometry at a 4x labelling
+  ##            difference, turning a 4.0x density ratio into 3.05x).
+  ##
+  ##   "locs" - every localization. A denser sample of the same region, so a
+  ##            smoother outline, but trace LENGTH is photophysics (how long one
+  ##            fluorophore stayed on), and it enters the closing sweep. Measured on
+  ##            the membrane-protein set: the localization outline inflated the area enough to
+  ##            loosen the CSR-calibrated eps, and the largest-focus size went from
+  ##            cleanly separating the conditions (6-12 against 19-51 units) to
+  ##            overlapping (10-24 against 19-52), by sweeping diffuse background
+  ##            into the control's foci.
+  ##
+  ## Default is "units": hotspots are hotspots OF CENTROIDS, and the failure above
+  ## is a false negative on the headline metric, which is worse than the density
+  ## ratio compression.
+  spatial_window_of <- function(df, use_3d = FALSE, close_nm = NULL, force = FALSE) {
+    if (!isTRUE(input$spatial_edge_correct) && !isTRUE(input$spatial_use_support) &&
+        !isTRUE(force))
       return(NULL)
     keep <- if (use_3d) c("x", "y", "z") else c("x", "y")
     if (is.null(df) || !nrow(df) || !all(keep %in% names(df))) return(NULL)
@@ -8642,8 +8697,9 @@ smlm_server <- function(input, output, session) {
     sp <- sp[stats::complete.cases(sp), , drop = FALSE]
     if (nrow(sp) < 3L) return(NULL)
     h <- max(10, as.numeric(input$dens_grid_h %||% 100))
+    smode <- input$dens_support_mode %||% "grid"
 
-    if (!isTRUE(input$spatial_use_support))
+    if (!isTRUE(input$spatial_use_support) && !isTRUE(force))
       return(bbox_support(sp, use_3d = use_3d, h_nm = h))
 
     # Shared radius when the caller resolved one for the set; the per-file plateau
@@ -8653,8 +8709,14 @@ smlm_server <- function(input, output, session) {
       p  <- plateau_close_nm(sw)
       if (is.finite(p)) p else max(0, as.numeric(input$dens_close_nm %||% 200))
     }, error = function(e) max(0, as.numeric(input$dens_close_nm %||% 200)))
-    fp <- tryCatch(estimate_support(sp, use_3d = use_3d, mode = "grid", h_nm = h,
-                                   close_nm = cn, return_mask = TRUE),
+    # The estimator mode is the density block's, not a hard-coded "grid". `hull`
+    # and `bbox` return no mask, and the randomisation-based callers (the CSR
+    # envelopes, the calibrated eps) cannot work without one, so those two fall
+    # back to the bounding box here rather than half-working downstream.
+    fp <- tryCatch(estimate_support(sp, use_3d = use_3d, mode = smode, h_nm = h,
+                                   close_nm = cn, return_mask = TRUE,
+                                   bw_nm = max(10, as.numeric(input$dens_kde_bw %||% 150)),
+                                   frac  = min(1, max(0.5, as.numeric(input$dens_kde_frac %||% 0.99)))),
                    error = function(e) NULL)
     if (is.null(fp) || is.null(fp$mask)) return(bbox_support(sp, use_3d = use_3d, h_nm = h))
 
@@ -8681,8 +8743,9 @@ smlm_server <- function(input, output, session) {
   spatial_window_log <- reactiveVal(NULL)
   # The radius the current run resolved for the whole set, shown once in the readout.
   spatial_common_close <- reactiveVal(NULL)
-  spatial_support_of <- function(df, use_3d = FALSE, tag = NULL, close_nm = NULL) {
-    w <- spatial_window_of(df, use_3d, close_nm = close_nm)
+  spatial_support_of <- function(df, use_3d = FALSE, tag = NULL, close_nm = NULL,
+                                 force = FALSE) {
+    w <- spatial_window_of(df, use_3d, close_nm = close_nm, force = force)
     if (!is.null(w) && !is.null(tag)) {
       row <- data.frame(
         dataset      = tag,
@@ -9410,7 +9473,7 @@ smlm_server <- function(input, output, session) {
 
         for (pt in parts) {
           sub <- pt$df %>% dplyr::filter(!is.na(cluster2) & cluster2 > 0L)
-          # When counting primary clusters, ignore primary-noise points (cluster 0).
+          # Legacy guard: de-blinking assigns every trace, so cluster 0 should not occur.
           if (count_col == "cluster") sub <- sub %>% dplyr::filter(!is.na(cluster) & cluster > 0L)
           if (!nrow(sub)) next
           cnt <- sub %>%
@@ -11150,8 +11213,8 @@ smlm_server <- function(input, output, session) {
   )
 
   ## ── Within-Cluster2 NN vs Cluster Size ────────────────────────────────────
-  # One row per Cluster2: size = # member units (trace IDs, or primary clusters
-  # if primary clustering is on); nn_median = median 1-NN distance among the
+  # One row per Cluster2: size = # member units (trace IDs, or de-blinked molecules
+  # if de-blinking is on); nn_median = median 1-NN distance among the
   # member centroids. Tests whether spacing is constant with size or "balloons".
   size_nn_results <- reactiveVal(NULL)
   size_nn_params  <- reactiveVal(NULL)   # compute params, frozen at Run
@@ -12004,7 +12067,10 @@ smlm_server <- function(input, output, session) {
       # Support window (opt-in): the observed curve and the envelope MUST get the
       # same support, or the band no longer references the same geometry. Keyed on
       # win_tag so channels of one file share a single cached support.
-      sup  <- spatial_support_of(wdf, use_3d, tag = win_tag %||% tag, close_nm = close_nm)
+      # Same shared choice of outline points as the hotspot panel, so one cell
+      # gets one area whichever panel measured it.
+      sup  <- spatial_support_of(spatial_outline_pts(wdf, wpts), use_3d,
+                                 tag = win_tag %||% tag, close_nm = close_nm)
       # One set-covariance build per file, reused by the curve AND every simulation.
       if (!is.null(sup) && isTRUE(input$spatial_edge_correct))
         sup <- attach_gamma_cache(sup, r_max = sqrt(sum((win[2, ] - win[1, ])^2)),
@@ -12065,7 +12131,11 @@ smlm_server <- function(input, output, session) {
     # One gap-fill radius for the whole set (see spatial_resolve_close()): a
     # per-file radius makes the windows - and therefore K, which scales with the
     # window area - incomparable between files. Never blocks.
-    cc <- spatial_gate_close(df_list, use_3d)
+    # The sweep runs on the same points the window will be drawn from.
+    cc <- spatial_gate_close(lapply(df_list, function(it) {
+      u <- tryCatch(get_pts_flat(it$df), error = function(e) NULL)
+      list(df = spatial_outline_pts(it$df, u), tag = it$tag)
+    }), use_3d)
     common_close <- cc$close_nm
 
     if (want_env && length(df_list) > env_file_cap) {
@@ -12397,7 +12467,10 @@ smlm_server <- function(input, output, session) {
       # (uncorrected) edge bias cancels between them.
       axes <- if (use_3d) c("x", "y", "z") else c("x", "y")
       win  <- apply(as.matrix(wpts[, axes, drop = FALSE]), 2, range)
-      sup  <- spatial_support_of(wdf, use_3d, tag = win_tag %||% tag, close_nm = close_nm)
+      # Same shared choice of outline points as the hotspot panel, so one cell
+      # gets one area whichever panel measured it.
+      sup  <- spatial_support_of(spatial_outline_pts(wdf, wpts), use_3d,
+                                 tag = win_tag %||% tag, close_nm = close_nm)
       if (!is.null(sup) && isTRUE(input$spatial_edge_correct))
         sup <- attach_gamma_cache(sup, r_max = sqrt(sum((win[2, ] - win[1, ])^2)),
                                   use_3d = use_3d)
@@ -12447,8 +12520,13 @@ smlm_server <- function(input, output, session) {
 
     df_list <- get_df_list()
 
-    # One gap-fill radius for the whole set (see spatial_resolve_close()).
-    cc <- spatial_gate_close(df_list, use_3d)
+    # One gap-fill radius for the whole set (see spatial_resolve_close()), swept on
+    # the same points the window will be drawn from.
+    cc <- spatial_gate_close(lapply(df_list, function(it) {
+      u <- tryCatch(unit_centroids(it$df, unit = unit, use_3d = use_3d),
+                    error = function(e) NULL)
+      list(df = spatial_outline_pts(it$df, u), tag = it$tag)
+    }), use_3d)
     common_close <- cc$close_nm
 
     if (want_env && length(df_list) > env_file_cap)
@@ -12933,6 +13011,16 @@ smlm_server <- function(input, output, session) {
             rmax_c, rmax_all)
   }
 
+  ## GOAL: pick the point set that draws the observation window, per the shared
+  ## `dens_support_from` setting. `locs` is the localization table, `units` the
+  ## one-point-per-trace/molecule centroids. See spatial_window_of() for the
+  ## measured trade-off; the analyses themselves always run on the units.
+  spatial_outline_pts <- function(locs_df, unit_pts) {
+    if (identical(input$dens_support_from %||% "units", "locs") &&
+        is.data.frame(locs_df) && nrow(locs_df)) return(locs_df)
+    if (is.data.frame(unit_pts) && nrow(unit_pts)) unit_pts else locs_df
+  }
+
   ## Look a name up in a named vector WITHOUT the `[[` trap. `v[["absent"]]` raises
   ## "subscript out of bounds" rather than returning NULL, so `%||%` never sees it
   ## and cannot supply the default - which is how an ungrouped file took the whole
@@ -12971,8 +13059,10 @@ smlm_server <- function(input, output, session) {
     minpts  <- max(2L, as.integer(input$hot_minpts %||% 5L))
     target  <- min(0.5, max(0.001, as.numeric(input$hot_target_frac %||% 0.05)))
     nsim    <- max(3L, as.integer(input$hot_nsim %||% 15L))
-    h_nm    <- max(10, as.numeric(input$hot_grid_h %||% 25))
-    close_in <- max(0, as.numeric(input$hot_close_nm %||% 0))
+    # The window is NOT this panel's to define. Pitch, closing radius and estimator
+    # mode all come from "Density & area normalization", so this panel measures the
+    # same cell area that Ripley's L and g(r) measure. See spatial_window_of().
+    h_nm    <- max(10, as.numeric(input$dens_grid_h %||% 100))
     needs_cluster <- unit == "cluster"
 
     store <- smlm_file_store()
@@ -12996,12 +13086,19 @@ smlm_server <- function(input, output, session) {
     # cell on its own density scale - which is precisely the comparison this panel
     # exists to make. Resolved on the UNIT positions (not the raw localizations),
     # because the units are what the density is measured on.
-    close_nm <- if (close_in > 0) close_in else {
-      cc <- spatial_gate_close(lapply(items, function(it)
-              list(df = it$pts, tag = it$tag)), use_3d,
-              force = TRUE, h_nm = h_nm)
-      if (!is.null(cc$close_nm) && is.finite(cc$close_nm)) cc$close_nm else 800
-    }
+    # THE FOOTPRINT MUST NOT BE BUILT FROM THE UNITS, so the sweep runs on every
+    # LOCALIZATION, exactly as the curve panels and the density panel do. The
+    # support is a property of where signal was detected; estimating it from unit
+    # centroids makes the area depend on the unit count, which is the very thing
+    # being normalised out. Measured (see compute_unit_density): two synthetic
+    # cells with identical geometry and a 4x labelling difference gave
+    # centroid-based supports of 5.01e6 against 3.82e6 nm^2, turning a true 4.0x
+    # density ratio into 3.05x.
+    cc <- spatial_gate_close(lapply(items, function(it)
+            list(df = spatial_outline_pts(it$df, it$pts), tag = it$tag)),
+            use_3d, force = TRUE, h_nm = h_nm)
+    close_nm <- if (!is.null(cc$close_nm) && is.finite(cc$close_nm)) cc$close_nm else
+      max(0, as.numeric(input$dens_close_nm %||% 200))
 
     # ---- 3. per file: footprint -> enhancement -> calibrated eps -> foci -------
     out <- withProgress(message = sprintf("Local density: %d file(s)...", length(items)),
@@ -13009,9 +13106,14 @@ smlm_server <- function(input, output, session) {
       lapply(seq_along(items), function(i) {
         it <- items[[i]]
         incProgress(1 / length(items), detail = it$tag)
-        sup <- tryCatch(estimate_support(it$pts, use_3d = use_3d, mode = "grid",
-                                         h_nm = h_nm, close_nm = close_nm,
-                                         return_mask = TRUE),
+        # The SAME call the curve panels make, on the SAME point set (all
+        # localizations - see the note on the radius above), so the window is
+        # logged once and the "these files were not measured the same way" check
+        # covers this panel too. The unit centroids are what the STATISTICS run
+        # on; they are not what defines the cell.
+        sup <- tryCatch(spatial_support_of(spatial_outline_pts(it$df, it$pts),
+                                           use_3d, tag = it$tag,
+                                           close_nm = close_nm, force = TRUE),
                         error = function(e) NULL)
         le <- compute_local_enhancement(it$pts, k = k, use_3d = use_3d, support = sup)
         if (is.null(le)) return(NULL)
@@ -13024,6 +13126,10 @@ smlm_server <- function(input, output, session) {
         row <- hotspot_summary_row(it$pts, support = sup, k = k, quadrat_nm = quad,
                                    enh_thresh = thresh, eps_cal = ec, minPts = minpts,
                                    use_3d = use_3d, dataset = it$tag)
+        # bbox_support() returns an all-TRUE mask and a finite area, so a bounding
+        # box does not fail here - it silently measures the imaged FRAME instead of
+        # the cell. Record the mode so the run can say so.
+        row$window_mode <- sup$mode %||% NA_character_
         list(tag = it$tag, pts = it$pts, support = sup, enh = le$enh, le = le,
              eps_cal = ec, foci = ft, row = row)
       })
@@ -13043,22 +13149,29 @@ smlm_server <- function(input, output, session) {
                         minPts = input$hot_minpts,
                         `false-cluster target` = input$hot_target_frac,
                         `CSR draws` = input$hot_nsim,
-                        `grid pitch (nm)` = input$hot_grid_h,
-                        `gap fill (nm)` = input$hot_close_nm,
                         `3-D` = use_3d))
 
     # The map file picker only ever offers files that actually produced a result.
+    spatial_report_windows(vapply(items, function(it) as.character(it$tag),
+                                  character(1)))
+
     updateSelectInput(session, "hot_map_file", choices = names(out),
                       selected = if (!is.null(input$hot_map_file) &&
                                      input$hot_map_file %in% names(out))
                         input$hot_map_file else names(out)[1])
 
-    # Any file that fell back to the bounding box is on a different density scale
-    # from the rest, so the comparison is broken for that file, not merely weaker.
-    fb <- rows$dataset[rows$used_bbox %in% TRUE]
-    if (length(fb))
+    # A bounding-box window makes every number here a per-FRAME density rather than
+    # a per-CELL one, which is a different quantity, not a noisier version of the
+    # same one. It happens two ways: the estimator mode is set to bbox or hull (no
+    # mask), or the footprint guard rejected the window for that file.
+    fb <- rows$dataset[grepl("bbox", rows$window_mode %||% "", fixed = TRUE)]
+    if (length(fb) == nrow(rows))
       showNotification(HTML(sprintf(
-        "<b>No footprint for %s.</b> Those files fell back to the bounding box, so their density is per unit of imaged FRAME rather than per unit of cell, and their enhancement values are not on the same scale as the rest. Raise the gap-fill radius or check the map.",
+        "<b>Every window is a bounding box</b>, so these are densities per unit of imaged frame, not per unit of cell. Set the estimator mode to <b>grid</b> or <b>kde</b> under Density &amp; area normalization; <b>bbox</b> and <b>hull</b> produce no cell mask, which the calibrated eps and the dispersion index both need. (%s)",
+        rows$window_mode[1])), type = "warning", duration = NULL)
+    else if (length(fb))
+      showNotification(HTML(sprintf(
+        "<b>No footprint for %s.</b> Those files fell back to the bounding box, so their density is per unit of imaged FRAME rather than per unit of cell, and they are not on the same scale as the rest. Raise the gap-fill radius or check the support map.",
         paste(utils::head(fb, 4), collapse = ", "))), type = "warning", duration = NULL)
   })
 
@@ -13066,7 +13179,6 @@ smlm_server <- function(input, output, session) {
     list(unit = input$hot_unit, k = input$hot_k, `quadrat (nm)` = input$hot_quadrat,
          `enhancement threshold` = input$hot_enh_thresh, minPts = input$hot_minpts,
          `false-cluster target` = input$hot_target_frac, `CSR draws` = input$hot_nsim,
-         `grid pitch (nm)` = input$hot_grid_h, `gap fill (nm)` = input$hot_close_nm,
          `3-D` = isTRUE(input$hot_use_3d)),
     hotspot_params()))
   # hot_curve_mode and hot_metric are deliberately NOT in the stale badge: they
@@ -13081,9 +13193,10 @@ smlm_server <- function(input, output, session) {
     floors <- sum(vapply(det, function(o) isTRUE(o$eps_cal$hit_floor), logical(1)))
     tags$div(style = paste0("margin:4px 0 8px; padding:6px 11px; border-left:4px solid #cfe0ee;",
                             "background:#f6f9fc; font-size:0.86em; color:#445;"),
-      sprintf("%d file(s), measured on %s. Gap fill %.0f nm, grid pitch %.0f nm. Footprint %.1f-%.1f um2, density %.1f-%.1f per um2.",
+      sprintf("%d file(s), measured on %s. Window: %s, gap fill %.0f nm, pitch %.0f nm (from Density & area normalization). Footprint %.1f-%.1f um2, density %.1f-%.1f per um2.",
               nrow(rows), hotspot_unit_label(hotspot_unit()),
-              rows$close_nm[1], max(10, as.numeric(input$hot_grid_h %||% 25)),
+              input$dens_support_mode %||% "grid",
+              rows$close_nm[1], max(10, as.numeric(input$dens_grid_h %||% 100)),
               min(rows$area_um2), max(rows$area_um2),
               min(rows$density), max(rows$density)),
       # eps is reported separately because a file whose calibration failed leaves

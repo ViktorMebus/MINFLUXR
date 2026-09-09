@@ -575,7 +575,7 @@ accurate only to the grid resolution. Use the Ripley/PCF panels for density stat
   half-normal linker (mean ≈ `link_nm`) and scattered by `dye_spread_nm`, each blinking into
   ~(1+`blink_lambda`) traces. Expected traces per molecule: **m_tid = n_fluor · eff · (1+blink_lambda)**;
   detection efficiency **η = eff** (single dye) or **η = 1 − e^{−n_fluor·eff}** (multivalent).
-- **Inverse:** build candidate units (trace or primary-cluster medians, ≥`minpts` locs), then **merge**
+- **Inverse:** build candidate units (trace or de-blinked molecule medians, ≥`minpts` locs), then **merge**
   unit centroids within a **complex radius** `complex_r` (auto = max(footprint, 2.5·dye_spread)) via
   `dbscan(eps = complex_r, minPts = 1)` so several dyes/blinks of one molecule collapse to **one candidate
   GT position** (this produces the contribution fan-out lines). Optional **stoichiometry-guided merge**
@@ -629,7 +629,7 @@ each population to its own total, separating a difference in *shape* (timing) fr
   additionally upward-biased by single outlying members.
 
 ### I-A.10 Traces per cluster (blinking-event count) — [Part II §6.1a, 🟡 AMBER]
-Counts **distinct TIDs** per primary or median cluster. Counting traces rather than localizations already
+Counts **distinct TIDs** per de-blinked molecule or median cluster. Counting traces rather than localizations already
 collapses the many localizations MINFLUX collects within one trace, so the number is a *blinking-event*
 count. It is **not stoichiometry**: one fluorophore re-enters the on-state repeatedly and is re-assigned a
 new TID each time, and a multivalent antibody carries several dyes — so the count over-estimates molecules

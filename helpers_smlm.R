@@ -2536,9 +2536,9 @@ apply_meta_filters_batch <- function(df, input) {
 
 # Compute k-NN distances between unit centroids.
 # unit:         "tid"           - one centroid per TID (global)
-#               "pcid"          - one centroid per primary cluster (global)
+#               "pcid"          - one centroid per de-blinked molecule (global)
 #               "cluster2_tid"  - TID centroids within each cluster2
-#               "cluster2_pcid" - primary cluster centroids within each cluster2
+#               "cluster2_pcid" - de-blinked molecule centroids within each cluster2
 # group_filter: NA (all), 1L, or 2L to restrict to an analysis_group
 # Returns a data.frame with column `distance`.
 compute_batch_nn <- function(df, unit = "tid", k = 1L, group_filter = NA_integer_,
@@ -6376,7 +6376,7 @@ build_curvature_table <- function(df) {
 
 ## ── Secondary (cluster2) grouping engine ──────────────────────────────────────
 # Runs the secondary grouping on a matrix of centroid coordinates (trace or
-# primary-cluster medians) and returns an integer vector of cluster ids using
+# de-blinked molecule medians) and returns an integer vector of cluster ids using
 # the dbscan convention: 0 = noise/unclustered, 1..k = clusters. This keeps the
 # output identical in shape regardless of method, so every downstream consumer
 # (cluster2 columns, isosurfaces, fitting pipelines, NN, exports) is unaffected.
@@ -6622,7 +6622,7 @@ deblink_axis_weights <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, use_z 
 }
 
 # GOAL: apply per-axis de-blink weights to an (x,y,z) coordinate matrix.
-# Kept as one function so every primary-DBSCAN call site transforms identically
+# Kept as one function so every de-blink call site transforms identically
 # - the suggestion and the clustering must share a metric or eps is meaningless.
 apply_deblink_weights <- function(pts, w) {
   if (is.null(w)) return(pts)
@@ -7377,7 +7377,7 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.3, rho = 3.0, mutual = TRU
 # deblink_minpts() - minPts IS THE TRACE-LENGTH FILTER, NOT A FREE KNOB
 # =============================================================================
 # GOAL
-#   Derive the primary DBSCAN minPts from the Trace ID Length filter's lower
+#   Derive this diagnostic's minPts from the Trace ID Length filter's lower
 #   bound instead of exposing it as a separate control.
 #
 # WHY IT IS NOT A FREE PARAMETER
@@ -7477,7 +7477,10 @@ deblink_assign_singletons <- function(df) {
 #
 # ARGUMENTS
 #   df       : filtered data.frame (x, y, z, tid)
-#   minpts   : the minPts the real primary DBSCAN uses
+#   minpts   : accepted for signature compatibility and currently UNUSED. The
+#              sweep counts connected components at each radius (minPts = 1), so
+#              there is no density criterion to match. De-blinking itself has no
+#              minPts either: it merges on a distance threshold.
 #   eps_seq  : radii to try (nm)
 #   w        : optional per-axis de-blink weights, so the curve is measured in
 #              the same metric the clustering will use
@@ -7553,28 +7556,42 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 #   can never disagree - that duplication is the reason this function exists.
 #
 # THE TWO TIERS AND WHY THERE ARE TWO
-#   PRIMARY clustering (`cluster`) - DE-BLINKING.
-#     Runs DBSCAN over RAW localizations with a SMALL eps (~10-30 nm, i.e. a few
-#     times the localization precision). A single fluorophore blinking on and off
-#     produces many localizations within a few nm of each other; this collapses
-#     them into one object. Without it, one molecule is counted many times and
-#     every downstream count and spatial statistic is inflated.
+#   DE-BLINKING (`cluster`).
+#     Merges TRACE CENTROIDS - one point per trace, not the raw localizations -
+#     when they sit within a threshold of a few times the MEASURED TRACE SPREAD
+#     (~10-30 nm). A single fluorophore blinking on and off produces several
+#     traces in the same place; this collapses them into one object. Without it,
+#     one molecule is counted many times and every downstream count and spatial
+#     statistic is inflated.
 #
-#   SECONDARY / "median" clustering (`cluster2`) - STRUCTURE.
+#     ⚠ THIS IS NOT DBSCAN, and it has not been for some time. The two criteria
+#     are complete-linkage on the centroids (`deblink_merge_centroids`, the
+#     default) and a majority vote of each trace's localizations
+#     (`deblink_merge_majority_vote`). Neither has a minPts and neither has a
+#     density criterion, so neither can emit noise: every trace comes out with
+#     an id and `cluster` has no 0. The single-linkage option calls
+#     `dbscan::dbscan(minPts = 1)`, but that is exactly single-linkage connected
+#     components at the threshold, used as a components engine rather than as
+#     density clustering. Older comments called this stage "primary DBSCAN";
+#     they were wrong and have been corrected. The input VALUES "primary" and
+#     "pcid" survive in saved settings and still mean the de-blinked level.
+#
+#   MEDIAN CLUSTERING (`cluster2`) - STRUCTURE.
 #     Runs over the MEDIAN position of each unit from the level above, with a
 #     LARGE eps (~100-300 nm). Its job is biological: group molecules into the
-#     structure they form (a filament, a ring, a complex).
+#     structure they form (a filament, a ring, a complex). THIS is where DBSCAN
+#     actually runs, and it is the only density-clustering stage in the pipeline.
 #
-#   The two eps values are doing completely different jobs - primary eps is set
-#   by the MICROSCOPE (precision + label size), secondary eps by the BIOLOGY
-#   (how far apart molecules in one structure sit). Tuning them together is the
-#   most common source of confusion.
+#   The two distances are doing completely different jobs - the de-blink
+#   threshold is set by the MICROSCOPE (precision + label size), cluster2's eps
+#   by the BIOLOGY (how far apart molecules in one structure sit). Tuning them
+#   together is the most common source of confusion.
 #
-# WHY DBSCAN (and its alternatives here)
+# WHY DBSCAN FOR THE MEDIAN LEVEL (and its alternatives here)
 #   DBSCAN needs no pre-set cluster count, finds arbitrary shapes, and labels
 #   sparse points as noise (cluster 0) rather than forcing them into a group -
 #   all three matter for SMLM data. It does assume roughly uniform density, so
-#   the secondary level also offers:
+#   the median level also offers:
 #     HDBSCAN ... adaptive density; only a minimum cluster size, no eps
 #     OPTICS .... adaptive; keeps small structures a single eps would merge
 #
@@ -7650,7 +7667,7 @@ apply_clustering_pipeline <- function(df, input) {
     out
   }
 
-  # ── Primary clustering (de-blinking) ──────────────────────────────────────
+  # ── De-blinking ─────────────────────────────────────────────────────
   if (isTRUE(input$enable_clustering)) {
     df$cluster <- 0L
 
@@ -7875,10 +7892,10 @@ measure_label_multiplicity <- function(df, k_per_structure = 1L, minpts = 3L) {
 #
 # So the labeling multiplicity at the RAW-TID level is
 #     m_tid = n_fluor * (eff/100) * (1 + blink_lambda)      (TIDs per molecule)
-# and the PRIMARY-DBSCAN step (eps ~ dye_spread) collapses re-blinks and the
-# dyes of one molecule back into ~one cluster => ~one unit per molecule, turning
-# an unstable /m_tid calibration into a /~1 count. Primary clusters are therefore
-# the preferred unit when present ("auto").
+# and the DE-BLINKING step (merge threshold ~ dye_spread) collapses re-blinks and
+# the dyes of one molecule back into ~one object => ~one unit per molecule,
+# turning an unstable /m_tid calibration into a /~1 count. De-blinked molecules
+# are therefore the preferred unit when present ("auto").
 #
 # KEY LIMIT: the link_nm offset is COMMON-MODE within a molecule (all its
 # localizations share the one draw), so it never averages out - it is the
@@ -7889,10 +7906,12 @@ measure_label_multiplicity <- function(df, k_per_structure = 1L, minpts = 3L) {
 #   preset   a preset list from minflux_label_presets(), OR its name, OR a list
 #            with n_fluor/link_nm/dye_spread_nm/footprint_nm/blink_lambda
 #   eff_pct  labeling/detection efficiency (%) - folds into the multiplicity
-#   level    "auto" (primary clusters when available else TIDs), "primary", "tid"
+#   level    "auto" (de-blinked molecules when available else TIDs), "primary", "tid"
+#            ("primary" is the stored VALUE for the de-blinked level; kept for
+#            settings compatibility, it does not mean a primary DBSCAN)
 #   fuse_k   a unit whose per-axis spread exceeds fuse_k x the single-molecule
 #            expectation is flagged as fused (multiple GTs merged)
-#   minpts   localizations below which a unit is ignored (matches primary DBSCAN)
+#   minpts   localizations below which a unit is ignored
 #   sigma_loc_nm  per-localization precision; estimated from data when NULL
 #   scope_cluster2 restrict to points inside a secondary structure (cluster2>0)
 #
@@ -8018,7 +8037,7 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
 
   # ── MERGE units into candidate molecules ──────────────────────────────────
   # A multivalent label (n_fluor>1, dye_spread>0) scatters several fluorophores,
-  # hence several primary clusters / TIDs, around ONE molecule. Pool unit
+  # hence several de-blinked molecules / TIDs, around ONE molecule. Pool unit
   # centroids that fall within `complex_r` (the label-complex radius) so those
   # contributors collapse into a single candidate GT - this is what makes
   # "many traces -> one molecule" happen, and it produces the contribution
@@ -8107,7 +8126,7 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   # Total spatial extent of a molecule = its members' fan-out (member_spread)
   # combined with the internal spread of those members (inner_sp). This catches
   # BOTH failure modes: several units spread wide (crowding merge) AND a single
-  # over-wide primary cluster that already chained many molecules together.
+  # over-wide de-blinked molecule that already chained many traces together.
   mol_extent <- sqrt(member_spread^2 + mols$inner_sp^2)
 
   # ── fusion: a molecule far wider than the expected single-molecule label
