@@ -1,0 +1,56 @@
+cff-version: 1.2.0
+message: "If you use MINFLUXR in your research, please cite it using the metadata below."
+type: software
+title: "MINFLUXR"
+abstract: >-
+  An interactive R/Shiny application for visualization and analysis of Abberior
+  MINFLUX data: localization quality control, de-blinking, clustering, spatial and
+  two-colour point-pattern statistics for imaging data; time-signature analysis,
+  cycle-based MSD, CVE, jump-distance, confinement and state analyses for
+  single-particle tracking; and a simulator for ground-truth validation.
+authors:
+  - family-names: "Mebus"
+    given-names: "Viktor"
+    email: "viktorhm@bmb.sdu.dk"
+    affiliation: "Department of Biochemistry and Molecular Biology, University of Southern Denmark"
+    orcid: "https://orcid.org/0009-0009-2332-2866"
+  - family-names: "Doughty"
+    given-names: "Luke"
+    orcid: "https://orcid.org/0009-0002-9342-5456"
+  - family-names: "Brewer"
+    given-names: "Jonathan"
+    affiliation: "Department of Biochemistry and Molecular Biology, University of Southern Denmark"
+repository-code: "https://github.com/ViktorMebus/MINFLUXR"
+keywords:
+  - MINFLUX
+  - super-resolution microscopy
+  - single-molecule localization microscopy
+  - single-particle tracking
+  - Shiny
+  - R
+references:
+  - type: article
+    title: "Parameter optimization for MINFLUX microscopy enabled single-particle tracking"
+    authors:
+      - family-names: "Vogler"
+        given-names: "B. T. L."
+      - family-names: "De Angelis"
+        given-names: "G."
+      - family-names: "Zhao"
+        given-names: "Z."
+      - family-names: "Eggeling"
+        given-names: "C."
+      - family-names: "Reina"
+        given-names: "F."
+    journal: "Communications Biology"
+    volume: 8
+    start: 1573
+    year: 2025
+    doi: "10.1038/s42003-025-09060-1"
+  - type: software
+    title: "Toolbox_for_MINFLUX_SPT (MinSpt)"
+    authors:
+      - family-names: "Vogler"
+        given-names: "Bela"
+    repository-code: "https://github.com/Zatyrus/Toolbox_for_MINFLUX_SPT"
+    license: GPL-3.0

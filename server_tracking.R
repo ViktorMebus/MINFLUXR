@@ -11007,8 +11007,20 @@ tracking_server <- function(input, output, session) {
   #        D_local = r² / (2·d·Δt)        (2d = 4 in 2D, 6 in 3D)
   #
   #   Each step is assigned to the cell containing its MIDPOINT, and the cell's D
-  #   is the MEDIAN of its steps' D (median, not mean, so one mis-linked jump
-  #   cannot dominate a cell).
+  #   is the MEAN of its steps' D, with the noise floor subtracted once per cell:
+  #
+  #        D_cell = max(0, mean(r²/(4Δt)) − σ²·mean(1/Δt))
+  #
+  #   WHY THE MEAN AND NOT THE MEDIAN. The relation <r²> = 4DΔt + 4σ² holds for
+  #   the MEAN only. A single 2D step's r² is exponentially distributed, so its
+  #   median sits at ln2 ≈ 0.69 of the mean. The old median form, with the noise
+  #   floor then subtracted per step and clamped at 0, measured (σ 5 nm, Δt 0.2 ms)
+  #   −50% at D = 0.2 µm²/s and read exactly 0 at D ≤ 0.05. The mean form is
+  #   unbiased at every D, whatever the step distribution. The price is
+  #   robustness: one mis-linked jump inflates its cell, so the per-cell standard
+  #   error is returned alongside D and upstream track cleaning carries the load.
+  #   Subtracting per cell (not per step) avoids clamping each step at 0, which
+  #   would rectify the noise and bias slow cells upward.
   #
   #   WHY SINGLE-LAG RATHER THAN A PER-CELL MSD FIT: a cell contains few steps.
   #   Fitting a multi-parameter MSD curve per cell would be badly under-
@@ -11037,7 +11049,7 @@ tracking_server <- function(input, output, session) {
   #   1. Build per-step r², Δt and midpoint (x,y) within each track.
   #   2. Optionally keep only single-cycle (integrated) steps.
   #   3. Bin midpoints onto a regular grid.
-  #   4. Per cell: D = median(r²/(2dΔt)), minus the σ²/Δt noise floor, clamped >= 0.
+  #   4. Per cell: D = mean(r²/(4Δt)) − σ²·mean(1/Δt), clamped >= 0, plus its SE.
   #   5. Blank cells with fewer than `min_pts` steps - too few to trust.
   #
   # CAVEAT: single-lag D is an INSTANTANEOUS estimate; it says nothing about
@@ -11096,15 +11108,15 @@ tracking_server <- function(input, output, session) {
 
     # Per-step apparent 2D diffusion: D_raw = r² / (4·Δt).
     steps$D_raw <- steps$r2 / (4 * steps$dt)
-    # Optional: subtract the static localization-error floor. A single 2D step has
+    # Optional static localization-error floor. A single 2D step has
     # E[r²_noise] = 4σ² → an apparent D of σ²/Δt; without this, immobile/confined
-    # regions show a spurious diffusion floor. Clamp at 0. σ_loc is the app-wide
-    # value (unified MSD fit or manual override); no-op when it is unset.
+    # regions show a spurious diffusion floor. It is subtracted PER CELL below
+    # (never per step, which would clamp and rectify). σ_loc is the app-wide
+    # value; no-op when it is unset.
     sig_loc <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
     noise_subtracted <- isTRUE(input$trk_dmap_sub_noise) &&
                         is.finite(sig_loc) && sig_loc > 0
-    if (noise_subtracted)
-      steps$D_raw <- pmax(0, steps$D_raw - sig_loc^2 / steps$dt)
+    sig2 <- if (noise_subtracted) sig_loc^2 else 0
 
     x_rng    <- range(steps$mx); y_rng <- range(steps$my)
     x_breaks <- seq(x_rng[1], x_rng[2], length.out = n_bins + 1L)
@@ -11115,27 +11127,33 @@ tracking_server <- function(input, output, session) {
     steps$ix <- pmin(findInterval(steps$mx, x_breaks), n_bins)
     steps$iy <- pmin(findInterval(steps$my, y_breaks), n_bins)
 
-    # Per-cell D: median of per-step D_raw (median is robust to outlier jumps)
+    # Per-cell D: mean of per-step D_raw minus the cell's own noise floor
+    # σ²·mean(1/Δt) (first moments only - see header for why not the median)
     D_mat    <- matrix(NA_real_, n_bins, n_bins)
+    SE_mat   <- matrix(NA_real_, n_bins, n_bins)
     N_mat    <- matrix(0L,       n_bins, n_bins)
 
     cell_idx <- steps$ix + (steps$iy - 1L) * n_bins
-    by_cell  <- split(steps$D_raw, cell_idx)
+    by_cell  <- split(seq_len(nrow(steps)), cell_idx)
 
     for (nm in names(by_cell)) {
-      vals <- by_cell[[nm]][is.finite(by_cell[[nm]])]
-      if (length(vals) < min_pts) next
+      rows <- by_cell[[nm]]
+      rows <- rows[is.finite(steps$D_raw[rows])]
+      if (length(rows) < min_pts) next
       idx  <- as.integer(nm)
       ix   <- ((idx - 1L) %% n_bins) + 1L
       iy   <- ((idx - 1L) %/% n_bins) + 1L
-      D_mat[ix, iy] <- median(vals)
-      N_mat[ix, iy] <- length(vals)
+      # per-step contribution to the estimate, so its SD gives the SE directly
+      contrib <- steps$D_raw[rows] - sig2 / steps$dt[rows]
+      D_mat[ix, iy]  <- max(0, mean(contrib))
+      SE_mat[ix, iy] <- stats::sd(contrib) / sqrt(length(rows))
+      N_mat[ix, iy]  <- length(rows)
     }
 
     x_centers <- 0.5 * (x_breaks[-1] + x_breaks[-length(x_breaks)])
     y_centers <- 0.5 * (y_breaks[-1] + y_breaks[-length(y_breaks)])
 
-    list(D_mat = D_mat, N_mat = N_mat,
+    list(D_mat = D_mat, SE_mat = SE_mat, N_mat = N_mat,
          x_centers = x_centers, y_centers = y_centers,
          cell_w_nm = cell_w, cell_h_nm = cell_h,
          n_bins = n_bins, n_steps = nrow(steps),
@@ -11180,11 +11198,12 @@ tracking_server <- function(input, output, session) {
     hover <- matrix("", n_row, n_col)
     for (r in seq_len(n_row))
       for (c in seq_len(n_col)) {
-        d <- bd$D_mat[c, r]
-        n <- bd$N_mat[c, r]
+        d  <- bd$D_mat[c, r]
+        se <- bd$SE_mat[c, r]
+        n  <- bd$N_mat[c, r]
         hover[r, c] <- if (is.finite(d))
-          sprintf("x: %.0f nm<br>y: %.0f nm<br>D: %.3g nm\u00B2/ms<br>n steps: %d",
-                  bd$x_centers[c], bd$y_centers[r], d, n)
+          sprintf("x: %.0f nm<br>y: %.0f nm<br>D: %.3g \u00B1 %.2g nm\u00B2/ms (SE)<br>n steps: %d",
+                  bd$x_centers[c], bd$y_centers[r], d, se, n)
         else sprintf("x: %.0f nm<br>y: %.0f nm<br>(no data)", bd$x_centers[c], bd$y_centers[r])
       }
 
@@ -11257,6 +11276,7 @@ tracking_server <- function(input, output, session) {
         lapply(seq_len(bd$n_bins), function(iy)
           data.frame(x_nm = bd$x_centers[ix], y_nm = bd$y_centers[iy],
                      D_nm2_per_ms = bd$D_mat[ix, iy],
+                     D_se_nm2_per_ms = bd$SE_mat[ix, iy],
                      n_steps = bd$N_mat[ix, iy],
                      stringsAsFactors = FALSE)
         )

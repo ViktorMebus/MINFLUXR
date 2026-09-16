@@ -30,6 +30,7 @@ pending/
 .Rhistory
 .Rproj.user/
 .RData
+.RDataTmp
 .Ruserdata
 
 # Personal strategy/planning notes — never published.

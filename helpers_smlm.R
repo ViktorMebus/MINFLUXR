@@ -8564,9 +8564,10 @@ compute_cluster_rog <- function(df, cluster_col = "cluster2", member_col = "tid"
 ## ── Ripley's L(r) ────────────────────────────────────────────────────────────
 # Computes L(r) - r for a set of 2-D or 3-D points.
 # Returns a data.frame: r, Kr, Lr, Lr_minus_r
-# Uses the naive (uncorrected) Ripley K estimator: K(r) = A * 2*pairs(r) / (n*(n-1)).
-# No edge correction is applied; K(r) is underestimated at large r due to border effects.
-# Restrict interpretation to r << min(window width, window height) / 2.
+# K(r) = A * 2*pairs(r) / (n*(n-1)). With no `support`, A is the bounding box and no
+# edge correction is applied, so K(r) is underestimated at large r; read it against the
+# CSR envelope. With a `support` carrying a mask and edge_correct = TRUE, each pair is
+# weighted by the translation correction 1/gammabar (see below) and A is the footprint.
 ## GOAL: a REPRODUCIBLE subsample for the O(n^2) spatial statistics.
 ##
 ## These estimators cap the point count (pairwise distances are quadratic), and the

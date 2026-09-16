@@ -622,7 +622,9 @@ is not the biologically meaningful coordinate.
 
 ### Panels
 
-The Analysis tab is organised into four sections. Each panel produces an interactive plot and, where
+The Analysis tab is organised into sections: Labelling Density and the observation window, Dataset
+Groups, Quality Control, Nearest-Neighbour & Spatial Statistics (including Local Density & Hotspots),
+Multi-Panel View, Median Cluster Analyses and Cross-Channel Analysis. Each panel produces an interactive plot and, where
 a table makes sense, an exportable CSV. Panels marked ⚠ carry an *exploratory* badge in the app -
 they are research tools whose interpretation is not yet settled, not validated readouts.
 
@@ -1871,10 +1873,11 @@ v_\text{drift} > \max\!\left(\text{fold} \times \text{diffusive baseline},\ \fra
 A single-lag estimator per step, midpoint-binned on an $n \times n$ grid:
 
 ```math
-D_\text{raw} = \frac{r^2}{4\,\Delta t} \quad \text{(2D)}, \qquad D_\text{raw} \leftarrow D_\text{raw} - \frac{\sigma_\text{loc}^2}{\Delta t}
+D_\text{raw} = \frac{r^2}{4\,\Delta t} \quad \text{(2D)}, \qquad D_\text{cell} = \max\!\Big(0,\ \langle D_\text{raw} \rangle - \sigma_\text{loc}^2 \big\langle \tfrac{1}{\Delta t} \big\rangle\Big)
 ```
 
-Each cell reports $\text{median}(D_\text{raw})$, which is robust to outlier jumps; cells with too few
+Each cell reports the mean with its standard error, because $\langle r^2 \rangle = 4D\Delta t + 4\sigma^2$
+holds for the mean only; the median of single-step $r^2$ sits at ln 2 of the mean. Cells with too few
 steps are left NA. The noise subtraction removes the spurious diffusion floor that would otherwise make
 immobile regions look mobile. This is the **short-lag limit of CVE**, far more robust than a per-cell
 MSD fit in small cells such as a bacterium.
@@ -1947,8 +1950,15 @@ MINFLUXR/
 ---
 ## AI declaration
 
-This app was in parts coded by the author, in collaboration with Claude Code Opus 4.6 and 4.8. Claude Code was used to optimize, research and design experiments to uncover various implementation possibilities. Claude Code has been implemented in our workflow, to create or revise code, where various functionalities were tested by the authors, before being refined. I started this as a simple MINFLUX viewer, yet AI enabled expansion of the tool to be more profound. We hope this app can be used as a way to explore MINFLUX data, without having to have extensive coding experience.  
+This app was in parts coded by the author, in collaboration with Claude Code (Opus 4.6, 4.8 and 5). Claude Code was used to optimize, research and design experiments to uncover various implementation possibilities. Claude Code has been implemented in our workflow, to create or revise code, where various functionalities were tested by the authors, before being refined. I started this as a simple MINFLUX viewer, yet AI enabled expansion of the tool to be more profound. We hope this app can be used as a way to explore MINFLUX data, without having to have extensive coding experience.  
 
+
+## Citing MINFLUXR
+
+If you use MINFLUXR in published work, please cite it using the metadata in [`CITATION.cff`](CITATION.cff)
+(GitHub's "Cite this repository" button reads it). The time-signature analysis and MSD workflow are R ports
+of Bela Vogler's [Toolbox_for_MINFLUX_SPT](https://github.com/Zatyrus/Toolbox_for_MINFLUX_SPT) (GPL-3.0);
+please also cite Vogler et al. 2025 when you use them.
 
 ## Further Documentation
 
@@ -1956,6 +1966,11 @@ This app was in parts coded by the author, in collaboration with Claude Code Opu
 |------|----------|
 | `docs/MINFLUX_analysis_methods.md` | Part I: the implementation and maths of every analysis, taken from the source. Part II: a literature review of whether each method is appropriate for MINFLUX data, with GREEN / AMBER / RED verdicts |
 | `docs/simulation_module.md` | The ground-truth diffusion simulator: model, validation, and the CVE round-trip on D |
+| `docs/simulator.md` | The Simulator tab: what each stage models and where it departs from real MINFLUX |
+| `docs/sigma_loc_model.md` | The tracking localization-precision model: derivation and immobile-sample calibration |
+| `docs/tracking_sigma_and_cve_plan.md` | Record of the σ_loc / CVE decision, including the fixed-cell and bead measurements of tracker wander |
+| `docs/sigma_loc_estimation.md` | Earlier survey of σ_loc estimation options (superseded by `sigma_loc_model.md`) |
+| `docs/channel_unification_plan.md` | Working plan for merging the single-colour, 2-colour and multiplex paths |
 | `docs/arch/` | Architecture overview |
 
 ---

@@ -1,8 +1,10 @@
 # CVE and σ_loc in MINFLUX tracking — verdict and plan
 
-Status: **plan only. No `server_tracking.R` change has been made.** Written 2026-08-24 from the
-GP67H tracking test data and the simulator round-trip built the same day
-(see `simulation_module.md` §5 and §9).
+Status (updated 2026-09-16): **implemented.** Written 2026-08-24 as a plan from the GP67H tracking test
+data and the simulator round-trip built the same day (see `simulation_module.md` §5 and §9). The
+blur-aware CVE and photon-budget σ_loc shipped (§9, §11); the prefactor note in §11 records the later
+return to a = 4. The current method is summarised in `MINFLUX_analysis_methods.md` §I-B.1. Sections 1–8
+are kept as the record of how the decision was reached.
 
 ---
 
@@ -461,6 +463,12 @@ L302 survives cleaning with only **3% of localizations** - confirmed unusable.
 ### Shipped
 
 - `TCP_CRLB_PREFACTOR` 4 -> **3.6** (measured, not assumed). The app ran ~10% low.
+  **Later reverted to 4 (current code, `packages.R`).** The MSD-intercept calibration returns a floor on
+  sigma, not an estimate: the wander is sub-diffusive (log-log slope 0.80 on the fixed cells), so a
+  straight line extrapolated to zero lag lands above the true intercept, inflating sigma and deflating a.
+  The measurement therefore brackets 3.6 <= a <= 4.0, and the app uses the ideal Cramer-Rao value 4
+  (derived in [sigma_loc_model.md](sigma_loc_model.md)), which makes the reported sigma a stated lower
+  bound. Users with their own immobile-sample measurement can enter a.
 - `TCP_BEAM_FWHM_NM` 195.5 -> **0 = off**. Eq. 1's beam-size denominator predicts a 39% rise in
   a from L=101 to L=151; the measurement says 4%. nu does not transfer from Vogler's instrument.
 - `.crlb_doughnut()` now keeps the **moving-emitter term when nu is off**: the large-beam limit is
