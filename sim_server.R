@@ -3661,7 +3661,12 @@ sim_server <- function(input, output, session) {
     p_perm  <- min(1, max(0, as.numeric(input$sim_trk_pperm %||% 0.05)))
     L_c     <- max(1, as.numeric(input$sim_trk_Lc %||% 150))         # confinement radius (nm)
     v_nmms  <- max(0, as.numeric(input$sim_trk_vel %||% 0))          # directed speed (µm/s = nm/ms)
-    kswitch <- min(1, max(0, as.numeric(input$sim_trk_kswitch %||% 0.03)))  # per-cycle state-switch prob
+    kswitch <- min(1, max(0, as.numeric(input$sim_trk_kswitch %||% 0.03)))  # per-cycle prob, mobile -> slow
+    # Slow-state D as a fraction of D, and the per-cycle prob of leaving the slow state.
+    # Separate values make asymmetric dwells and a finite D contrast possible, which the
+    # HMM recovery sweep needs (defaults reproduce the old symmetric mobile/immobile case).
+    slow_frac <- min(1, max(0, as.numeric(input$sim_trk_slow_frac %||% 0.01)))
+    kback     <- min(1, max(0, as.numeric(input$sim_trk_kswitch_back %||% kswitch)))
 
     drift0  <- if (is_rod) c(1,0,0)                                          # rod drift ∥ long axis
                else if (identical(geom, "membrane")) { a <- runif(1, 0, 2*pi); c(cos(a), sin(a), 0) }  # in-plane
@@ -3727,7 +3732,7 @@ sim_server <- function(input, output, session) {
         dur <- cyc + sw * integ
       }
       for (i in 2:n_cyc) {
-        Dstep <- if (identical(motion,"twostate") && st == 0L) D_trk * 0.01 else D_trk
+        Dstep <- if (identical(motion,"twostate") && st == 0L) D_trk * slow_frac else D_trk
         dti   <- dur[i - 1L]                                                # this step's duration (ms)
         sdi   <- sqrt(2 * Dstep * dti)
         g0 <- if (is_anom) inc[i, ] * sdi else rnorm(3, 0, sdi)             # correlated when anomalous
@@ -3748,7 +3753,7 @@ sim_server <- function(input, output, session) {
               else if (is_mem) c(p2[1], p2[2],                              # keep z within the membrane thickness
                                  if (mthick > 0) max(-mthick/2, min(mthick/2, p[3] + rnorm(1, 0, sdi * 0.2))) else 0)
               else if (surface) geo_project(p2) else geo_reflect(p2)
-        if (identical(motion,"twostate") && runif(1) < kswitch) st <- 1L - st
+        if (identical(motion,"twostate") && runif(1) < (if (st == 1L) kswitch else kback)) st <- 1L - st
         pos[i,] <- p; states[i] <- st
         # Was this cycle recorded? Under the photon budget that was already decided from
         # brightness above; otherwise fall back to a flat per-cycle probability.
@@ -3780,7 +3785,7 @@ sim_server <- function(input, output, session) {
           taui[rec[-length(rec)]]  <- reps_used * expfrac * cyc
         }
         mid <- pos + (taui / (2 * Tstep)) * (pos[nxt, , drop = FALSE] - pos)
-        Dst <- if (identical(motion, "twostate")) ifelse(states == 0L, D_trk * 0.01, D_trk)
+        Dst <- if (identical(motion, "twostate")) ifelse(states == 0L, D_trk * slow_frac, D_trk)
                else rep(D_trk, n_cyc)
         # Time-average over a window tau <= T, conditioned on both end points:
         #   mean = x_i + (tau/(2T))*(x_j - x_i),  var = (2*D*tau/3)*(1 - 3*tau/(4T))
@@ -3880,6 +3885,8 @@ sim_server <- function(input, output, session) {
         tid = k, tim = t_cyc[idx] / 1000,              # SECONDS (importer ×1000 → ms)
         x = obs[, 1], y = obs[, 2], z = obs[, 3],
         efo = N / (tau_i / 1000), eco = N, stringsAsFactors = FALSE)
+      # Ground-truth state for HMM validation, numbered like the HMM (1 = slow, 2 = mobile).
+      if (identical(motion, "twostate")) rows[[k]]$state_true <- attr(pos, "states")[idx] + 1L
       gt[[k]] <- data.frame(tid = k, D_true_um2_s = D_trk / 1000, geometry = geom, mode = mode,
                             motion = motion, L_c_nm = if (identical(motion,"confined")) L_c else NA_real_,
                             v_um_s = if (identical(motion,"directed")) v_nmms else NA_real_,
@@ -4030,7 +4037,7 @@ sim_server <- function(input, output, session) {
       hop = sprintf("hop diffusion (corral %.0f nm, permeability %.2f)", res$L_hop, res$p_perm),
       confined = sprintf("confined (OU tether, L_c = %.0f nm)", res$L_c),
       directed = sprintf("directed (v = %.3g µm/s)", res$v_nmms),
-      twostate = "two-state (mobile↔immobile)",
+      twostate = "two-state (mobile↔slow)",
       "free")
     mode_lbl <- if ((res$geom %||% "") %in% c("free","membrane")) ""
                 else if (identical(res$mode, "volume")) " · volume (intracellular)" else " · surface"

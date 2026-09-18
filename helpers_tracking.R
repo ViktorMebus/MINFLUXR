@@ -469,33 +469,65 @@ split_by_tid_to_dir <- function(df, out_dir,
 # the median only 0.917 -> 0.967), which is why the caller may collapse the D grid to
 # one point when the noise is negligible.
 #
+# WHY THE NULL IS BLURRED. A MINFLUX localization averages the path over the photon
+# collection window, which LOWERS every MSD lag by 2*d*2*R*D*t_c - the opposite sign
+# to the sigma^2 offset. At GP67H timings (D 0.215 um^2/s, t_c 0.192 ms, sigma 5 nm)
+# the blur term is about half of sigma^2, so an unblurred null carries twice the
+# real offset, its free CI sits too low, and real free tracks drift toward "directed".
+# Blur is simulated exactly in its second moments: with a collection window tau
+# starting at each localization time, the window-average of Brownian motion given
+# its displacement w over the window is  B(t_i) + w/2 + N(0, D*tau/6)  per axis.
+#
+# WHY SIGMA MAY BE A VECTOR. Pairs in the MSD carry sigma_i^2 + sigma_j^2, so the
+# offset is set by MEAN(sigma^2), which exceeds median(sigma)^2 when the photon count
+# has a long tail. Passing the per-localization photon-model sigma values lets the null
+# resample them per localization instead of assuming one static value.
+#
 # n_grid   : localization counts to simulate the null at (nearest-N lookup by caller)
 # D_grid   : per-axis D values (nm^2/ms) to simulate at; length 1 = the old behaviour
 # n_sim    : free tracks per (n, D) grid point
-# t_c      : cycle time (ms)         sigma : localization sigma (nm)
+# t_c      : cycle time (ms)
+# sigma    : localization sigma (nm); one value = static, a vector = empirical
+#            per-localization distribution resampled with replacement
 # ndim     : 2 or 3
 # gap_p    : probabilities of a step spanning 1,2,3,... cycles (measured from the data)
 # min_lag/max_lag : the SAME cycle-lag fit window the real CI uses
+# R_blur   : motion-blur coefficient relative to one cycle; the collection window is
+#            tau = 6*R_blur*t_c (capped at t_c). 0 = instantaneous localizations.
 # returns  : data.frame(n, D, lo05, med, hi95) - CI quantiles at each (n, D) pair
 sim_free_ci_null <- function(n_grid, D_grid = 100, n_sim = 200L, t_c = 0.2, sigma = 10,
                              ndim = 2L, gap_p = c(0.55, 0.22, 0.09, 0.05, 0.04, 0.05),
-                             min_lag = 4L, max_lag = 50L, progress = NULL) {
+                             min_lag = 4L, max_lag = 50L, progress = NULL, R_blur = 0) {
   gap_p <- gap_p[is.finite(gap_p) & gap_p > 0]
   if (!length(gap_p)) gap_p <- 1
   gap_p <- gap_p / sum(gap_p)
   kmax  <- length(gap_p)
   D_grid <- D_grid[is.finite(D_grid) & D_grid > 0]
   if (!length(D_grid)) D_grid <- 100
+  sigma <- sigma[is.finite(sigma) & sigma >= 0]          # drop unusable values
+  if (!length(sigma)) sigma <- 0
+  # Collection window (ms); a finite, non-negative R only.
+  tau_c <- if (is.finite(R_blur) && R_blur > 0) min(t_c, 6 * R_blur * t_c) else 0
 
   # CI of one simulated free track, using cycle-index binning exactly as the app does.
   ci_one <- function(N, D) {
     k   <- sample.int(kmax, N - 1L, TRUE, prob = gap_p)
     cyc <- c(0L, cumsum(k))
     pos <- matrix(0, N, ndim)
-    sd_step <- sqrt(2 * D * t_c * k)
-    for (j in seq_len(ndim))
-      pos[, j] <- cumsum(c(0, stats::rnorm(N - 1L, 0, sd_step)))
-    pos <- pos + matrix(stats::rnorm(N * ndim, 0, sigma), N, ndim)
+    for (j in seq_len(ndim)) {
+      if (tau_c > 0) {
+        w    <- stats::rnorm(N, 0, sqrt(2 * D * tau_c))            # motion inside each window
+        # motion from the end of window i to the start of localization i+1
+        gapm <- stats::rnorm(N - 1L, 0, sqrt(2 * D * pmax(0, t_c * k - tau_c)))
+        B    <- cumsum(c(0, w[-N] + gapm))                         # path at each window start
+        pos[, j] <- B + w / 2 + stats::rnorm(N, 0, sqrt(D * tau_c / 6))  # window average
+      } else {
+        pos[, j] <- cumsum(c(0, stats::rnorm(N - 1L, 0, sqrt(2 * D * t_c * k))))
+      }
+    }
+    # per-localization noise: static sigma, or resampled from the empirical distribution
+    sig_i <- if (length(sigma) > 1L) sample(sigma, N, replace = TRUE) else rep(sigma, N)
+    pos <- pos + matrix(stats::rnorm(N * ndim), N, ndim) * sig_i
     # per-track MSD by integer cycle lag, capped at max_lag (bounds the inner loop)
     s <- numeric(max_lag); cnt <- integer(max_lag)
     for (i in seq_len(N - 1L)) {

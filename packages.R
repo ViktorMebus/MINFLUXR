@@ -254,6 +254,19 @@ TCP_CRLB_PREFACTOR <- 4
 # Set a finite value here only if a future measurement shows an L-dependence.
 TCP_BEAM_FWHM_NM <- 0
 
+# ── Continuous-time HMM: validated range (est_hmm.R) ──────────────────────────
+# From tests/validation/hmm_recovery_sweep.R (simulated GP67H acquisition: t_c 0.192
+# ms, SW 0.011 ms, dark-cycle mix, photon σ, blur R = 1/6.2, 200 tracks × 300 locs).
+# A state is flagged in the HMM summary when its fitted mean dwell is below
+# HMM_RESOLV_MIN_DWELL_CYC cycles, or when fewer than HMM_RESOLV_MIN_SWITCHES
+# switches out of it are expected over the whole data set. See the sweep results
+# in docs/MINFLUX_analysis_methods.md §I-B.5 for where these numbers come from.
+# Sweep result (2026-09-17, 54 fits): dwell 1-3 cycles fails (dwell +34 to +180%, CIs never cover);
+# 10 cycles within +1 to +19%; 30-300 cycles within ±10% on average. The smallest validated case
+# had ~290 expected switches, so fewer than 300 is outside what has been checked.
+HMM_RESOLV_MIN_DWELL_CYC <- 10
+HMM_RESOLV_MIN_SWITCHES  <- 300
+
 # ── Tracker wander floor, D_w (nm^2/ms) ───────────────────────────────────────
 # The reported position wanders even on a genuinely immobile target, so a measured
 # D contains an instrumental term. Measured 2026-09-02:

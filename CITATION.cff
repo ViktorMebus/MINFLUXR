@@ -21,6 +21,7 @@ authors:
     given-names: "Jonathan"
     affiliation: "Department of Biochemistry and Molecular Biology, University of Southern Denmark"
 repository-code: "https://github.com/ViktorMebus/MINFLUXR"
+license: GPL-3.0-or-later
 keywords:
   - MINFLUX
   - super-resolution microscopy
@@ -54,3 +55,13 @@ references:
         given-names: "Bela"
     repository-code: "https://github.com/Zatyrus/Toolbox_for_MINFLUX_SPT"
     license: GPL-3.0
+    notes: "TSA and the MSD/OLSF workflow are ported from this toolbox; see THIRD-PARTY.md"
+  - type: software
+    title: "pyMINFLUX"
+    authors:
+      - family-names: "Ponti"
+        given-names: "Aaron"
+        affiliation: "Single Cell Facility, D-BSSE, ETH Zurich"
+    repository-code: "https://github.com/bsse-scf/pyMINFLUX"
+    license: Apache-2.0
+    notes: "DCR pooling and the per-trace spread statistic are reimplemented from it; see THIRD-PARTY.md"

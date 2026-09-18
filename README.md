@@ -634,6 +634,12 @@ analyses relabel and pool by group so you can compare conditions. Files left una
 Spatial statistics (Ripley / PCF) average per-file curves within a group rather than pooling
 coordinates - pooling would mix observation windows and invent structure.
 
+**The cell (file) is the unit of replication.** A group-mode histogram pools distances or clusters from
+every file, and units from one cell are correlated, so a statistical test on those pooled units overstates
+the sample size. **Download per-file summary (CSV)** in the Dataset Groups panel writes one row per file
+(per channel, per metric) for every distribution analysis you have run: n, mean, SD, median and quartiles,
+with the file's group. Run between-group statistics on those rows.
+
 ### De-blinking applies to every dataset
 
 De-blinking is a **global** switch (Display tab), and every batch analysis re-derives it per file, so
@@ -651,7 +657,7 @@ Note the **Crowding** panel needs unclustered background traces to reference its
 If every molecule ends up inside a median cluster it will report nothing - that is the background rule,
 not a de-blinking problem.
 
-### Observation window and edge correction (opt-in)
+### Observation window and edge correction
 
 Two checkboxes at the top of the tab, inside the collapsed labelling-density section. They apply to
 Ripley's L, g(r), L12, g12 and the co-localization null, and they fix **different** things - usually only
@@ -661,7 +667,7 @@ the first is wanted.
 the middle, simply because part of its surroundings falls outside the window. Left uncorrected, that
 deficit grows with r, so every curve drifts downward at larger radii and a genuinely random pattern stops
 reading as random. The correction accounts for how much of each neighbourhood actually fell inside the
-window (the translation correction; Illian et al. 2008; Baddeley et al. 2015). Leave it on.
+window (the translation correction; Illian et al. 2008; Baddeley et al. 2015). It is on by default.
 
 **Footprint window.** Changes what counts as the observed area. If your cell fills the scan field, the
 bounding box already *is* the cell and you should leave this off. Turn it on when the cell is concave or
@@ -672,7 +678,9 @@ Two things to know:
 
 - The settings are **not independent**. Correcting the edge of a bounding box that contains a lot of
   empty space is worse than not correcting it at all, because it amplifies a deficit that was partly
-  cancelling the area error. On a concave cell, use both together rather than the first alone.
+  cancelling the area error. On a concave cell, use both together rather than the first alone. When the
+  footprint window is off, the window readout reports how much of the bounding box the sample covers and
+  asks you to turn the footprint window on when that is below 70%.
 - The window is the **outline of the cell**, not the region where the sample happens to be densest. A
   window drawn tightly around your structures would erase the clustering it is meant to measure, so the
   footprint is estimated independently of the Labelling Density panel, and if it comes out in
@@ -1960,6 +1968,20 @@ If you use MINFLUXR in published work, please cite it using the metadata in [`CI
 of Bela Vogler's [Toolbox_for_MINFLUX_SPT](https://github.com/Zatyrus/Toolbox_for_MINFLUX_SPT) (GPL-3.0);
 please also cite Vogler et al. 2025 when you use them.
 
+## Licence
+
+MINFLUXR is licensed under the **GNU General Public License v3.0 or later** ([`LICENSE`](LICENSE)).
+
+GPL-3 is required rather than chosen: the time-signature analysis and the MSD/OLSF workflow are ports of
+MinSpt, which is GPL-3.0, and a port of GPL-3 code must itself be GPL-3.
+
+DCR pooling and the per-trace spread statistic are reimplemented in R from
+[pyMINFLUX](https://github.com/bsse-scf/pyMINFLUX) (Apache-2.0), which may be combined into a GPL-3 work.
+No pyMINFLUX or MinSpt source is copied or bundled here.
+
+[`THIRD-PARTY.md`](THIRD-PARTY.md) records what was taken from each project, what was changed, and the
+licences of the R packages MINFLUXR depends on (installed from CRAN, not redistributed).
+
 ## Further Documentation
 
 | File | Contents |
@@ -1971,7 +1993,7 @@ please also cite Vogler et al. 2025 when you use them.
 | `docs/tracking_sigma_and_cve_plan.md` | Record of the σ_loc / CVE decision, including the fixed-cell and bead measurements of tracker wander |
 | `docs/sigma_loc_estimation.md` | Earlier survey of σ_loc estimation options (superseded by `sigma_loc_model.md`) |
 | `docs/channel_unification_plan.md` | Working plan for merging the single-colour, 2-colour and multiplex paths |
-| `docs/arch/` | Architecture overview |
+| File headers in `helpers_*.R`, `server_*.R` | Code architecture: each source file opens with a map of what it contains, its data flow and conventions |
 
 ---
 

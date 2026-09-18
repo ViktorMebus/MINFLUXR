@@ -1685,6 +1685,8 @@ mad_finite_sample_factor <- function(n) {
 #
 # RETURNS  data.frame(tid, n_locs, sd_x, sd_y, sd_z), tid in its input type.
 # =============================================================================
+# The plain-SD form is reimplemented in R from pyMINFLUX (Apache-2.0); the robust
+# variant and the spread-based trace filter are additions. See THIRD-PARTY.md section 2.
 sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
   need_cols <- intersect(c("tid","x","y","z"), names(df))
   if (!all(c("tid","x","y") %in% need_cols)) return(data.frame())
@@ -10066,7 +10068,8 @@ compute_local_enhancement <- function(pts, k = 5L, use_3d = FALSE, support = NUL
 #   support    : estimate_support() object; only its area is used here
 #
 # RETURNS
-#   list(vmr, mean_count, var_count, n_quadrats, quadrat_nm, used_bbox)
+#   list(vmr, mean_count, var_count, n_quadrats, quadrat_nm, used_bbox, edge_quadrats)
+#   edge_quadrats = TRUE when the area-based fallback (partial edge quadrats) was used.
 # =============================================================================
 compute_dispersion_index <- function(pts, quadrat_nm = 250, use_3d = FALSE,
                                      support = NULL) {
@@ -10079,7 +10082,46 @@ compute_dispersion_index <- function(pts, quadrat_nm = 250, use_3d = FALSE,
   q <- max(1, as.numeric(quadrat_nm))
   d <- ncol(m)
 
-  # Index every unit into a quadrat on a lattice anchored at the data minimum.
+  # WHOLE QUADRATS ONLY (fixed 2026-09-17). With a support mask, count only the
+  # quadrats that lie entirely inside the footprint, empty ones included. Edge
+  # quadrats that are partly outside have a smaller expected count, which adds
+  # variance that is not clustering; the excess grows with density and with the
+  # footprint's edge-to-area ratio. Measured on CSR (tests/validation/
+  # hotspot_csr_null.R): a 2 x 8 µm rod read VMR 2.56 at 5000 units and 0.79 at
+  # 200, where whole quadrats read ~1. Needs >= 10 whole quadrats; otherwise the
+  # area-based count below is used and `edge_quadrats` is TRUE.
+  if (!is.null(support) && !is.null(support$mask) && is.finite(support$h %||% NA_real_)) {
+    mk <- support$mask; dm <- dim(mk); h <- support$h; o_m <- support$origin
+    if (length(dm) == d) {
+      # quadrat lattice anchored at the mask origin; quadrat a spans [o + a q, o + (a+1) q)
+      n_ax <- floor(dm * h / q)
+      if (all(n_ax >= 1)) {
+        qgrid <- as.matrix(expand.grid(lapply(n_ax, function(k) seq_len(k) - 1L)))
+        whole <- vapply(seq_len(nrow(qgrid)), function(r) {
+          rng_cells <- lapply(seq_len(d), function(k) {
+            lo <- floor(qgrid[r, k] * q / h) + 1L
+            hi <- min(dm[k], ceiling((qgrid[r, k] + 1) * q / h))
+            lo:hi
+          })
+          all(do.call(`[`, c(list(mk), rng_cells)))           # every overlapping cell inside
+        }, logical(1))
+        if (sum(whole) >= 10L) {
+          qi   <- floor(sweep(m, 2, o_m, "-") / q)               # quadrat index of each unit
+          ukey <- apply(qi, 1, paste, collapse = ",")
+          wkey <- apply(qgrid[whole, , drop = FALSE], 1, paste, collapse = ",")
+          cnt  <- as.integer(table(factor(ukey[ukey %in% wkey], levels = wkey)))
+          mu   <- mean(cnt)
+          if (is.finite(mu) && mu > 0)
+            return(list(vmr = stats::var(cnt) / mu, mean_count = mu, var_count = stats::var(cnt),
+                        n_quadrats = length(cnt), quadrat_nm = q, used_bbox = FALSE,
+                        edge_quadrats = FALSE))
+        }
+      }
+    }
+  }
+
+  # Fallback without a usable mask: index every unit into a quadrat on a lattice
+  # anchored at the data minimum and infer the empty quadrats from the area.
   o   <- apply(m, 2, min)
   idx <- floor(sweep(m, 2, o, "-") / q)
   key <- apply(idx, 1, paste, collapse = ",")
@@ -10100,7 +10142,8 @@ compute_dispersion_index <- function(pts, quadrat_nm = 250, use_3d = FALSE,
   mu  <- mean(cnt)
   if (!is.finite(mu) || mu <= 0) return(NULL)
   list(vmr = stats::var(cnt) / mu, mean_count = mu, var_count = stats::var(cnt),
-       n_quadrats = length(cnt), quadrat_nm = q, used_bbox = used_bbox)
+       n_quadrats = length(cnt), quadrat_nm = q, used_bbox = used_bbox,
+       edge_quadrats = TRUE)
 }
 
 # =============================================================================
@@ -10151,10 +10194,14 @@ compute_dispersion_index <- function(pts, quadrat_nm = 250, use_3d = FALSE,
 #                 spacing has already quantised.
 #
 # RETURNS
-#   list(eps, curve = data.frame(eps, frac), target_frac, minPts, hit_floor)
-#   `hit_floor` is TRUE when even the smallest candidate clustered too much, i.e.
-#   the grid did not reach low enough - the returned eps is then the grid minimum
-#   and the calibration did NOT converge.
+#   list(eps, curve = data.frame(eps, frac), target_frac, minPts, hit_floor,
+#        grid_extended, null_max_focus_mean, null_max_focus_q95)
+#   The null_max_focus_* entries are the largest focus found in random patterns in
+#   this cell's footprint at the calibrated eps (at least 20 draws).
+#   `grid_extended` is TRUE when the grid had to be extended below its floor.
+#   `hit_floor` is TRUE when even the extended grid (down to ~1/12 of the floor)
+#   clustered too much - the returned eps is then the smallest tried and the
+#   calibration did NOT converge.
 # =============================================================================
 calibrate_dbscan_eps <- function(pts, support = NULL, minPts = 5L,
                                  eps_grid = c(40, 60, 80, 100, 125, 150, 175,
@@ -10194,10 +10241,47 @@ calibrate_dbscan_eps <- function(pts, support = NULL, minPts = 5L,
   }, numeric(1))
 
   ok <- is.finite(frac) & frac <= target_frac
+  # BELOW THE GRID FLOOR (fixed 2026-09-17). In a dense cell even the smallest grid
+  # eps clusters random units above the target: a CSR rod with 5000 units failed
+  # to calibrate in 20/20 runs and then put 31% of random units "in foci". Step
+  # the eps down by 20% at a time (to ~1/12 of the floor, 11 more rungs) until the
+  # random pattern stays under the target. Cells that calibrated before are
+  # unchanged, because the extension only runs when the whole grid failed.
+  grid_extended <- FALSE
+  if (!any(ok)) {
+    grid_extended <- TRUE
+    for (e in eps_grid[1] * 0.8^(1:11)) {
+      fe <- mean(vapply(seq_len(nsim), function(i) {
+        cl <- tryCatch(dbscan::dbscan(draw(), eps = e, minPts = minPts)$cluster,
+                       error = function(err) NULL)
+        if (is.null(cl)) NA_real_ else mean(cl > 0L)
+      }, numeric(1)), na.rm = TRUE)
+      eps_grid <- c(e, eps_grid); frac <- c(fe, frac)
+      if (is.finite(fe) && fe <= target_frac) break
+    }
+    ok <- is.finite(frac) & frac <= target_frac
+  }
   hit_floor <- !any(ok)
-  eps <- if (hit_floor) eps_grid[1] else max(eps_grid[ok])
+  eps <- if (hit_floor) min(eps_grid) else max(eps_grid[ok])
+
+  # NULL FOR THE HEADLINE METRIC (added 2026-09-17). The largest focus found in a
+  # RANDOM pattern at the calibrated eps grows with density (CSR in a filled frame:
+  # mean 2.7 units at 200 units per cell, 9.4 at 5000), so a raw max_focus_n
+  # compared across cells of different density is confounded. Record this cell's
+  # own random distribution of the largest focus, at the eps actually used, so the
+  # summary row can express the observed focus relative to it.
+  null_max <- vapply(seq_len(max(nsim, 20L)), function(i) {
+    cl <- tryCatch(dbscan::dbscan(draw(), eps = eps, minPts = minPts)$cluster,
+                   error = function(err) NULL)
+    if (is.null(cl)) NA_real_ else if (any(cl > 0L)) max(tabulate(cl[cl > 0L])) else 0
+  }, numeric(1))
+  null_max <- null_max[is.finite(null_max)]
+
   list(eps = eps, curve = data.frame(eps = eps_grid, frac = frac),
-       target_frac = target_frac, minPts = minPts, hit_floor = hit_floor)
+       target_frac = target_frac, minPts = minPts, hit_floor = hit_floor,
+       grid_extended = grid_extended,
+       null_max_focus_mean = if (length(null_max)) mean(null_max) else NA_real_,
+       null_max_focus_q95  = if (length(null_max)) unname(stats::quantile(null_max, 0.95)) else NA_real_)
 }
 
 # =============================================================================
@@ -10393,6 +10477,11 @@ hotspot_summary_row <- function(pts, support = NULL, k = 5L, quadrat_nm = 250,
     eps_nm       = eps_cal$eps %||% NA_real_,
     n_foci       = if (is.null(tb)) NA_integer_ else nrow(tb),
     max_focus_n  = if (is.null(tb) || !nrow(tb)) 0L else as.integer(tb$n[1]),
+    # Largest focus relative to this cell's random 95th percentile (1 = what chance
+    # alone reaches); comparable across densities where max_focus_n is not.
+    max_focus_null95 = eps_cal$null_max_focus_q95 %||% NA_real_,
+    max_focus_ratio  = if (is.null(tb)) NA_real_ else
+                         (if (!nrow(tb)) 0 else tb$n[1]) / max(1, eps_cal$null_max_focus_q95 %||% NA_real_),
     max_focus_rg = if (is.null(tb) || !nrow(tb)) NA_real_ else tb$rg[1],
     max_focus_aniso = if (is.null(tb) || !nrow(tb)) NA_real_ else tb$aniso[1],
     frac_in_foci = if (is.null(ft)) NA_real_ else mean(ft$cluster > 0L),
@@ -10643,6 +10732,7 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
                                      nsim = 99L, estimator = c("L", "L12", "pcf", "g"),
                                      n2 = NULL, probs = c(0.025, 0.975),
                                      support = NULL, edge_correct = TRUE,
+                                     null_mode = c("csr", "labels"), pts1 = NULL, pts2 = NULL,
                                      progress = NULL) {
   estimator <- match.arg(estimator)
   if (is.null(r_seq) || !length(r_seq)) return(NULL)
@@ -10678,6 +10768,29 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
   mat <- matrix(NA_real_, nrow = nr, ncol = nsim)
   cap <- if (estimator %in% c("L", "g")) n else max(n, n2)
 
+  # ── NULL MODE FOR THE TWO-CHANNEL ESTIMATORS ───────────────────────────────
+  # "csr"    simulates two independent uniform patterns INSIDE the window. It is
+  #          only as good as the window: the observed points fill the real cell and
+  #          the simulated ones only its estimate, and the leftover SHAPE error is
+  #          not removable by any area correction. Measured on independent CSR
+  #          channels in an L-shaped cell (global test, 60 reps): L12 rejected 22%
+  #          of the time and g12 8%, against a nominal 5%.
+  # "labels" keeps the OBSERVED points exactly where they are and permutes which
+  #          channel each one belongs to, so both marginal patterns and the window
+  #          cancel out of the comparison. This is the standard random-labelling
+  #          null for two types in one pattern. What it tests is therefore "the two
+  #          channels are a random labelling of one pattern": if the two species
+  #          genuinely occupy different regions of the cell, that difference alone
+  #          makes the test reject, which is why it is offered rather than forced.
+  null_mode <- match.arg(null_mode)
+  use_labels <- identical(null_mode, "labels") && !is.null(pts1) && !is.null(pts2) &&
+                estimator %in% c("L12", "pcf")
+  if (use_labels) {
+    pool <- rbind(data.frame(x = pts1$x, y = pts1$y, z = if (!is.null(pts1$z)) pts1$z else 0),
+                  data.frame(x = pts2$x, y = pts2$y, z = if (!is.null(pts2$z)) pts2$z else 0))
+    n1_lab <- nrow(pts1); n_pool <- nrow(pool)
+  }
+
   # Set covariance ONCE for the whole loop - it is a property of the window, and
   # rebuilding it per simulation is what made this look like a hang.
   if (!is.null(support) && isTRUE(edge_correct)) {
@@ -10686,31 +10799,49 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
                                  use_3d = is3d)
   }
 
+  # WHY THE NULL IS NOT RE-ESTIMATED PER SIMULATION (tried and rejected 2026-09-17).
+  # The observed points occupy the CELL, while a simulated pattern is confined to the
+  # estimated footprint, which is smaller (see debias_support_window). Re-estimating
+  # each simulation's area from its own points makes the mismatch worse, not better:
+  # random data then read ABOVE the band in 100% of replicates instead of below it.
+  # The region, not the normalising area, is what has to match, so the fix lives in
+  # the window (debias_support_window) and this loop uses the window it is given.
   for (s in seq_len(nsim)) {
     p1 <- gen(n)
+    sup_s <- support
     col <- if (estimator == "L") {
       cv <- compute_ripley_L(p1$x, p1$y, p1$z, r_seq = r_seq, use_3d = is3d,
                              max_subsample = cap, window_ranges = window_ranges,
-                             support = support, edge_correct = edge_correct)
+                             support = sup_s, edge_correct = edge_correct)
       cv$Lr_minus_r
     } else if (estimator == "g") {
       cv <- compute_pcf(p1$x, p1$y, p1$z, r_seq = r_seq, use_3d = is3d,
                         max_subsample = cap, window_ranges = window_ranges,
-                        support = support, edge_correct = edge_correct)
+                        support = sup_s, edge_correct = edge_correct)
       cv$g
     } else if (estimator == "L12") {
-      p2 <- gen(n2)
+      if (use_labels) {
+        i1 <- sample.int(n_pool, n1_lab)
+        p1 <- as.list(pool[i1, ]); p2 <- as.list(pool[-i1, ])
+        if (!is3d) { p1$z <- NULL; p2$z <- NULL }
+      } else p2 <- gen(n2)
+      # edge_correct passed through (fixed 2026-09-17): the default TRUE here made
+      # the envelope edge-corrected even when the observed curve was not.
       cv <- compute_ripley_L12(p1$x, p1$y, p1$z, p2$x, p2$y, p2$z,
                                r_seq = r_seq, use_3d = is3d,
                                max_subsample = cap, window_ranges = window_ranges,
-                               support = support)
+                               support = sup_s, edge_correct = edge_correct)
       cv$Lr_minus_r
     } else {
-      p2 <- gen(n2)
+      if (use_labels) {
+        i1 <- sample.int(n_pool, n1_lab)
+        p1 <- as.list(pool[i1, ]); p2 <- as.list(pool[-i1, ])
+        if (!is3d) { p1$z <- NULL; p2$z <- NULL }
+      } else p2 <- gen(n2)
       cv <- compute_pcf12(p1$x, p1$y, p1$z, p2$x, p2$y, p2$z,
                           r_seq = r_seq, use_3d = is3d,
                           max_subsample = cap, window_ranges = window_ranges,
-                          support = support)
+                          support = sup_s, edge_correct = edge_correct)
       cv$g12
     }
     if (length(col) == nr) {
@@ -10724,8 +10855,189 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
 
   lo <- apply(mat, 1, stats::quantile, probs = probs[1], na.rm = TRUE)
   hi <- apply(mat, 1, stats::quantile, probs = probs[2], na.rm = TRUE)
-  data.frame(r = r_seq, lo = as.numeric(lo), hi = as.numeric(hi),
-             null_mean = rowMeans(mat, na.rm = TRUE))
+
+  # ── GLOBAL ENVELOPE (added 2026-09-17) ──────────────────────────────────────
+  # The band above is POINTWISE: it holds at each r separately, so reading
+  # "the curve leaves the band ANYWHERE" over 40 radii is not a 5% test. Measured
+  # on CSR in an L-shaped cell with the true window, random data left the pointwise
+  # band somewhere in 73% of replicates. The global band is the studentized
+  # maximum-deviation (MAD) test: for each simulated curve
+  #     T = max_r |f(r) - mean(r)| / sd(r)
+  # and the band is mean +/- T_crit * sd with T_crit the (1 - alpha) quantile of the
+  # simulated T. Crossing it ANYWHERE is then a single test at level alpha
+  # (Loosmore & Ford 2006; Myllymaki et al. 2017). mean and sd for each simulated
+  # curve exclude that curve (leave-one-out), so its T is on the same footing as the
+  # observed one, which was not part of the simulations at all.
+  mu <- rowMeans(mat, na.rm = TRUE)
+  sdv <- apply(mat, 1, stats::sd, na.rm = TRUE)
+  alpha <- max(1e-3, min(0.5, 2 * probs[1]))
+  ok_r <- is.finite(mu) & is.finite(sdv) & sdv > 0
+  T_sims <- rep(NA_real_, nsim)
+  if (any(ok_r) && nsim >= 3L) {
+    m_ok <- mat[ok_r, , drop = FALSE]
+    n_j  <- rowSums(!is.na(m_ok))
+    s1   <- rowSums(m_ok, na.rm = TRUE)
+    s2   <- rowSums(m_ok^2, na.rm = TRUE)
+    for (j in seq_len(nsim)) {
+      v  <- m_ok[, j]
+      nj <- n_j - !is.na(v)
+      mj <- (s1 - ifelse(is.na(v), 0, v)) / pmax(nj, 1)
+      vj <- (s2 - ifelse(is.na(v), 0, v^2) - nj * mj^2) / pmax(nj - 1, 1)
+      sj <- sqrt(pmax(vj, 0))
+      d  <- abs(v - mj) / sj
+      T_sims[j] <- suppressWarnings(max(d[is.finite(d)], na.rm = TRUE))
+    }
+  }
+  T_sims <- T_sims[is.finite(T_sims)]
+  T_crit <- if (length(T_sims) >= 3L) unname(stats::quantile(T_sims, 1 - alpha)) else NA_real_
+  out <- data.frame(r = r_seq, lo = as.numeric(lo), hi = as.numeric(hi),
+                    null_mean = mu, null_sd = sdv,
+                    g_lo = mu - T_crit * sdv, g_hi = mu + T_crit * sdv)
+  attr(out, "null_mode") <- if (use_labels) "labels" else "csr"
+  attr(out, "T_sims") <- T_sims
+  attr(out, "T_crit") <- T_crit
+  attr(out, "alpha")  <- alpha
+  attr(out, "nsim")   <- nsim
+  out
+}
+
+# =============================================================================
+# dilate_mask_cells() - grow a boolean mask by r whole cells (Chebyshev/box)
+# =============================================================================
+# Separable box dilation, the same structuring element estimate_support() closes
+# with. The array is padded by r on every side first so the growth has room, so
+# the returned mask is larger than the input and `origin` shifts by -r*h.
+# RETURNS list(mask, pad) with pad = r (cells added on each side).
+dilate_mask_cells <- function(mask, r) {
+  r <- max(0L, as.integer(r))
+  if (r == 0L) return(list(mask = mask, pad = 0L))
+  dm <- dim(mask); d <- length(dm)
+  if (!d %in% c(2L, 3L)) return(list(mask = mask, pad = 0L))
+  # pad by r on every side so the growth has room
+  big <- array(FALSE, dim = dm + 2L * r)
+  if (d == 2L) big[seq_len(dm[1]) + r, seq_len(dm[2]) + r] <- mask
+  else         big[seq_len(dm[1]) + r, seq_len(dm[2]) + r, seq_len(dm[3]) + r] <- mask
+  db <- dim(big)
+  # separable: OR the array with itself shifted by one cell, r times per axis
+  for (ax in seq_len(d)) {
+    n_ax <- db[ax]
+    if (n_ax < 2L) next
+    for (step in seq_len(r)) {
+      lo <- seq_len(n_ax - 1L); hi <- lo + 1L
+      if (d == 2L) {
+        if (ax == 1L) big[lo, ] <- big[lo, ] | big[hi, , drop = FALSE]
+        else          big[, lo] <- big[, lo] | big[, hi, drop = FALSE]
+        if (ax == 1L) big[hi, ] <- big[hi, ] | big[lo, , drop = FALSE]
+        else          big[, hi] <- big[, hi] | big[, lo, drop = FALSE]
+      } else {
+        if (ax == 1L) { big[lo, , ] <- big[lo, , ] | big[hi, , , drop = FALSE]
+                        big[hi, , ] <- big[hi, , ] | big[lo, , , drop = FALSE] }
+        else if (ax == 2L) { big[, lo, ] <- big[, lo, ] | big[, hi, , drop = FALSE]
+                             big[, hi, ] <- big[, hi, ] | big[, lo, , drop = FALSE] }
+        else { big[, , lo] <- big[, , lo] | big[, , hi, drop = FALSE]
+               big[, , hi] <- big[, , hi] | big[, , lo, drop = FALSE] }
+      }
+    }
+  }
+  list(mask = big, pad = r)
+}
+
+# =============================================================================
+# debias_support_window() - grow the footprint to the region the points really fill
+# =============================================================================
+#
+# GOAL
+#   Remove the area bias of the occupancy-grid footprint before it is used as the
+#   observation window of a spatial statistic.
+#
+# WHY IT IS NEEDED
+#   The footprint is built from occupied grid cells, so at sparse labelling its
+#   boundary sits INSIDE the true cell edge: measured on CSR in an L-shaped cell,
+#   estimated/true area = 0.87 / 0.93 / 0.99 / 1.00 at 5.6 / 14 / 42 / 139 units per
+#   um^2. Ripley L, g(r), L12 and g12 compare the observed pattern with simulations
+#   drawn INSIDE that window. The observed points fill the real cell, the simulated
+#   ones only the smaller window, so random data look more spread out than the null
+#   and read as regular: L-r at r = 200 nm came out -6.9 nm against a null mean of
+#   -0.7 nm, with 33% of random replicates below the pointwise band.
+#
+# HOW
+#   The shrink is measured on the window itself: draw `n_pts` uniform points inside
+#   the mask, re-estimate the footprint from them with the same pitch and gap fill,
+#   and average the ratio rho = A_re-estimated / A_mask over `n_draw` draws. The cell
+#   the observed points came from is then about A_mask / rho, so the mask is dilated
+#   by whole cells until its area is closest to that target (capped at the bounding
+#   box). Dilation, not rescaling: the simulations have to be drawn from the larger
+#   REGION, and only a mask can do that.
+#
+# support : estimate_support() object WITH $mask
+# n_pts   : number of points the window was estimated from
+# RETURNS the support with mask, origin, support (area), frac_of_bbox and
+#   debias_rho / debias_cells updated; unchanged when there is no mask or rho ~ 1.
+#   Any gamma cache is dropped, so re-attach attach_gamma_cache() afterwards.
+debias_support_window <- function(support, n_pts, n_draw = 6L, max_cells = 8L, tol = 0.02) {
+  if (is.null(support) || is.null(support$mask) || !is.finite(support$h %||% NA_real_)) return(support)
+  if (!is.finite(n_pts) || n_pts < 10L) return(support)
+  h <- support$h; d <- length(dim(support$mask))
+  A0 <- support$support
+  if (!is.finite(A0) || A0 <= 0) return(support)
+  rhos <- vapply(seq_len(max(1L, n_draw)), function(i) {
+    p <- tryCatch(sample_in_support(support, n_pts, use_3d = d >= 3L), error = function(e) NULL)
+    if (is.null(p)) return(NA_real_)
+    pts <- data.frame(x = p$x, y = p$y, z = if (!is.null(p$z)) p$z else 0)
+    e <- tryCatch(estimate_support(pts, use_3d = d >= 3L, mode = support$mode %||% "grid",
+                                   h_nm = h, close_nm = support$close_nm %||% 200),
+                  error = function(err) NULL)
+    a <- e$support %||% NA_real_
+    if (is.finite(a) && a > 0) a / A0 else NA_real_
+  }, numeric(1))
+  rho <- mean(rhos, na.rm = TRUE)
+  if (!is.finite(rho) || rho <= 0 || rho >= 1 - tol) return(support)   # already unbiased
+  target <- min(A0 / rho, support$bbox %||% Inf)
+  cell_v <- h^d
+  best <- support; best_diff <- abs(A0 - target); best_r <- 0L
+  for (r in seq_len(max_cells)) {
+    dl <- dilate_mask_cells(support$mask, r)
+    a  <- sum(dl$mask) * cell_v
+    if (abs(a - target) < best_diff) {
+      best_diff <- abs(a - target); best_r <- r
+      best <- support
+      best$mask   <- dl$mask
+      best$origin <- support$origin - r * h
+      best$support <- a
+      best$frac_of_bbox <- if (is.finite(support$bbox %||% NA_real_)) a / support$bbox else NA_real_
+    }
+    if (a >= target) break
+  }
+  best$gcache <- NULL; best$gcache_r <- NULL      # the covariance belongs to the old mask
+  best$debias_rho <- rho; best$debias_cells <- best_r
+  best
+}
+
+# =============================================================================
+# envelope_global_p() - one p-value for a curve against its CSR envelope
+# =============================================================================
+# GOAL: turn "does the curve leave the band" into a single test over the whole r
+# range, using the studentized maximum deviation stored on the envelope.
+#
+# env : a compute_ripley_envelope() result (needs null_mean, null_sd, T_sims)
+# obs : the observed curve, aligned with env$r
+#
+# RETURNS list(p, T_obs, T_crit, alpha, nsim, r_at_max) where p is the Monte-Carlo
+# p-value (1 + #{T_sim >= T_obs}) / (nsim + 1), i.e. never below 1/(nsim+1), and
+# r_at_max is the radius where the largest standardized deviation sits.
+envelope_global_p <- function(env, obs) {
+  if (is.null(env) || is.null(obs) || !all(c("null_mean", "null_sd") %in% names(env)))
+    return(NULL)
+  T_sims <- attr(env, "T_sims")
+  n_ok <- min(length(obs), nrow(env))
+  d <- abs(obs[seq_len(n_ok)] - env$null_mean[seq_len(n_ok)]) / env$null_sd[seq_len(n_ok)]
+  d[!is.finite(d)] <- NA_real_
+  if (all(is.na(d))) return(NULL)
+  T_obs <- max(d, na.rm = TRUE)
+  p <- if (length(T_sims) >= 3L)
+         (1 + sum(T_sims >= T_obs, na.rm = TRUE)) / (length(T_sims) + 1) else NA_real_
+  list(p = p, T_obs = T_obs, T_crit = attr(env, "T_crit"), alpha = attr(env, "alpha"),
+       nsim = attr(env, "nsim"), r_at_max = env$r[which.max(replace(d, is.na(d), -Inf))])
 }
 
 ## ── 2D KDE density co-localization map ──────────────────────────────────────
@@ -10889,4 +11201,76 @@ make_helpers <- function(mode) {
       add_distance_lines   = function(fig, med) add_distance_lines_to_plot(fig, med) # 3D
     )
   }
+}
+
+
+# =============================================================================
+# per_file_summary() - ONE ROW PER FILE PER METRIC, FOR BETWEEN-GROUP STATISTICS
+# =============================================================================
+#
+# GOAL
+#   Collapse each distribution analysis to per-file summary statistics, tagged
+#   with the file's dataset group, so group comparisons can use the CELL (file)
+#   as the unit of replication.
+#
+# WHY IT EXISTS
+#   In group mode the distribution panels (Batch NN, trace IDs per Median
+#   Cluster, RoG, crowding, within-cluster NN vs size, cross-channel NN) pool
+#   every unit from every file in a group into one histogram. Units within a cell
+#   are not independent (same labelling, same drift, same biology), so a test run
+#   on pooled units is pseudo-replicated: its n is the number of distances or
+#   clusters when the number of independent samples is the number of cells. The
+#   spatial panels already average per-file curves; this gives the distribution
+#   panels the same footing. The app runs no test itself; the export feeds one.
+#
+# ARGS
+#   results   : named list, one entry per panel, each list(df = <stored result
+#               data.frame with a `dataset` column>, metrics = <character vector of
+#               numeric column names to summarise>, unit = <what one row is>).
+#               NULL / empty entries are skipped (panel not run).
+#   group_map : named character vector file -> group (file_group_map()); may be empty.
+#   files     : loaded file names, used to resolve faceted tags ("file · channel")
+#               back to their file so the group lookup works.
+#
+# RETURNS
+#   data.frame(panel, metric, unit, dataset, file, group, n, mean, sd, median, q25, q75)
+#   or an empty data.frame when nothing has been run. `dataset` keeps the facet
+#   tag (a channel split gives one row per channel per file).
+per_file_summary <- function(results, group_map = character(0), files = character(0)) {
+  empty <- data.frame(panel = character(), metric = character(), unit = character(),
+                      dataset = character(), file = character(), group = character(),
+                      n = integer(), mean = numeric(), sd = numeric(), median = numeric(),
+                      q25 = numeric(), q75 = numeric(), stringsAsFactors = FALSE)
+  if (!length(results)) return(empty)
+  # Resolve a dataset tag to its source file: exact match, else the longest loaded
+  # file name the tag starts with (facets are named "<file> · <channel>").
+  file_of <- function(tag) {
+    if (tag %in% files) return(tag)
+    hit <- files[startsWith(tag, paste0(files, " "))]
+    if (length(hit)) hit[which.max(nchar(hit))] else tag
+  }
+  rows <- list()
+  for (panel in names(results)) {
+    ent <- results[[panel]]
+    df  <- ent$df
+    if (is.null(df) || !is.data.frame(df) || !nrow(df) || !"dataset" %in% names(df)) next
+    for (metric in intersect(ent$metrics, names(df))) {
+      for (tag in unique(as.character(df$dataset))) {
+        v <- suppressWarnings(as.numeric(df[[metric]][as.character(df$dataset) == tag]))
+        v <- v[is.finite(v)]                              # summaries on finite values only
+        if (!length(v)) next
+        f <- file_of(tag)
+        g <- if (length(group_map) && f %in% names(group_map)) unname(group_map[[f]]) else NA_character_
+        q <- stats::quantile(v, c(0.25, 0.5, 0.75), names = FALSE)
+        rows[[length(rows) + 1L]] <- data.frame(
+          panel = panel, metric = metric, unit = ent$unit %||% NA_character_,
+          dataset = tag, file = f, group = g, n = length(v),
+          mean = mean(v), sd = if (length(v) > 1L) stats::sd(v) else NA_real_,
+          median = q[2], q25 = q[1], q75 = q[3], stringsAsFactors = FALSE)
+      }
+    }
+  }
+  if (!length(rows)) return(empty)
+  out <- do.call(rbind, rows)
+  out[order(out$panel, out$metric, out$group, out$dataset), , drop = FALSE]
 }

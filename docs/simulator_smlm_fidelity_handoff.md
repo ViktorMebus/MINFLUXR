@@ -1,5 +1,9 @@
 # SMLM Simulator — MINFLUX Fidelity Handoff
 
+> **Superseded (2026-09-17).** The findings below are folded into [simulator.md](simulator.md) §7
+> (known fidelity gaps, with current status) and §8 (the planned work, with build status). Kept for the
+> record of the 2026-08-11 audit; read simulator.md for what is true now.
+
 *Findings from a camera-SMLM-assumption audit of the SMLM app and simulator (2026-08-11). The app
 side is done; **this file is the un-started simulator work**, split out so it can be picked up in a
 fresh session.* Companion to [simulation_module.md](simulation_module.md) (the diffusion/tracking

@@ -363,8 +363,9 @@ tracking_server <- function(input, output, session) {
   #
   #       σ_loc² = −< Δx_i · Δx_{i+1} >          (per axis, averaged over x,y[,z])
   #
-  #   This is the R = 0 (no motion blur) case, which is the right limit for
-  #   MINFLUX: there is no camera exposure to smear the position.
+  #   That is the R = 0 (instantaneous exposure) case. A MINFLUX localization
+  #   integrates photons across the TCP cycle, so the code below uses the blur-aware
+  #   form σ² = R·<Δx²> + (2R − 1)·cov₁ (see "Motion blur" in the bundle).
   #   Bonus: D falls out too, noise-corrected, with no MSD fit at all:
   #       D = <Δ²>/(2Δt) + cov₁/Δt
   #
@@ -423,18 +424,11 @@ tracking_server <- function(input, output, session) {
     # Real axial data only - a placeholder all-zero z column would dilute both σ_loc
     # and D_cve (see .has_real_z).
     has_z <- .has_real_z(df)
-    df <- df[order(df$tid, df$tim), ]
-    n  <- nrow(df)
-    same <- c(FALSE, df$tid[-1] == df$tid[-n])                 # step i valid (2nd+ loc)
-    dt   <- c(NA_real_, diff(df$tim)); dt[!same] <- NA_real_
-    dx   <- c(NA_real_, diff(df$x));   dx[!same] <- NA_real_
-    dy   <- c(NA_real_, diff(df$y));   dy[!same] <- NA_real_
-    dz   <- if (has_z) { v <- c(NA_real_, diff(df$z)); v[!same] <- NA_real_; v } else rep(NA_real_, n)
-    n_cyc <- if (is.finite(t_c) && t_c > 0) round(dt / t_c) else rep(1L, n)
-    integ_step <- same & is.finite(n_cyc) & (n_cyc == 1L)
-    integ_step[is.na(integ_step)] <- FALSE
-    n_steps    <- sum(same, na.rm = TRUE)
-    frac_integ <- if (n_steps > 0) sum(integ_step) / n_steps else NA_real_
+    # Step arrays from est_cve.R, shared with cve_core() and the diagnostics below.
+    st <- cve_steps(df, t_c, has_z)
+    df <- st$df; n <- st$n; same <- st$same; dt <- st$dt
+    dx <- st$dx; dy <- st$dy; dz <- st$dz; n_cyc <- st$n_cyc
+    integ_step <- st$integ_step; n_steps <- st$n_steps; frac_integ <- st$frac_integ
 
     # Same integrated fraction, but on the FULLY-FILTERED data (post quality-gate /
     # end-trim / length / duration / spatial) - the data the analyses actually use.
@@ -472,54 +466,6 @@ tracking_server <- function(input, output, session) {
     cont_raw  <- cont_of(tryCatch(trk_raw_original(), error = function(e) NULL), H_disp)  # TRUE raw (frozen at upload)
     cont_filt <- cont_of(tryCatch(trk_spatial_filtered(), error = function(e) NULL), H_disp)  # analyzed (live filtered)
 
-    # CVE lag-1 autocovariance over CONSECUTIVE integrated step pairs.
-    lead_integ <- c(integ_step[-1], FALSE)
-    pair   <- integ_step & lead_integ
-    prod_x <- dx * c(dx[-1], NA_real_)
-    prod_y <- dy * c(dy[-1], NA_real_)
-    vals   <- c(prod_x[pair], prod_y[pair])
-    prod_z <- if (has_z) dz * c(dz[-1], NA_real_) else rep(NA_real_, n)
-    if (has_z) vals <- c(vals, prod_z[pair])
-    vals <- vals[is.finite(vals)]
-    shiny::validate(shiny::need(length(vals) >= 20,
-      "Too few consecutive integrated steps for a CVE estimate - relax filters or check the cycle time."))
-    cov1   <- mean(vals)
-    # ── Motion blur (Vestergaard's R) ──────────────────────────────────────────
-    # A MINFLUX localization is not a snapshot: photons are collected across the
-    # whole TCP cycle, so the reported position is a time-average of the molecule's
-    # path over that window. Vestergaard's CVE then reads
-    #     sigma^2 = R*<dx^2> + (2R - 1)*cov1        (D is blur-INDEPENDENT)
-    # with R = t_collect/(6*dt). R = 0 is the instantaneous-exposure special case,
-    # where it collapses to sigma^2 = -cov1 - which is what this used to compute,
-    # and it under-reports sigma by ~3x on real tracking data (1.5 vs 4.1 nm on the
-    # GP67H files). Collection spans the cycle t_c out of a step dt = t_c + SW, so
-    # R = t_c/(6*dt); a full-cycle window at SW = 0 gives the familiar 1/6.
-    dt_int  <- mean(dt[integ_step], na.rm = TRUE)
-    # R is not a single knowable number: it depends on how the cycle's photons are
-    # distributed in time, and only part of that is visible in the data. So bound it.
-    #
-    #   R_hi - collection spans the whole cycle: R = t_c/(6*dt), capped at 1/6.
-    #   R_lo - collection is only the measured ECO/EFO window, delivered as a
-    #          staircase over the pattern's vertices, with the beam moves between
-    #          them and the terminal localization step contributing nothing.
-    #          Closed form for K equal dwells of a, moves of m, terminal r:
-    #            R = [ sum_i a*(s0(1-s0) + d(1-2*s0)/2 - d^2/3) + sum_i m*(i/K)(1-i/K) ] / dt
-    #          with d = 1/K and s0 = (i-1)/K.
-    # Vertex count is a weak lever (triangle 0.131 vs hexagon 0.137 at these
-    # timings); the terminal step is the strong one (0.165 without it, 0.137 with).
-    .blur_R_duty <- function(dt_ms, t_coll_ms, K, t_eod_ms = 0.0053, t_rep_ms = 0.020) {
-      if (!is.finite(dt_ms) || dt_ms <= 0 || !is.finite(t_coll_ms) || t_coll_ms <= 0 ||
-          !is.finite(K) || K < 1) return(NA_real_)
-      t_coll_ms <- min(t_coll_ms, dt_ms)
-      a  <- t_coll_ms / K
-      m  <- max(0, min(t_eod_ms, (dt_ms - t_coll_ms) / K))
-      d  <- 1 / K; i <- seq_len(K); s0 <- (i - 1) / K
-      dwell_part <- sum(a * (s0 * (1 - s0) + d * (1 - 2 * s0) / 2 - d^2 / 3))
-      flat_part  <- sum(m * (i / K) * (1 - i / K))
-      (dwell_part + flat_part) / dt_ms
-    }
-    R_hi <- if (is.finite(t_c) && t_c > 0 && is.finite(dt_int) && dt_int > 0)
-              min(1/6, t_c / (6 * dt_int)) else 1/6
     # Collection window from the photon budget: t_coll = ECO / EFO.
     .med_of <- function(cn) if (cn %in% names(df)) {
                               v <- df[[cn]][is.finite(df[[cn]]) & df[[cn]] > 0]
@@ -533,48 +479,16 @@ tracking_server <- function(input, output, session) {
       if (!is.finite(v)) suppressWarnings(as.integer(input$trk_hw_vertices %||% 6L)) else v
     }
     if (!is.finite(n_vert) || n_vert < 1L) n_vert <- 6L
-    R_lo <- .blur_R_duty(dt_int, t_coll, n_vert)
-    if (!is.finite(R_lo) || R_lo <= 0 || R_lo > R_hi) R_lo <- R_hi
-    R_blur <- R_lo   # the physically modelled value; R_hi bounds the other side
-    sq_all  <- c(dx[integ_step]^2, dy[integ_step]^2)
-    if (has_z) sq_all <- c(sq_all, dz[integ_step]^2)
-    sq_all  <- sq_all[is.finite(sq_all)]
-    msq     <- if (length(sq_all)) mean(sq_all) else NA_real_
-    .sig_from <- function(msq_v, cov_v)
-      if (!is.finite(msq_v) || !is.finite(cov_v)) NA_real_
-      else sqrt(max(0, R_blur * msq_v + (2 * R_blur - 1) * cov_v))
-    sigma2 <- R_blur * msq + (2 * R_blur - 1) * cov1
-    sigma  <- sqrt(max(0, sigma2))
-    # ── Per-axis-group σ: LATERAL (x,y) vs AXIAL (z) ────────────────────────────
-    # `sigma` above pools all axes into ONE number. In 3D MINFLUX the axial precision
-    # is typically WORSE than the lateral, so the pooled value over-states σ_xy and
-    # under-states σ_z. Several consumers are purely lateral (the D-map is an x–y map;
-    # JDD/MSD in 2D mode), and subtracting a z-inflated noise floor from them
-    # over-corrects. Report both so the anisotropy is visible and quantified.
-    .sig_of <- function(v, sqv) {
-      v <- v[is.finite(v)]; sqv <- sqv[is.finite(sqv)]
-      if (length(v) < 10L || !length(sqv)) NA_real_ else .sig_from(mean(sqv), mean(v))
-    }
-    sigma_xy <- .sig_of(c(prod_x[pair], prod_y[pair]),
-                        c(dx[integ_step]^2, dy[integ_step]^2))
-    sigma_z  <- if (has_z) .sig_of(prod_z[pair], dz[integ_step]^2) else NA_real_
-    # Axial/lateral ratio - > ~1.3 means a single pooled σ_loc is a poor description.
-    sig_aniso <- if (is.finite(sigma_xy) && sigma_xy > 0 && is.finite(sigma_z))
-                   sigma_z / sigma_xy else NA_real_
-    # D is blur-independent: D = ⟨Δ²⟩/(2Δt) + cov1/Δt holds for any R.
-    sq     <- sq_all
-    D_cve  <- if (length(sq) && is.finite(dt_int) && dt_int > 0) mean(sq)/(2*dt_int) + cov1/dt_int else NA_real_
-
-    # ── How well is σ actually resolved? (drives the photon-weighting gate) ─────
-    # Normalized lag-1 correlation r1 = cov1/⟨Δ²⟩. For Brownian + noise,
-    # r1 = −σ²/(2·D·Δt + 2σ²), so the NOISE FRACTION of the step variance is −2·r1.
-    # r1 → −0.5 means noise dominates (σ cleanly resolved); r1 → 0 means σ is a marginal
-    # residual sitting on top of motion, and any PER-TRACK or PER-BIN σ then mostly
-    # tracks the step variance (mobility), not photons. r1 > 0 means correlated/directed
-    # motion is dominating and σ is unresolvable there. The pooled σ above is still the
-    # best estimate; this only says how much to trust σ HETEROGENEITY between tracks.
-    r1_norm    <- if (length(sq) && mean(sq) > 0) cov1 / mean(sq) else NA_real_
-    noise_frac <- -2 * r1_norm
+    # CVE core (covariance, blur bounds, σ, D) lives in est_cve.R.
+    cc <- cve_core(dx, dy, dz, dt, integ_step, has_z, t_c, t_coll, n_vert)
+    shiny::validate(shiny::need(!is.null(cc),
+      "Too few consecutive integrated steps for a CVE estimate - relax filters or check the cycle time."))
+    pair <- cc$pair; prod_x <- cc$prod_x; prod_y <- cc$prod_y; prod_z <- cc$prod_z
+    vals <- rep(NA_real_, cc$n_pairs)                       # only its length is read below
+    cov1 <- cc$cov1; dt_int <- cc$dt_int; R_lo <- cc$R_lo; R_hi <- cc$R_hi; R_blur <- cc$R_blur
+    msq <- cc$msq; sigma2 <- cc$sigma2; sigma <- cc$sigma
+    sigma_xy <- cc$sigma_xy; sigma_z <- cc$sigma_z; sig_aniso <- cc$sig_aniso
+    D_cve <- cc$D_cve; r1_norm <- cc$r1_norm; noise_frac <- cc$noise_frac
 
     # ── Per-track σ_loc heterogeneity ──────────────────────────────────────────
     # One CVE σ per track (tracks with ≥ n_min integrated steps), skipping the
@@ -2346,36 +2260,7 @@ tracking_server <- function(input, output, session) {
            NA_integer_)
   }
 
-  # ── Doughnut CRLB, Vogler et al. 2025 Eq. 1 ─────────────────────────────────
-  # sigma(x) = L/(4 sqrt(N)) * [1 + 2(x/L)^2] * |cosh(a) - (x/L) sinh(a)|
-  #            / |1 + ln2 (L/nu)^2 ((2x/L)^2 - 1)| ,   a = 4 ln2 x L / nu^2
-  #
-  # L  TCP diameter of the reiterated iteration
-  # nu FWHM of the excitation doughnut (instrument constant)
-  # N  detected photons for this localization (eco)
-  # x  emitter offset from the TCP centre. Zero for an immobile emitter; while
-  #    tracking, Vogler model it as the 1D diffusive spread over one localization,
-  #    x = sqrt(2 D t_loc), which is why SPT precision is worse than imaging.
-  #
-  # Vectorised over N. Returns L/(4 sqrt(N)) when nu is not usable, i.e. the
-  # nu -> infinity limit, so a missing constant degrades to the old behaviour.
-  .crlb_doughnut <- function(L, nu, N, x = 0, pref = TCP_CRLB_PREFACTOR) {
-    if (!length(N)) return(numeric(0))
-    if (!is.finite(pref) || pref <= 0) pref <- TCP_CRLB_PREFACTOR
-    base <- L / (pref * sqrt(N))
-    if (!is.finite(L) || L <= 0) return(base)
-    if (!is.finite(x) || x < 0) x <- 0
-    # nu off (0) = the large-beam limit. The denominator goes to 1 and cosh/sinh to
-    # 1/0, so Eq. 1 collapses to base * [1 + 2(x/L)^2] - the moving-emitter term
-    # SURVIVES. That term is what makes the estimate mode-aware: x = sqrt(2 D t_loc)
-    # is smaller under confinement and larger under directed or fast motion.
-    if (!is.finite(nu) || nu <= 0) return(base * (1 + 2 * (x / L)^2))
-    a   <- 4 * log(2) * x * L / nu^2
-    num <- (1 + 2 * (x / L)^2) * abs(cosh(a) - (x / L) * sinh(a))
-    den <- abs(1 + log(2) * (L / nu)^2 * ((2 * x / L)^2 - 1))
-    if (!is.finite(num) || !is.finite(den) || den <= 0) return(base)
-    base * num / den
-  }
+  # .crlb_doughnut() (photon-budget σ, Vogler et al. 2025 Eq. 1) lives in est_cve.R.
 
   # TCP diameter of one iteration, in nm. Sequence files store the pattern size as
   # the dimensionless `patGeoFactor`; L = patGeoFactor x TCP_L_PER_GEOFACTOR_NM.
@@ -5858,7 +5743,8 @@ tracking_server <- function(input, output, session) {
   #
   #   (d) HOW MANY STATES: pool the per-segment D values and fit a Gaussian
   #       mixture in log10(D), component count chosen by BIC (`cpd_gmm_rv`).
-  #       The data decide the number of states, not the user.
+  #       Exploratory: segments of different lengths from one population can
+  #       return two components (est_cpd.R header).
   #
   # OBJECTS IT CALLS (inputs)
   #   trk_spatial_filtered() (last pipeline stage), has_z(), trk_sigma_loc_eff()
@@ -5904,61 +5790,13 @@ tracking_server <- function(input, output, session) {
     sub_noise_cpd <- isTRUE(input$trk_cpd_sub_noise) && is.finite(sig_cpd) && sig_cpd > 0
     noise_D_off   <- if (sub_noise_cpd) sig_cpd^2 else 0   # × ⟨1/Δt⟩ per segment below
 
-    tids <- split(df, df$tid)
-
-    seg_rows <- withProgress(message = "Segmenting tracks…", value = 0, {
-      lapply(seq_along(tids), function(i) {
-        incProgress(1 / length(tids))
-        td <- tids[[i]][order(tids[[i]]$tim), ]
-        n  <- nrow(td)
-        if (n < 2L * min_seg) return(NULL)
-
-        dt <- diff(td$tim)                       # ms (already converted)
-        if (any(!is.finite(dt) | dt <= 0)) return(NULL)
-        r2 <- diff(td$x)^2 + diff(td$y)^2       # nm²
-        if (use_z_cpd && "z" %in% names(td) && any(is.finite(td$z)))
-          r2 <- r2 + diff(td$z)^2               # include z for 3D data
-
-        # Normalise step size by time lag → value ∝ local D
-        # Log-transform → approximately normal; mean shifts between D-states
-        r2n <- pmax(r2 / dt, .Machine$double.eps)
-        log_r2n <- log(r2n)
-
-        # PELT change-point on the mean of log(r²/Δt)
-        cpt_obj <- tryCatch(
-          changepoint::cpt.mean(log_r2n, method = "PELT", penalty = "BIC",
-                                minseglen = min_seg),
-          error = function(e) NULL
-        )
-        bkpts <- if (!is.null(cpt_obj)) changepoint::cpts(cpt_obj) else integer(0)
-        seg_s <- c(1L, if (length(bkpts)) bkpts + 1L else integer(0))
-        seg_e <- c(bkpts, length(log_r2n))
-
-        tid_val <- as.character(td$tid[1])
-        do.call(rbind, Filter(Negate(is.null), lapply(seq_along(seg_s), function(s) {
-          idx <- seg_s[s]:seg_e[s]
-          if (length(idx) < min_seg) return(NULL)
-          # Use mean(r²/Δt) / coef_D, not mean(r²) / (coef_D * mean(Δt)):
-          # the latter is biased when r² and Δt covary (Jensen's inequality).
-          D_nm2_ms <- mean(r2[idx] / dt[idx]) / coef_D
-          # Subtract the σ_loc noise floor σ²·⟨1/Δt⟩ (clamped ≥ 0) so immobile
-          # segments don't read as a small non-zero D - same floor the D-map uses.
-          if (noise_D_off > 0)
-            D_nm2_ms <- max(0, D_nm2_ms - noise_D_off * mean(1 / dt[idx]))
-          data.frame(
-            tid      = tid_val,
-            seg_idx  = s,
-            n_states = length(seg_s),     # total segments in this track
-            n_steps  = length(idx),
-            D_nm2_ms = D_nm2_ms,
-            D_um2_s  = D_nm2_ms / 1e3,
-            stringsAsFactors = FALSE
-          )
-        })))
-      })
-    })
-
-    result <- do.call(rbind, Filter(Negate(is.null), seg_rows))
+    # Segmentation core lives in est_cpd.R (pure, tested).
+    result <- withProgress(message = "Segmenting tracks…", value = 0,
+      cpd_segment_tracks(df, min_seg = min_seg, use_z = use_z_cpd,
+                         noise_sig2 = noise_D_off,
+                         R_abs = { tc <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+                                   if (is.finite(tc) && tc > 0) MSD_BLUR_R * tc else 0 },
+                         progress = function(f) incProgress(f)))
     shiny::validate(shiny::need(
       !is.null(result) && nrow(result) >= 3L,
       "No segments found - try lowering Min segment length."
@@ -5977,15 +5815,8 @@ tracking_server <- function(input, output, session) {
   cpd_gmm_rv <- reactive({
     req(isTRUE(input$trk_show_cpd))
     segs <- tryCatch(cpd_segments_rv(), error = function(e) NULL)   # per-segment D values
-    req(!is.null(segs), nrow(segs) >= 3L)                          # need enough to fit
-    log10_D <- log10(segs$D_um2_s)
-    log10_D <- log10_D[is.finite(log10_D)]
-    req(length(log10_D) >= 3L)
-    max_G <- max(1L, min(6L, as.integer(input$trk_cpd_max_g %||% 4L)))
-    tryCatch(
-      mclust::Mclust(log10_D, G = seq_len(max_G), modelNames = "V", verbose = FALSE),
-      error = function(e) NULL
-    )
+    req(!is.null(segs), nrow(segs) >= 3L)
+    cpd_gmm(segs, max_G = input$trk_cpd_max_g %||% 4L)              # est_cpd.R
   })
 
   output$trk_cpd_hist <- renderPlotly({
@@ -6101,177 +5932,8 @@ tracking_server <- function(input, output, session) {
     }
   )
 
-  # --- Shared MSD fit helpers --------------------------------------------------
-  # ndim = 2 (2D): MSD = 4*D*tau^alpha + 4*sigma^2
-  # ndim = 3 (3D): MSD = 6*D*tau^alpha + 6*sigma^2
-  # Units throughout: tau in ms, MSD in nm², D in nm²/ms.
-  # Display conversion: D [µm²/s] = D [nm²/ms] / 1e3   (1 nm²/ms = 0.001 µm²/s)
-  #                     MSD [µm²] = MSD [nm²]   / 1e6
-
-  # OLSF - faithful port of Vogler's OptimizedLeastSquaresFitting (Michalet &
-  # Berglund). UNWEIGHTED linear fit MSD = a + b·τ with SEPARATE optimal point
-  # counts for the slope (→ D) and the intercept (→ σ²), iterated to a fixed
-  # point.  Edge cases and formulas match his olsf_base_math / olsf_fit_utilities:
-  #   x   = σ²/(D·dt) − 2R                 (reduced localization error)
-  #   a   = 2d·σ² − 4d·R·D·dt   (a<0 ⟺ x<0 → p = 2)
-  #   b   = 2d·D·dt            (b<0 → p = L)
-  #   f_b = 2 + 1.35·x^0.6 ,  L_b = 0.8 + 0.564·N            (slope)
-  #   f_a = 2 + 1.6·x^0.51 ,  L_a = 3 + (4.5·N^0.4 − 8.5)^1.2 (intercept)
-  #   p   = f·L / (f³ + L³)^(1/3)
-  .michalet_p <- function(D, sig2, dt, N, R, d, which) {
-    if (!is.finite(D) || D <= 0 || !is.finite(dt) || dt <= 0) return(NA_real_)
-    a <- 2*d*sig2 - 4*d*R*D*dt
-    b <- 2*d*D*dt
-    if (which == "slope") {
-      if (a < 0) return(2); if (b < 0) return(0.8 + 0.564*N)
-      x <- sig2/(D*dt) - 2*R; if (x < 0) x <- 0
-      fb <- 2 + 1.35*x^0.6; Lb <- 0.8 + 0.564*N
-      fb*Lb/((fb^3 + Lb^3)^(1/3))
-    } else {
-      if (a < 0) return(2); if (b < 0) return(3 + (4.5*N^0.4 - 8.5)^1.2)
-      x <- sig2/(D*dt) - 2*R; if (x < 0) x <- 0
-      fa <- 2 + 1.6*x^0.51; La <- 3 + (4.5*N^0.4 - 8.5)^1.2
-      fa*La/((fa^3 + La^3)^(1/3))
-    }
-  }
-
-  # auto_pmin = FALSE: fit the first k points (caller-chosen window).
-  # auto_pmin = TRUE : two-stage iterative Michalet optimal point selection.
-  # `dt_cycle` is the cycle time (for x); `Npts` the trajectory length for L(N).
-  # coef_override: the MSD-vs-D coefficient, when it is NOT simply 2*ndim. A molecule
-  # confined to a SURFACE moves in 2 degrees of freedom however many coordinates are
-  # recorded, and a 2D projection of a curved surface is foreshortened by a
-  # geometry-dependent factor, so the divisor is not the recorded dimensionality (see
-  # .msd_d_eff). `ndim` still carries the GEOMETRIC dimension, because Michalet's
-  # optimal point count is derived for real spatial dimensions.
-  msd_fit_olsf <- function(tau, msd, npairs, k, ndim = 2L,
-                           auto_pmin = FALSE, R = 0, Npts = NA_real_,
-                           dt_cycle = NA_real_, coef_override = NULL) {
-    coef_val <- if (is.null(coef_override)) 2L * ndim else coef_override
-    ok_all <- is.finite(tau) & is.finite(msd) & tau > 0
-    tau <- tau[ok_all]; msd <- msd[ok_all]
-    n_avail <- length(tau)
-    if (n_avail < 3L) return(NULL)
-
-    # Unweighted linear fit on the first p points → D, σ² (his curve_fit).
-    fit_p <- function(p) {
-      p  <- max(2L, min(as.integer(p), n_avail))
-      s <- tau[seq_len(p)]; y <- msd[seq_len(p)]
-      ok <- is.finite(s) & is.finite(y)
-      if (sum(ok) < 2L) return(NULL)
-      cf <- tryCatch(coef(lm(y[ok] ~ s[ok])), error = function(e) NULL)
-      if (is.null(cf) || any(!is.finite(cf))) return(NULL)
-      list(D = cf[2] / coef_val, sig2 = cf[1] / coef_val, p = p)
-    }
-
-    if (!auto_pmin) {
-      r <- fit_p(max(3L, min(as.integer(k), n_avail)))
-      if (is.null(r)) return(NULL)
-      D_est <- max(0, r$D); sig2_est <- max(0, r$sig2); p_slope <- r$p; p_int <- r$p
-    } else {
-      dt <- if (is.finite(dt_cycle) && dt_cycle > 0) dt_cycle
-            else if (n_avail >= 2) stats::median(diff(tau)) else tau[1]
-      N  <- if (is.finite(Npts) && Npts > 0) Npts else n_avail
-      d  <- ndim
-      # Anchor the reduced localization error x on a STABLE fit over the whole
-      # [min_lag, fit_max] window.  Michalet's iteration is otherwise init-
-      # dependent: a few-point fit gives a too-small σ² (hence too-small x) and
-      # collapses p to the starting guess.  The full-window σ² is the stable
-      # baseline that makes the optimal point count well-defined and reproducible.
-      r_anc   <- fit_p(n_avail)
-      if (is.null(r_anc)) return(NULL)
-      D_anc   <- max(1e-9, r_anc$D)
-      sig2_anc<- max(0, r_anc$sig2)
-      # Separate optimal point counts for the slope (→ D) and intercept (→ σ²),
-      # per Michalet & Berglund (Vogler's p_b / p_a), with his +1 shift.
-      p_b <- .michalet_p(D_anc, sig2_anc, dt, N, R, d, "slope")
-      p_a <- .michalet_p(D_anc, sig2_anc, dt, N, R, d, "intercept")
-      p_slope <- if (is.finite(p_b)) max(3L, min(n_avail, as.integer(round(p_b)) + 1L)) else n_avail
-      p_int   <- if (is.finite(p_a)) max(3L, min(n_avail, as.integer(round(p_a)) + 1L)) else n_avail
-      r_s <- fit_p(p_slope); r_i <- fit_p(p_int)
-      D_est    <- if (!is.null(r_s)) max(0, r_s$D)    else max(0, D_anc)
-      sig2_est <- if (!is.null(r_i)) max(0, r_i$sig2) else sig2_anc
-    }
-    if (!is.finite(D_est)) return(NULL)
-    if (!is.finite(sig2_est)) sig2_est <- 0
-    sig_est <- sqrt(sig2_est)
-    tau_seq <- seq(min(tau), max(tau), length.out = 200)
-    yfit    <- pmax(0, coef_val * D_est * tau_seq + coef_val * sig_est^2)
-
-    list(D = D_est, alpha = 1.0, sigma_loc = sig_est,
-         tau_fit = tau_seq, msd_fit = yfit, n_points = p_slope,
-         n_points_intercept = p_int,
-         forced_linear = TRUE, ndim = ndim, method = "OLSF")
-  }
-
-  # Bela's EXACT iterative OLSF (optimized_least_squares_fitting.py). Unlike the
-  # anchored variant above, it does NOT pre-fit the whole window - it starts at a
-  # few points and iterates the optimal point count until it repeats, separately
-  # for slope (→ D) and intercept (→ σ²). This deliberately converges on the
-  # LOWEST lags (least error-prone), reproducing his numbers. `tau` is the lag
-  # axis (use the linearized lag×cycle axis for a faithful match); D = slope/(2d).
-  # coef_override as in msd_fit_olsf.
-  msd_fit_olsf_iterative <- function(tau, msd, ndim = 2L, R = 0, coef_override = NULL,
-                                     dt_cycle = NA_real_, N = NA_real_,
-                                     max_attempts = 1000L) {
-    coef_val <- if (is.null(coef_override)) 2L * ndim else coef_override
-    ok <- is.finite(tau) & is.finite(msd) & tau > 0
-    tau <- tau[ok]; msd <- msd[ok]
-    n_avail <- length(tau)
-    if (n_avail < 3L) return(NULL)
-    d  <- ndim
-    if (!is.finite(N) || N <= 0) N <- n_avail
-    if (!is.finite(dt_cycle) || dt_cycle <= 0)
-      dt_cycle <- if (n_avail >= 2) stats::median(diff(tau)) else tau[1]
-
-    fit_p <- function(p) {
-      p <- max(2L, min(as.integer(p), n_avail))
-      s <- tau[seq_len(p)]; y <- msd[seq_len(p)]
-      cf <- tryCatch(stats::coef(stats::lm(y ~ s)), error = function(e) NULL)
-      if (is.null(cf) || any(!is.finite(cf))) return(NULL)
-      list(D = cf[2] / coef_val, sig2 = cf[1] / coef_val, p = p)
-    }
-
-    p0 <- if (n_avail %/% 10L > 3L) n_avail %/% 10L else 3L
-    nps_s <- p0; nps_i <- p0
-    hist_s <- p0; hist_i <- p0
-    s_done <- FALSE; i_done <- FALSE
-    D_opt <- NA_real_; sig2_opt <- NA_real_
-    p_s_fin <- p0; p_i_fin <- p0
-
-    for (it in seq_len(max_attempts)) {
-      rs <- if (!s_done) fit_p(nps_s) else NULL
-      ri <- if (!i_done) fit_p(nps_i) else NULL
-      if ((!s_done && is.null(rs)) || (!i_done && is.null(ri))) break
-      # Cross-coupled (his exact wiring): σ² from the INTERCEPT fit, D from SLOPE.
-      D_cur    <- if (!s_done) rs$D    else D_opt
-      sig2_cur <- if (!i_done) ri$sig2 else sig2_opt
-      if (!s_done) {
-        pb <- .michalet_p(max(1e-9, D_cur), max(0, sig2_cur), dt_cycle, N, R, d, "slope")
-        new_s <- if (is.finite(pb)) as.integer(round(pb)) + 1L else n_avail
-        if (new_s %in% hist_s) { D_opt <- rs$D; p_s_fin <- nps_s; s_done <- TRUE }
-        else { hist_s <- c(hist_s, new_s); nps_s <- max(2L, min(n_avail, new_s)) }
-      }
-      if (!i_done) {
-        pa <- .michalet_p(max(1e-9, D_cur), max(0, sig2_cur), dt_cycle, N, R, d, "intercept")
-        new_i <- if (is.finite(pa)) as.integer(round(pa)) + 1L else n_avail
-        if (new_i %in% hist_i) { sig2_opt <- ri$sig2; p_i_fin <- nps_i; i_done <- TRUE }
-        else { hist_i <- c(hist_i, new_i); nps_i <- max(2L, min(n_avail, new_i)) }
-      }
-      if (s_done && i_done) break
-    }
-    if (!is.finite(D_opt))    { r <- fit_p(nps_s); if (!is.null(r)) D_opt <- r$D }
-    if (!is.finite(sig2_opt)) { r <- fit_p(nps_i); if (!is.null(r)) sig2_opt <- r$sig2 }
-    if (!is.finite(D_opt)) return(NULL)
-    D_est <- max(0, D_opt); sig2_est <- max(0, if (is.finite(sig2_opt)) sig2_opt else 0)
-    sig_est <- sqrt(sig2_est)
-    tau_seq <- seq(min(tau), max(tau), length.out = 200)
-    yfit <- pmax(0, coef_val * D_est * tau_seq + coef_val * sig_est^2)
-    list(D = D_est, alpha = 1.0, sigma_loc = sig_est,
-         tau_fit = tau_seq, msd_fit = yfit, n_points = p_s_fin,
-         n_points_intercept = p_i_fin,
-         forced_linear = TRUE, ndim = ndim, method = "OLSF-iterative")
-  }
+  # MSD fit core (MSD_BLUR_R, .olsf_sig2, .michalet_p, msd_fit_olsf,
+  # msd_fit_olsf_iterative) lives in est_msd.R since 2026-09-17.
 
   msd_fit_result <- function(tau, msd, k, anomalous = TRUE, ndim = 2L) {
     df <- data.frame(tau = tau[seq_len(k)], msd = msd[seq_len(k)])
@@ -7013,107 +6675,19 @@ tracking_server <- function(input, output, session) {
     if (sum(ok) < 3L) return(NULL)
     if (isTRUE(input$trk_uni_iterative)) {
       # Bela's exact iterative loop - converges on the lowest, least-noisy lags.
-      msd_fit_olsf_iterative(tau_use[ok], ub$msd[ok], ndim = ub$ndim, R = 0,
+      msd_fit_olsf_iterative(tau_use[ok], ub$msd[ok], ndim = ub$ndim, R = MSD_BLUR_R,
                              dt_cycle = ub$t_cycle, N = sum(ok),
                              coef_override = ub$coef_eff)
     } else {
       # Robust full-window-anchored Michalet (default).
       msd_fit_olsf(tau_use[ok], ub$msd[ok], ub$npairs[ok],
                    k = sum(ok), ndim = ub$ndim,
-                   auto_pmin = TRUE, R = 0, Npts = 1e4, dt_cycle = ub$t_cycle,
+                   auto_pmin = TRUE, R = MSD_BLUR_R, Npts = 1e4, dt_cycle = ub$t_cycle,
                    coef_override = ub$coef_eff)
     }
   }
 
-  # Ensemble-MSD model fit with a selectable model. "linear" = the OLSF above
-  # (Brownian, D from the slope). "confined" = a plateauing corral model (→ local
-  # D + confinement size L). "directed" = Brownian + drift (→ D + velocity v).
-  # "anomalous" = power law (→ D + exponent α). The non-linear models fit the WHOLE
-  # [min_lag, max_lag] window (they need the curvature/plateau, not just low lags).
-  # Returns a list with $model, $D (nm²/ms), $sigma_loc (nm), $tau_fit, $msd_fit
-  # (nm²) and model-specific extras (L_conf, tau_c_ms, plateau_um2, v_um_s, alpha).
-  # Pure model-fit core, reused by the unified plot AND the per-segment analysis.
-  # s = τ (ms, already windowed), y = MSD (nm²). model ∈ linear/confined/directed/
-  # anomalous. Returns $model, $D (nm²/ms), $sigma_loc (nm), $tau_fit, $msd_fit (nm²)
-  # + extras (L_conf, tau_c_ms, plateau_um2, degenerate / v_um_s / alpha).
-  .msd_model_fit <- function(s, y, npairs, ndim, model, use_iter, t_cycle,
-                             coef_override = NULL) {
-    coef_v <- if (is.null(coef_override)) 2L * ndim else coef_override
-    if (identical(model, "linear")) {
-      if (length(s) < 3L) return(NULL)
-      return(if (isTRUE(use_iter))
-               msd_fit_olsf_iterative(s, y, ndim = ndim, R = 0, dt_cycle = t_cycle,
-                                      N = length(s), coef_override = coef_override)
-             else
-               msd_fit_olsf(s, y, npairs, k = length(s), ndim = ndim,
-                            auto_pmin = TRUE, R = 0, Npts = 1e4, dt_cycle = t_cycle,
-                            coef_override = coef_override))
-    }
-    if (length(s) < 4L) return(NULL)
-    # `warnOnly = TRUE` makes nls RETURN a fit instead of erroring when it cannot
-    # converge - but it still prints "Convergence failure: singular convergence (7)"
-    # to the console, once per attempt, which is noise the user cannot act on (each
-    # cluster × each of the three non-linear models is an attempt). The failure is not
-    # ignored: it is recorded on the fit and folded into the `degenerate` flag below,
-    # which is what the UI already reports. Singular convergence means the parameters
-    # are not identifiable over this window - usually no plateau has been reached -
-    # so the coefficients that come back must not be presented as a real fit.
-    nls_fit <- function(formula, start, lower, upper) {
-      f <- tryCatch(suppressWarnings(
-        stats::nls(formula, data = data.frame(s = s, y = y), start = start,
-                   lower = lower, upper = upper, algorithm = "port",
-                   control = stats::nls.control(maxiter = 200, warnOnly = TRUE))),
-        error = function(e) NULL)
-      if (is.null(f)) return(NULL)
-      attr(f, "converged") <- isTRUE(tryCatch(f$convInfo$isConv, error = function(e) NA))
-      f
-    }
-    D0   <- max(1e-6, (max(y) - min(y)) / (coef_v * max(s)))
-    C0   <- max(0, min(y, na.rm = TRUE))
-    tseq <- seq(min(s), max(s), length.out = 200)
-    if (identical(model, "confined")) {
-      fit <- nls_fit(y ~ A * (1 - exp(-s / tc)) + C,
-                     start = list(A = max(y) * 0.9, tc = max(s) / 3, C = C0),
-                     lower = list(A = 0, tc = 1e-4, C = 0),
-                     upper = list(A = Inf, tc = Inf, C = Inf))
-      if (is.null(fit)) return(NULL)
-      cf <- coef(fit); A <- unname(cf["A"]); tc <- unname(cf["tc"]); C <- unname(cf["C"])
-      # A non-converged fit is degenerate too: singular convergence means the plateau
-      # was never resolved, which is exactly what this flag already communicates.
-      degenerate <- (tc > 2 * max(s)) || (A > 3 * max(y, na.rm = TRUE)) ||
-                    !isTRUE(attr(fit, "converged"))
-      # Confinement size L_c from the fitted plateau A. For a particle uniformly
-      # exploring a d-dimensional box of side L_c, each axis contributes
-      # Var(Δx) = L_c²/6, so the steady-state MSD is A = d·L_c²/6 and
-      #     L_c = sqrt(6·A/d)
-      # which gives the familiar sqrt(3A) in 2D and sqrt(2A) in 3D. Verified against
-      # reflecting-boundary simulations (d=2 and d=3, L_c = 140/200/300 nm, recovered
-      # to <1%). Using the 2D form in 3D would inflate L_c by sqrt(3/2) = 1.22×.
-      list(model = "confined", D = A / (coef_v * tc), sigma_loc = sqrt(max(0, C / coef_v)),
-           L_conf = sqrt(6 * A / ndim), tau_c_ms = tc, plateau_um2 = A / 1e6, degenerate = degenerate,
-           tau_fit = tseq, msd_fit = A * (1 - exp(-tseq / tc)) + C, ndim = ndim, method = "confined")
-    } else if (identical(model, "directed")) {
-      fit <- nls_fit(y ~ coef_v * D * s + (v * s)^2 + C,
-                     start = list(D = D0, v = sqrt(D0) / max(s), C = C0),
-                     lower = list(D = 0, v = 0, C = 0),
-                     upper = list(D = Inf, v = Inf, C = Inf))
-      if (is.null(fit)) return(NULL)
-      cf <- coef(fit); D <- unname(cf["D"]); v <- unname(cf["v"]); C <- unname(cf["C"])
-      list(model = "directed", D = D, sigma_loc = sqrt(max(0, C / coef_v)), v_um_s = v,
-           degenerate = !isTRUE(attr(fit, "converged")),
-           tau_fit = tseq, msd_fit = coef_v * D * tseq + (v * tseq)^2 + C, ndim = ndim, method = "directed")
-    } else if (identical(model, "anomalous")) {
-      fit <- nls_fit(y ~ coef_v * D * s^a + C,
-                     start = list(D = D0, a = 1, C = C0),
-                     lower = list(D = 0, a = 0.05, C = 0),
-                     upper = list(D = Inf, a = 2.5, C = Inf))
-      if (is.null(fit)) return(NULL)
-      cf <- coef(fit); D <- unname(cf["D"]); a <- unname(cf["a"]); C <- unname(cf["C"])
-      list(model = "anomalous", D = D, alpha = a, sigma_loc = sqrt(max(0, C / coef_v)),
-           degenerate = !isTRUE(attr(fit, "converged")),
-           tau_fit = tseq, msd_fit = coef_v * D * tseq^a + C, ndim = ndim, method = "anomalous")
-    } else NULL
-  }
+  # .msd_model_fit() (linear / confined / directed / anomalous) lives in est_msd.R.
 
   # Ensemble-MSD model fit for the unified plot (selectable model). Non-linear
   # models fit the whole [min_lag, max_lag] window (they need curvature/plateau).
@@ -7175,11 +6749,11 @@ tracking_server <- function(input, output, session) {
       okc <- is.finite(mv); if (sum(okc) < 3L) return(NULL)
       tt <- tau_w[okc]; yy <- mv[okc]; N_tr <- sum(is.finite(col))
       fr_tr <- if (use_iter)
-        msd_fit_olsf_iterative(tt, yy, ndim = ub$ndim, R = 0, dt_cycle = t_c_e, N = N_tr,
+        msd_fit_olsf_iterative(tt, yy, ndim = ub$ndim, R = MSD_BLUR_R, dt_cycle = t_c_e, N = N_tr,
                                coef_override = ub$coef_eff)
       else
         msd_fit_olsf(tt, yy, rep(1L, length(tt)), k = length(tt), ndim = ub$ndim,
-                     auto_pmin = TRUE, R = 0, Npts = N_tr, dt_cycle = t_c_e,
+                     auto_pmin = TRUE, R = MSD_BLUR_R, Npts = N_tr, dt_cycle = t_c_e,
                      coef_override = ub$coef_eff)
       if (is.null(fr_tr) || !is.finite(fr_tr$D) || fr_tr$D <= 0) return(NULL)
       # Confinement index: actual MSD growth vs the free-diffusion expectation,
@@ -7227,10 +6801,10 @@ tracking_server <- function(input, output, session) {
       eD <- if (sum(winc) >= 3L) {
         frc <- tryCatch(
           if (use_iter) msd_fit_olsf_iterative(tau_sel[winc], emsd[winc], ndim = ub$ndim,
-                                               R = 0, dt_cycle = ub$t_cycle, N = sum(winc),
+                                               R = MSD_BLUR_R, dt_cycle = ub$t_cycle, N = sum(winc),
                                                coef_override = ub$coef_eff)
           else msd_fit_olsf(tau_sel[winc], emsd[winc], rep(1L, sum(winc)), k = sum(winc),
-                            ndim = ub$ndim, auto_pmin = TRUE, R = 0, Npts = 1e4,
+                            ndim = ub$ndim, auto_pmin = TRUE, R = MSD_BLUR_R, Npts = 1e4,
                             dt_cycle = ub$t_cycle, coef_override = ub$coef_eff),
           error = function(e) NULL)
         if (!is.null(frc) && is.finite(frc$D)) frc$D / 1e3 else NA_real_
@@ -8291,169 +7865,27 @@ tracking_server <- function(input, output, session) {
     if (!is.finite(bin_width) || bin_width <= 0) bin_width <- 1
     if (!is.finite(subsamp_n) || subsamp_n <  2) subsamp_n <- 4L
 
-    df <- df[is.finite(df$x) & is.finite(df$y) & is.finite(df$tim), ]
-    df <- df[order(df$tid, df$tim), ]
-    sp <- split(df, df$tid)
-
     # Real axial data only. A placeholder all-zero z column would make this fit the 3D
     # Maxwell law to what are really 2D distances (dz ≡ 0), biasing D by −33%.
     use_z_jdd <- .has_real_z(df)
-    jumps  <- numeric(0)
-    dt_all <- numeric(0)
+    # Collection and fit live in est_jdd.R (pure, tested).
     withProgress(message = "Computing JDD…", value = 0, {
-    n_sp_jdd <- length(sp)
-    for (ti_jdd in seq_along(sp)) {
-      if (ti_jdd %% 50L == 0L) incProgress(50 / n_sp_jdd, detail = "collecting steps")
-      tb <- sp[[ti_jdd]]
-      if (nrow(tb) < min_pts) next
-
-      # ---- Coarsen the track according to the chosen step mode ----------------
-      if (identical(step_mode, "binmed")) {
-        # Assign each localization to a time bin and take the median position
-        bin_idx     <- floor(tb$tim / bin_width)
-        unique_bins <- sort(unique(bin_idx))
-        if (length(unique_bins) < 2) next
-        bin_rows <- vector("list", length(unique_bins))
-        for (bi_i in seq_along(unique_bins)) {
-          idx <- which(bin_idx == unique_bins[bi_i])
-          row <- data.frame(x = median(tb$x[idx]), y = median(tb$y[idx]),
-                            tim = median(tb$tim[idx]))
-          if (use_z_jdd && "z" %in% names(tb)) row$z <- median(tb$z[idx])
-          bin_rows[[bi_i]] <- row
-        }
-        tb_use <- do.call(rbind, bin_rows)
-      } else if (identical(step_mode, "subsamp")) {
-        # Take every N-th localization
-        idx_keep <- seq(1L, nrow(tb), by = subsamp_n)
-        if (length(idx_keep) < 2) next
-        tb_use <- tb[idx_keep, , drop = FALSE]
-      } else {
-        tb_use <- tb   # consecutive steps - original behaviour
-      }
-      if (nrow(tb_use) < 2) next
-
-      dx <- diff(tb_use$x); dy <- diff(tb_use$y)
-      r  <- if (use_z_jdd && "z" %in% names(tb_use))
-               sqrt(dx^2 + dy^2 + diff(tb_use$z)^2)
-            else sqrt(dx^2 + dy^2)
-      dt <- diff(tb_use$tim)
-      keep <- is.finite(dt) & dt > min_dt & dt <= max_dt & is.finite(r)
-      if (integ_only) keep <- keep & (round(dt / t_c_jdd) == 1L)
-      if (!any(keep)) next
-      if (norm_dt) {
-        r    <- r / sqrt(dt)
-        keep <- keep & is.finite(r)
-      }
-      if (!any(keep)) next
-      dt_all <- c(dt_all, dt[keep])
-      jumps  <- c(jumps,  r[keep])
-    }
-    shiny::validate(shiny::need(length(jumps) >= 10,
+    cj <- jdd_collect_jumps(df, min_pts = min_pts, step_mode = step_mode, bin_width = bin_width,
+                            subsamp_n = subsamp_n, min_dt = min_dt, max_dt = max_dt,
+                            integ_only = integ_only, t_c = t_c_jdd, norm_dt = norm_dt,
+                            use_z = use_z_jdd,
+                            progress = function(f) incProgress(f, detail = "collecting steps"))
+    shiny::validate(shiny::need(length(cj$jumps) >= 10,
       "Too few jumps - lower 'Min points per TID' or relax filters."))
+    jf <- jdd_fit(cj$jumps, cj$dt_all, n_comp = n_comp, use_z = use_z_jdd, norm_dt = norm_dt,
+                  sigma_loc = sigma_loc,
+                  R_abs = if (is.finite(t_c_jdd) && t_c_jdd > 0) MSD_BLUR_R * t_c_jdd else 0,
+                  progress = function(f) incProgress(f, detail = "fitting Rayleigh mixture"))
 
-    # Histogram (truncate upper tail at 99.5th pct to avoid outlier stretching)
-    q_hi <- quantile(jumps, 0.995, na.rm = TRUE)
-    br   <- c(pretty(c(0, q_hi), n = 60), Inf)
-    h    <- hist(jumps, breaks = br, plot = FALSE)
-    mids <- h$mids[is.finite(h$mids)]
-    dens <- h$density[seq_along(mids)]
-
-    # --- Jump-distance mixture MLE (dimension-correct) ------------------------
-    # The distance |Δr| of a d-dimensional isotropic Gaussian displacement follows a
-    # SCALED CHI distribution with d degrees of freedom:
-    #
-    #   p_d(r) = C_d · r^(d−1) / s^d · exp(−r² / (2 s²)),   C_d = 1/(2^(d/2−1)·Γ(d/2))
-    #
-    #   d = 2 → Rayleigh   (C = 1)          - the classic Schütz 1997 2D form
-    #   d = 3 → Maxwell    (C = √(2/π))     - the correct law when z is included
-    #
-    # s is the PER-AXIS standard deviation in BOTH cases, so E[r²] = d·s² and the
-    # conversion to D is the same in 2D and 3D (see `divisor` below). Using the 2D
-    # Rayleigh shape on 3D distances (as this did previously) fits a measurably worse
-    # likelihood, rescales s by √1.5, and - because the σ_loc bias term is defined on
-    # the per-axis variance - under-subtracts the noise floor by a third in 3D.
-    #
-    # Parameters: log(sigma_k), and for k>1: log(w_k / w_K) (softmax)
-    d_jdd  <- if (use_z_jdd) 3L else 2L
-    C_jdd  <- 1 / (2^(d_jdd / 2 - 1) * gamma(d_jdd / 2))
-    rayleigh_mix_nll <- function(par) {
-      sigs <- exp(par[seq_len(n_comp)])
-      if (n_comp > 1) {
-        raw  <- exp(par[n_comp + seq_len(n_comp - 1)])
-        ws   <- c(raw, 1) / (1 + sum(raw))
-      } else {
-        ws <- 1
-      }
-      if (any(!is.finite(sigs)) || any(!is.finite(ws))) return(1e15)
-      lik <- Reduce(`+`, lapply(seq_len(n_comp), function(k)
-        ws[k] * C_jdd * jumps^(d_jdd - 1) / sigs[k]^d_jdd *
-          exp(-jumps^2 / (2 * sigs[k]^2))
-      ))
-      lik[lik <= 0] <- .Machine$double.eps
-      -sum(log(lik))
-    }
-
-    sig0 <- seq(quantile(jumps, 0.05), quantile(jumps, 0.75), length.out = n_comp)
-    sig0 <- pmax(sig0, 1e-3)
-    par0 <- c(log(sig0), rep(0, max(0, n_comp - 1)))
-
-    incProgress(0.4, detail = "fitting Rayleigh mixture")
-    fit <- tryCatch(
-      optim(par0, rayleigh_mix_nll, method = "Nelder-Mead",
-            control = list(maxit = 8000, reltol = 1e-9)),
-      error = function(e) NULL
-    )
-
-    if (!is.null(fit) && fit$convergence == 0) {
-      sigs <- exp(fit$par[seq_len(n_comp)])
-      if (n_comp > 1) {
-        raw <- exp(fit$par[n_comp + seq_len(n_comp - 1)])
-        ws  <- c(raw, 1) / (1 + sum(raw))
-      } else {
-        ws <- 1
-      }
-    } else {
-      sigs <- sig0
-      ws   <- rep(1 / n_comp, n_comp)
-    }
-
-    # Sort slow -> fast
-    ord  <- order(sigs); sigs <- sigs[ord]; ws <- ws[ord]
-
-    # Median Δt across all valid steps used in this fit (ms)
-    dt0 <- median(dt_all, na.rm = TRUE)
-    if (!is.finite(dt0) || dt0 <= 0) dt0 <- NA_real_
-
-    # D from sigma (when norm_dt = TRUE, σ is in nm/√ms so σ²/2 is nm²/ms).
-    # σ is the PER-AXIS spread in both 2D and 3D (the chi PDF above is parameterised
-    # that way), and a d-dimensional walk has E[r²] = d·σ² = 2·d·D·Δt. The d cancels:
-    #   2D: E[r²] = 2σ² = 4D·Δt  →  D = σ²/2
-    #   3D: E[r²] = 3σ² = 6D·Δt  →  D = σ²/2
-    # so ONE divisor is correct for both - and it matches the σ_loc bias term below,
-    # which is likewise defined on the per-axis variance.
-    divisor <- 2
-
-    # σ_loc correction (only meaningful when norm_dt = TRUE):
-    # The measured σ_fit² = 2D + 2σ_loc²/Δt_typical (per-coordinate loc noise adds
-    # 2σ_loc² to the raw step variance; after √Δt normalisation this becomes 2σ_loc²/Δt).
-    # We subtract the bias term before computing D, clamping to ≥ 0.
-    loc_bias <- if (norm_dt && sigma_loc > 0 && is.finite(dt0))
-                  2 * sigma_loc^2 / dt0
-                else 0
-    D_vals <- pmax(0, sigs^2 - loc_bias) / divisor
-
-    # Localization-noise floor as a JUMP DISTANCE in the plot's units. A pure-noise
-    # jump has RMS √(2·d)·σ_loc (d = 2/3); after √Δt normalisation, divide by √dt0.
-    # Peaks/steps left of it are noise-dominated, not real motion.
-    d_dim_jdd <- if (use_z_jdd) 3 else 2
-    r_noise <- if (sigma_loc > 0) {
-      base <- sqrt(2 * d_dim_jdd) * sigma_loc
-      if (norm_dt && is.finite(dt0) && dt0 > 0) base / sqrt(dt0) else base
-    } else NA_real_
-
-    list(mids = mids, dens = dens, sigs = sigs, ws = ws, D_vals = D_vals,
-         n_comp = n_comp, norm_dt = norm_dt, n_jumps = length(jumps),
-         use_z = use_z_jdd, d_fit = d_jdd, dt0 = dt0, sigma_loc = sigma_loc, r_noise = r_noise,
+    list(mids = jf$mids, dens = jf$dens, sigs = jf$sigs, ws = jf$ws, D_vals = jf$D_vals,
+         n_comp = n_comp, norm_dt = norm_dt, n_jumps = length(cj$jumps),
+         use_z = use_z_jdd, d_fit = jf$d_fit, dt0 = jf$dt0, inv_dt = jf$inv_dt, sigma_loc = sigma_loc,
+         r_noise = jf$r_noise, R_abs = if (is.finite(t_c_jdd) && t_c_jdd > 0) MSD_BLUR_R * t_c_jdd else 0,
          step_mode = step_mode, integrated_only = integ_only, t_cycle = t_c_jdd,
          min_dt_used = if (min_dt > 0) min_dt else NA_real_,
          max_dt_used = if (is.finite(max_dt)) max_dt else NA_real_)
@@ -8537,14 +7969,15 @@ tracking_server <- function(input, output, session) {
     show_D    <- isTRUE(bd$norm_dt)
     # \u03C3 is the per-axis spread in both 2D and 3D (chi-d PDF), so the /2 is dimension-
     # independent; only the fitted PDF shape changes (Rayleigh 2D / Maxwell 3D).
-    d_formula <- sprintf("D = (\u03C3\u00B2 \u2212 2\u03C3\u1D38\u1D52\u1D9C\u00B2/\u27E8\u0394t\u27E9)/2   [%s]",
+    d_formula <- sprintf("D = (\u03C3\u00B2 \u2212 2\u03C3\u1D38\u1D52\u1D9C\u00B2\u27E81/\u0394t\u27E9) / (2(1 \u2212 2R\u00B7t\u1D9C\u27E81/\u0394t\u27E9))   [%s]",
                          if (isTRUE(bd$use_z)) "3D, Maxwell" else "2D, Rayleigh")
     dt0_str   <- if (is.finite(bd$dt0)) sprintf("%.2g ms", bd$dt0) else "n/a"
     max_dt_str <- if (is.finite(bd$max_dt_used)) sprintf("%.4g ms", bd$max_dt_used) else "none"
 
     sigma_note <- if (show_D && bd$sigma_loc > 0 && is.finite(bd$dt0))
-      tags$p(sprintf("\u03C3\u1D38\u1D52\u1D9C = %.1f nm  |  \u27E8\u0394t\u27E9 = %s  |  bias subtracted: %.2g nm\u00B2/ms",
-                     bd$sigma_loc, dt0_str, 2 * bd$sigma_loc^2 / bd$dt0),
+      tags$p(sprintf("\u03C3\u1D38\u1D52\u1D9C = %.1f nm  |  median \u0394t = %s  |  noise subtracted: %.2g nm\u00B2/ms  |  blur factor %.2f",
+                     bd$sigma_loc, dt0_str, 2 * bd$sigma_loc^2 * (bd$inv_dt %||% (1 / bd$dt0)),
+                     1 - 2 * (bd$R_abs %||% 0) * (bd$inv_dt %||% (1 / bd$dt0))),
              style = "font-size:0.82em; color:#888; margin:2px 0;")
     else NULL
 
@@ -8717,10 +8150,17 @@ tracking_server <- function(input, output, session) {
                 exp(seq(log(D_rng[1]), log(D_rng[2]), length.out = 4L))
               else D_use
     ncell <- length(grid) * length(D_grid)
+    # Noise for the null: when σ_loc comes from the photon model, resample the
+    # per-localization values (the MSD offset is set by mean σ², which a long-tailed
+    # photon count pushes above median σ²). A manual or CVE/MSD σ stays static.
+    sig_null <- if (identical(trk_sigma_loc_src(), "photon budget") && !is.null(b) &&
+                    sum(is.finite(b$sig_phot)) >= 50L) b$sig_phot[is.finite(b$sig_phot)]
+                else sig
     nul <- withProgress(message = "Simulating free-CI null…", value = 0,
-      sim_free_ci_null(grid, D_grid = D_grid, n_sim = nsim, t_c = t_c, sigma = sig,
+      sim_free_ci_null(grid, D_grid = D_grid, n_sim = nsim, t_c = t_c, sigma = sig_null,
                        ndim = ndim, gap_p = gap_p, min_lag = min_lag, max_lag = max_lag,
-                       progress = function(f) incProgress(1 / ncell)))
+                       progress = function(f) incProgress(1 / ncell),
+                       R_blur = MSD_BLUR_R))   # same blur coefficient as the MSD fits
     # nearest cell in (log N, log D)
     idx <- vapply(seq_len(nrow(pt)), function(i) {
       which.min((log(nul$n) - log(Ns[i]))^2 + (log(nul$D) - log(Dtr[i]))^2)
@@ -10188,399 +9628,147 @@ tracking_server <- function(input, output, session) {
   )
 
   # ============================================================================
-  # hmm_bundle() - DIFFUSION-STATE SEGMENTATION (Hidden Markov Model)
+  # hmm_bundle() - DIFFUSION-STATE SEGMENTATION (continuous-time HMM, est_hmm.R)
   # ============================================================================
   #
   # GOAL
-  #   A molecule rarely moves the same way for its whole track: it may bind,
-  #   release, get confined, then diffuse freely. This finds those hidden
-  #   MOBILITY STATES, labels every localization with the state it was in, and
-  #   reports how fast each state is and how often molecules switch between them.
+  #   Answer "does this population switch between diffusive states, and how fast?"
+  #   with K states (D_k) and switching RATES estimated by maximum likelihood over
+  #   all tracks at once. The estimator itself lives in est_hmm.R (pure functions,
+  #   tested against simulated ground truth); this reactive only gathers inputs,
+  #   calls it and packages the result for the plots.
   #
-  # WHY AN HMM
-  #   We never observe the state, only the step sizes it produces. An HMM is
-  #   exactly the model for "hidden discrete state -> observable emission", and
-  #   it also enforces that states PERSIST over time rather than flickering
-  #   step-to-step. Source: Das, Cairo & Coombs 2009; pooling across many short
-  #   tracks in the spirit of vbSPT (Persson et al. 2013).
+  # THE MODEL (full statement in the est_hmm.R header)
+  #   Hidden state per step, a continuous-time Markov chain with generator Q, so a
+  #   step of any Δt has transition matrix expm(Q·Δt): dark cycles are handled
+  #   exactly. Emission: r² over x,y is Gamma(1, 2·v) with the per-axis variance
+  #       v = 2·D_s·(Δt − 2·R·t_c) + σ_j² + σ_{j+1}²
+  #   i.e. diffusion, motion blur (MSD_BLUR_R) and the noise of both localizations.
+  #   D is therefore noise- and blur-corrected by construction.
   #
-  # THE MODEL
-  #   Emission: for 2D Brownian motion the step LENGTH r follows a Rayleigh
-  #     distribution, so state k emits  log p(r|k) = log r − 2log σ_k − r²/2σ_k².
-  #     Each state is one width σ_k, and D_k = σ_k²/2.
-  #   Transition: a K×K matrix A of state-to-state probabilities.
-  #
-  # THE MINFLUX ADAPTATION (two distinct problems, two distinct fixes)
-  #   (a) EMISSIONS. A step across 3 dark cycles is longer simply because more
-  #       time passed - not because the molecule was faster. Fix: divide every
-  #       step by √Δt (`norm_dt`, default ON). States then correspond to
-  #       DIFFUSIVITIES rather than raw step sizes, and variable Δt no longer
-  #       creates fake state switches.
-  #   (b) TRANSITIONS. The matrix A is per-STEP, so it silently assumes every
-  #       step spans the same time. It does not. Fix: after decoding we estimate
-  #       a CONTINUOUS-TIME rate generator Q from the decoded path using REAL
-  #       elapsed time (see the block at the end of this reactive). Q is what is
-  #       reported; A is kept only for reference.
+  # WHAT CHANGED AND WHY (2026-09-17)
+  #   The old version fitted a per-step matrix by Baum-Welch and counted switches
+  #   along the Viterbi path. Path counting absorbs short dwells: on simulated data
+  #   with dwells of 10 / 20 ms it read 15.6 / 30.2 ms (+50%), while this MLE read
+  #   9.9 / 18.8 ms. The Viterbi path is still computed, but ONLY to colour tracks
+  #   and to feed the per-state MSD.
   #
   # OBJECTS IT CALLS (inputs)
-  #   trk() ................. analysis-ready data
-  #   trk_cycle_time() ...... to convert Δt into cycle counts for the rate step
-  #   trk_sigma_loc_eff() ... σ_loc, to flag states that are just noise
-  #   inputs: trk_hmm_run (Run trigger), trk_hmm_n_states, trk_hmm_min_pts,
-  #           trk_hmm_norm_dt, trk_hmm_max_fit_trk, trk_hmm_max_fit_steps
+  #   trk() ................. analysis-ready data (tid, x, y, tim in ms, eco)
+  #   trk_cycle_time() ...... t_c, for the blur offset and starting rates
+  #   trk_sigma_loc_eff() / trk_sigma_loc_src() ... the noise model: per-localization
+  #                           photon σ when the photon model is active, else one σ
+  #   trk_cve_bundle() ...... optional, supplies the emitter offset x for the photon σ
+  #   inputs: trk_hmm_run, trk_hmm_n_states, trk_hmm_min_pts, trk_hmm_n_ex,
+  #           trk_hmm_boot (bootstrap resamples, 0 = off)
   #
-  # STEP BY STEP
-  #   1. Split into tracks, keep those with enough localizations, and build the
-  #      observation sequence per track: step lengths r, √Δt-normalised.
-  #   2. Initialise K state widths spread across the observed step-size quantiles.
-  #   3. BAUM-WELCH EM (<=30 iterations, early-stopped on log-likelihood):
-  #        forward-backward in log space -> posterior state probabilities
-  #        -> re-estimate each σ_k (Rayleigh MLE) and the transition matrix A.
-  #      Fitting is capped to the longest `max_fit_trk` tracks for speed; the
-  #      DECODE below still runs on every track at full length.
-  #   4. Sort states slow -> fast by σ so "state 1" always means the slowest.
-  #   5. VITERBI decode every track -> the single most likely state path, giving
-  #      each localization a state label.
-  #   6. Flag any state whose D sits at or below the σ_loc noise floor: that is
-  #      an immobile/noise-limited state, not a resolved diffusive one.
-  #   7. CONTINUOUS-TIME RATES: from the decoded paths, count a->b jumps and the
-  #      real time spent in each state, giving q[a,b] = N[a,b]/T[a] (per ms) and
-  #      mean dwell time -1/q[a,a]. Long gaps are excluded so one big gap cannot
-  #      masquerade as a long dwell.
-  #
-  # RETURNS a list:
-  #   K, sigma[K], D_vals[K] .... state widths and diffusivities
-  #   fracs[K] .................. fraction of localizations in each state
-  #   A ......................... per-step transition matrix (reference only)
-  #   Qrate ..................... continuous-time generator, per ms  <- USE THIS
-  #   dwell_ms[K] ............... mean dwell time per state
-  #   Njump, Tstate, gap_tol_cyc  the raw counts behind Qrate
-  #   seg_list .................. per-track data.frame(tid,x,y,tim,state) - this
-  #                               is what the per-segment MSD and the coloured
-  #                               example plot consume
-  #   noise_state[K], D_noise, sigma_loc_nm, dt_med_ms, n_tracks, norm_dt
-  #
-  # CAVEAT: the decode still uses the per-step prior A, so state ASSIGNMENT is
-  # emission-dominated (robust), while the RATES come from the Q step above.
+  # RETURNS a list (fields read by the plots, the summary and seg_msd_rv):
+  #   K, D_vals[K] (nm²/ms), fracs[K] (stationary occupancy), P_cycle (K×K
+  #   transition probabilities over one cycle), Qrate (per ms), dwell_ms[K],
+  #   fit (the full est_hmm result incl. CIs), boot (bootstrap CIs or NULL),
+  #   seg_list (per-track data.frame(tid, x, y, tim, state)), n_tracks, n_steps,
+  #   dt_med_ms, t_cycle_ms, sigma_loc_nm, sigma_mode, D_noise, noise_state[K],
+  #   resolv (per-state flags from the validated range), bic_other (BIC at K±1)
   # ============================================================================
   hmm_bundle <- eventReactive(input$trk_hmm_run, {
     req(isTRUE(input$trk_show_hmm))
     df <- trk(); req(nrow(df) > 0)
-    K        <- max(2L, min(4L, as.integer(input$trk_hmm_n_states)))
-    min_pts  <- max(4L, as.integer(input$trk_hmm_min_pts))
-    n_ex     <- max(1L, as.integer(input$trk_hmm_n_ex))
-    norm_dt  <- isTRUE(input$trk_hmm_norm_dt)
-    t_c      <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    K       <- max(2L, min(4L, as.integer(input$trk_hmm_n_states)))
+    min_pts <- max(4L, as.integer(input$trk_hmm_min_pts))
+    B       <- max(0L, min(200L, as.integer(input$trk_hmm_boot %||% 0L)))
+    t_c     <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    shiny::validate(shiny::need(is.finite(t_c) && t_c > 0,
+      "Cycle time unknown - run Data Quality & Calibration first."))
+    R_abs   <- MSD_BLUR_R * t_c                         # blur offset in ms, as in the MSD fits
 
-    df <- df[is.finite(df$x) & is.finite(df$y) & is.finite(df$tim), ]
-    df <- df[order(df$tid, df$tim), ]
-    sp <- split(df, df$tid)
-    sp <- sp[sapply(sp, nrow) >= min_pts]
-    shiny::validate(shiny::need(length(sp) > 0,
-      "No tracks meet the minimum length - lower 'Min localizations per TID'."))
-
-    # Build per-track observation sequences.
-    # When norm_dt = TRUE each step r is divided by √Δt so that states correspond
-    # to diffusion coefficients rather than raw step sizes (important for irregular
-    # MINFLUX sampling where variable Δt within a track would otherwise create
-    # spurious apparent state switches).
-    obs_list <- Filter(function(r) length(r) >= 2L,
-      lapply(sp, function(tb) {
-        r  <- sqrt(diff(tb$x)^2 + diff(tb$y)^2)
-        if (norm_dt) {
-          dt <- diff(tb$tim)
-          ok <- is.finite(dt) & dt > 0 & is.finite(r) & r > 0
-          r  <- ifelse(ok, r / sqrt(dt), NA_real_)
-          r  <- r[!is.na(r)]
-        } else {
-          r <- r[is.finite(r) & r > 0]
-        }
-        r
-      })
-    )
-    all_r <- unlist(obs_list, use.names = FALSE)
-    shiny::validate(shiny::need(length(all_r) >= 20, "Too few valid steps."))
-
-    # ---- HMM helpers --------------------------------------------------------
-    lse <- function(x) {
-      x <- x[is.finite(x)]; if (!length(x)) return(-Inf)
-      m <- max(x); m + log(sum(exp(x - m)))
-    }
-    # Fast logsumexp over columns of a K×K matrix; returns -Inf (not NaN) for all-(-Inf) columns
-    # Column-wise max of a matrix without apply() (K small -> 1-3 pmax calls).
-    col_max <- function(mat) {
-      nr <- nrow(mat); m <- mat[1L, ]
-      if (nr > 1L) for (r in 2L:nr) m <- pmax(m, mat[r, ])
-      m
-    }
-    # Column-wise logsumexp; returns -Inf (not NaN) for all-(-Inf) columns.
-    # Vectorised replacement for the old apply()/sweep() version (identical result).
-    lse_cols <- function(mat) {
-      nr  <- nrow(mat)
-      m   <- col_max(mat)
-      fin <- is.finite(m)
-      out <- rep(-Inf, length(m))
-      if (any(fin)) {
-        mm <- m; mm[!fin] <- 0
-        cs <- colSums(exp(mat - rep(mm, each = nr)))
-        out[fin] <- m[fin] + log(cs[fin])
-      }
-      out
-    }
-    # Row-wise logsumexp for a T x K matrix (replaces apply(mat, 1L, lse)).
-    lse_rows <- function(mat) {
-      nc  <- ncol(mat); m <- mat[, 1L]
-      if (nc > 1L) for (cc in 2L:nc) m <- pmax(m, mat[, cc])
-      fin <- is.finite(m)
-      out <- rep(-Inf, nrow(mat))
-      if (any(fin)) {
-        mm <- m; mm[!fin] <- 0
-        rs <- rowSums(exp(mat - mm))       # mm (length T) recycles down columns
-        out[fin] <- m[fin] + log(rs[fin])
-      }
-      out
-    }
-    # Elementwise log(exp(a) + exp(b)) for equally-shaped matrices/vectors.
-    log_add <- function(a, b) {
-      m   <- pmax(a, b)
-      res <- m + log1p(exp(-abs(a - b)))
-      res[!is.finite(m)] <- -Inf          # both -Inf -> -Inf (not NaN)
-      res
-    }
-    # Log Rayleigh emission: T×K matrix
-    lem <- function(r, sigma)
-      outer(r, sigma, function(ri, si) log(ri) - 2*log(si) - ri^2/(2*si^2))
-
-    fwd <- function(le, lA, lpi) {
-      T <- nrow(le); la <- matrix(-Inf, T, K)
-      la[1L, ] <- lpi + le[1L, ]
-      for (t in seq(2L, T))
-        la[t, ] <- lse_cols(lA + la[t-1L, ]) + le[t, ]
-      la
-    }
-    bwd <- function(le, lA) {
-      T <- nrow(le); lb <- matrix(0, T, K)
-      tlA <- t(lA)                          # hoist transpose out of the loop
-      for (t in seq(T-1L, 1L)) {
-        v <- le[t+1L, ] + lb[t+1L, ]
-        lb[t, ] <- lse_cols(tlA + v)   # tlA[j,k]=lA[k,j]; +v[j] via recycle -> col k = lb[t,k]
-      }
-      lb
-    }
-    safe_which_max <- function(x) {
-      # Replace NaN/NA with -Inf so which.max never returns integer(0)
-      x[!is.finite(x)] <- -Inf
-      w <- which.max(x)
-      if (!length(w)) 1L else w
-    }
-    viterbi_path <- function(obs, lA, lpi, sigma) {
-      le <- lem(obs, sigma)
-      # Replace any -Inf rows with uniform log-prob so decoding never collapses
-      bad_rows <- !is.finite(rowSums(le))
-      if (any(bad_rows)) le[bad_rows, ] <- log(1 / K)
-      T <- nrow(le)
-      delta <- matrix(-Inf, T, K); psi <- matrix(1L, T, K)
-      delta[1L, ] <- lpi + le[1L, ]
-      for (t in seq(2L, T)) {
-        mat        <- lA + delta[t-1L, ]
-        mat[!is.finite(mat)] <- -Inf
-        # column argmax via max.col(t(mat)); ties.method="first" matches which.max
-        psi[t, ]   <- max.col(t(mat), ties.method = "first")
-        delta[t, ] <- col_max(mat) + le[t, ]
-      }
-      path <- integer(T); path[T] <- safe_which_max(delta[T, ])
-      for (t in seq(T-1L, 1L)) path[t] <- psi[t+1L, path[t+1L]]
-      path
+    # ── Noise model ──────────────────────────────────────────────────────────
+    # The emission needs each step's noise variance. With the photon model active,
+    # every localization gets its own σ from its photon count (the same model the
+    # rest of the tab uses); otherwise one σ for all. Without any σ the slow state
+    # would absorb the noise and read too fast, so that case is refused.
+    sig_eff <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
+    src     <- tryCatch(trk_sigma_loc_src(), error = function(e) "not set")
+    shiny::validate(shiny::need(is.finite(sig_eff) && sig_eff > 0,
+      "Set the localization precision first (Data Quality & Calibration, or enter it manually)."))
+    d_in <- df[, intersect(c("tid", "x", "y", "tim", "eco"), names(df)), drop = FALSE]
+    sigma_mode <- "one value for all localizations"
+    if (identical(src, "photon budget") && "eco" %in% names(d_in)) {
+      cve <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
+      L_tcp  <- suppressWarnings(as.numeric(input$trk_L_tcp %||% DMAX_L_TCP_DEFAULT))
+      if (!is.finite(L_tcp) || L_tcp <= 0) L_tcp <- DMAX_L_TCP_DEFAULT
+      nu     <- suppressWarnings(as.numeric(input$trk_beam_fwhm %||% TCP_BEAM_FWHM_NM))
+      if (!is.finite(nu) || nu <= 0) nu <- TCP_BEAM_FWHM_NM
+      a_pref <- suppressWarnings(as.numeric(input$trk_crlb_pref %||% TCP_CRLB_PREFACTOR))
+      if (!is.finite(a_pref) || a_pref <= 0) a_pref <- TCP_CRLB_PREFACTOR
+      x_off  <- if (!is.null(cve) && is.finite(cve$D_cve) && cve$D_cve > 0) sqrt(2 * cve$D_cve * t_c) else 0
+      okc    <- is.finite(d_in$eco) & d_in$eco > 0
+      d_in$sig <- NA_real_                               # rows without eco fall back to sig_eff
+      if (any(okc)) d_in$sig[okc] <- .crlb_doughnut(L_tcp, nu, d_in$eco[okc], x_off, a_pref)
+      sigma_mode <- "per localization, from its photon count"
     }
 
-    # ---- Initialisation -----------------------------------------------------
-    # Sigma for a Rayleigh is close to the median / sqrt(ln 4) ≈ median / 1.18.
-    # Spread K initial sigmas evenly across 10th–90th percentile of step sizes.
-    # Floor at 1% of the overall median (at least 0.5 nm) to prevent collapse.
-    r_floor <- max(0.5, median(all_r) * 0.01)
-    sigma_init_pts <- quantile(all_r, seq(0.10, 0.90, length.out = K))
-    sigma <- pmax(sort(as.numeric(sigma_init_pts) / sqrt(log(4))), r_floor)
-    pi_v <- rep(1/K, K)
-    A    <- matrix(0.1 / max(K-1L, 1L), K, K); diag(A) <- 0.9
+    pr <- hmm_ct_prepare(d_in, ndim = 2L, sigma = sig_eff, min_pts = min_pts)
+    shiny::validate(shiny::need(!is.null(pr) && pr$n_steps >= 50L,
+      "Too few valid steps - lower 'Min localizations per TID'."))
 
-    # Fit on at most max_fit_trk longest tracks to keep runtime bounded
-    max_fit_trk <- max(10L, as.integer(isolate(input$trk_hmm_max_fit_trk) %||% 100L))
-    fit_obs <- obs_list[order(sapply(obs_list, length), decreasing = TRUE)[seq_len(min(max_fit_trk, length(obs_list)))]]
+    fit <- withProgress(message = "Fitting continuous-time HMM…", value = 0.2, {
+      f <- hmm_ct_fit(pr, K = K, R_abs = R_abs, t_c = t_c)
+      incProgress(0.5)
+      f
+    })
+    shiny::validate(shiny::need(!is.null(fit), "The HMM fit failed - try fewer states."))
 
-    # Optional per-track step cap for FITTING only (0 = use every step). The EM
-    # cost is linear in the total number of steps, and the longest tracks are the
-    # slowest; a contiguous prefix of a long track already contains ample emission
-    # + transition statistics, so capping barely moves the fitted σ/A but can cut
-    # runtime several-fold. A CONTIGUOUS prefix is used (not every-Nth) because the
-    # observation is a per-step displacement - subsampling localizations would
-    # inflate the step sizes and bias the diffusion estimate. The Viterbi decode
-    # below always runs on the FULL tracks, so per-localization state resolution
-    # is unaffected.
-    fit_step_cap <- as.integer(isolate(input$trk_hmm_max_fit_steps) %||% 0L)
-    if (is.finite(fit_step_cap) && fit_step_cap >= 10L)
-      fit_obs <- lapply(fit_obs, function(o)
-        if (length(o) > fit_step_cap) o[seq_len(fit_step_cap)] else o)
-
-    # ---- Baum-Welch EM -------------------------------------------------------
-    # Speed: (1) ≤30 iterations with an early-stop convergence threshold;
-    # (2) all per-step log-space math is vectorised (col_max/lse_cols/lse_rows/
-    #     log_add) - no apply()/sweep() and no K×K lse() loop in the hot path;
-    # (3) fitting is bounded by max_fit_trk (tracks) and the optional step cap
-    #     above. The remaining cost is the inherently sequential forward/backward
-    #     recursion (one iteration per localization); shrink tracks/steps to speed
-    #     it up further, or move the recursion to Rcpp for a step change.
-    prev_ll <- -Inf
-    withProgress(message = "Fitting HMM (Baum-Welch)…", value = 0, {
-      for (iter in seq_len(30L)) {
-        setProgress(iter / 30)
-        lA <- log(A); lpi <- log(pi_v)
-        sg1  <- rep(0, K); sg <- rep(0, K); sgr2 <- rep(0, K); total_ll <- 0
-        log_sx <- matrix(-Inf, K, K)
-
-        for (obs in fit_obs) {
-          le  <- lem(obs, sigma)
-          la  <- fwd(le, lA, lpi)
-          lb  <- bwd(le, lA)
-          ll  <- lse(la[nrow(la), ])
-          if (!is.finite(ll)) next
-          total_ll <- total_ll + ll
-
-          lg  <- la + lb; lg <- lg - lse_rows(lg)
-          gam <- exp(lg)
-          bad <- !is.finite(rowSums(gam))
-          if (any(bad)) gam[bad, ] <- 1 / K
-          sg1  <- sg1  + gam[1L, ]
-          sg   <- sg   + colSums(gam)
-          sgr2 <- sgr2 + colSums(gam * obs^2)
-
-          # Vectorised log-xi: broadcast v2_t[,j] over all K columns of la_t,
-          # then colwise logsumexp - replaces the inner K*K lse() loop.
-          T_obs <- length(obs)
-          la_t  <- la[seq_len(T_obs - 1L), , drop = FALSE]
-          v2_t  <- le[seq(2L, T_obs), , drop = FALSE] +
-                   lb[seq(2L, T_obs), , drop = FALSE]
-          log_inner <- matrix(-Inf, K, K)
-          nrt <- nrow(la_t)
-          for (j in seq_len(K)) {
-            m     <- la_t + v2_t[, j]          # (T-1) x K broadcast
-            m_max <- col_max(m)
-            ok    <- is.finite(m_max)
-            if (any(ok)) {
-              cs <- colSums(exp(m[, ok, drop = FALSE] - rep(m_max[ok], each = nrt)))
-              log_inner[ok, j] <- m_max[ok] + log(pmax(cs, .Machine$double.eps))
-            }
-          }
-          log_xi_new <- lA + log_inner - ll
-          # Accumulate in log-space, vectorised over the whole K x K matrix.
-          log_sx <- log_add(log_sx, log_xi_new)
-        }
-
-        if (any(!is.finite(c(sg, sgr2)))) break
-        pi_v <- sg1 / sum(sg1)
-        for (i in seq_len(K)) {
-          row_lse <- lse(log_sx[i, ])
-          A[i, ]  <- if (is.finite(row_lse)) exp(log_sx[i, ] - row_lse) else rep(1/K, K)
-        }
-        sigma <- sqrt(pmax(sgr2 / (2 * pmax(sg, .Machine$double.eps)), r_floor^2))
-
-        if (is.finite(total_ll) && is.finite(prev_ll) &&
-            abs(total_ll - prev_ll) < 1e-3 * abs(prev_ll) + 1e-5) break
-        if (is.finite(total_ll)) prev_ll <- total_ll
-      }
+    # Neighbouring model sizes, so the summary can show whether the data support K.
+    bic_other <- withProgress(message = "Comparing state counts (BIC)…", value = 0.3, {
+      ks <- setdiff(c(K - 1L, K + 1L), 1L); ks <- ks[ks <= 4L]
+      stats::setNames(vapply(ks, function(k) {
+        f2 <- tryCatch(hmm_ct_fit(pr, K = k, R_abs = R_abs, t_c = t_c, hessian = FALSE,
+                                  n_starts = 2L), error = function(e) NULL)
+        if (is.null(f2)) NA_real_ else f2$BIC
+      }, numeric(1)), ks)
     })
 
-    # Sort states slow -> fast (by sigma)
-    ord   <- order(sigma)
-    sigma <- sigma[ord]; pi_v <- pi_v[ord]; A <- A[ord, ][, ord]
+    boot <- if (B >= 10L) withProgress(message = sprintf("Bootstrap over tracks (%d refits)…", B), value = 0,
+      hmm_ct_bootstrap(pr$df, fit, B = B, ndim = 2L, sigma = sig_eff, t_c = t_c,
+                       min_pts = min_pts, progress = function(p) setProgress(p)))
+      else NULL
 
-    # ---- Viterbi decode all tracks ------------------------------------------
-    # Observations must use the same normalisation as training.
-    # viterbi_path patches degenerate emission rows with uniform log-prob,
-    # so NA/Inf entries (from dt ≤ 0 when norm_dt=TRUE) decode as the most
-    # likely state given context rather than crashing.
-    lA <- log(A); lpi <- log(pi_v)
-    seg_list <- lapply(names(obs_list), function(nm) {
-      tb  <- sp[[nm]]
-      if (norm_dt) {
-        r_raw <- sqrt(diff(tb$x)^2 + diff(tb$y)^2)
-        dt_v  <- diff(tb$tim)
-        ok    <- is.finite(dt_v) & dt_v > 0 & is.finite(r_raw)
-        obs   <- ifelse(ok, r_raw / sqrt(dt_v), NA_real_)
-      } else {
-        obs <- sqrt(diff(tb$x)^2 + diff(tb$y)^2)
-      }
-      # Replace NA/non-positive with a small floor so viterbi_path can patch them
-      obs[!is.finite(obs) | obs <= 0] <- NA_real_
-      path <- viterbi_path(obs, lA, lpi, sigma)
-      data.frame(tid = nm, x = tb$x, y = tb$y, tim = tb$tim,
-                 state = c(path, tail(path, 1L)), stringsAsFactors = FALSE)
-    })
+    # Display-only decode under the fitted model.
+    step_states <- hmm_ct_viterbi(pr, fit)
+    lab <- hmm_ct_states_by_loc(pr, step_states)
+    lab <- lab[is.finite(lab$state), , drop = FALSE]
+    seg_list <- lapply(split(lab, lab$tid), function(d)
+      data.frame(tid = d$tid, x = d$x, y = d$y, tim = d$tim, state = as.integer(d$state),
+                 stringsAsFactors = FALSE))
+    # Longest tracks first, so the example panel shows tracks with room to switch.
+    seg_list <- seg_list[order(-vapply(seg_list, nrow, integer(1)))]
 
-    all_states <- unlist(lapply(seg_list, `[[`, "state"), use.names = FALSE)
-    fracs      <- tabulate(all_states, nbins = K) / length(all_states)
+    dt_med  <- stats::median(pr$DT, na.rm = TRUE)
+    D_noise <- sig_eff^2 / dt_med                        # D equivalent of the noise per step
+    # Validated range (tests/validation/hmm_recovery_sweep.R, HMM_RESOLV_* in packages.R).
+    exp_sw  <- fit$expected_switches
+    resolv <- data.frame(
+      state        = seq_len(K),
+      dwell_cycles = fit$dwell_ms / t_c,
+      too_short    = fit$dwell_ms / t_c < HMM_RESOLV_MIN_DWELL_CYC,
+      few_switches = rowSums(exp_sw, na.rm = TRUE) < HMM_RESOLV_MIN_SWITCHES,
+      stringsAsFactors = FALSE)
+    # Two states with the same D differ only in how long they last: the model is
+    # describing a non-exponential dwell distribution of ONE diffusivity, not a
+    # separate state. Seen on GP67H-014 at K = 3 (D 0.026 / 0.026 / 0.49 µm²/s,
+    # dwells 17 / 0.26 / 0.17 ms). Flag adjacent states within 5% of each other.
+    same_D <- rep(FALSE, K)
+    for (k in seq_len(K - 1L)) if (abs(fit$D[k + 1L] / fit$D[k] - 1) < 0.05) same_D[c(k, k + 1L)] <- TRUE
+    resolv$same_D <- same_D
 
-    # Median Δt across all tracks (ms)
-    all_dt <- unlist(lapply(sp, function(tb) diff(tb$tim)), use.names = FALSE)
-    dt_med <- median(all_dt[all_dt > 0], na.rm = TRUE)
-
-    # D computation:
-    # norm_dt=TRUE:  σ is in nm/√ms  →  D = σ²/2  in nm²/ms (proper diffusivity)
-    # norm_dt=FALSE: σ is in nm      →  D = σ²/2  in nm²/step (not nm²/ms)
-    D_vals <- sigma^2 / 2
-
-    # Flag states that are indistinguishable from the localization-noise floor.
-    # A pure-noise 2D step has per-coordinate variance 2σ_loc², i.e. an apparent
-    # D of σ_loc²/Δt (normalised) or σ_loc² per step (un-normalised). A fitted
-    # state at or below this is a noise/immobile-limited state, not a resolved
-    # diffusive one. σ_loc is the app-wide value (unified MSD fit or manual).
-    sig_loc <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
-    D_noise <- if (is.finite(sig_loc) && sig_loc > 0) {
-      if (norm_dt && is.finite(dt_med) && dt_med > 0) sig_loc^2 / dt_med  # nm²/ms
-      else sig_loc^2                                                       # nm²/step
-    } else NA_real_
-    noise_state <- if (is.finite(D_noise)) D_vals <= D_noise else rep(FALSE, K)
-
-    # ── Continuous-time transition RATES (generator Q) - the Δt-correct output ──
-    # The per-step matrix A conflates state switching with each step's (irregular)
-    # Δt: a step spanning 3 dark cycles is counted as one transition opportunity,
-    # exactly like a single-cycle step, so per-step probabilities are NOT rates.
-    # The Δt-honest quantity is the generator Q of the underlying Markov jump
-    # process. For a path observed in continuous time its MLE is
-    #   q[a,b] = N[a,b] / T[a]   (b≠a),   q[a,a] = −Σ_{b≠a} q[a,b],
-    # with N[a,b] = decoded a→b jumps and T[a] = REAL time spent in state a. Using
-    # actual elapsed time makes the rates and mean dwell times (τ_a = −1/q[a,a])
-    # invariant to dark cycles. Intervals spanning a long gap (> gap_tol_cyc cycles),
-    # where an unobserved switch could hide, are excluded from the counts so a single
-    # big gap can't masquerade as a long dwell. States are ordered slow→fast (as A).
-    gap_tol_cyc <- 4L                       # count steps of ≤ 3 dark cycles
-    Tstate <- rep(0, K); Njump <- matrix(0L, K, K)
-    for (sg in seg_list) {
-      st <- sg$state; tm <- sg$tim
-      m  <- length(st); if (m < 2L) next
-      dseg <- diff(tm)
-      kc   <- if (is.finite(t_c) && t_c > 0) round(dseg / t_c) else rep(1, length(dseg))
-      for (i in seq_along(dseg)) {
-        if (!is.finite(dseg[i]) || dseg[i] <= 0) next
-        if (is.finite(kc[i]) && kc[i] > gap_tol_cyc) next       # skip long gaps
-        a <- st[i]; Tstate[a] <- Tstate[a] + dseg[i]
-        b <- st[i + 1L]; if (b != a) Njump[a, b] <- Njump[a, b] + 1L
-      }
-    }
-    Qrate <- matrix(0, K, K)                # per ms (tim is ms)
-    for (a in seq_len(K)) if (Tstate[a] > 0) {
-      for (b in seq_len(K)) if (b != a) Qrate[a, b] <- Njump[a, b] / Tstate[a]
-      Qrate[a, a] <- -sum(Qrate[a, -a])
-    }
-    dwell_ms <- ifelse(diag(Qrate) < 0, -1 / diag(Qrate), NA_real_)  # mean dwell (ms)
-
-    list(K = K, sigma = sigma, A = A, pi = pi_v,
-         D_vals = D_vals, fracs = fracs,
-         norm_dt = norm_dt,
-         seg_list = seg_list, n_tracks = length(obs_list),
-         dt_med_ms = dt_med, t_cycle_ms = t_c,
-         Qrate = Qrate, dwell_ms = dwell_ms, Njump = Njump, Tstate = Tstate,
-         gap_tol_cyc = gap_tol_cyc,
-         sigma_loc_nm = sig_loc, D_noise = D_noise, noise_state = noise_state)
+    list(K = K, D_vals = fit$D, fracs = fit$pi,
+         P_cycle = .expm_small(fit$Q * t_c), Qrate = fit$Q, dwell_ms = fit$dwell_ms,
+         fit = fit, boot = boot, bic_other = bic_other,
+         seg_list = seg_list, n_tracks = fit$n_tracks, n_steps = fit$n_steps,
+         dt_med_ms = dt_med, t_cycle_ms = t_c, R_abs = R_abs,
+         sigma_loc_nm = sig_eff, sigma_mode = sigma_mode,
+         D_noise = D_noise, noise_state = fit$D <= D_noise, resolv = resolv,
+         norm_dt = TRUE)
   })
 
   output$trk_hmm_params_plot <- renderPlotly({
@@ -10589,31 +9777,28 @@ tracking_server <- function(input, output, session) {
     bg_col <- if (dark) "#000000" else "#FFFFFF"
     fg_col <- if (dark) "#FFFFFF" else "#333333"
     state_cols <- c("#C03030","#D08020","#2080C0","#7030A0")[seq_len(bd$K)]
-
-    d_unit  <- if (isTRUE(bd$norm_dt)) "nm\u00B2/ms" else "nm\u00B2/step"
-    sig_unit <- if (isTRUE(bd$norm_dt)) "nm/\u221Ams" else "nm"
-    is_noise <- if (!is.null(bd$noise_state)) bd$noise_state else rep(FALSE, bd$K)
-    labels  <- sprintf("State %d\n%.0f%%", seq_len(bd$K), bd$fracs * 100)
-    labels  <- ifelse(is_noise, paste0(labels, "\n\u26A0 noise-limited"), labels)
-    bar_cols <- ifelse(is_noise, "#9e9e9e", state_cols)   # grey out noise/immobile-limited states
-    plot_ly() %>%
+    D_um <- bd$D_vals / 1e3                               # µm²/s
+    ci   <- if (!is.null(bd$boot)) bd$boot$D else bd$fit$ci$D   # bootstrap CI preferred
+    lo   <- if (!is.null(ci)) ci[1, ] / 1e3 else rep(NA_real_, bd$K)
+    hi   <- if (!is.null(ci)) ci[2, ] / 1e3 else rep(NA_real_, bd$K)
+    is_noise <- bd$noise_state %||% rep(FALSE, bd$K)
+    labels <- sprintf("State %d\n%.0f%% of time", seq_len(bd$K), bd$fracs * 100)
+    labels <- ifelse(is_noise, paste0(labels, "\n⚠ at noise level"), labels)
+    bar_cols <- ifelse(is_noise, "#9e9e9e", state_cols)
+    p <- plot_ly() %>%
       add_bars(
-        x = bd$D_vals, y = labels,
-        orientation = "h",
+        x = D_um, y = labels, orientation = "h",
         marker = list(color = bar_cols),
-        text  = sprintf("\u03C3=%.1f %s  D=%.2g %s%s", bd$sigma, sig_unit, bd$D_vals, d_unit,
-                        ifelse(is_noise,
-                               sprintf("  (\u2264 noise floor %.2g %s - immobile/noise-limited)", bd$D_noise, d_unit),
-                               "")),
-        hovertemplate = "%{text}<extra></extra>"
-      ) %>%
-      layout(
-        xaxis = list(title = paste("D (", d_unit, ")"), color = fg_col),
-        yaxis = list(title = "", autorange = "reversed", color = fg_col),
-        paper_bgcolor = bg_col, plot_bgcolor = bg_col,
-        font = list(color = fg_col), showlegend = FALSE,
-        uirevision = "hmm_params"
-      )
+        error_x = if (all(is.finite(c(lo, hi))))
+                    list(type = "data", symmetric = FALSE, array = hi - D_um,
+                         arrayminus = D_um - lo, color = fg_col) else NULL,
+        text = sprintf("D = %.3g µm²/s  (95%% CI %.3g to %.3g)", D_um, lo, hi),
+        hovertemplate = "%{text}<extra></extra>")
+    p %>% layout(
+      xaxis = list(title = "D (µm²/s)", color = fg_col),
+      yaxis = list(title = "", autorange = "reversed", color = fg_col),
+      paper_bgcolor = bg_col, plot_bgcolor = bg_col,
+      font = list(color = fg_col), showlegend = FALSE, uirevision = "hmm_params")
   })
 
   output$trk_hmm_trans_plot <- renderPlotly({
@@ -10623,21 +9808,21 @@ tracking_server <- function(input, output, session) {
     fg_col <- if (dark) "#FFFFFF" else "#333333"
     K      <- bd$K
     labels <- paste0("S", seq_len(K))
+    P      <- bd$P_cycle                                  # expm(Q·t_c): one cycle
     plot_ly(
       x = labels, y = rev(labels),
-      z = bd$A[rev(seq_len(K)), ],
+      z = P[rev(seq_len(K)), , drop = FALSE],
       type = "heatmap",
       colorscale = list(list(0, "#08306b"), list(0.5, "#4393c3"), list(1, "#ffffff")),
-      reversescale = FALSE, zmin = 0, zmax = 1,
-      text  = matrix(sprintf("%.3f", bd$A[rev(seq_len(K)), ]), K, K),
+      zmin = 0, zmax = 1,
+      text  = matrix(sprintf("%.3f", P[rev(seq_len(K)), ]), K, K),
       texttemplate = "%{text}",
-      hovertemplate = "From %{y} \u2192 To %{x}: %{text}<extra></extra>"
+      hovertemplate = "From %{y} → To %{x} within one cycle: %{text}<extra></extra>"
     ) %>% layout(
       xaxis = list(title = "To state",   color = fg_col, side = "top"),
       yaxis = list(title = "From state", color = fg_col),
       paper_bgcolor = bg_col, plot_bgcolor = bg_col,
-      font = list(color = fg_col), uirevision = "hmm_trans"
-    )
+      font = list(color = fg_col), uirevision = "hmm_trans")
   })
 
   output$trk_hmm_example_plot <- renderPlotly({
@@ -10702,75 +9887,79 @@ tracking_server <- function(input, output, session) {
   })
 
   output$trk_hmm_summary <- renderUI({
-    bd       <- hmm_bundle()
-    K        <- bd$K
-    norm_dt  <- isTRUE(bd$norm_dt)
-    dt       <- bd$dt_med_ms
-    d_unit   <- if (norm_dt) "nm\u00B2/ms"
-                else if (is.finite(dt) && dt > 0)
-                  sprintf("nm\u00B2/step  (\u00F7%.2g ms \u2192 nm\u00B2/ms)", dt)
-                else "nm\u00B2/step"
-    sig_unit <- if (norm_dt) "nm/\u221Ams" else "nm"
-
-    is_noise <- if (!is.null(bd$noise_state)) bd$noise_state else rep(FALSE, K)
+    bd  <- hmm_bundle()
+    K   <- bd$K; fit <- bd$fit
     fmt_time <- function(ms) if (!is.finite(ms)) "-"
                              else if (ms >= 1000) sprintf("%.2f s", ms / 1000)
-                             else sprintf("%.0f ms", ms)
-    dwell <- if (!is.null(bd$dwell_ms)) bd$dwell_ms else rep(NA_real_, K)
-    rows <- lapply(seq_len(K), function(k)
+                             else if (ms >= 1) sprintf("%.1f ms", ms)
+                             else sprintf("%.2f ms", ms)
+    ci_src <- if (!is.null(bd$boot)) bd$boot else fit$ci   # bootstrap preferred
+    ci_lbl <- if (!is.null(bd$boot)) sprintf("bootstrap over tracks, %d refits", bd$boot$n_ok)
+              else "from the likelihood curvature; too narrow when molecules differ"
+    rng <- function(m, k, scale = 1, f = function(v) sprintf("%.3g", v))
+      if (is.null(m)) "" else sprintf(" (%s to %s)", f(m[1, k] * scale), f(m[2, k] * scale))
+    rs  <- bd$resolv
+    rows <- lapply(seq_len(K), function(k) {
+      flag <- c(if (isTRUE(bd$noise_state[k])) "D at the noise level",
+                if (isTRUE(rs$too_short[k])) "dwell below the validated range",
+                if (isTRUE(rs$few_switches[k])) "too few switches observed",
+                if (isTRUE(rs$same_D[k])) "same D as a neighbouring state (one diffusivity with non-exponential dwells)")
       tags$tr(
-        tags$td(sprintf("State %d", k),                                     style = "padding:2px 8px;"),
-        tags$td(sprintf("%.1f%%",  bd$fracs[k] * 100),                     style = "padding:2px 8px;"),
-        tags$td(sprintf("\u03C3 = %.1f %s", bd$sigma[k], sig_unit),        style = "padding:2px 8px;"),
-        tags$td(sprintf("D = %.3g %s", bd$D_vals[k], d_unit),              style = "padding:2px 8px;"),
-        tags$td(sprintf("dwell \u2248 %s", fmt_time(dwell[k])),            style = "padding:2px 8px;"),
-        tags$td(if (isTRUE(is_noise[k]))
-                  tags$span("\u26A0 noise/immobile-limited", style = "color:#b26a00;")
-                else "",                                                    style = "padding:2px 8px;")
-      )
-    )
+        tags$td(sprintf("State %d", k), style = "padding:2px 8px;"),
+        tags$td(sprintf("%.0f%%", bd$fracs[k] * 100), style = "padding:2px 8px;"),
+        tags$td(sprintf("%.3g", bd$D_vals[k] / 1e3), rng(ci_src$D, k, 1e-3), style = "padding:2px 8px;"),
+        tags$td(fmt_time(bd$dwell_ms[k]), rng(ci_src$dwell_ms, k, 1, fmt_time),
+                sprintf(" ≈ %.0f cycles", rs$dwell_cycles[k]), style = "padding:2px 8px;"),
+        tags$td(if (length(flag)) tags$span(paste("⚠", paste(flag, collapse = "; ")),
+                                            style = "color:#b26a00;") else "",
+                style = "padding:2px 8px;"))
+    })
+    rate_txt <- {
+      off <- character(0)
+      for (a in seq_len(K)) for (b in seq_len(K)) if (a != b)
+        off <- c(off, sprintf("S%d→S%d %.3g s⁻¹%s", a, b, bd$Qrate[a, b] * 1000,
+                              if (!is.null(ci_src$rates_lo))
+                                sprintf(" (%.3g to %.3g)", ci_src$rates_lo[a, b], ci_src$rates_hi[a, b])
+                              else ""))
+      paste(off, collapse = "  ·  ")
+    }
+    bic_txt <- {
+      bo <- bd$bic_other
+      if (length(bo) && any(is.finite(bo))) {
+        all_bic <- c(stats::setNames(fit$BIC, K), bo)
+        best <- as.integer(names(all_bic)[which.min(all_bic)])
+        sprintf("BIC prefers %d states (%s).", best,
+                paste(sprintf("K=%s: %+.0f", names(all_bic), all_bic - min(all_bic, na.rm = TRUE)),
+                      collapse = ", "))
+      } else ""
+    }
+    # JDD cross-check: at short lags the JDD component weights estimate the same
+    # occupancies (per step rather than per unit time), with no segmentation at all.
+    jdd_txt <- {
+      jb <- tryCatch(jdd_bundle(), error = function(e) NULL)
+      if (!is.null(jb) && isTRUE(jb$n_comp == K) && length(jb$ws) == K) {
+        o <- order(jb$D_vals)
+        sprintf("JDD (%d components): D %s µm²/s, weights %s.", K,
+                paste(sprintf("%.3g", jb$D_vals[o] / 1e3), collapse = " / "),
+                paste(sprintf("%.0f%%", 100 * jb$ws[o]), collapse = " / "))
+      } else NULL
+    }
     tags$div(style = "font-size:0.88em; margin:4px 0;",
-      tags$p(sprintf("n = %d tracks  |  median \u0394t = %.2g ms  |  \u221A\u0394t normalisation: %s",
-                     bd$n_tracks, bd$dt_med_ms, if (norm_dt) "on" else "off"),
-             style = "color:#888; margin:2px 0;"),
-      tags$table(
-        style = "border-collapse:collapse;",
+      tags$p(style = "color:#888; margin:2px 0;",
+        sprintf("n = %d tracks, %d steps  |  cycle %.3g ms  |  σ_loc %s (median %.2f nm)  |  log-likelihood %.1f",
+                bd$n_tracks, bd$n_steps, bd$t_cycle_ms, bd$sigma_mode, bd$sigma_loc_nm, fit$loglik)),
+      tags$table(style = "border-collapse:collapse;",
         tags$thead(tags$tr(lapply(
-          c("", "Fraction", "Width (\u03C3)", "Diffusivity (D)", "Mean dwell", ""),
-          function(h) tags$th(h, style = "padding:2px 8px; border-bottom:1px solid #ccc;")
-        ))),
-        tags$tbody(rows)
-      ),
-      if (is.finite(bd$D_noise %||% NA_real_))
-        tags$p(style = "color:#888; font-size:0.92em; margin-top:4px;",
-          sprintf("Noise floor D = %.2g %s (\u03C3_loc = %.2f nm). States at or below it are marked \u26A0 - they are indistinguishable from localization noise, not resolved diffusive states.",
-                  bd$D_noise, d_unit, bd$sigma_loc_nm))
-      else
-        tags$p(style = "color:#888; font-size:0.92em; margin-top:4px;",
-          "Set \u03C3_loc (run the MSD, or enter it in Acquisition Parameters) to flag noise/immobile-limited states.")
-      ,
-      # Continuous-time transition rates (\u0394t-correct). The per-step matrix A conflates
-      # switching with each step's irregular \u0394t; the generator Q, estimated from the
-      # decoded path using REAL elapsed time, gives rates (s\u207B\u00B9) and mean dwell times
-      # that are invariant to dark cycles. This replaces the old "rates approximate"
-      # caveat with an actual \u0394t-honest estimate. (See docs/MINFLUX_analysis_methods.md.)
-      {
-        Q <- bd$Qrate
-        rate_txt <- if (!is.null(Q) && K >= 2) {
-          off <- character(0)
-          for (a in seq_len(K)) for (b in seq_len(K)) if (a != b && is.finite(Q[a, b]) && Q[a, b] > 0)
-            off <- c(off, sprintf("S%d\u2192S%d %.3g s\u207B\u00B9", a, b, Q[a, b] * 1000))  # \u00D71000: per-ms \u2192 per-s
-          if (length(off)) paste(off, collapse = "  \u00B7  ") else "no state switches observed in the decoded paths"
-        } else "-"
-        tags$div(style = "margin-top:6px; border-top:1px dashed #ddd; padding-top:4px;",
-          tags$p(style = "color:#444; font-size:0.9em; margin:2px 0;",
-            tags$b("Transition rates (continuous-time, \u0394t-corrected): "), rate_txt),
-          tags$p(style = "color:#888; font-size:0.82em; margin:2px 0;",
-            sprintf("Generator Q on real elapsed time (mean dwell = \u22121/q\u2090\u2090); steps over %d cycles excluded. ",
-                    bd$gap_tol_cyc %||% 4L),
-            "The per-step matrix A above is reference only."))
-      }
-    )
+          c("", "Occupancy", "D (µm²/s, 95% CI)", "Mean dwell (95% CI)", ""),
+          function(h) tags$th(h, style = "padding:2px 8px; border-bottom:1px solid #ccc;")))),
+        tags$tbody(rows)),
+      tags$p(style = "color:#444; margin:6px 0 2px;", tags$b("Switching rates: "), rate_txt),
+      tags$p(style = "color:#888; font-size:0.9em; margin:2px 0;",
+        sprintf("CIs %s. %s", ci_lbl, bic_txt)),
+      if (!is.null(jdd_txt))
+        tags$p(style = "color:#888; font-size:0.9em; margin:2px 0;", tags$b("Cross-check. "), jdd_txt),
+      if (!isTRUE(fit$converged))
+        tags$p(style = "color:#b26a00; margin:2px 0;", "The optimiser did not report convergence; treat the estimates with caution."))
   })
 
   output$trk_dl_hmm_csv <- downloadHandler(
@@ -11009,7 +10198,10 @@ tracking_server <- function(input, output, session) {
   #   Each step is assigned to the cell containing its MIDPOINT, and the cell's D
   #   is the MEAN of its steps' D, with the noise floor subtracted once per cell:
   #
-  #        D_cell = max(0, mean(r²/(4Δt)) − σ²·mean(1/Δt))
+  #        D_cell = max(0, mean(r²/(4Δt)) − σ²·mean(1/Δt)) / (1 − 2R·t_c·mean(1/Δt))
+  #
+  #   (the denominator is the motion-blur correction added 2026-09-17; without it
+  #   the map read −30% on blurred simulated tracks. Estimator: est_dmap.R)
   #
   #   WHY THE MEAN AND NOT THE MEDIAN. The relation <r²> = 4DΔt + 4σ² holds for
   #   the MEAN only. A single 2D step's r² is exponentially distributed, so its
@@ -11049,7 +10241,7 @@ tracking_server <- function(input, output, session) {
   #   1. Build per-step r², Δt and midpoint (x,y) within each track.
   #   2. Optionally keep only single-cycle (integrated) steps.
   #   3. Bin midpoints onto a regular grid.
-  #   4. Per cell: D = mean(r²/(4Δt)) − σ²·mean(1/Δt), clamped >= 0, plus its SE.
+  #   4. Per cell: D = [mean(r²/(4Δt)) − σ²·mean(1/Δt)]₊ / (1 − 2R·t_c·mean(1/Δt)), plus its SE.
   #   5. Blank cells with fewer than `min_pts` steps - too few to trust.
   #
   # CAVEAT: single-lag D is an INSTANTANEOUS estimate; it says nothing about
@@ -11059,109 +10251,19 @@ tracking_server <- function(input, output, session) {
   dmap_bundle <- eventReactive(input$trk_dmap_run, {
     req(isTRUE(input$trk_show_dmap))
     df <- trk(); req(nrow(df) > 0)
-
-    n_bins  <- max(5L, as.integer(input$trk_dmap_bins))
-    min_pts <- max(3L, as.integer(input$trk_dmap_min_pts))
-
-    df <- df[is.finite(df$x) & is.finite(df$y) & is.finite(df$tim), ]
-    df <- df[order(df$tid, df$tim), ]
-    sp <- split(df, df$tid)
-
-    withProgress(message = "Computing D-map…", value = 0.1, {
-    # Build step table: midpoint position, dt, r²
-    step_rows <- lapply(sp, function(tb) {
-      if (nrow(tb) < 2L) return(NULL)
-      n  <- nrow(tb)
-      i1 <- seq_len(n - 1L); i2 <- i1 + 1L
-      dt <- tb$tim[i2] - tb$tim[i1]
-      data.frame(
-        mx = 0.5 * (tb$x[i1] + tb$x[i2]),
-        my = 0.5 * (tb$y[i1] + tb$y[i2]),
-        dt = dt,
-        r2 = (tb$x[i2] - tb$x[i1])^2 + (tb$y[i2] - tb$y[i1])^2,
-        stringsAsFactors = FALSE
-      )
-    })
-    steps <- do.call(rbind, step_rows[!sapply(step_rows, is.null)])
-    steps <- steps[is.finite(steps$dt) & steps$dt > 0 & is.finite(steps$r2), ]
-    shiny::validate(shiny::need(nrow(steps) >= min_pts * 2,
-      "Too few steps - relax filters or lower 'Min steps per cell'."))
-
-    # Optional: keep only INTEGRATED (single-cycle) steps. A step spanning dark
-    # cycles has a large \u0394t and a spatially meaningless midpoint (the molecule may
-    # have moved far while unseen), so mixing them in smears the map. Classified by
-    # cycle count with the same cycle time the TSA uses.
     t_c_dmap <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
-    integrated_only <- isTRUE(input$trk_dmap_integrated_only) &&
-                       is.finite(t_c_dmap) && t_c_dmap > 0
-    if (integrated_only) {
-      keep_step <- pmax(1L, as.integer(round(steps$dt / t_c_dmap))) == 1L
-      steps <- steps[keep_step, , drop = FALSE]
-      shiny::validate(shiny::need(nrow(steps) >= min_pts * 2,
-        "Too few integrated (single-cycle) steps - untick 'Integrated steps only' or relax filters."))
-    }
-
-    # Global median dt used to normalise all cells to the same lag
-    dt_med <- median(steps$dt, na.rm = TRUE)
-    shiny::validate(shiny::need(is.finite(dt_med) && dt_med > 0,
-      "Cannot determine median \u0394t."))
-
-    # Per-step apparent 2D diffusion: D_raw = r² / (4·Δt).
-    steps$D_raw <- steps$r2 / (4 * steps$dt)
-    # Optional static localization-error floor. A single 2D step has
-    # E[r²_noise] = 4σ² → an apparent D of σ²/Δt; without this, immobile/confined
-    # regions show a spurious diffusion floor. It is subtracted PER CELL below
-    # (never per step, which would clamp and rectify). σ_loc is the app-wide
-    # value; no-op when it is unset.
-    sig_loc <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
-    noise_subtracted <- isTRUE(input$trk_dmap_sub_noise) &&
-                        is.finite(sig_loc) && sig_loc > 0
-    sig2 <- if (noise_subtracted) sig_loc^2 else 0
-
-    x_rng    <- range(steps$mx); y_rng <- range(steps$my)
-    x_breaks <- seq(x_rng[1], x_rng[2], length.out = n_bins + 1L)
-    y_breaks <- seq(y_rng[1], y_rng[2], length.out = n_bins + 1L)
-    cell_w   <- diff(x_rng) / n_bins
-    cell_h   <- diff(y_rng) / n_bins
-
-    steps$ix <- pmin(findInterval(steps$mx, x_breaks), n_bins)
-    steps$iy <- pmin(findInterval(steps$my, y_breaks), n_bins)
-
-    # Per-cell D: mean of per-step D_raw minus the cell's own noise floor
-    # σ²·mean(1/Δt) (first moments only - see header for why not the median)
-    D_mat    <- matrix(NA_real_, n_bins, n_bins)
-    SE_mat   <- matrix(NA_real_, n_bins, n_bins)
-    N_mat    <- matrix(0L,       n_bins, n_bins)
-
-    cell_idx <- steps$ix + (steps$iy - 1L) * n_bins
-    by_cell  <- split(seq_len(nrow(steps)), cell_idx)
-
-    for (nm in names(by_cell)) {
-      rows <- by_cell[[nm]]
-      rows <- rows[is.finite(steps$D_raw[rows])]
-      if (length(rows) < min_pts) next
-      idx  <- as.integer(nm)
-      ix   <- ((idx - 1L) %% n_bins) + 1L
-      iy   <- ((idx - 1L) %/% n_bins) + 1L
-      # per-step contribution to the estimate, so its SD gives the SE directly
-      contrib <- steps$D_raw[rows] - sig2 / steps$dt[rows]
-      D_mat[ix, iy]  <- max(0, mean(contrib))
-      SE_mat[ix, iy] <- stats::sd(contrib) / sqrt(length(rows))
-      N_mat[ix, iy]  <- length(rows)
-    }
-
-    x_centers <- 0.5 * (x_breaks[-1] + x_breaks[-length(x_breaks)])
-    y_centers <- 0.5 * (y_breaks[-1] + y_breaks[-length(y_breaks)])
-
-    list(D_mat = D_mat, SE_mat = SE_mat, N_mat = N_mat,
-         x_centers = x_centers, y_centers = y_centers,
-         cell_w_nm = cell_w, cell_h_nm = cell_h,
-         n_bins = n_bins, n_steps = nrow(steps),
-         dt_med_ms = dt_med,
-         integrated_only = integrated_only,
-         noise_subtracted = noise_subtracted,
-         sigma_loc_nm = if (noise_subtracted) sig_loc else NA_real_)
-    })  # withProgress
+    # σ_loc floor is optional (toggle); the app-wide value is used when set.
+    sig_loc  <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
+    sig_use  <- if (isTRUE(input$trk_dmap_sub_noise) && is.finite(sig_loc) && sig_loc > 0) sig_loc else NA_real_
+    # Estimator lives in est_dmap.R (pure, tested); blur offset as in the MSD fits.
+    withProgress(message = "Computing D-map…", value = 0.1, {
+      res <- dmap_compute(df, n_bins = input$trk_dmap_bins, min_pts = input$trk_dmap_min_pts,
+                          t_c = t_c_dmap, integrated_only = isTRUE(input$trk_dmap_integrated_only),
+                          sigma_loc = sig_use,
+                          R_abs = if (is.finite(t_c_dmap) && t_c_dmap > 0) MSD_BLUR_R * t_c_dmap else 0)
+    })
+    shiny::validate(shiny::need(is.null(res$error), res$error %||% ""))
+    res
   })
 
   output$trk_dmap_plot <- renderPlotly({

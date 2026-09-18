@@ -608,6 +608,7 @@ read_minflux_json_as_df <- function(path,
 
   # ---- Pool DCR across all iterations per TID (optional) ----
   # Matches pyMINFLUX: ECO-weighted mean of dcr1, restricted to non-zero iterations.
+  # Reimplemented in R from pyMINFLUX (Apache-2.0); see THIRD-PARTY.md section 2.
   # Computed before keep_final_only so all iterations contribute.
   dcr_pool_tbl <- NULL
   if (isTRUE(pool_dcr) && "dcr1" %in% names(df_all) && "eco" %in% names(df_all)) {

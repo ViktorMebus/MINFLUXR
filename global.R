@@ -13,6 +13,12 @@ source("packages.R")
 source("helpers_shared.R")
 source("helpers_smlm.R")
 source("helpers_tracking.R")
+source("est_cve.R")          # CVE core + photon-budget sigma
+source("est_msd.R")          # MSD fit core (OLSF + non-linear models)
+source("est_cpd.R")          # change-point segmentation + GMM
+source("est_jdd.R")          # jump-distance mixture fit
+source("est_dmap.R")         # spatial D-map
+source("est_hmm.R")          # continuous-time diffusive-state HMM (pure estimator)
 source("ui_smlm.R")
 source("ui_tracking.R")
 source("sim_ui.R")

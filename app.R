@@ -1,5 +1,19 @@
-I## ─────────────────────────────────────────────────────────────────────────────
+## ─────────────────────────────────────────────────────────────────────────────
 ## app.R  —  MINFLUXR: combined SMLM, tracking and simulator app
+##
+## Copyright (C) 2026 Viktor Mebus and contributors
+##
+## This program is free software: you can redistribute it and/or modify it under
+## the terms of the GNU General Public License as published by the Free Software
+## Foundation, either version 3 of the License, or (at your option) any later
+## version. It is distributed WITHOUT ANY WARRANTY; without even the implied
+## warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+## General Public License (LICENSE) for more details.
+##
+## GPL-3 is required rather than chosen: the time-signature analysis and MSD/OLSF
+## workflow are ports of MinSpt (GPL-3.0). DCR pooling and the per-trace spread
+## statistic are reimplemented from pyMINFLUX (Apache-2.0), which GPL-3 permits.
+## See THIRD-PARTY.md.
 ##
 ## File layout:
 ##   global.R            Auto-sourced by Shiny; loads packages and all helpers

@@ -1155,6 +1155,8 @@ smlm_server <- function(input, output, session) {
       fiducial = list(
         fid_exclude   = isTRUE(input$fid_exclude),
         fid_efo_z     = input$fid_efo_z,
+        fid_dur_x     = input$fid_dur_x,
+        fid_min_locs  = input$fid_min_locs,
         fid_len_z     = input$fid_len_z,
         fid_recur_r   = input$fid_recur_r,
         fid_recur_min = input$fid_recur_min,
@@ -2666,7 +2668,7 @@ smlm_server <- function(input, output, session) {
       fd <- raw$fiducial %||% list()
       updateCheckboxInput(session, "fid_exclude",   value = isTRUE(fd$fid_exclude))
       updateCheckboxInput(session, "fid_all_files", value = isTRUE(fd$fid_all_files))
-      for (nm in c("fid_efo_z", "fid_len_z", "fid_recur_r", "fid_recur_min")) {
+      for (nm in c("fid_efo_z", "fid_dur_x", "fid_min_locs", "fid_len_z", "fid_recur_r", "fid_recur_min")) {
         v <- suppressWarnings(as.numeric(fd[[nm]]))
         if (length(v) == 1 && is.finite(v)) updateNumericInput(session, nm, value = v)
       }
@@ -7893,6 +7895,35 @@ smlm_server <- function(input, output, session) {
     res
   }
 
+  ## ── Per-file summary export (unit of replication = the file / cell) ────────
+  ## GOAL: one CSV with per-file summaries of every distribution analysis that has
+  ## been run, tagged with each file's group, so between-group statistics use one
+  ## value per cell. Group-mode histograms pool units across files, which is fine
+  ## for looking but pseudo-replicates any test run on them; see per_file_summary()
+  ## in helpers_smlm.R. Reads the stored results at download time, so it reflects
+  ## the last Run of each panel. The result stores are defined further down this
+  ## function; they exist by the time the handler can fire.
+  output$download_per_file_summary <- downloadHandler(
+    filename = function() paste0("per_file_summary_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) {
+      rv <- function(f) tryCatch(f(), error = function(e) NULL)   # a store may be unset
+      cross <- rv(cross_nn_results)
+      if (is.data.frame(cross) && nrow(cross) && "direction" %in% names(cross))
+        cross$dataset <- paste(cross$dataset, cross$direction, sep = " · ")  # one row per direction
+      results <- list(
+        batch_nn         = list(df = rv(nn_batch_results),  metrics = "distance",   unit = "NN distance (nm)"),
+        units_per_median_cluster = list(df = rv(tid_count_results), metrics = "n_tids", unit = "Median Cluster"),
+        radius_of_gyration = list(df = rv(rog_results),     metrics = c("rog", "n_units"), unit = "cluster"),
+        crowding         = list(df = rv(crowd_results),     metrics = c("nn_median", "time_shift", "n_tids"), unit = "Median Cluster"),
+        within_cluster_nn_vs_size = list(df = rv(size_nn_results), metrics = c("nn_median", "size"), unit = "Median Cluster"),
+        cross_channel_nn = list(df = cross,                  metrics = "distance",   unit = "cross-channel NN distance (nm)"))
+      out <- per_file_summary(results, group_map = file_group_map(),
+                              files = names(smlm_file_store() %||% list()))
+      if (!nrow(out))
+        out <- data.frame(note = "No distribution analysis has been run yet. Run a panel, then download again.")
+      utils::write.csv(out, file, row.names = FALSE)
+    })
+
   ## ══════════════════════════════════════════════════════════════════════════
   ## LABELLING-DENSITY NORMALISATION  (opt-in, default OFF)
   ## ══════════════════════════════════════════════════════════════════════════
@@ -8724,6 +8755,15 @@ smlm_server <- function(input, output, session) {
     # not one that merely has a few detached slivers (a real cell edge). Measured on
     # four real MINFLUX acquisitions the footprint came out in 2/3/1/1 pieces with
     # >=93% of the window in the largest, so a count-based rule rejected good data.
+    # The occupancy footprint stops inside the real cell edge at sparse labelling, so
+    # a null simulated inside it is denser than the data and random points read as
+    # regular (measured: L-r = -6.9 nm at r = 200 on CSR, 33% below the pointwise
+    # band). Grow it back to the region the points actually fill. Not applied to the
+    # hotspot panel (`force`), whose eps calibration randomises inside this same mask
+    # and is therefore already self-consistent.
+    if (!isTRUE(force)) {
+      fp <- tryCatch(debias_support_window(fp, nrow(sp)), error = function(e) fp)
+    }
     cmp <- mask_components(if (use_3d) fp$mask else mask_project_2d(fp$mask), fp$h)
     fp$n_components  <- cmp$n
     fp$largest_frac  <- cmp$largest_frac
@@ -8747,6 +8787,26 @@ smlm_server <- function(input, output, session) {
                                  force = FALSE) {
     w <- spatial_window_of(df, use_3d, close_nm = close_nm, force = force)
     if (!is.null(w) && !is.null(tag)) {
+      # Edge correction on a bounding box is only right when the sample fills the box.
+      # When the footprint window is off, measure (without using it) how much of the
+      # box a footprint would cover, so the readout can prompt for the footprint
+      # window. Uses the footprint at the LARGEST swept gap fill (24 grid steps), the
+      # most generous outline: clustered data filling its frame reads ~80% there
+      # (closing cannot fill indentations at the box edge), so only a box that is
+      # mostly empty at the micrometre scale falls below the prompt threshold.
+      # Plan view only; ~0.1 s per file.
+      fp_frac <- NA_real_
+      if (identical(w$mode, "bbox") && !isTRUE(input$spatial_use_support) && !isTRUE(force) &&
+          isTRUE(input$spatial_edge_correct) && !is.null(df) && all(c("x", "y") %in% names(df))) {
+        fp_frac <- tryCatch({
+          sp <- df[stats::complete.cases(df[, c("x", "y")]), c("x", "y"), drop = FALSE]
+          sp$z <- 0                                             # plan view
+          h  <- max(10, as.numeric(input$dens_grid_h %||% 100))
+          sw <- support_closing_sweep(sp, use_3d = FALSE, h_nm = h)
+          if (is.null(sw) || !nrow(sw)) NA_real_
+          else sw$frac_of_bbox[which.max(sw$close_nm)]          # most generous footprint
+        }, error = function(e) NA_real_)
+      }
       row <- data.frame(
         dataset      = tag,
         window       = if (identical(w$mode, "bbox"))
@@ -8757,6 +8817,7 @@ smlm_server <- function(input, output, session) {
         gap_fill_nm  = w$close_nm %||% NA_real_,
         pieces       = w$n_components %||% NA_integer_,
         largest_frac = w$largest_frac %||% NA_real_,
+        footprint_frac = fp_frac,        # diagnostic only, filled when the box is in use
         stringsAsFactors = FALSE)
       cur <- spatial_window_log()
       cur <- if (is.null(cur)) row else rbind(cur[cur$dataset != tag, , drop = FALSE], row)
@@ -8826,6 +8887,15 @@ smlm_server <- function(input, output, session) {
     cc <- spatial_common_close()
     small <- which(is.finite(lg$frac_of_bbox) & lg$frac_of_bbox < 0.40 &
                      !grepl("bounding box", lg$window, fixed = TRUE))
+    # Edge-corrected bounding box on a sample that leaves much of the box empty: the
+    # correction then amplifies the framing error, so prompt for the footprint window.
+    # 0.70 is a prompt threshold (a sample filling 70% of its box inflates K by
+    # ~1.4x). Synthetic check: CSR filling the frame 100%, clustered filling the frame
+    # 79%, L-shaped cell 75%, so it fires on half-framed cells and diagonal rods.
+    empty_box <- if ("footprint_frac" %in% names(lg))
+                   which(is.finite(lg$footprint_frac) & lg$footprint_frac < 0.70 &
+                         grepl("bounding box", lg$window, fixed = TRUE))
+                 else integer(0)
     tags$div(style = "font-size:0.85em; margin-top:6px;",
       tags$div(style = "font-weight:600; margin-bottom:3px;", "Window used per file:"),
       tags$table(style = "border-collapse:collapse;", rows),
@@ -8840,6 +8910,14 @@ smlm_server <- function(input, output, session) {
           "Some files used the footprint and others the bounding box. The bounding box counts empty",
           " field as sample and K scales with the window area, so those curves are inflated relative",
           " to the rest and the two groups are not on one scale."),
+      if (length(empty_box))
+        tags$p(style = "margin:5px 0 0; color:#b26a00;",
+          tags$b("Turn on the footprint window. "),
+          sprintf("The sample covers about %s of the bounding box in %s. ",
+                  paste(sprintf("%.0f%%", 100 * lg$footprint_frac[empty_box]), collapse = ", "),
+                  paste(lg$dataset[empty_box], collapse = ", ")),
+          "The box counts that empty field as sample, which reads as clustering, and edge",
+          " correction on such a box makes the error larger."),
       if (length(small))
         tags$p(style = "margin:5px 0 0; color:#b26a00;",
           tags$b("Check the support map. "),
@@ -9975,7 +10053,7 @@ smlm_server <- function(input, output, session) {
         df <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), input),
                        error = function(e) store[[fname]])
         if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) next
-        hasz <- use_z && "z" %in% names(df) && any(is.finite(df$z))
+        hasz <- use_z && has_axial_data(df)   # z must vary; a planar z = 0 column is not 3D
         # Residuals are taken about each trace's MEAN, not its median. The mean is
         # the maximum-likelihood centre under the Gaussian error model this panel
         # assumes, and it is the only centre for which the degree-of-freedom
@@ -10711,9 +10789,11 @@ smlm_server <- function(input, output, session) {
       af <- input$active_file; if (!is.null(af) && af %in% names(store)) store <- store[af]
     }
     k_efo     <- max(2, input$fid_efo_z    %||% 4)      # brightness outlier (robust z)
-    k_len     <- max(2, input$fid_len_z    %||% 4)      # length outlier (robust z)
-    recur_r   <- max(1, input$fid_recur_r  %||% 100)    # recurrence radius (nm)
-    recur_min <- max(1, input$fid_recur_min %||% 4)     # min co-located traces
+    k_dur     <- max(1.5, input$fid_dur_x  %||% 5)      # duration, as a multiple of the file's q99
+    min_locs  <- max(1, input$fid_min_locs %||% 5)      # min localizations for the brightness rule
+    k_len     <- max(2, input$fid_len_z    %||% 4)      # length outlier (robust z), reported only
+    recur_r   <- max(1, input$fid_recur_r  %||% 100)    # recurrence radius (nm), reported only
+    recur_min <- max(1, input$fid_recur_min %||% 4)     # co-located traces, reported only
     # Robust z of log10(v): (log10 v − median) / MAD. 0 when MAD collapses (too few
     # / identical values) so a tiny or degenerate file flags nothing.
     rzlog <- function(v) {
@@ -10748,7 +10828,8 @@ smlm_server <- function(input, output, session) {
           df <- store[[fname]]
           if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df)))
             stop("no coords")
-          hasz  <- "z" %in% names(df) && any(is.finite(df$z))
+          # Shared predicate: z counts only if it VARIES (planar exports carry z = 0).
+          hasz  <- has_axial_data(df)
           has_e <- "efo" %in% names(df); has_c <- "cfr" %in% names(df); has_t <- "tim" %in% names(df)
           feat <- df %>%
             dplyr::group_by(tid) %>%
@@ -10769,12 +10850,26 @@ smlm_server <- function(input, output, session) {
           feat$z_efo <- if (has_e) rzlog(feat$efo_med) else rep(NA_real_, nrow(feat))
           feat$z_len <- rzlog(feat$n_loc)
           feat$recur <- recurrence(feat$cx, feat$cy, recur_r)
-          bright     <- has_e & is.finite(feat$z_efo) & feat$z_efo >= k_efo
-          persistent <- feat$z_len >= k_len
-          recurrent  <- feat$recur >= recur_min
-          # BRIGHT alone (gold reflection is unmistakable); OR a long trace that
-          # also piles up spatially; OR an extreme-length trace even if isolated.
-          feat$flagged <- bright | (persistent & recurrent) | (feat$z_len >= k_len + 1.5)
+          # ── HOW LONG THE TRACKER STAYED LOCKED ON, RELATIVE TO THIS FILE ──────
+          # A fiducial does not bleach, so the sequence keeps re-finding it and its
+          # trace outlives every real fluorophore in the same acquisition. That is
+          # the primary signature; brightness is secondary, and on some samples the
+          # bead is not even the brightest thing in the file.
+          # The reference is the file's own 99th percentile of the durations of
+          # traces that live at all (duration > 0) - a file can be mostly
+          # single-localization traces, which would collapse a median/MAD scale.
+          live <- feat$duration[is.finite(feat$duration) & feat$duration > 0]
+          dur_q99 <- if (length(live) >= 20L) unname(stats::quantile(live, 0.99)) else NA_real_
+          feat$dur_x_q99 <- if (is.finite(dur_q99) && dur_q99 > 0) feat$duration / dur_q99 else NA_real_
+          long_lived <- is.finite(feat$dur_x_q99) & feat$dur_x_q99 >= k_dur
+          # Brightness outlier, but only for a trace that persisted: a single very
+          # bright localization is a blip, not a bead. Measured on the labelled set
+          # (Test data/Fiducial test): every brightness-only false positive in the
+          # bead-free files was a 1-3 localization trace at 850-5700 kHz.
+          bright <- has_e & is.finite(feat$z_efo) & feat$z_efo >= k_efo & feat$n_loc >= min_locs
+          feat$flagged <- long_lived | bright
+          feat$rule <- ifelse(long_lived & bright, "long+bright",
+                       ifelse(long_lived, "long-lived", ifelse(bright, "bright", "")))
           feat
         }, error = function(e) NULL)
       }
@@ -12014,6 +12109,51 @@ smlm_server <- function(input, output, session) {
   )
 
   ## ── Ripley's L(r) ─────────────────────────────────────────────────────────
+  ## ── Global (whole-curve) CSR test: band + caption ──────────────────────────
+  ## The shaded envelope is POINTWISE: it holds at each r on its own, so a curve
+  ## that leaves it somewhere is not significant at 5% - on simulated random data
+  ## in a cell footprint that happens in 96-100% of runs. `g_lo`/`g_hi` (from
+  ## compute_ripley_envelope) are the studentized maximum-deviation band, which the
+  ## curve crosses anywhere with probability 5% under the null, and `global_p` is
+  ## the matching p-value for the whole r range. Both are drawn/reported per file.
+  ## `smooth_fn` is the builder's own smoother (each panel defines its own from its
+  ## smoothing controls), so the band gets exactly the same treatment as the curve.
+  .add_global_band <- function(fig, e, col, nm, smooth_fn = NULL) {
+    if (is.null(e$g_lo) || all(!is.finite(e$g_lo))) return(fig)
+    sm <- if (is.function(smooth_fn)) smooth_fn else function(r, y) y
+    gl <- sm(e$r, e$g_lo); gh <- sm(e$r, e$g_hi)
+    fig %>%
+      plotly::add_trace(x = e$r, y = gh, type = "scatter", mode = "lines",
+        line = list(color = col, width = 1, dash = "dash"), legendgroup = nm,
+        name = paste0(nm, " global 95% band"), showlegend = TRUE, hoverinfo = "skip") %>%
+      plotly::add_trace(x = e$r, y = gl, type = "scatter", mode = "lines",
+        line = list(color = col, width = 1, dash = "dash"), legendgroup = nm,
+        showlegend = FALSE, hoverinfo = "skip")
+  }
+  ## One line naming each file's global p, for the plot caption. Files beyond the
+  ## fourth are summarised so the caption cannot grow without bound.
+  .global_p_caption <- function(env_res) {
+    if (is.null(env_res) || !"global_p" %in% names(env_res)) return(NULL)
+    d <- unique(env_res[, c("dataset", "global_p")])
+    d <- d[is.finite(d$global_p), , drop = FALSE]
+    if (!nrow(d)) return(NULL)
+    fmt <- function(p) if (p <= 1 / 100) sprintf("p \u2264 %.2g", p) else sprintf("p = %.2f", p)
+    txt <- paste(sprintf("%s %s", d$dataset, vapply(d$global_p, fmt, character(1))), collapse = "  \u00b7  ")
+    if (nrow(d) > 4) txt <- paste0(paste(sprintf("%s %s", d$dataset[1:4], vapply(d$global_p[1:4], fmt, character(1))),
+                                         collapse = "  \u00b7  "),
+                                   sprintf("  \u00b7  (+%d more, %d with p < 0.05)", nrow(d) - 4,
+                                           sum(d$global_p < 0.05, na.rm = TRUE)))
+    paste("Global test over the whole r range:", txt)
+  }
+
+  ## Caption as a plot annotation (NULL when no envelope was computed).
+  .global_p_annot <- function(env_res) {
+    cap <- .global_p_caption(env_res)
+    if (is.null(cap)) return(NULL)
+    list(list(text = cap, xref = "paper", yref = "paper", x = 0, y = 1.06,
+              xanchor = "left", showarrow = FALSE, font = list(size = 11, color = "#555")))
+  }
+
   ripley_results     <- reactiveVal(NULL)
   ripley_params      <- reactiveVal(NULL)   # compute settings, frozen at Run
   ripley_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
@@ -12089,7 +12229,13 @@ smlm_server <- function(input, output, session) {
                                        support = sup,
                                        edge_correct = isTRUE(input$spatial_edge_correct),
                                        progress = env_prog)
-        if (!is.null(env)) env$dataset <- tag
+        # Global (studentized max-deviation) test, computed here because rbind drops
+        # the attributes the envelope carries. One p per file for the whole r range.
+        if (!is.null(env)) {
+          gp <- envelope_global_p(env, curve$Lr_minus_r)
+          env$global_p <- gp$p %||% NA_real_
+          env$dataset <- tag
+        }
       }
       list(curve = curve, env = env)
     }
@@ -12236,6 +12382,7 @@ smlm_server <- function(input, output, session) {
             plotly::add_trace(x = e$r, y = e_nm, type = "scatter", mode = "lines",
               line = list(color = unname(pal[nm]), width = 1, dash = "dot"),
               legendgroup = nm, showlegend = FALSE, hoverinfo = "skip")
+          fig <- .add_global_band(fig, e, unname(pal[nm]), nm, smooth_vec)
         }
         fig <- fig %>% plotly::add_trace(
           x = sub$r, y = smooth_vec(sub$r, sub$Lr_minus_r),
@@ -12405,6 +12552,7 @@ smlm_server <- function(input, output, session) {
       plotly::layout(
         xaxis  = list(title = .rmax_axis_title(grouped, res, rmax_c, show_files)),
         yaxis  = list(title = "L(r) − r (nm)"),
+        annotations = .global_p_annot(env_res),
         # Hover deliberately OFF on this plot: the curve is read as a shape against
         # the envelope, and a unified tooltip listing every series' L−r at each r
         # was noise that also covered the plot.
@@ -12488,7 +12636,11 @@ smlm_server <- function(input, output, session) {
                                        nsim = nsim, estimator = "g", support = sup,
                                        edge_correct = isTRUE(input$spatial_edge_correct),
                                        progress = env_prog)
-        if (!is.null(env)) env$dataset <- tag
+        if (!is.null(env)) {
+          gp <- envelope_global_p(env, curve$g)
+          env$global_p <- gp$p %||% NA_real_
+          env$dataset <- tag
+        }
       }
       list(curve = curve, env = env)
     }
@@ -12696,6 +12848,7 @@ smlm_server <- function(input, output, session) {
             plotly::add_trace(x = e$r, y = e_lo, type = "scatter", mode = "lines", fill = "tonexty",
               fillcolor = hex2rgba(unname(pal[nm]), 0.15), line = list(width = 0),
               legendgroup = nm, name = paste0(nm, " CSR 95% envelope"), hoverinfo = "skip")
+          fig <- .add_global_band(fig, e, unname(pal[nm]), nm, smooth_vec)
         }
         fig <- fig %>% plotly::add_trace(
           x = sub$r, y = smooth_vec(sub$r, sub$g), type = "scatter", mode = "lines",
@@ -12837,6 +12990,7 @@ smlm_server <- function(input, output, session) {
       plotly::layout(
         xaxis = list(title = .rmax_axis_title(grouped, res, rmax_c, show_files)),
         yaxis = list(title = "g(r)"),
+        annotations = .global_p_annot(env_res),
         # Hover off, as on the Ripley plot: the curve is read as a shape against the
         # envelope, and a tooltip per series at every r covered the plot.
         hovermode = FALSE,
@@ -13455,6 +13609,7 @@ smlm_server <- function(input, output, session) {
   .HOTSPOT_METRICS <- c(
     "Density unevenness (x random)"      = "cv_ratio",
     "CV of local density (raw)"          = "cv_local",
+    "Largest focus (x random 95th pct)"  = "max_focus_ratio",
     "Largest focus (n)"                  = "max_focus_n",
     "Enhancement, 90th percentile"       = "enh_q90",
     "Enhancement, 99th percentile"       = "enh_q99",
@@ -13506,7 +13661,7 @@ smlm_server <- function(input, output, session) {
     # Three of these metrics have a known value for an unclustered pattern, so
     # draw it. Without the line the reader has no way to tell "clustered" from
     # "large number".
-    ref <- switch(mkey, cv_ratio = 1, vmr = 1, clark_evans = 1,
+    ref <- switch(mkey, cv_ratio = 1, vmr = 1, clark_evans = 1, max_focus_ratio = 1,
                   cv_local = csr_cv_local_density(input$hot_k %||% 5), NULL)
     if (!is.null(ref) && is.finite(ref))
       fig <- fig %>% plotly::add_segments(
@@ -13575,7 +13730,7 @@ smlm_server <- function(input, output, session) {
         }
       }
     }
-    ref <- switch(mkey, cv_ratio = 1, vmr = 1, clark_evans = 1,
+    ref <- switch(mkey, cv_ratio = 1, vmr = 1, clark_evans = 1, max_focus_ratio = 1,
                   cv_local = csr_cv_local_density(input$hot_k %||% 5), NULL)
     if (!is.null(ref) && is.finite(ref)) {
       xr <- range(rows$density[is.finite(rows$density)])
@@ -13611,6 +13766,7 @@ smlm_server <- function(input, output, session) {
       `eps nm`   = round(rows$eps_nm),
       `Foci`     = rows$n_foci,
       `Largest`  = rows$max_focus_n,
+      `Largest / random` = round(rows$max_focus_ratio %||% NA_real_, 2),
       `Rg nm`    = round(rows$max_focus_rg),
       `Aniso`    = round(rows$max_focus_aniso, 2),
       `NN med`   = round(rows$nn_med),
@@ -14059,8 +14215,13 @@ smlm_server <- function(input, output, session) {
             n = min(nrow(pts1), 2000L), n2 = min(nrow(pts2), 2000L),
             window_ranges = win, r_seq = lr$r, use_3d = use_3d,
             nsim = nsim, estimator = "L12", support = sup,
-            edge_correct = isTRUE(input$spatial_edge_correct))
-          if (!is.null(env)) { env$dataset <- nm; env_list[[nm]] <- env }
+            edge_correct = isTRUE(input$spatial_edge_correct),
+            null_mode = input$coloc_null_mode %||% "labels", pts1 = pts1, pts2 = pts2)
+          if (!is.null(env)) {
+            gp <- envelope_global_p(env, lr$Lr_minus_r)
+            env$global_p <- gp$p %||% NA_real_
+            env$dataset <- nm; env_list[[nm]] <- env
+          }
         }
       }
     })
@@ -14123,6 +14284,7 @@ smlm_server <- function(input, output, session) {
             plotly::add_trace(x = e$r, y = e$null_mean, type = "scatter", mode = "lines",
               line = list(color = unname(pal[nm]), width = 1, dash = "dot"),
               legendgroup = nm, showlegend = FALSE, hoverinfo = "skip")
+          fig <- .add_global_band(fig, e, unname(pal[nm]), nm)
         }
         fig <- fig %>% plotly::add_trace(
           x = sub$r, y = smooth_y(sub),
@@ -14145,6 +14307,7 @@ smlm_server <- function(input, output, session) {
       plotly::layout(
         xaxis = list(title = "r (nm)"),
         yaxis = list(title = "L₁₂(r) − r (nm)"),
+        annotations = .global_p_annot(env_res),
         title = "Bivariate Ripley’s L₁₂(r)",
         hovermode = "x unified",
         paper_bgcolor = "white", plot_bgcolor = "white"
@@ -14254,8 +14417,13 @@ smlm_server <- function(input, output, session) {
             n = min(nrow(pts1), 2000L), n2 = min(nrow(pts2), 2000L),
             window_ranges = win, r_seq = g$r, use_3d = use_3d,
             nsim = nsim, estimator = "pcf", support = sup,
-            edge_correct = isTRUE(input$spatial_edge_correct))
-          if (!is.null(env)) { env$dataset <- nm; env_list[[nm]] <- env }
+            edge_correct = isTRUE(input$spatial_edge_correct),
+            null_mode = input$coloc_null_mode %||% "labels", pts1 = pts1, pts2 = pts2)
+          if (!is.null(env)) {
+            gp <- envelope_global_p(env, g$g12)
+            env$global_p <- gp$p %||% NA_real_
+            env$dataset <- nm; env_list[[nm]] <- env
+          }
         }
       }
     })
@@ -14306,6 +14474,7 @@ smlm_server <- function(input, output, session) {
             plotly::add_trace(x = e$r, y = e$null_mean, type = "scatter", mode = "lines",
               line = list(color = unname(pal[nm]), width = 1, dash = "dot"),
               legendgroup = nm, showlegend = FALSE, hoverinfo = "skip")
+          fig <- .add_global_band(fig, e, unname(pal[nm]), nm)
         }
         fig <- fig %>% plotly::add_trace(x = sub$r, y = sub$g12,
           type = "scatter", mode = "lines", name = nm, legendgroup = nm,
@@ -14320,6 +14489,7 @@ smlm_server <- function(input, output, session) {
       plotly::layout(
         xaxis = list(title = "r (nm)"),
         yaxis = list(title = "g₁₂(r)"),
+        annotations = .global_p_annot(env_res),
         title = "Pair Cross-Correlation Function g₁₂(r)",
         hovermode = "x unified",
         paper_bgcolor = "white", plot_bgcolor = "white"

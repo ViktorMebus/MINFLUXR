@@ -1,5 +1,10 @@
 # Estimating σ_loc for MINFLUX tracking — options, and what MINFLUX sampling does to each
 
+> **Superseded (2026-09-17) by [sigma_loc_model.md](sigma_loc_model.md)**, which documents the model the
+> app ships and its immobile-sample calibration. This file is the earlier survey of estimation options
+> (2026-08-25) and its status line below is historical; for the fixed-cell and bead measurements see
+> [tracking_sigma_and_cve_plan.md](tracking_sigma_and_cve_plan.md) §10–12.
+
 **Status (2026-08-25):** the app uses σ = L_TCP/(4√N). The literature says that form is only a
 limiting case and should read larger; the GP67H data says it cannot be larger. §1b resolves the
 contradiction — those files were acquired with galvo damping on, which suppresses exactly the step

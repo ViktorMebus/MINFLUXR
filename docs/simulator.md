@@ -1,10 +1,10 @@
 # MINFLUX Simulator — Reference
 
 *Reference for the Simulator tab: what it models, how each stage works, and where it currently
-departs from real MINFLUX.* Last reviewed 2026-08-11 · Code: [`sim_server.R`](../sim_server.R),
+departs from real MINFLUX.* Last reviewed 2026-08-11; §7 intro and §8 status checked against the code 2026-09-17 · Code: [`sim_server.R`](../sim_server.R),
 [`sim_ui.R`](../sim_ui.R) · Companions: [simulation_module.md](simulation_module.md) (Phase 2 design
 spec), [MINFLUX_analysis_methods.md](MINFLUX_analysis_methods.md) (the analysis side),
-[simulator_smlm_fidelity_handoff.md](simulator_smlm_fidelity_handoff.md) (the audit this doc folds in).
+[simulator_smlm_fidelity_handoff.md](simulator_smlm_fidelity_handoff.md) (the 2026-08-11 audit; superseded by §7 and §8 here).
 
 ---
 
@@ -442,7 +442,10 @@ round-trip. Full spec: [simulation_module.md](simulation_module.md).
 
 Ranked by how much they distort the tab's headline question. Items 1, 5, 6, 7 were found in this
 review; 2, 3, 4 come from the 2026-08-11 audit
-([handoff](simulator_smlm_fidelity_handoff.md)). **None are fixed yet.**
+([handoff](simulator_smlm_fidelity_handoff.md)). *Status 2026-09-17:* 7.10 is fixed. 7.1 is partly
+addressed: the Precision Budget now headlines the label floor, the per-molecule error ε and a
+resolvable / not-resolvable verdict (§8.2), but the acquisition timeline's "% resolved" and
+time-to-resolve still count first detection. The others are open.
 
 ### 7.1 "% resolved" measures *discovery*, not *resolution* — the biggest one
 
@@ -615,7 +618,14 @@ removes — and the resolvability verdict distinguishes "⚠ below the limit *fo
 
 ## 8. PLANNED — real-run calibration + honest time-to-resolve
 
-*Agreed scope, 2026-08-11. Two work items only. Nothing below is implemented yet.* Explicitly
+*Agreed scope, 2026-08-11. Two work items only.* **Build status (checked against `sim_server.R`,
+2026-09-17):** 8.1a gate **built** (`sim_real_gate_ui`: EFO / CFR / trace-length ranges with before and
+after counts). 8.1b profile **built** (small-n debiased per-axis σ, per-trace axis ratios, `eco_vec` and
+`len_vec` stored). 8.1c **not built**: the stored vectors are displayed but `gen_localizations` does not
+resample them, so the simulated cloud still uses one σ and Poisson/geometric trace lengths, and the
+bias-3 guard in 8.1d has nothing to guard yet. 8.2 **partly built**: the label floor, ε per molecule and
+the 2ε criterion are in the Precision Budget; ε_m(t) and a time-to-resolve based on it are not, so the
+timeline still reports discovery (§7.1). Explicitly
 **deferred** (considered and dropped as over-engineering for now): empirical cluster-geometry fitting,
 the simulated-vs-real round-trip validation, blink-displacement modelling, physical Normal-mode
 timestamps, the non-linear background CRB, and `cfr` emission. §7 keeps them on record.
