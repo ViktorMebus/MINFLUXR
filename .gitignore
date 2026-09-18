@@ -7,8 +7,13 @@
 # syntax, never tracked, never pushed.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Local test/sample data — never upload. Raw MINFLUX exports are hundreds of MB
-# and are not needed to run the app; users bring their own.
+# The test suite itself IS tracked (tests/run_tests.R, tests/testthat/, tests/validation/):
+# it is how a reader checks the estimators. Only sample DATA is ignored — raw MINFLUX
+# exports are hundreds of MB and are not needed to run the app; users bring their own.
+tests/data/
+tests/**/*.npy
+tests/**/*.csv.gz
+
 Test data/
 test data/
 *.npy
@@ -35,3 +40,8 @@ pending/
 
 # Personal strategy/planning notes — never published.
 private/
+
+# Validation run logs: console output of the scripts in tests/validation/. The CSV
+# next to each one is the tracked result; re-running the script recreates the log.
+tests/validation/results/*.log
+tests/validation/results/*_before_fix.csv

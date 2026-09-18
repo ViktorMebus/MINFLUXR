@@ -4634,7 +4634,7 @@ smlm_server <- function(input, output, session) {
           "Methods: gyration-tensor shape anisotropy (Rudnick &amp; Gaspari, <i>J. Phys. A</i> <b>19</b>, L191, 1986); ",
           "linear/planar/spherical anisotropy coefficients (Westin et&nbsp;al., <i>MICCAI/Med. Image Anal.</i>, 1997/2002); ",
           "minimum-spanning-tree backbone (Prim, 1957). ",
-          "The labeling-displacement inverse (candidate-GT estimation, complex-radius merge, inward linkage displacement, stoichiometric cross-check) is a heuristic developed in this tool and validated in&nbsp;silico against the simulator - treat quantitatively with care and cite as exploratory.")))
+          "The labeling-displacement inverse (candidate-GT estimation, complex-radius merge, inward linkage displacement, stoichiometric cross-check) is a heuristic specific to this tool and checked against the simulator rather than against a known structure. Treat it quantitatively with care and cite it as exploratory.")))
   }
 
   # ── GT counting-standard calibration ───────────────────────────────────────

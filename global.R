@@ -13,12 +13,15 @@ source("packages.R")
 source("helpers_shared.R")
 source("helpers_smlm.R")
 source("helpers_tracking.R")
-source("est_cve.R")          # CVE core + photon-budget sigma
-source("est_msd.R")          # MSD fit core (OLSF + non-linear models)
-source("est_cpd.R")          # change-point segmentation + GMM
-source("est_jdd.R")          # jump-distance mixture fit
-source("est_dmap.R")         # spatial D-map
-source("est_hmm.R")          # continuous-time diffusive-state HMM (pure estimator)
+# R/ holds the estimators as plain functions, outside the Shiny server closures, so
+# they can be called (and tested) without a running app. The server panels gather
+# the inputs and call these; see tests/ for the recovery tests that use them.
+source("R/est_cve.R")        # CVE: D and sigma_loc from step covariance, photon-budget sigma
+source("R/est_msd.R")        # MSD fits: OLSF (linear) + confined / directed / anomalous
+source("R/est_cpd.R")        # change-point segmentation of a track + per-segment D
+source("R/est_jdd.R")        # jump-distance distribution mixture fit
+source("R/est_dmap.R")       # spatially resolved D-map
+source("R/est_hmm.R")        # continuous-time diffusive-state HMM
 source("ui_smlm.R")
 source("ui_tracking.R")
 source("sim_ui.R")

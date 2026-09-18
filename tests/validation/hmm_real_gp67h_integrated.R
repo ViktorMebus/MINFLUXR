@@ -3,7 +3,7 @@
 ## tabulating mean r2 by cycles per step (the compression that would fake a slow state).
 ## RUN  Rscript tests/validation/hmm_real_gp67h_integrated.R > tests/validation/results/hmm_real_gp67h_integrated.log
 setwd(normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", "..")))
-source("helpers_shared.R"); source("est_hmm.R")
+source("helpers_shared.R"); source("R/est_hmm.R")
 f <- list.files("Test data", "GP67H-track-014_filtered.*csv$", full.names = TRUE)[1]
 d <- utils::read.csv(f); d$tim <- d$tim * 1000; d$tid <- as.character(d$tid)
 t_c <- 0.1914; sw <- 0.0107; R_abs <- (1/6.2) * t_c

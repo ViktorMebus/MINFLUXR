@@ -15,7 +15,7 @@
 args <- commandArgs(trailingOnly = TRUE)
 n_reps <- if (length(args)) as.integer(args[1]) else 3L
 root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
-suppressMessages({ source(file.path(root, "helpers_shared.R")); source(file.path(root, "est_hmm.R")) })
+suppressMessages({ source(file.path(root, "helpers_shared.R")); source(file.path(root, "R/est_hmm.R")) })
 
 # Acquisition matched to the GP67H tracking files (docs/simulation_module.md §9)
 t_c <- 0.192; sw <- 0.011; R <- 1 / 6.2; gap_p <- c(0.72, 0.20, 0.05, 0.03)

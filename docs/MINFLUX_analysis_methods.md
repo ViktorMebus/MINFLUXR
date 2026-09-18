@@ -1010,7 +1010,7 @@ per-segment log₁₀D distribution is then fit with a **BIC-selected Gaussian m
   ≈ trigamma(d/2)/n in log space) would be the fix. Chip set to 🟠 (lab tier).
 
 ### I-B.4 Jump-distance distribution (JDD) — [Part II §2.3]
-`est_jdd.R` (`jdd_collect_jumps`, `jdd_fit`), called by `jdd_bundle`. Fit the step-length histogram with an **N-component scaled-chi mixture** — the law of
+`R/est_jdd.R` (`jdd_collect_jumps`, `jdd_fit`), called by `jdd_bundle`. Fit the step-length histogram with an **N-component scaled-chi mixture** — the law of
 |Δr| for a d-dimensional isotropic Gaussian displacement:
 
 **p(r) = Σ_k w_k · C_d · r^(d−1)/σ_k^d · exp(−r²/2σ_k²)**,  **C_d = 1/(2^(d/2−1)·Γ(d/2))**
@@ -1043,7 +1043,7 @@ included. σ_k is the **per-axis** spread in both cases. MINFLUX handling:
 > projection of isotropic 3D diffusion has the same D, their D is unbiased on 3D data.
 
 ### I-B.5 Diffusive-state HMM (continuous-time, maximum likelihood) — [Part II §2.4]
-`est_hmm.R` (pure functions), called by `hmm_bundle`. **Rebuilt 2026-09-17**; the previous Baum–Welch +
+`R/est_hmm.R` (pure functions), called by `hmm_bundle`. **Rebuilt 2026-09-17**; the previous Baum–Welch +
 Viterbi-path-counting version is in git history.
 
 - **Model.** Hidden state per step, a continuous-time Markov chain with generator Q. A step of any Δt has
@@ -1344,7 +1344,7 @@ evenly spaced. Step-index fallback only when t_cycle is unknown.
   localization-noise velocity.
 
 ### I-B.9 Spatially-resolved D-map — [Part II §5 note; single-lag = short-lag CVE limit]
-`est_dmap.R` (`dmap_compute`), called by `dmap_bundle`. Single-lag estimator per step: **D_raw = r²/(4·Δt)**
+`R/est_dmap.R` (`dmap_compute`), called by `dmap_bundle`. Single-lag estimator per step: **D_raw = r²/(4·Δt)**
 (2D), midpoint-binned on an n×n grid; per-cell
 **D = max(0, mean(D_raw) − σ_loc²·mean(1/Δt)) / (1 − 2R·t_c·mean(1/Δt))** with its standard error (same
 scaling), cells with

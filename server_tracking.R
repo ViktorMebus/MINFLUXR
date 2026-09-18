@@ -9901,8 +9901,8 @@ tracking_server <- function(input, output, session) {
     rs  <- bd$resolv
     rows <- lapply(seq_len(K), function(k) {
       flag <- c(if (isTRUE(bd$noise_state[k])) "D at the noise level",
-                if (isTRUE(rs$too_short[k])) "dwell below the validated range",
-                if (isTRUE(rs$few_switches[k])) "too few switches observed",
+                if (isTRUE(rs$too_short[k])) "dwell too short to resolve reliably",
+                if (isTRUE(rs$few_switches[k])) "too few switches to constrain the rate",
                 if (isTRUE(rs$same_D[k])) "same D as a neighbouring state (one diffusivity with non-exponential dwells)")
       tags$tr(
         tags$td(sprintf("State %d", k), style = "padding:2px 8px;"),

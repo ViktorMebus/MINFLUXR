@@ -1,7 +1,7 @@
 ## Real-data check of est_hmm.R on GP67H-track-014 (K = 1-3, bootstrap over tracks for K = 2).
 ## RUN  Rscript tests/validation/hmm_real_gp67h.R > tests/validation/results/hmm_real_gp67h.log
 setwd("C:/Users/viktorhm/repos/MINFLUXR")
-source("helpers_shared.R"); source("est_hmm.R")
+source("helpers_shared.R"); source("R/est_hmm.R")
 f <- list.files("Test data", "GP67H-track-014_filtered.*csv$", full.names = TRUE)[1]
 d <- utils::read.csv(f); d$tim <- d$tim * 1000; d$tid <- as.character(d$tid)
 t_c <- 0.1914; R_abs <- (1/6.2) * t_c

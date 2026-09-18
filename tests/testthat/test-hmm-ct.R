@@ -1,5 +1,5 @@
 # Tests for est_hmm.R (continuous-time diffusive-state HMM).
-source(file.path(.repo_root, "est_hmm.R"))
+source(file.path(.repo_root, "R/est_hmm.R"))
 
 test_that(".expm_small matches the closed form for a two-state generator", {
   a <- 0.3; b <- 0.1; t <- 2.5

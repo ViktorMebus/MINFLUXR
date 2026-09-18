@@ -14,7 +14,7 @@ This file records the external work it builds on, what was taken, and what was c
   (`TOT`-style classification), `server_tracking.R`.
 - **MSD workflow:** cycle-index lag binning, the fit window convention (`fit_limits`, default 5–50), and
   the **OLSF** optimal-point-count fit after Michalet & Berglund, including the exact iterative variant
-  (`est_msd.R`: `msd_fit_olsf`, `msd_fit_olsf_iterative`, `.michalet_p`).
+  (`R/est_msd.R`: `msd_fit_olsf`, `msd_fit_olsf_iterative`, `.michalet_p`).
 
 **Changes made:**
 - Rewritten in R; the app infers the cycle time from the Δt distribution, where MinSpt simulates it from

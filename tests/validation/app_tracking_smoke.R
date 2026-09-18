@@ -2,7 +2,7 @@
 ## tests/validation/app_tracking_smoke.R  -  Tracking-tab smoke test on real data
 ## ─────────────────────────────────────────────────────────────────────────────
 ## Loads a GP67H subset through the Tracking tab's own upload path in a test
-## session, runs every panel whose estimator lives in est_*.R (CVE, MSD, JDD,
+## session, runs every panel whose estimator lives in R/est_*.R (CVE, MSD, JDD,
 ## change-point, D-map, HMM, per-state MSD) through its Run button, and renders
 ## each output. Prints the headline numbers so a refactor that changes results
 ## is visible. Needs Test data/ (not in the repo).
