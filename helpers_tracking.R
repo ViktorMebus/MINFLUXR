@@ -15,6 +15,9 @@
 ##   3. Data prep       prep_tracking()          validate / sort / zero the time axis
 ##   4. Plot helpers    decimate_per_tid()       thin tracks so plotly stays fast
 ##                      nearest_idx()            nearest time index for scrubbing
+##   5. Diagnostics     continuity_mobility_table()  D, σ and continuity by
+##                                               continuity quartile (does the
+##                                               cleaning select on mobility?)
 ##
 ## WHY THE CHUNKING EXISTS
 ##   MINFLUX tracking files are large (often ~1e6 localizations). The app does
@@ -622,4 +625,70 @@ sim_free_geom_msd <- function(lag_cycles, D_surf, geom = "rod", params = list(),
     mean(rowSums((Pl - P0)^2))
   }, numeric(1))
   data.frame(lag = lag_cycles, tau = lag_cycles * cyc_ms, msd = msd)
+}
+
+
+# ── continuity_mobility_table() ───────────────────────────────────────────────
+# GOAL: show whether track continuity follows mobility in THIS data set, so the
+# user can see whether a continuity-based cleaning step selects on speed.
+#
+# Why it can: a molecule that moves fast relative to the TCP is lost for a cycle
+# or two more often, so its track collects dark cycles. "Dark-cycle-heavy" is
+# then partly a readout of speed rather than of data quality, and dropping those
+# tracks drops the fast molecules. The table makes that visible: tracks are
+# ranked by continuity score and split into quarters, and each quarter gets its
+# own pooled CVE D. Flat D across the quarters means continuity is not tracking
+# mobility; a D that falls with continuity means a stricter gate would pull D down.
+#
+# df        : analysis-ready tracks (tid, tim in ms, x, y[, z])
+# scores    : named vector tid -> continuity score (from the continuity scorer)
+# t_c       : cycle time (ms)
+# has_z     : passed to cve_estimate()
+# min_tracks: fewer scored tracks than this returns NULL (quarters too thin)
+#
+# RETURNS data.frame(quartile, n_tracks, score_lo, score_hi, score_med,
+#   loc_share, integ_frac, D_um2_s, sigma_nm), with attributes
+#   ratio_best_rest = D(best quarter) / D(other three quarters pooled),
+#   D_rest_um2_s, D_all_um2_s (all scored tracks pooled) and
+#   ratio_best_all = D(best quarter) / D(all). Quarters are by RANK, so tied scores
+#   (many tracks at 1.0) still split into four equal groups.
+#
+# The two ratios answer different questions. Pooled CVE weights each track by its
+# steps, and the most continuous tracks are usually also the longest, so the best
+# quarter can hold most of the localizations. ratio_best_rest is then the gradient
+# ACROSS MOLECULES (what a per-track statistic sees), while ratio_best_all is what
+# keeping only that quarter would do to the pooled D actually reported.
+continuity_mobility_table <- function(df, scores, t_c, has_z = FALSE, min_tracks = 40L) {
+  if (is.null(df) || !nrow(df) || is.null(scores) || !is.finite(t_c) || t_c <= 0) return(NULL)
+  scores <- scores[is.finite(scores) & names(scores) %in% df$tid]
+  if (length(scores) < min_tracks) return(NULL)
+  q <- ceiling(rank(scores, ties.method = "first") * 4 / length(scores))   # 1 = worst .. 4 = best
+  labs <- c("Q1 (least continuous)", "Q2", "Q3", "Q4 (most continuous)")
+  n_all <- nrow(df)
+
+  one <- function(ids) {
+    d  <- df[df$tid %in% ids, , drop = FALSE]
+    ce <- tryCatch(cve_estimate(d, t_c, has_z = has_z), error = function(e) NULL)
+    # share of steps that are integrated (one cycle, no dark cycle in between)
+    k  <- unlist(lapply(split(d$tim, d$tid), function(v) round(diff(sort(v)) / t_c)))
+    list(n_locs = nrow(d), integ = if (length(k)) mean(k <= 1) else NA_real_,
+         D = if (is.null(ce)) NA_real_ else ce$D_cve / 1e3,
+         sig = if (is.null(ce)) NA_real_ else ce$sigma)
+  }
+
+  rows <- lapply(1:4, function(i) {
+    ids <- names(scores)[q == i]; s <- scores[ids]; r <- one(ids)
+    data.frame(quartile = labs[i], n_tracks = length(ids),
+               score_lo = min(s), score_hi = max(s), score_med = stats::median(s),
+               loc_share = r$n_locs / n_all, integ_frac = r$integ,
+               D_um2_s = r$D, sigma_nm = r$sig, stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, rows)
+  rest <- one(names(scores)[q < 4])
+  all_ <- one(names(scores))
+  attr(out, "D_rest_um2_s")    <- rest$D
+  attr(out, "D_all_um2_s")     <- all_$D
+  attr(out, "ratio_best_rest") <- out$D_um2_s[4] / rest$D
+  attr(out, "ratio_best_all")  <- out$D_um2_s[4] / all_$D
+  out
 }

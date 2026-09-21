@@ -10,6 +10,7 @@ These are the measurements the method documentation cites; the scripts regenerat
 | `hotspot_csr_null.csv` | `hotspot_csr_null.R` | The baseline every hotspot statistic takes on random patterns, across density and cell shape |
 | `hotspot_example_recheck.csv` | `hotspot_example_recheck.R` | The same statistics on the labelled membrane-protein acquisitions |
 | `fiducial_labelled.csv` | `fiducial_labelled.R` | Fiducial detection on labelled acquisitions with and without beads |
+| `hmm_step_budget.csv` | `hmm_step_budget.R` | What the HMM step budget costs: D and dwell recovery at each budget, against known values |
 
 Run logs (`*.log`) are not tracked: they are the console output of the run that produced the CSV next to
 it, and they are recreated by re-running the script. The scripts that need `Test data/` say so in their

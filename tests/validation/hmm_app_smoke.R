@@ -10,7 +10,8 @@ shiny::testServer(tracking_server, {
   cat("rows in trk():", tryCatch(nrow(trk()), error = function(e) paste("ERR", conditionMessage(e))), "\n")
   session$setInputs(trk_msd_cycle_ms = 0.1914); cat("cycle:", tryCatch(trk_cycle_time(), error = function(e) conditionMessage(e)), "\n")
   session$setInputs(trk_sigma_loc_nm = 4.2, trk_msd_cycle_ms = 0.1914)
-  session$setInputs(trk_show_hmm = TRUE, trk_hmm_n_states = 2, trk_hmm_min_pts = 10, trk_hmm_n_ex = 6, trk_hmm_boot = 0)
+  session$setInputs(trk_show_hmm = TRUE, trk_hmm_n_states = 2, trk_hmm_min_pts = 10, trk_hmm_n_ex = 6, trk_hmm_boot = 0,
+                     trk_hmm_max_steps = 150000, trk_hmm_bic = FALSE)
   session$setInputs(trk_hmm_run = 1)
   bd <- tryCatch(hmm_bundle(), error = function(e) { cat("HMM ERROR:", conditionMessage(e), "\n"); NULL })
   if (!is.null(bd)) {

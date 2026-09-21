@@ -678,6 +678,14 @@ smlm_ui <- fluidPage(
           condition = "input.mode3d =='3D' && input.enable_cluster2 == true",
           checkboxInput("show_cluster2_shape", "Wrap Cluster in Alpha Shape", value = FALSE),
           checkboxInput("show_cluster2_isosurface", "Show isosurface of Median Clusters", value = FALSE),
+          # Shared by the alpha shape and the isosurface. Only meaningful with more
+          # than one channel, so it only appears then.
+          conditionalPanel(
+            condition = "output.n_channels > 1 && (input.show_cluster2_shape == true || input.show_cluster2_isosurface == true)",
+            checkboxInput("cluster2_iso_by_channel", "Color wraps by channel", value = TRUE),
+            helpText("Each Median Cluster is wrapped within its own channel, so a wrap never",
+                     "joins two colours. This colours each wrap by that channel.")
+          ),
           conditionalPanel(
             condition = "input.show_cluster2_isosurface == true",
 
@@ -690,7 +698,8 @@ smlm_ui <- fluidPage(
             checkboxInput("cluster2_iso_selected_only", "Only selected Median Cluster ID", value = FALSE),
             conditionalPanel(
               condition = "input.cluster2_iso_selected_only == true",
-              numericInput("cluster2_iso_id", "Selected Median Cluster ID", value = 1, min = 1, step = 1)
+              numericInput("cluster2_iso_id", "Selected Median Cluster ID", value = 1, min = 1, step = 1),
+              helpText("IDs are unique across channels, so one ID is one structure in one colour.")
             ),
 
             tags$hr(style = "margin:10px 0;"),
@@ -698,7 +707,7 @@ smlm_ui <- fluidPage(
             helpText(tags$em("Applied when you press Plot Data.")),
             sliderInput("cluster2_iso_pad", "Tighten or loosen the wrap (nm)", min = -40, max = 200, value = 0, step = 5),
             helpText("Shifts the wrap distance reported above. Negative tightens, positive loosens."),
-            sliderInput("cluster2_iso_smooth_rel", "Smoothing", min = 0.4, max = 2, value = 1, step = 0.05),
+            sliderInput("cluster2_iso_smooth_rel", "Smoothing", min = 0.1, max = 2, value = 0.4, step = 0.05),
             helpText("Scales the automatic smoothing. Lower keeps more of the measured detail,",
                      "higher gives a simpler surface that absorbs small protrusions."),
             sliderInput("cluster2_iso_grid_res", "Grid resolution (higher = slower)", min = 12, max = 40, value = 22, step = 1),
@@ -716,13 +725,6 @@ smlm_ui <- fluidPage(
                 "Isosurface color",
                 value = "#00CED1"
               )
-            ),
-            conditionalPanel(
-              condition = "input.cluster2_iso_unicolor != true && output.n_channels > 1",
-              checkboxInput("cluster2_iso_by_channel", "Color surfaces by channel", value = FALSE),
-              helpText("Takes the color from the channel its molecules belong to, matching the",
-                       "localizations inside it. Clusters spanning two channels keep the",
-                       "cluster palette.")
             ),
 
             tags$details(
@@ -1048,70 +1050,9 @@ smlm_ui <- fluidPage(
                    "molecules from two colours. The eps and MinPts above apply to every ",
                    "channel - they are set by the structure, which the choice of dye ",
                    "does not change."),
-          conditionalPanel(
-            condition = "input.mode3d == '3D'",
-            checkboxInput("show_tc2_alpha", "Wrap 2-color clusters (tc2)", value = FALSE),
-            conditionalPanel(
-              condition = "input.show_tc2_alpha == true && input.mode3d == '3D'",
-              numericInput("tc2_alpha", "tc2 alpha", value = 150, min = 1, step = 1),
-              sliderInput("tc2_alpha_opacity", "tc2 opacity", min = 0, max = 1, value = 0.18, step = 0.01),
-              numericInput("tc2_alpha_min_pts", "tc2 min points to wrap", value = 15, min = 4, step = 1)
-            ),
-            checkboxInput("show_tc2_isosurface", "Show isosurface for 2-color clusters (tc2)", value = FALSE),
-            conditionalPanel(
-              condition = "input.show_tc2_isosurface",
-
-              uiOutput("tc2_iso_status"),
-
-              tags$b("Which clusters"),
-              checkboxInput("tc2_iso_selected_only", "Only selected tc2 cluster", value = TRUE),
-              conditionalPanel(
-                condition = "input.tc2_iso_selected_only == true",
-                textInput("tc2_iso_cluster_label", "Selected tc2 cluster (A-# or B-#)", value = "A-1")
-              ),
-              helpText("Built from de-blinked molecule centroids per channel, or trace medians when",
-                       "2-colour de-blinking is off. Surfaces take the color of their own channel."),
-
-              tags$hr(style = "margin:10px 0;"),
-              tags$b("Shape"),
-              helpText(tags$em("Applied when you press Plot Data.")),
-              sliderInput("tc2_iso_pad", "Tighten or loosen the wrap (nm)", min = -40, max = 200, value = 0, step = 5),
-              helpText("Shifts the wrap distance reported above. Negative tightens, positive loosens."),
-              sliderInput("tc2_iso_smooth_rel", "Smoothing", min = 0.4, max = 2, value = 1, step = 0.05),
-              helpText("Scales the automatic smoothing. Lower keeps more of the measured detail,",
-                       "higher gives a simpler surface that absorbs small protrusions."),
-              sliderInput("tc2_iso_grid_res", "Grid resolution (higher = slower)", min = 12, max = 40, value = 22, step = 1),
-              helpText("Voxel budget for the surface. The grid is refined automatically when the",
-                       "wrap distance is finer than the voxel."),
-
-              tags$hr(style = "margin:10px 0;"),
-              tags$b("Appearance"),
-              sliderInput("tc2_iso_opacity", "Isosurface opacity", min = 0, max = 1, value = 0.25, step = 0.01),
-
-              tags$details(
-                style = "margin-top:10px;",
-                tags$summary(tags$b("Override the automatic geometry")),
-                helpText("The wrap sits at 3 x the measured localization precision, held to at least",
-                         "half the spacing between the molecules being wrapped. Smoothing sits at",
-                         "0.85 x that spacing. Both are set per axis, so a structure measured more",
-                         "precisely along z is wrapped more tightly along z."),
-                helpText(tags$em("Applied when you press Plot Data.")),
-                checkboxInput("tc2_iso_manual_offset", "Set the wrap distance manually", value = FALSE),
-                conditionalPanel(
-                  condition = "input.tc2_iso_manual_offset == true",
-                  sliderInput("tc2_iso_offset", "Wrap distance (nm)", min = 2, max = 200, value = 30, step = 2),
-                  helpText("Measured laterally. The axial wrap follows the axial precision.")
-                ),
-                checkboxInput("tc2_iso_manual_sigma", "Set smoothing manually", value = FALSE),
-                conditionalPanel(
-                  condition = "input.tc2_iso_manual_sigma == true",
-                  sliderInput("tc2_iso_sigma", "Smoothing (sigma, nm)", min = 2, max = 200, value = 30, step = 2),
-                  helpText("Absolute bandwidth, replacing the automatic value and the Smoothing dial.",
-                           "The wrap is re-measured at whatever is set here.")
-                )
-              )
-            )
-          )
+          helpText("The Median Cluster wrap and isosurface are set under Median Clustering. ",
+                   "With two colours they are drawn separately for each channel, so one ",
+                   "surface never encloses both.")
         ),
         uiOutput("two_color_settings_file_ui"),
         downloadButton("download_two_color_settings", "Save channel settings"),
@@ -2040,7 +1981,7 @@ smlm_ui <- fluidPage(
           helpText("3-D measures density in spheres and quadrats as cubes. Use it for genuinely 3-D data; a thin membrane sheet is 2-D."),
           numericInput("hot_k", "k for local density", value = 5, min = 1, max = 50, step = 1),
           helpText("Neighbour order for the density estimate. Small k is noisy, large k blurs a focus into its surroundings."),
-          .detail(HTML("k is a smoothing parameter, not a cluster size. A focus holding fewer than about 2k units cannot be resolved at that k. 5 is a reasonable default for foci of tens of units; raise it for large diffuse domains.")),
+          .detail(HTML("k is a smoothing parameter. A focus holding fewer than about 2k units cannot be resolved at that k. 5 is a reasonable default for foci of tens of units; raise it for large diffuse domains.")),
           numericInput("hot_enh_thresh", "Enhancement threshold (x cell mean)",
                        value = 5, min = 1.5, max = 100, step = 0.5),
           helpText("The multiple that the reported fraction counts, and the dashed line on the distribution plot."),

@@ -23,6 +23,14 @@ First public release (Zenodo).
   to resolve and tracks with too few switches to constrain the rate.
 - Change-point detection uses a variance-scaled penalty, so the segment count no longer depends
   on the magnitude of D.
+- The HMM fits at most a set number of steps (default 150,000), drawing whole tracks at random
+  when the data hold more, and says so in the summary. Recovery of D is unchanged at that budget
+  (`tests/validation/hmm_step_budget.csv`). Fitting one state fewer and one more for BIC is now
+  opt-in, since it is two further fits.
+- The HMM derives the photon-budget σ_loc itself when the calibration panel has not published one,
+  instead of refusing to run.
+- The jump-distance, D-map and change-point panels now require the cycle time rather than falling
+  back to no blur correction, which would have read D about a third low without saying so.
 
 ### Spatial statistics (SMLM)
 
@@ -38,7 +46,20 @@ First public release (Zenodo).
   eps floor in the DBSCAN calibration, and a density-aware focus null. Hotspot numbers from
   before this release are not comparable with the current ones.
 
+### Reading the tracking panels
+
+- The **confinement index is the primary call on confinement**. The displacement-vs-diffusion panel
+  now reports how far it agrees with it track by track, instead of a second percentage that invited
+  comparison: the two ask different questions (the shape of the MSD curve against a null matched on
+  each track's length and D, versus net displacement against an infinite-plane null at one ensemble D).
+
 ### Quality control
+
+- **D by track continuity** (Data Quality & Calibration): splits the analysed tracks into quarters by
+  the continuity score and gives each its own D. It reports the gradient across molecules and,
+  separately, what the most continuous quarter would do to the pooled D. On MINFLUX tracking data a
+  fast molecule collects dark cycles, so a continuity threshold can select on speed.
+- Trimming degraded track ends no longer shortens a segment below the gap-splitting minimum length.
 
 - **Fiducial detection** is now driven by trace lifetime relative to the file's own distribution,
   with brightness as a secondary test, matching how a bead behaves: the tracker holds onto it long

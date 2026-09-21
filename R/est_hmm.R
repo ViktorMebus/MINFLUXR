@@ -185,7 +185,13 @@ hmm_ct_prepare <- function(df, ndim = 2L, sigma = 0, chunk_len = 256L, min_pts =
   UIDX  <- mk(match(dt_key, dt_u), NA_integer_)
   n_act <- vapply(seq_len(L), function(cc) sum(len >= cc), integer(1))
 
-  list(R2 = R2, DT = DT, NOISE = NOISE, UIDX = UIDX, len = len, n_act = n_act,
+  # r2 transforms the 3D emission density needs; constant across the fit, so they
+  # are computed once here rather than inside the optimiser's inner loop.
+  R2_SQ  <- if (ndim == 3L) sqrt(R2) else NULL
+  R2_LOG <- if (ndim == 3L) log(pmax(R2, 1e-300)) else NULL
+
+  list(R2 = R2, R2_SQ = R2_SQ, R2_LOG = R2_LOG,
+       DT = DT, NOISE = NOISE, UIDX = UIDX, len = len, n_act = n_act,
        dt_u = dt_u, ndim = as.integer(ndim), chunk_len = as.integer(chunk_len),
        steps = data.frame(tid = df$tid[j], loc = loc_in_track[j], row = j,
                           chunk = new_id, col = col, stringsAsFactors = FALSE),
@@ -198,14 +204,33 @@ hmm_ct_prepare <- function(df, ndim = 2L, sigma = 0, chunk_len = 256L, min_pts =
 # GOAL: emission densities for every step and state, n_chunk × L × K.
 # Padding cells get density 1 (they are never read by the prefix loops, but a
 # finite value keeps array arithmetic clean).
+#
+# The gamma density is written out rather than called through stats::dgamma().
+# This runs once per state on every optimiser iteration, over every step in the
+# data, so it dominates the fit time. The shape is fixed by the dimensionality
+# (1 in 2D, 3/2 in 3D), and at those two values the density is elementary:
+#   shape 1   : e = exp(-r2/c) / c
+#   shape 3/2 : e = sqrt(r2) * exp(-r2/c) / (Gamma(3/2) * c^(3/2))
+# with c = 2v. The sqrt(r2) and log(r2) that the 3D form needs do not change
+# between iterations, so hmm_ct_prepare() computes them once.
 .hmm_emissions <- function(prep, D, R_abs, log = FALSE) {
   K <- length(D); shape <- prep$ndim / 2
   eff <- pmax(prep$DT - 2 * R_abs, 1e-9)                  # blur-shortened diffusion time
   E <- array(if (log) 0 else 1, dim = c(dim(prep$R2), K))
   pad <- is.na(prep$R2)
+  r2  <- prep$R2
+  # Cached r2 transforms for the 3D form (recomputed if an older prep lacks them).
+  r2_sq  <- if (shape != 1) prep$R2_SQ  %||% sqrt(r2)         else NULL
+  r2_log <- if (shape != 1) prep$R2_LOG %||% log(pmax(r2, 1e-300)) else NULL
   for (s in seq_len(K)) {
-    v  <- 2 * D[s] * eff + prep$NOISE                     # per-axis variance of the step
-    e  <- stats::dgamma(prep$R2, shape = shape, scale = 2 * pmax(v, 1e-9), log = log)
+    v <- 2 * D[s] * eff + prep$NOISE                      # per-axis variance of the step
+    cc <- 2 * pmax(v, 1e-9)                               # gamma scale
+    e <- if (shape == 1) {
+      if (log) -r2 / cc - log(cc) else exp(-r2 / cc) / cc
+    } else if (shape == 1.5) {
+      if (log) 0.5 * r2_log - r2 / cc - lgamma(1.5) - 1.5 * log(cc)
+      else     r2_sq * exp(-r2 / cc) / (gamma(1.5) * cc^1.5)
+    } else stats::dgamma(r2, shape = shape, scale = cc, log = log)
     if (!log) e <- pmax(e, 1e-300)                        # avoid exact zeros in products
     e[pad] <- if (log) 0 else 1
     E[, , s] <- e

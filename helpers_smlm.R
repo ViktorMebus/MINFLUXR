@@ -38,7 +38,7 @@
 ##
 ##   2. TWO-COLOUR / MULTIPLEX
 ##      assign_two_color_group, auto_detect_dcr_split ... split channels on DCR
-##      assign_analysis_group(_from_mplex/_legacy), parse_tc_label, format_tc_id
+##      assign_analysis_group(_from_mplex/_legacy), format_tc_id, wrap_groups
 ##      mplex_default_colors
 ##
 ##   3. POINT BUILDING & SUMMARISING
@@ -357,21 +357,6 @@ dcr_split_confidence <- function(v, gmm, post_cut = NULL) {
 }
 
 # Helper: parse TC label like "A-1" or "B_2" into integer group IDs
-parse_tc_label <- function(lbl) {
-  if (is.null(lbl) || !nzchar(lbl)) return(NA_integer_)
-  lbl <- trimws(lbl)
-  
-  m <- regexec("^([ABab])\\s*[-_]?\\s*(\\d+)$", lbl)
-  g <- regmatches(lbl, m)[[1]]
-  if (length(g) != 3) return(NA_integer_)
-  
-  grp <- toupper(g[2])
-  n   <- as.integer(g[3])
-  if (!is.finite(n) || n < 1) return(NA_integer_)
-  
-  if (grp == "A") return(n)
-  return(10000L + n)  # B group offset
-}
 # Helper: assign analysis groups based on DCR or FLUO medians
 assign_analysis_group <- function(df, input) {
   .dcr_col <- if (isTRUE(input$use_pooled_dcr %||% FALSE) && "dcr_pooled" %in% names(df))
@@ -5165,9 +5150,78 @@ compute_cluster2_plane_distances <- function(df) {
   
   df_cluster2
 }
-format_tc_id <- function(x) {
-  ifelse(is.na(x) | x == 0, NA_character_,
-         ifelse(x >= 10001L, paste0("B-", x - 10000L), paste0("A-", x)))
+# GOAL: label a de-blinked or Median Cluster id with the channel it belongs to,
+# e.g. "B-8", for the hover text.
+#
+# THE LETTER COMES FROM THE CHANNEL COLUMN, NEVER FROM THE ID. This used to
+# decode ids >= 10001 as channel B, from when the two-colour path offset channel
+# B by a fixed 10000. apply_clustering_pipeline() now offsets by a running
+# maximum (channel B starts at max(A) + 1), so every channel-B cluster was being
+# labelled "A-". The id is global and unique across channels, so it is shown
+# as-is; only the channel prefix is added.
+#
+# x  : integer cluster ids (0 / NA = none)
+# ch : per-row channel label (resolve_channels()' `channel_label`), or NULL
+format_tc_id <- function(x, ch = NULL) {
+  none <- is.na(x) | x == 0
+  if (is.null(ch) || length(ch) != length(x))
+    return(ifelse(none, NA_character_, as.character(x)))
+  ifelse(none, NA_character_,
+         ifelse(is.na(ch) | !nzchar(as.character(ch)), as.character(x),
+                paste0(ch, "-", x)))
+}
+
+# =============================================================================
+# wrap_groups() - THE UNITS AN ALPHA SHAPE OR ISOSURFACE MAY WRAP
+# =============================================================================
+#
+# GOAL
+#   Return one row per group a 3-D wrap is allowed to enclose: a Median Cluster
+#   WITHIN ONE CHANNEL. Both the alpha-shape wrap and the isosurface iterate over
+#   this, so the rule lives in one place.
+#
+# WHY THE CHANNEL IS PART OF THE KEY
+#   apply_clustering_pipeline() already clusters each channel separately and
+#   offsets the ids, so today a `cluster2` id never spans two channels and this
+#   key adds no rows. It is keyed on (id, channel) anyway so the guarantee holds
+#   at the point of drawing, not only as a consequence of how ids happen to be
+#   numbered upstream: a wrap that joined two colours would draw one structure
+#   out of molecules that were never shown to belong together. With a single
+#   channel the result is identical to grouping on the id alone.
+#
+# ARGUMENTS
+#   df     : points carrying `id_col`, optionally `channel`, `channel_label`,
+#            `channel_color`
+#   id_col : the grouping column, normally "cluster2"
+#
+# RETURNS
+#   data.frame(id, channel, label, color). `channel` is NA and `label` "" when
+#   the data has no channel column.
+wrap_groups <- function(df, id_col = "cluster2") {
+  empty <- data.frame(id = integer(0), channel = integer(0),
+                      label = character(0), color = character(0))
+  if (!is.data.frame(df) || !nrow(df) || !id_col %in% names(df)) return(empty)
+  ids <- df[[id_col]]
+  keep <- !is.na(ids) & is.finite(ids) & ids != 0
+  if (!any(keep)) return(empty)
+  ch  <- if ("channel" %in% names(df)) df$channel[keep] else rep(NA_integer_, sum(keep))
+  lab <- if ("channel_label" %in% names(df)) as.character(df$channel_label[keep])
+         else rep("", sum(keep))
+  col <- if ("channel_color" %in% names(df)) as.character(df$channel_color[keep])
+         else rep(NA_character_, sum(keep))
+  g <- data.frame(id = ids[keep], channel = ch, label = lab, color = col,
+                  stringsAsFactors = FALSE)
+  g <- g[!duplicated(g[, c("id", "channel")]), , drop = FALSE]
+  g[order(g$id, g$channel), , drop = FALSE]
+}
+
+# GOAL: rows of `df` belonging to one wrap_groups() row. Matches on the channel
+# as well as the id, which is what makes the (id, channel) key binding.
+wrap_group_rows <- function(df, id_col, g) {
+  sel <- !is.na(df[[id_col]]) & df[[id_col]] == g$id
+  if (!is.na(g$channel) && "channel" %in% names(df))
+    sel <- sel & !is.na(df$channel) & df$channel == g$channel
+  df[sel, , drop = FALSE]
 }
 
 generate_xy_plane <- function(df, limits, z_offset = 0) {
@@ -7611,18 +7665,18 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 #   column exists to prevent; `cluster_group_scope` chooses between "within"
 #   (every channel, separately) and "only:<k>" (one channel, for inspection).
 #
-#   PARAMETERS SPLIT WHERE THE PHYSICS SPLITS. The primary merge distance is per
+#   PARAMETERS SPLIT WHERE THE PHYSICS SPLITS. The de-blink merge distance is per
 #   channel, because it is k x the trace spread and spread is a property of the
 #   dye (see deblink_threshold_for_channel). eps2 is shared, because it is set by
 #   the biology - how far apart molecules in one structure sit - which no choice
 #   of fluorophore changes.
 #
 # DE-BLINKING MERGES, IT NEVER REMOVES
-#   The primary tier has no "drop unclustered" behaviour and no free minPts:
-#     - minPts comes from the Trace ID Length filter (see deblink_minpts), so it
-#       cannot contradict the filter the user actually set.
-#     - traces DBSCAN cannot merge become their own single-blink molecule (see
-#       deblink_assign_singletons), so `cluster` is > 0 everywhere.
+#   De-blinking has no "drop unclustered" behaviour and no minPts at all: it
+#   merges trace centroids on a distance threshold (complete linkage or majority
+#   vote - not DBSCAN), and a trace nothing merges with becomes its own
+#   single-blink molecule (see deblink_assign_singletons), so `cluster` is > 0
+#   everywhere.
 #   Removing molecules is the job of the metadata and spread filters, where it
 #   is visible and reversible - not a side effect of a clustering radius.
 #

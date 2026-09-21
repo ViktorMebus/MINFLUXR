@@ -64,7 +64,8 @@ shiny::testServer(tracking_server, {
     if (!is.null(fr)) cat(sprintf("MSD OLSF: D %.4g um2/s, sigma %.3g nm\n", fr$D / 1e3, fr$sigma_loc)) }
   try_out(output, c("trk_msd_unified_plot"))
 
-  session$setInputs(trk_show_hmm = TRUE, trk_hmm_n_states = 2, trk_hmm_min_pts = 10, trk_hmm_n_ex = 6, trk_hmm_boot = 0)
+  session$setInputs(trk_show_hmm = TRUE, trk_hmm_n_states = 2, trk_hmm_min_pts = 10, trk_hmm_n_ex = 6, trk_hmm_boot = 0,
+                     trk_hmm_max_steps = 150000, trk_hmm_bic = FALSE)
   session$setInputs(trk_hmm_run = 1)
   h <- tryCatch(hmm_bundle(), error = function(e) { cat("HMM ERROR:", conditionMessage(e), "\n"); NULL })
   if (!is.null(h)) cat(sprintf("HMM: D %s um2/s, dwell %s ms, sigma mode: %s\n",

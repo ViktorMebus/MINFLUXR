@@ -1267,7 +1267,7 @@ smlm_server <- function(input, output, session) {
       cluster2_iso_id = 1,
       cluster2_iso_color = "#00CED1",
       cluster2_iso_unicolor = FALSE,
-      cluster2_iso_by_channel = FALSE,
+      cluster2_iso_by_channel = TRUE,
       cluster2_iso_grid_res = 22,
       cluster2_iso_pad = 0,
       cluster2_iso_manual_offset = FALSE,
@@ -1329,24 +1329,10 @@ smlm_server <- function(input, output, session) {
       show_tc1_alpha = FALSE,
       tc1_alpha = 120,
       tc1_alpha_opacity = 0.15,
-      tc1_alpha_min_pts = 5,
-
-      show_tc2_alpha = FALSE,
-      tc2_alpha = 150,
-      tc2_alpha_opacity = 0.18,
-      tc2_alpha_min_pts = 15,
-      
-      show_tc2_isosurface = FALSE,
-      tc2_iso_selected_only = TRUE,
-      tc2_iso_cluster_label = "A-1",
-      tc2_iso_grid_res = 22,
-      tc2_iso_pad = 0,
-      tc2_iso_manual_offset = FALSE,
-      tc2_iso_offset = 30,
-      tc2_iso_manual_sigma = FALSE,
-      tc2_iso_smooth_rel = 1,
-      tc2_iso_sigma = 30,
-      tc2_iso_opacity = 0.25
+      tc1_alpha_min_pts = 5
+      # The Median Cluster wrap and isosurface are no longer duplicated here;
+      # they are saved with the Median Clustering controls. Old files carrying
+      # show_tc2_alpha / show_tc2_isosurface are migrated on load.
     )
   }
   
@@ -1358,8 +1344,7 @@ smlm_server <- function(input, output, session) {
       # master toggle first, so the restored 2-color parameters take effect
       "enable_two_color",
       "color_by_fluo", "use_pooled_dcr",
-      "show_tc1_alpha", "show_tc2_alpha",
-      "show_tc2_isosurface", "tc2_iso_selected_only"
+      "show_tc1_alpha"
     )
     for (id in cb_ids) if (!is.null(s[[id]])) updateCheckboxInput(session, id, value = isTRUE(s[[id]]))
     
@@ -1447,26 +1432,41 @@ smlm_server <- function(input, output, session) {
     if (!is.null(getv("tc1_alpha_opacity"))) updateSliderInput(session, "tc1_alpha_opacity", value = as.numeric(getv("tc1_alpha_opacity")))
     if (!is.null(getv("tc1_alpha_min_pts"))) updateNumericInput(session, "tc1_alpha_min_pts", value = as.integer(getv("tc1_alpha_min_pts")))
     
-    # clustering tc2
-    # (retired *_tc2 restores removed - handled by tc_legacy above)
-    if (!is.null(getv("tc2_alpha"))) updateNumericInput(session, "tc2_alpha", value = as.numeric(getv("tc2_alpha")))
-    if (!is.null(getv("tc2_alpha_opacity"))) updateSliderInput(session, "tc2_alpha_opacity", value = as.numeric(getv("tc2_alpha_opacity")))
-    if (!is.null(getv("tc2_alpha_min_pts"))) updateNumericInput(session, "tc2_alpha_min_pts", value = as.integer(getv("tc2_alpha_min_pts")))
-    
-    # isosurface
-    if (!is.null(getv("tc2_iso_cluster_label"))) updateTextInput(session, "tc2_iso_cluster_label", value = as.character(getv("tc2_iso_cluster_label")))
-    if (!is.null(getv("tc2_iso_grid_res"))) updateSliderInput(session, "tc2_iso_grid_res", value = as.numeric(getv("tc2_iso_grid_res")))
-    if (!is.null(getv("tc2_iso_pad"))) updateSliderInput(session, "tc2_iso_pad", value = as.numeric(getv("tc2_iso_pad")))
-    if (!is.null(getv("tc2_iso_offset"))) updateSliderInput(session, "tc2_iso_offset", value = as.numeric(getv("tc2_iso_offset")))
-    if (!is.null(getv("tc2_iso_manual_offset"))) updateCheckboxInput(session, "tc2_iso_manual_offset", value = isTRUE(getv("tc2_iso_manual_offset")))
-    if (!is.null(getv("tc2_iso_sigma"))) updateSliderInput(session, "tc2_iso_sigma", value = as.numeric(getv("tc2_iso_sigma")))
-    if (!is.null(getv("tc2_iso_opacity"))) updateSliderInput(session, "tc2_iso_opacity", value = as.numeric(getv("tc2_iso_opacity")))
-    if (!is.null(getv("tc2_iso_manual_sigma"))) updateCheckboxInput(session, "tc2_iso_manual_sigma", value = isTRUE(getv("tc2_iso_manual_sigma")))
-    if (!is.null(getv("tc2_iso_smooth_rel"))) updateSliderInput(session, "tc2_iso_smooth_rel", value = as.numeric(getv("tc2_iso_smooth_rel")))
+    # RETIRED: the two-colour Median Cluster wrap and isosurface. They now live
+    # under Median Clustering and draw per channel. An older file that had them
+    # switched on turns on the unified controls instead, carrying the isosurface
+    # geometry across so the surface looks as it did.
+    tc2_moved <- character(0)
+    if (isTRUE(getv("show_tc2_alpha"))) {
+      updateCheckboxInput(session, "show_cluster2_shape", value = TRUE)
+      tc2_moved <- c(tc2_moved, "alpha-shape wrap")
+    }
+    if (isTRUE(getv("show_tc2_isosurface"))) {
+      updateCheckboxInput(session, "show_cluster2_isosurface", value = TRUE)
+      updateCheckboxInput(session, "cluster2_iso_by_channel", value = TRUE)
+      for (pr in list(c("tc2_iso_grid_res",   "cluster2_iso_grid_res"),
+                      c("tc2_iso_pad",        "cluster2_iso_pad"),
+                      c("tc2_iso_smooth_rel", "cluster2_iso_smooth_rel"),
+                      c("tc2_iso_offset",     "cluster2_iso_offset"),
+                      c("tc2_iso_sigma",      "cluster2_iso_sigma"),
+                      c("tc2_iso_opacity",    "cluster2_iso_opacity"))) {
+        v <- suppressWarnings(as.numeric(getv(pr[1])))
+        if (length(v) == 1L && is.finite(v)) updateSliderInput(session, pr[2], value = v)
+      }
+      for (pr in list(c("tc2_iso_manual_offset", "cluster2_iso_manual_offset"),
+                      c("tc2_iso_manual_sigma",  "cluster2_iso_manual_sigma")))
+        if (!is.null(getv(pr[1])))
+          updateCheckboxInput(session, pr[2], value = isTRUE(getv(pr[1])))
+      tc2_moved <- c(tc2_moved, "isosurface")
+    }
+    if (length(tc2_moved))
+      showNotification(sprintf(
+        "This settings file used the two-colour Median Cluster %s. That now lives under Median Clustering, drawn separately for each channel, and has been switched on there.",
+        paste(tc2_moved, collapse = " and ")), type = "message", duration = 10)
   }
-  
-  
-  
+
+
+
   apply_overlay_settings <- function(ov, session, current_bg_name=NULL) {  # (same as your 2D)
     if (!is.null(ov$show_confocal)) updateCheckboxInput(session,"show_confocal", value=ov$show_confocal)
     if (!is.null(ov$show_bg))       updateCheckboxInput(session,"show_bg",       value=ov$show_bg)
@@ -2513,24 +2513,9 @@ smlm_server <- function(input, output, session) {
         show_tc1_alpha = isTRUE(input$show_tc1_alpha),
         tc1_alpha = input$tc1_alpha,
         tc1_alpha_opacity = input$tc1_alpha_opacity,
-        tc1_alpha_min_pts = input$tc1_alpha_min_pts,
-
-        show_tc2_alpha = isTRUE(input$show_tc2_alpha),
-        tc2_alpha = input$tc2_alpha,
-        tc2_alpha_opacity = input$tc2_alpha_opacity,
-        tc2_alpha_min_pts = input$tc2_alpha_min_pts,
-        
-        show_tc2_isosurface = isTRUE(input$show_tc2_isosurface),
-        tc2_iso_selected_only = isTRUE(input$tc2_iso_selected_only),
-        tc2_iso_cluster_label = input$tc2_iso_cluster_label,
-        tc2_iso_grid_res = input$tc2_iso_grid_res,
-        tc2_iso_pad = input$tc2_iso_pad,
-        tc2_iso_manual_offset = isTRUE(input$tc2_iso_manual_offset),
-        tc2_iso_offset = input$tc2_iso_offset,
-        tc2_iso_manual_sigma = isTRUE(input$tc2_iso_manual_sigma),
-        tc2_iso_sigma = input$tc2_iso_sigma,
-        tc2_iso_opacity = input$tc2_iso_opacity,
-        tc2_iso_smooth_rel = input$tc2_iso_smooth_rel
+        tc1_alpha_min_pts = input$tc1_alpha_min_pts
+        # Median Cluster wrap / isosurface settings are saved with Median
+        # Clustering, not here.
       )
       
       jsonlite::write_json(s, path = file, auto_unbox = TRUE, pretty = TRUE)
@@ -3538,7 +3523,6 @@ smlm_server <- function(input, output, session) {
   # One row per isosurface drawn in the last 3-D render, so the controls can
   # report the geometry they picked. See iso_status_ui().
   cluster2_iso_diag <- reactiveVal(NULL)
-  tc2_iso_diag      <- reactiveVal(NULL)
 
   # ==========================================================================
   # ISOSURFACE: COMMITTED GEOMETRY + MESH CACHE
@@ -3571,18 +3555,10 @@ smlm_server <- function(input, output, session) {
       c2_manual_off   = isTRUE(input$cluster2_iso_manual_offset),
       c2_offset       = input$cluster2_iso_offset,
       c2_manual_sigma = isTRUE(input$cluster2_iso_manual_sigma),
-      c2_sigma        = input$cluster2_iso_sigma,
-      tc2_grid_res     = input$tc2_iso_grid_res,
-      tc2_pad          = input$tc2_iso_pad,
-      tc2_smooth_rel   = input$tc2_iso_smooth_rel,
-      tc2_manual_off   = isTRUE(input$tc2_iso_manual_offset),
-      tc2_offset       = input$tc2_iso_offset,
-      tc2_manual_sigma = isTRUE(input$tc2_iso_manual_sigma),
-      tc2_sigma        = input$tc2_iso_sigma
+      c2_sigma        = input$cluster2_iso_sigma
     )
   })
   output$cluster2_iso_status <- renderUI(iso_status_ui(cluster2_iso_diag()))
-  output$tc2_iso_status      <- renderUI(iso_status_ui(tc2_iso_diag()))
   cluster2_table_store <- reactiveVal(NULL)
   # Cache of clustered data per file - populated whenever a file is plotted.
   # Enables batch analysis across all previously-plotted files.
@@ -5855,8 +5831,9 @@ smlm_server <- function(input, output, session) {
 
     # A-#/B-# labels come straight off cluster/cluster2 now - there is one
     # clustering, so the "2-colour cluster" was never a different object.
-    tc1_lbl <- format_tc_id(df$cluster)
-    tc2_lbl <- format_tc_id(df$cluster2)
+    ch_lbl  <- if ("channel_label" %in% names(df)) df$channel_label else NULL
+    tc1_lbl <- format_tc_id(df$cluster,  ch_lbl)
+    tc2_lbl <- format_tc_id(df$cluster2, ch_lbl)
     
     df <- df %>% dplyr::mutate(
       hover_text = paste0(
@@ -6364,18 +6341,25 @@ smlm_server <- function(input, output, session) {
         dplyr::filter(!is.na(cluster2), cluster2 != 0) %>%
         { if (identical(iso_unit, "cluster"))
             dplyr::filter(., !is.na(cluster), cluster > 0L) else . } %>%
-        dplyr::group_by(.data[[iso_unit]]) %>%
+        # Grouped by (unit, channel), not the unit alone. A de-blinked molecule
+        # never spans channels, but a trace ID can in multiplex mode (that split
+        # is per localization), and one median over both would sit between them.
+        dplyr::group_by(.data[[iso_unit]],
+                        .ch = if ("channel" %in% names(.)) channel else NA_integer_) %>%
         dplyr::summarise(
           x = stats::median(x, na.rm = TRUE),
           y = stats::median(y, na.rm = TRUE),
           z = stats::median(z, na.rm = TRUE),
           cluster2 = dplyr::first(cluster2),
-          # carried so the isosurface can be coloured by channel; the member unit
-          # never spans channels, so first() is the channel, not a sample of it
+          # carried so the wrap can be keyed and coloured by channel (see
+          # wrap_groups()); constant within a group by construction
+          channel_label = if ("channel_label" %in% names(df))
+                            dplyr::first(channel_label) else NA_character_,
           channel_color = if ("channel_color" %in% names(df))
                             dplyr::first(channel_color) else NA_character_,
           .groups = "drop"
         ) %>%
+        dplyr::rename(channel = .ch) %>%
         dplyr::filter(is.finite(x), is.finite(y), is.finite(z), is.finite(cluster2), cluster2 != 0)
     }
     
@@ -6485,8 +6469,11 @@ smlm_server <- function(input, output, session) {
         }
       }
     }
-    # ── 2-color alpha shapes ────────────────────────────────────────────────
-    if (isTRUE(input$enable_two_color) && (isTRUE(input$show_tc1_alpha) || isTRUE(input$show_tc2_alpha)) &&
+    # ── 2-color alpha shapes (de-blinked molecules) ─────────────────────────
+    # Only the per-molecule wrap lives here. The Median Cluster wrap and
+    # isosurface are drawn by the Median Clustering controls, per channel (see
+    # wrap_groups()); a second copy here was redundant and had drifted.
+    if (isTRUE(input$enable_two_color) && isTRUE(input$show_tc1_alpha) &&
         all(c("x","y","z") %in% names(df))) {
       
       add_alpha_for <- function(cluster_col, alpha, opacity, min_pts) {
@@ -6527,104 +6514,9 @@ smlm_server <- function(input, output, session) {
         )
       }
       
-      if (isTRUE(input$show_tc2_alpha) && "cluster2" %in% names(df)) {
-        fig <- add_alpha_for(
-          cluster_col = "cluster2",
-          alpha   = input$tc2_alpha %||% 150,
-          opacity = input$tc2_alpha_opacity %||% 0.18,
-          min_pts = input$tc2_alpha_min_pts %||% 15
-        )
-      }
     }
-    if (!isTRUE(input$show_tc2_isosurface)) tc2_iso_diag(NULL)
     if (!isTRUE(input$show_cluster2_isosurface)) cluster2_iso_diag(NULL)
 
-    # ── 2-color tc2 isosurface ──────────────────────────────────────────────
-    if (isTRUE(input$show_tc2_isosurface) &&
-        isTRUE(input$enable_two_color) &&
-        "cluster2" %in% names(df)) {
-      
-      # Geometry from the committed snapshot (Plot Data); opacity stays live.
-      ig       <- iso_geom()
-      grid_res <- ig$tc2_grid_res %||% 22
-      pad      <- ig$tc2_pad %||% 0
-      op       <- input$tc2_iso_opacity %||% 0.25
-      # NULL = auto, i.e. 3 x localization precision floored at half the member
-      # gap. Anchoring to the microscope rather than to the labelling is what
-      # keeps two clusters comparable; see cluster_density_field().
-      iso_off  <- if (!isTRUE(ig$tc2_manual_off)) NULL else {
-        o <- suppressWarnings(as.numeric(ig$tc2_offset %||% 30))
-        if (!is.finite(o) || o <= 0) NULL else o
-      }
-      sigma    <- if (!isTRUE(ig$tc2_manual_sigma)) NULL else {
-        s <- suppressWarnings(as.numeric(ig$tc2_sigma %||% 30))
-        if (!is.finite(s) || s <= 0) NULL else s
-      }
-
-      # Same member unit as every other Median-Cluster statistic: the de-blinked
-      # molecule when de-blinking has run, else the trace ID.
-      # This block used to build the field from RAW LOCALIZATIONS, so one long
-      # trace contributed hundreds of points and dominated the density while a
-      # short trace of the same molecule contributed a handful - the envelope
-      # then tracked trace length rather than labelling.
-      tc2_unit <- if ("cluster" %in% names(df) &&
-                      any(!is.na(df$cluster) & df$cluster != 0L)) "cluster" else "tid"
-
-      # Physical scale for the surface geometry: measured once for the whole
-      # dataset, not per cluster, so two clusters in one view are drawn on the
-      # same ruler. Per-cluster it would reintroduce exactly the sampling
-      # dependence the precision anchor exists to remove.
-      # Per-axis: MINFLUX z is usually TIGHTER than x/y (measured z:lateral 0.60
-      # on the collaborator cond02 files), so an isotropic wrap over-wraps axially.
-      iso_precision <- smlm_loc_precision_nm(df, per_axis = TRUE)
-      tc2_diag <- new.env(parent = emptyenv()); tc2_diag$rows <- list()
-
-      # choose which clusters to draw
-      ids <- sort(unique(df$cluster2))
-      ids <- ids[is.finite(ids) & ids != 0]
-
-      if (isTRUE(input$tc2_iso_selected_only)) {
-        sel <- parse_tc_label(input$tc2_iso_cluster_label)
-        ids <- ids[ids == sel]
-      }
-      for (cid in ids) {
-        sub <- df[!is.na(df$cluster2) & df$cluster2 == cid, , drop = FALSE]
-        if (!nrow(sub) || !all(c("x","y","z") %in% names(sub))) next
-        if (identical(tc2_unit, "cluster"))
-          sub <- sub[!is.na(sub$cluster) & sub$cluster != 0L, , drop = FALSE]
-        if (!nrow(sub)) next
-
-        cent <- sub %>%
-          dplyr::group_by(.data[[tc2_unit]]) %>%
-          dplyr::summarise(x = stats::median(x, na.rm = TRUE),
-                           y = stats::median(y, na.rm = TRUE),
-                           z = stats::median(z, na.rm = TRUE), .groups = "drop")
-        pts <- as.matrix(cent[, c("x","y","z")])
-        pts <- pts[stats::complete.cases(pts), , drop = FALSE]
-        if (nrow(pts) < 4) next
-
-        # Colour follows the channel the members are in, taken from the same
-        # channel_color column the points use, so a surface can never disagree
-        # with the localizations inside it. Falls back to the group split
-        # (A = ids < 10000, B = ids >= 10000) when no channel colour is present.
-        tc2_iso_col <- iso_channel_color(sub)
-        if (is.na(tc2_iso_col)) tc2_iso_col <- if (cid < 10000L) {
-          input$color_group1 %||% "#1f77b4"
-        } else {
-          input$color_group2 %||% "#d62728"
-        }
-
-        fig <- add_cluster_isosurface(
-          fig, pts, color = tc2_iso_col, opacity = op,
-          name = paste0("tc2 ", if (cid < 10000L) "A-" else "B-",
-                        if (cid < 10000L) cid else cid - 10000L),
-          grid_res = grid_res, pad = pad, sigma = sigma, offset = iso_off,
-          precision = iso_precision, diag_env = tc2_diag,
-          sigma_scale = ig$tc2_smooth_rel %||% 1, cache = iso_mesh_cache
-        )
-      }
-      tc2_iso_diag(tc2_diag$rows)
-    }
     # ── cluster2 isosurface (3D) ────────────────────────────────────────────
     if (isTRUE(input$show_cluster2_isosurface) &&
         isTRUE(input$enable_cluster2) &&
@@ -6656,23 +6548,29 @@ smlm_server <- function(input, output, session) {
       iso_precision <- smlm_loc_precision_nm(df, per_axis = TRUE)
       c2_diag <- new.env(parent = emptyenv()); c2_diag$rows <- list()
 
-      ids <- sort(unique(cluster2_medians$cluster2))
-      ids <- ids[is.finite(ids) & ids != 0]
+      # One wrap per Median Cluster PER CHANNEL, so a surface can never enclose
+      # molecules of two colours. See wrap_groups().
+      groups <- wrap_groups(cluster2_medians, "cluster2")
+      # Decided on the WHOLE dataset, before any single cluster is picked out:
+      # a selected channel-B surface must still say "(B)" and still be red.
+      multi_ch <- length(unique(stats::na.omit(groups$channel))) > 1L
 
       if (isTRUE(input$cluster2_iso_selected_only)) {
-        sel <- as.integer(input$cluster2_iso_id %||% 1L)
-        ids <- ids[ids == sel]
+        sel <- .int_input(input$cluster2_iso_id, 1L, 1L)
+        groups <- groups[groups$id == sel, , drop = FALSE]
       }
 
-      if (length(ids)) {
+      if (nrow(groups)) {
 
       # build per-cluster color map using the same palette as cluster2 points
       qual_pals_iso <- RColorBrewer::brewer.pal.info[RColorBrewer::brewer.pal.info$category == "qual", ]
       base_colors_iso <- unlist(mapply(RColorBrewer::brewer.pal, qual_pals_iso$maxcolors, rownames(qual_pals_iso)))
-      pal_iso <- rep(base_colors_iso, length.out = max(ids) + 1)
+      pal_iso <- rep(base_colors_iso, length.out = max(groups$id) + 1)
 
-      for (cid in ids) {
-        sub <- cluster2_medians[cluster2_medians$cluster2 == cid, , drop = FALSE]
+      for (gi in seq_len(nrow(groups))) {
+        g   <- groups[gi, , drop = FALSE]
+        cid <- g$id
+        sub <- wrap_group_rows(cluster2_medians, "cluster2", g)
         if (nrow(sub) < 4) next
 
         pts <- as.matrix(sub[, c("x","y","z")])
@@ -6687,9 +6585,11 @@ smlm_server <- function(input, output, session) {
         # channel the members belong to, then the cluster palette. Channel colour
         # is what makes this usable in multiplex mode, where the cluster palette
         # says nothing about which target a structure is.
+        # By-channel colouring only means something with more than one channel;
+        # with one it would paint every surface the same colour.
         iso_col <- if (isTRUE(input$cluster2_iso_unicolor)) {
           input$cluster2_iso_color %||% "#00CED1"
-        } else if (isTRUE(input$cluster2_iso_by_channel)) {
+        } else if (multi_ch && isTRUE(input$cluster2_iso_by_channel)) {
           cc <- iso_channel_color(sub)
           if (is.na(cc)) pal_iso[(cid %% length(pal_iso)) + 1] else cc
         } else {
@@ -6698,7 +6598,9 @@ smlm_server <- function(input, output, session) {
 
         fig <- add_cluster_isosurface(
           fig, pts, color = iso_col, opacity = op,
-          name = paste0("Median Cluster ", cid),
+          name = if (multi_ch && nzchar(g$label %||% ""))
+                   paste0("Median Cluster ", cid, " (", g$label, ")")
+                 else paste0("Median Cluster ", cid),
           grid_res = grid_res, pad = pad, sigma = sigma, offset = iso_off,
           precision = iso_precision, diag_env = c2_diag,
           sigma_scale = ig$c2_smooth_rel %||% 1, cache = iso_mesh_cache
@@ -7676,8 +7578,14 @@ smlm_server <- function(input, output, session) {
       )
     
     if (isTRUE(input$show_cluster2_shape) && isTRUE(input$enable_cluster2) && !is.null(df$cluster2)) {
-      for (cl2 in unique(df$cluster2[df$cluster2 != 0])) {
-        group_df <- df %>% dplyr::filter(cluster2 == cl2)
+      # One wrap per Median Cluster PER CHANNEL, the same rule the isosurface
+      # follows, so an alpha shape can never join two colours (wrap_groups()).
+      a_groups   <- wrap_groups(df, "cluster2")
+      a_multi_ch <- length(unique(stats::na.omit(a_groups$channel))) > 1L
+      for (gi in seq_len(nrow(a_groups))) {
+        g   <- a_groups[gi, , drop = FALSE]
+        cl2 <- g$id
+        group_df <- wrap_group_rows(df, "cluster2", g)
         if (nrow(group_df) >= 4) {
           # Radius derived per cluster from its own point spacing - see
           # alpha_surface_3d() in helpers_smlm.R.
@@ -7687,14 +7595,26 @@ smlm_server <- function(input, output, session) {
             # pick a single solid color: first non-NA cluster2 color (fallback to light gray)
             col_hex <- group_df$cluster2_color[which(!is.na(group_df$cluster2_color) & nzchar(group_df$cluster2_color))][1]
             if (is.na(col_hex) || !nzchar(col_hex)) col_hex <- "#bdbdbd"
+            # With several channels, the shared "Color wraps by channel" option
+            # takes the channel's colour instead, as the isosurface does.
+            if (a_multi_ch && isTRUE(input$cluster2_iso_by_channel) &&
+                !is.na(g$color) && nzchar(g$color)) col_hex <- g$color
 
             fig <- fig %>% plotly::add_trace(
               type = "mesh3d",
               x = srf$x, y = srf$y, z = srf$z,   # srf may be subsampled; i/j/k index these
               i = srf$i, j = srf$j, k = srf$k,
               opacity = input$hull_opacity,
-              color = I(col_hex),
-              name = paste("Median Cluster", cl2),
+              # Colour as a flat intensity + one-colour scale, the encoding
+              # iso_mesh_trace() uses. `color = I(hex)` on a mesh3d is DROPPED by
+              # plotly_build() (with or without I()), so this wrap used to render
+              # in plotly's default mesh colour whatever col_hex said.
+              intensity = rep(0, length(srf$x)),
+              colorscale = list(list(0, col_hex), list(1, col_hex)),
+              showscale = FALSE,
+              name = if (a_multi_ch && nzchar(g$label %||% ""))
+                       paste0("Median Cluster ", cl2, " (", g$label, ")")
+                     else paste("Median Cluster", cl2),
               hoverinfo = "skip",
               hovertemplate = "",
               showlegend = FALSE,
@@ -9001,7 +8921,7 @@ smlm_server <- function(input, output, session) {
     "cluster2_min_members", "cluster_group_scope", "centroid_k",
     "deblink_shared_spread",
     # resolve_channels - what DEFINES a channel. Getting one of these wrong
-    # repartitions the data, so they are as load-bearing as the eps values.
+    # repartitions the data, so they are as important as the eps values.
     "enable_two_color", "color_by_fluo", "dcr_group1", "dcr_group2",
     "use_pooled_dcr",
     # the two opt-in gates that rewrite the data before clustering

@@ -13,7 +13,7 @@
 ## HOW TO READ A SHINY SERVER FILE
 ##   Reactives are LAZY: the order they appear in the file is NOT the order they
 ##   run. What matters is which reactive calls which. So to follow the data,
-##   follow the CALLS, not the line numbers. The dependency chain is drawn below.
+##   follow the CALLS. The dependency chain is drawn below.
 ##
 ## ── 1. THE DATA FLOW (the single most important thing in this file) ──────────
 ##
@@ -36,8 +36,7 @@
 ##                               analysis below starts by calling trk().
 ##
 ##   Cleaning stages are HEAVY, so they read their parameters via isolate() and
-##   only recompute when the "apply cleaning" trigger fires - not on every
-##   slider twitch.
+##   only recompute when the "apply cleaning" trigger fires 
 ##
 ## ── 2. THE OTHER FOUNDATION: TIME ────────────────────────────────────────────
 ##   MINFLUX has no fixed clock. Almost every estimator here needs the base
@@ -62,7 +61,7 @@
 ##       so the displacement itself grows as the SQUARE ROOT of time:
 ##           r ~ sqrt(2·d·D·Δt)
 ##
-##   (2) WHY WE DIVIDE BY sqrt(Δt), NOT BY Δt.
+##   (2) WHY WE DIVIDE BY sqrt(Δt)
 ##       MINFLUX steps span different Δt, so before pooling them we must remove
 ##       the Δt dependence. From (1) that dependence is sqrt(Δt):
 ##
@@ -87,7 +86,7 @@
 ##       corrections, and why "integrated steps only" (one fixed Δt, no
 ##       normalisation needed) is the cleanest mode where it is available.
 ##
-##   (3) LOCALIZATION NOISE adds a constant offset, it does not grow with time:
+##   (3) LOCALIZATION NOISE adds a constant offset:
 ##
 ##           <r²>_measured = 2·d·D·Δt  +  2·d·σ²
 ##
@@ -369,7 +368,7 @@ tracking_server <- function(input, output, session) {
   #   Bonus: D falls out too, noise-corrected, with no MSD fit at all:
   #       D = <Δ²>/(2Δt) + cov₁/Δt
   #
-  # THE MINFLUX ADAPTATION (the load-bearing bit)
+  # THE MINFLUX ADAPTATION
   #   The algebra above assumes a CONSTANT Δt. MINFLUX Δt is irregular. So the
   #   covariance is taken ONLY over pairs where BOTH steps are single-cycle
   #   ("integrated", n_cyc == 1) and share a midpoint inside one track. That
@@ -926,6 +925,73 @@ tracking_server <- function(input, output, session) {
       htmltools::tags$p(style = "font-size:0.8em; color:#888; margin:5px 0 0 0;",
         "Analyses run on the last row. Filtering for well-tracked molecules is a disclosed choice - ",
         "report this funnel in your methods. Track count can rise at Gap-split (segments) then fall."))
+  })
+
+  # GOAL: show whether track continuity follows mobility in the analysed data, i.e.
+  # whether keeping "well-tracked" molecules means keeping slow ones.
+  # A molecule that moves fast relative to the TCP is lost for a cycle more often, so
+  # its track collects dark cycles; a continuity threshold can then remove fast
+  # molecules under the name of quality. The table ranks the analysed tracks by the
+  # same continuity score the gate uses (same half-life) and gives each quarter its
+  # own pooled CVE D. It is computed after "Estimate σ_loc & quality", on the data
+  # the analyses see, so it describes the population actually being reported.
+  # The ±20% band for the verdict is a reading aid, not a significance test.
+  output$trk_continuity_mobility <- renderUI({
+    b <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
+    if (is.null(b))
+      return(htmltools::tags$p(style = "font-size:0.83em; color:#888;",
+        "Run Estimate σ_loc & quality first."))
+    df  <- tryCatch(trk(), error = function(e) NULL)
+    t_c <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    H   <- suppressWarnings(as.numeric(input$trk_quality_darktol %||% 3))
+    sc  <- .continuity_scores(df, t_c, H)
+    tab <- continuity_mobility_table(df, sc, t_c, has_z = .has_real_z(df))
+    if (is.null(tab))
+      return(htmltools::tags$p(style = "font-size:0.83em; color:#888;",
+        "Too few tracks to split into quarters (at least 40 needed)."))
+
+    # Two readings, kept apart. r_mol: the gradient across molecules (best quarter vs
+    # the other three), which is what a per-track statistic sees. r_pool: what keeping
+    # only the best quarter would do to the POOLED D, which weights tracks by their
+    # steps; when that quarter holds most localizations, r_mol can be large while the
+    # reported number barely moves.
+    r_mol  <- attr(tab, "ratio_best_rest")
+    r_pool <- attr(tab, "ratio_best_all")
+    share4 <- tab$loc_share[4]
+    coupled <- is.finite(r_mol) && abs(log(r_mol)) > log(1.2)
+    verdict <- if (!is.finite(r_mol)) NULL
+      else if (!coupled)
+        htmltools::tags$p(style = "font-size:0.85em; color:#1a8a1a; margin:4px 0;",
+          sprintf("D is within 20%% across continuity (most continuous quarter %.2f× the rest), so continuity is not tracking mobility here and the continuity gate is not selecting on speed.", r_mol))
+      else
+        htmltools::tags$div(style = "font-size:0.85em; margin:4px 0;",
+          htmltools::tags$p(style = "color:#B8860B; margin:0 0 3px 0;",
+            htmltools::HTML(sprintf(
+              "&#9888; <b>Across molecules</b>, the most continuous quarter diffuses %.0f%% %s than the rest (D %.3g vs %.3g µm²/s). Continuity follows mobility here, so any per-track statistic is sensitive to how strictly tracks are gated.",
+              100 * abs(r_mol - 1), if (r_mol < 1) "slower" else "faster",
+              tab$D_um2_s[4], attr(tab, "D_rest_um2_s")))),
+          htmltools::tags$p(style = "color:#555; margin:0;",
+            htmltools::HTML(sprintf(
+              "<b>On the pooled D</b>, that quarter already holds %.0f%% of the localizations, so keeping only it would move D from %.3g to %.3g µm²/s (%+.0f%%). Pooled D weights each track by its steps, which gives the long, continuous tracks most of the say either way.",
+              100 * share4, attr(tab, "D_all_um2_s"), tab$D_um2_s[4], 100 * (r_pool - 1)))))
+
+    fmt <- function(v, d) ifelse(is.finite(v), formatC(v, format = "f", digits = d), "-")
+    rows <- lapply(seq_len(nrow(tab)), function(i) htmltools::tags$tr(
+      lapply(c(tab$quartile[i], tab$n_tracks[i],
+               sprintf("%s-%s", fmt(tab$score_lo[i], 2), fmt(tab$score_hi[i], 2)),
+               paste0(fmt(100 * tab$loc_share[i], 1), "%"),
+               paste0(fmt(100 * tab$integ_frac[i], 0), "%"),
+               fmt(tab$D_um2_s[i], 3), fmt(tab$sigma_nm[i], 2)),
+             function(v) htmltools::tags$td(v, style = "padding:1px 8px; text-align:right;"))))
+    htmltools::tagList(
+      verdict,
+      htmltools::tags$table(style = "font-size:0.83em; border-collapse:collapse;",
+        htmltools::tags$thead(htmltools::tags$tr(lapply(
+          c("Continuity", "tracks", "score", "of locs", "integrated steps", "D (µm²/s)", "σ (nm)"),
+          function(h) htmltools::tags$th(h, style = "padding:1px 8px; text-align:right; border-bottom:1px solid #ccc; color:#666;")))),
+        htmltools::tags$tbody(rows)),
+      htmltools::tags$p(style = "font-size:0.8em; color:#888; margin:5px 0 0 0;",
+        sprintf("Tracks ranked by the continuity score (half-life %.3g cycles, as in the continuity gate) and split into four equal groups; D is the pooled CVE of each group.", H)))
   })
 
 
@@ -1794,6 +1860,12 @@ tracking_server <- function(input, output, session) {
     dark_cyc <- max(2L, as.integer(isolate(input$trk_endtrim_dark_cycles %||% 3L)))
     efo_frac <- suppressWarnings(as.numeric(isolate(input$trk_endtrim_efo_frac %||% 0.5)))
     dark_gap <- if (use_dark && is.finite(t_c) && t_c > 0) dark_cyc * t_c else Inf
+    # Length floor. Gap splitting promises segments of at least `min_len` localizations,
+    # and peeling ends afterwards would quietly break that promise (measured on
+    # GP67H-014: 41 segments fell to 41-49). Trimming therefore stops at the floor: a
+    # track keeps a slightly dark end rather than dropping below the declared minimum.
+    floor_len <- if (isTRUE(isolate(input$trk_split_gaps_enable)))
+                   max(1L, as.integer(isolate(input$trk_split_min_len) %||% 1L)) else 1L
     tf  <- match(df$tid, unique(df$tid))                  # integer track codes (fast sort/group)
     ord <- order(tf, df$tim, method = "radix")
     df  <- df[ord, , drop = FALSE]
@@ -1807,11 +1879,11 @@ tracking_server <- function(input, output, session) {
       efo_thr <- if (use_efo) efo_frac * stats::median(df$efo[idx], na.rm = TRUE) else -Inf
       efo_v   <- if (use_efo) df$efo[idx] else rep(Inf, m)
       lo <- 1L
-      while (lo < m &&
+      while (lo < m && (m - lo + 1L) > floor_len &&
              ((use_efo && is.finite(efo_v[lo]) && efo_v[lo] < efo_thr) ||
               (use_dark && d[lo]      >= dark_gap))) lo <- lo + 1L
       hi <- m
-      while (hi > lo &&
+      while (hi > lo && (hi - lo + 1L) > floor_len &&
              ((use_efo && is.finite(efo_v[hi]) && efo_v[hi] < efo_thr) ||
               (use_dark && d[hi - 1L] >= dark_gap))) hi <- hi - 1L
       if (hi >= lo) keep[idx[lo:hi]] <- TRUE
@@ -5790,12 +5862,17 @@ tracking_server <- function(input, output, session) {
     sub_noise_cpd <- isTRUE(input$trk_cpd_sub_noise) && is.finite(sig_cpd) && sig_cpd > 0
     noise_D_off   <- if (sub_noise_cpd) sig_cpd^2 else 0   # × ⟨1/Δt⟩ per segment below
 
+    t_c_cpd <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    # Motion blur needs the cycle time. Without it the fit would silently run with no
+    # blur correction, which reads D about a third low at MINFLUX cycle times, so the
+    # panel asks for the calibration instead of guessing.
+    shiny::validate(shiny::need(is.finite(t_c_cpd) && t_c_cpd > 0,
+      "Cycle time unknown - run Data Quality & Calibration first (the blur correction needs it)."))
     # Segmentation core lives in est_cpd.R (pure, tested).
     result <- withProgress(message = "Segmenting tracks…", value = 0,
       cpd_segment_tracks(df, min_seg = min_seg, use_z = use_z_cpd,
                          noise_sig2 = noise_D_off,
-                         R_abs = { tc <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
-                                   if (is.finite(tc) && tc > 0) MSD_BLUR_R * tc else 0 },
+                         R_abs = MSD_BLUR_R * t_c_cpd,
                          progress = function(f) incProgress(f)))
     shiny::validate(shiny::need(
       !is.null(result) && nrow(result) >= 3L,
@@ -7867,6 +7944,11 @@ tracking_server <- function(input, output, session) {
 
     # Real axial data only. A placeholder all-zero z column would make this fit the 3D
     # Maxwell law to what are really 2D distances (dz ≡ 0), biasing D by −33%.
+    # Motion blur needs the cycle time. Without it the fit would silently run with no
+    # blur correction, which reads D about a third low at MINFLUX cycle times, so the
+    # panel asks for the calibration instead of guessing.
+    shiny::validate(shiny::need(is.finite(t_c_jdd) && t_c_jdd > 0,
+      "Cycle time unknown - run Data Quality & Calibration first (the blur correction needs it)."))
     use_z_jdd <- .has_real_z(df)
     # Collection and fit live in est_jdd.R (pure, tested).
     withProgress(message = "Computing JDD…", value = 0, {
@@ -7879,13 +7961,13 @@ tracking_server <- function(input, output, session) {
       "Too few jumps - lower 'Min points per TID' or relax filters."))
     jf <- jdd_fit(cj$jumps, cj$dt_all, n_comp = n_comp, use_z = use_z_jdd, norm_dt = norm_dt,
                   sigma_loc = sigma_loc,
-                  R_abs = if (is.finite(t_c_jdd) && t_c_jdd > 0) MSD_BLUR_R * t_c_jdd else 0,
+                  R_abs = MSD_BLUR_R * t_c_jdd,
                   progress = function(f) incProgress(f, detail = "fitting Rayleigh mixture"))
 
     list(mids = jf$mids, dens = jf$dens, sigs = jf$sigs, ws = jf$ws, D_vals = jf$D_vals,
          n_comp = n_comp, norm_dt = norm_dt, n_jumps = length(cj$jumps),
          use_z = use_z_jdd, d_fit = jf$d_fit, dt0 = jf$dt0, inv_dt = jf$inv_dt, sigma_loc = sigma_loc,
-         r_noise = jf$r_noise, R_abs = if (is.finite(t_c_jdd) && t_c_jdd > 0) MSD_BLUR_R * t_c_jdd else 0,
+         r_noise = jf$r_noise, R_abs = MSD_BLUR_R * t_c_jdd,
          step_mode = step_mode, integrated_only = integ_only, t_cycle = t_c_jdd,
          min_dt_used = if (min_dt > 0) min_dt else NA_real_,
          max_dt_used = if (is.finite(max_dt)) max_dt else NA_real_)
@@ -8156,15 +8238,23 @@ tracking_server <- function(input, output, session) {
     sig_null <- if (identical(trk_sigma_loc_src(), "photon budget") && !is.null(b) &&
                     sum(is.finite(b$sig_phot)) >= 50L) b$sig_phot[is.finite(b$sig_phot)]
                 else sig
-    nul <- withProgress(message = "Simulating free-CI null…", value = 0,
+    # The simulation is ~85% of the wait, so it owns 0 -> 0.85 of the bar and the
+    # per-track matching that follows owns the rest. sim_free_ci_null() reports a
+    # CUMULATIVE fraction, so it is set, not added: incrementing would run the bar
+    # to 100% at the end of the simulation and leave the matching looking hung.
+    nul <- withProgress(message = "Confinement: simulating the free null…", value = 0,
       sim_free_ci_null(grid, D_grid = D_grid, n_sim = nsim, t_c = t_c, sigma = sig_null,
                        ndim = ndim, gap_p = gap_p, min_lag = min_lag, max_lag = max_lag,
-                       progress = function(f) incProgress(1 / ncell),
+                       progress = function(f) setProgress(0.85 * f,
+                         detail = sprintf("%d of %d (length, D) cells", round(f * ncell), ncell)),
                        R_blur = MSD_BLUR_R))   # same blur coefficient as the MSD fits
     # nearest cell in (log N, log D)
-    idx <- vapply(seq_len(nrow(pt)), function(i) {
-      which.min((log(nul$n) - log(Ns[i]))^2 + (log(nul$D) - log(Dtr[i]))^2)
-    }, integer(1))
+    idx <- withProgress(message = "Confinement: matching tracks to the null…", value = 0.85, {
+      ln <- log(nul$n); lD <- log(nul$D)
+      vapply(seq_len(nrow(pt)), function(i) {
+        which.min((ln - log(Ns[i]))^2 + (lD - log(Dtr[i]))^2)
+      }, integer(1))
+    })
     pt$null_D  <- nul$D[idx]
     pt$ci_lo05 <- nul$lo05[idx]; pt$ci_med <- nul$med[idx]; pt$ci_hi95 <- nul$hi95[idx]
     pt$ci_class <- ifelse(pt$conf_index < pt$ci_lo05, "confined",
@@ -8188,7 +8278,8 @@ tracking_server <- function(input, output, session) {
     f_d <- mean(pt$ci_class == "directed")
     rv2 <- attr(pt, "resolv")
     tags$div(style = "font-size:0.9em; margin:6px 0; padding:6px 8px; border-left:3px solid #1a8a1a; background:rgba(26,138,26,0.05);",
-      tags$b("MSD confinement index vs a simulated free null"), tags$br(),
+      tags$b("MSD confinement index vs a simulated free null"),
+      tags$span(style = "color:#666; font-weight:normal;", " - the primary call on confinement"), tags$br(),
       tags$b(style = "color:#1a8a1a; font-size:1.02em;",
         sprintf("Confined %.0f%%  ·  free-like %.0f%%  ·  directed %.0f%%",
                 100 * f_c, 100 * f_f, 100 * f_d)),
@@ -8625,6 +8716,29 @@ tracking_server <- function(input, output, session) {
       htmltools::HTML(sprintf(
         "Infinite-plane null: <b style='color:#2c7fb8;'>%.0f%% sub-diffusive</b> · <b style='color:#9e9e9e;'>%.0f%% free</b> · <b style='color:#e31a1c;'>%.0f%% super-diffusive</b> (~5%% per tail by construction)",
         100 * f_sub, 100 * f_free, 100 * f_sup)),
+      {
+        # This panel corroborates the confinement index; it does not compete with it.
+        # The two ask different questions of the same track - the CI reads the shape of
+        # the MSD curve across lags, this reads how far the track actually travelled -
+        # so their percentages are not meant to match. What is informative is how far
+        # they agree track by track, which is only shown once both have been run.
+        pt <- tryCatch(conf_ci_bundle(), error = function(e) NULL)
+        if (is.null(pt) || !nrow(pt) || !all(c("tid", "ci_class") %in% names(pt)))
+          htmltools::div(style = "color:#555; margin-top:4px;",
+            htmltools::HTML("The <b>confinement index</b> above is the primary call on confinement. Run it to see how far the two agree track by track."))
+        else {
+          m <- merge(res[, c("tid", "class")], pt[, c("tid", "ci_class")], by = "tid")
+          if (!nrow(m)) NULL else {
+            ci_conf <- m$ci_class == "confined"
+            both    <- sum(ci_conf & m$class == "sub-diffusive")
+            htmltools::div(style = "color:#555; margin-top:4px;",
+              htmltools::HTML(sprintf(
+                "Agreement with the <b>confinement index</b> (the primary call): of its <b>%d</b> confined tracks, <b>%d</b> (%.0f%%) also fall below this panel's free displacement band, over %d tracks both panels scored.",
+                sum(ci_conf), both,
+                if (sum(ci_conf)) 100 * both / sum(ci_conf) else 0, nrow(m))))
+          }
+        }
+      },
       htmltools::div(style = "color:#555; margin-top:5px;",
         htmltools::HTML(sprintf(
           "Resolution floor <b>%.0f nm</b> RMS free extent - confinement below this is invisible.", resolv))),
@@ -9688,9 +9802,47 @@ tracking_server <- function(input, output, session) {
     # would absorb the noise and read too fast, so that case is refused.
     sig_eff <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
     src     <- tryCatch(trk_sigma_loc_src(), error = function(e) "not set")
+    # If Data Quality & Calibration has not published a σ yet, derive the photon-budget
+    # value here from the same model rather than refusing: every input it needs (ECO,
+    # L_TCP, the prefactor) is already on this tab.
+    if (!is.finite(sig_eff) || sig_eff <= 0) {
+      if ("eco" %in% names(df) && any(is.finite(df$eco) & df$eco > 0)) {
+        L0 <- suppressWarnings(as.numeric(input$trk_L_tcp %||% DMAX_L_TCP_DEFAULT))
+        if (!is.finite(L0) || L0 <= 0) L0 <- DMAX_L_TCP_DEFAULT
+        n0 <- suppressWarnings(as.numeric(input$trk_beam_fwhm %||% TCP_BEAM_FWHM_NM))
+        if (!is.finite(n0) || n0 <= 0) n0 <- TCP_BEAM_FWHM_NM
+        a0 <- suppressWarnings(as.numeric(input$trk_crlb_pref %||% TCP_CRLB_PREFACTOR))
+        if (!is.finite(a0) || a0 <= 0) a0 <- TCP_CRLB_PREFACTOR
+        ok0 <- is.finite(df$eco) & df$eco > 0
+        sig_eff <- stats::median(.crlb_doughnut(L0, n0, df$eco[ok0], 0, a0), na.rm = TRUE)
+        src <- "photon budget"
+      }
+    }
     shiny::validate(shiny::need(is.finite(sig_eff) && sig_eff > 0,
-      "Set the localization precision first (Data Quality & Calibration, or enter it manually)."))
+      "Localization precision unknown: the file carries no photon counts, so enter σ_loc on this tab."))
     d_in <- df[, intersect(c("tid", "x", "y", "tim", "eco"), names(df)), drop = FALSE]
+
+    # ── Step budget ──────────────────────────────────────────────────────────
+    # Fit time scales with the number of steps, and the optimiser evaluates the
+    # likelihood over every step many times. The spread of D across molecules, not
+    # the step count, is what limits how precisely D is known, so beyond a budget
+    # the extra steps buy time rather than certainty. Whole TRACKS are drawn, never
+    # parts of them, so no track is cut in half.
+    cap <- suppressWarnings(as.integer(input$trk_hmm_max_steps %||% 0L))
+    n_sub_tracks <- NA_integer_
+    if (is.finite(cap) && cap > 0) {
+      per_tid <- table(d_in$tid)
+      if (sum(per_tid - 1L) > cap) {
+        set.seed(1L)                                     # same subset on a re-run
+        shuf <- sample(names(per_tid))
+        keep <- shuf[cumsum(per_tid[shuf] - 1L) <= cap]
+        if (length(keep) >= 2L) {
+          d_in <- d_in[d_in$tid %in% keep, , drop = FALSE]
+          n_sub_tracks <- length(per_tid)
+        }
+      }
+    }
+
     sigma_mode <- "one value for all localizations"
     if (identical(src, "photon budget") && "eco" %in% names(d_in)) {
       cve <- tryCatch(trk_cve_bundle(), error = function(e) NULL)
@@ -9719,7 +9871,9 @@ tracking_server <- function(input, output, session) {
     shiny::validate(shiny::need(!is.null(fit), "The HMM fit failed - try fewer states."))
 
     # Neighbouring model sizes, so the summary can show whether the data support K.
-    bic_other <- withProgress(message = "Comparing state counts (BIC)…", value = 0.3, {
+    # Two further fits, so it is opt-in: it roughly triples the run time.
+    bic_other <- if (!isTRUE(input$trk_hmm_bic)) NULL else
+      withProgress(message = "Comparing state counts (BIC)…", value = 0.3, {
       ks <- setdiff(c(K - 1L, K + 1L), 1L); ks <- ks[ks <= 4L]
       stats::setNames(vapply(ks, function(k) {
         f2 <- tryCatch(hmm_ct_fit(pr, K = k, R_abs = R_abs, t_c = t_c, hessian = FALSE,
@@ -9763,7 +9917,7 @@ tracking_server <- function(input, output, session) {
 
     list(K = K, D_vals = fit$D, fracs = fit$pi,
          P_cycle = .expm_small(fit$Q * t_c), Qrate = fit$Q, dwell_ms = fit$dwell_ms,
-         fit = fit, boot = boot, bic_other = bic_other,
+         fit = fit, boot = boot, bic_other = bic_other, n_tracks_all = n_sub_tracks,
          seg_list = seg_list, n_tracks = fit$n_tracks, n_steps = fit$n_steps,
          dt_med_ms = dt_med, t_cycle_ms = t_c, R_abs = R_abs,
          sigma_loc_nm = sig_eff, sigma_mode = sigma_mode,
@@ -9946,8 +10100,11 @@ tracking_server <- function(input, output, session) {
     }
     tags$div(style = "font-size:0.88em; margin:4px 0;",
       tags$p(style = "color:#888; margin:2px 0;",
-        sprintf("n = %d tracks, %d steps  |  cycle %.3g ms  |  σ_loc %s (median %.2f nm)  |  log-likelihood %.1f",
-                bd$n_tracks, bd$n_steps, bd$t_cycle_ms, bd$sigma_mode, bd$sigma_loc_nm, fit$loglik)),
+        sprintf("n = %d tracks%s, %d steps  |  cycle %.3g ms  |  σ_loc %s (median %.2f nm)  |  log-likelihood %.1f",
+                bd$n_tracks,
+                if (is.finite(bd$n_tracks_all %||% NA)) sprintf(" of %d, drawn at random to meet the step budget",
+                                                                bd$n_tracks_all) else "",
+                bd$n_steps, bd$t_cycle_ms, bd$sigma_mode, bd$sigma_loc_nm, fit$loglik)),
       tags$table(style = "border-collapse:collapse;",
         tags$thead(tags$tr(lapply(
           c("", "Occupancy", "D (µm²/s, 95% CI)", "Mean dwell (95% CI)", ""),
@@ -10252,6 +10409,11 @@ tracking_server <- function(input, output, session) {
     req(isTRUE(input$trk_show_dmap))
     df <- trk(); req(nrow(df) > 0)
     t_c_dmap <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    # Motion blur needs the cycle time. Without it the fit would silently run with no
+    # blur correction, which reads D about a third low at MINFLUX cycle times, so the
+    # panel asks for the calibration instead of guessing.
+    shiny::validate(shiny::need(is.finite(t_c_dmap) && t_c_dmap > 0,
+      "Cycle time unknown - run Data Quality & Calibration first (the blur correction needs it)."))
     # σ_loc floor is optional (toggle); the app-wide value is used when set.
     sig_loc  <- tryCatch(trk_sigma_loc_eff(), error = function(e) NA_real_)
     sig_use  <- if (isTRUE(input$trk_dmap_sub_noise) && is.finite(sig_loc) && sig_loc > 0) sig_loc else NA_real_
@@ -10260,7 +10422,7 @@ tracking_server <- function(input, output, session) {
       res <- dmap_compute(df, n_bins = input$trk_dmap_bins, min_pts = input$trk_dmap_min_pts,
                           t_c = t_c_dmap, integrated_only = isTRUE(input$trk_dmap_integrated_only),
                           sigma_loc = sig_use,
-                          R_abs = if (is.finite(t_c_dmap) && t_c_dmap > 0) MSD_BLUR_R * t_c_dmap else 0)
+                          R_abs = MSD_BLUR_R * t_c_dmap)
     })
     shiny::validate(shiny::need(is.null(res$error), res$error %||% ""))
     res
