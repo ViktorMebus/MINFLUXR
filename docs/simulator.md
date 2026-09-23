@@ -1,10 +1,9 @@
 # MINFLUX Simulator — Reference
 
-*Reference for the Simulator tab: what it models, how each stage works, and where it currently
-departs from real MINFLUX.* Last reviewed 2026-08-11; §7 intro and §8 status checked against the code 2026-09-17 · Code: [`sim_server.R`](../sim_server.R),
-[`sim_ui.R`](../sim_ui.R) · Companions: [simulation_module.md](simulation_module.md) (Phase 2 design
-spec), [MINFLUX_analysis_methods.md](MINFLUX_analysis_methods.md) (the analysis side),
-the 2026-08-11 fidelity audit, now superseded by §7 and §8 here.
+*Reference for the Simulator tab: what it models, how each stage works, and where it departs from
+real MINFLUX (§7).* Code: [`sim_server.R`](../sim_server.R), [`sim_ui.R`](../sim_ui.R) ·
+Companions: [simulation_module.md](simulation_module.md) (the diffusion simulator),
+[MINFLUX_analysis_methods.md](MINFLUX_analysis_methods.md) (the analysis side).
 
 ---
 
@@ -133,9 +132,8 @@ The level-1 scale is set so the **mean** magnitude is exactly `link_nm`: a half-
 `σ_link` has mean `σ_link·√(2/π) = link_nm`.
 
 > ⚠️ **`link_nm` is a mean, not an RMS.** For quadrature you need the second moment:
-> `E[|d₁|²] = σ_link² = (π/2)·link_nm²`, so the RMS displacement is **1.253 × `link_nm`**. The
-> Precision Budget used to add `link_nm` itself, understating the term by 20 % — corrected, along
-> with three other quadrature errors, in §7.10.
+> `E[|d₁|²] = σ_link² = (π/2)·link_nm²`, so the RMS displacement is **1.253 × `link_nm`**, and the
+> Precision Budget uses that second moment (§1.4).
 
 #### 1.2.3 Dyes → trace IDs
 
@@ -196,7 +194,7 @@ Only the terms drawn **per localization** or **per dye** shrink with sampling:
 ```
 
 Levels 0 and 1 are drawn **once per molecule** and shared by every dye and every localization on it,
-so they are a bias, not a noise. This is exactly why time-to-resolve has a hard floor (§7.1, §8.2).
+so they are a bias, not a noise, and time-to-resolve has a hard floor (§7).
 
 A **steric check** compares the label footprint + protein diameter against the mean GT
 nearest-neighbour distance and warns when stoichiometric labeling is physically impossible at that
@@ -227,39 +225,31 @@ Two modes:
   σ_z   = σ_xy × z_factor            (default 0.7 — z TIGHTER than xy)
   ```
 
-  `L` is the effective targeting-pattern (TCP) diameter of the final iteration. The **σ_z < σ_xy**
-  default is correct for MINFLUX and is *not* the camera-SMLM astigmatism reflex — see
-  `reference_minflux_axial_precision`.
+  `L` is the effective targeting-pattern (TCP) diameter of the final iteration. `σ_z` defaults to
+  0.7 × `σ_xy`: in MINFLUX the axial precision is usually tighter than the lateral one.
 
-  **Defaults measured on real data.** Running the calibrator over the fixed-sample test runs
-  (ungated, same code path as the app):
+  **`L` here is an effective value, not the instrument setting.** `L_eff = 2σ√N` absorbs everything
+  that widens σ beyond the ideal bound: drift, motion within a trace, background and imperfect
+  centring. It is therefore 2–3× larger than published final-iteration TCP diameters (~40–75 nm), and
+  that is the right quantity to simulate with. The default of **120 nm** is typical of fixed-sample
+  imaging; harder samples run near 220 nm. Use *Calibrate from a real run* rather than the default.
 
-  | Run | traces | locs/trace | σ_x | σ_y | σ_z | σ_z/σ_x | photons | L_eff |
-  |---|--:|--:|--:|--:|--:|--:|--:|--:|
-  | Imaging run A | 546 | 8 | 7.06 | 7.16 | 6.17 | 0.87 | 73 | **121** |
-  | Imaging run B | 472 | 7 | 6.72 | 7.31 | 5.63 | 0.84 | 71 | **118** |
-  | Imaging run C (with fiducials) | 3679 | 2 | 10.56 | 9.21 | 5.50 | 0.49 | 137 | **231** |
-  | Imaging run D (clean) | 4583 | 2 | 11.01 | 10.17 | 6.84 | 0.61 | 105 | **217** |
+  The `2` in the prefactor is a convention that varies with pattern geometry in the literature. It is
+  self-consistent here because *Calibrate from a real run* inverts the same formula
+  (`L ≈ 2·σ·√N`, [`sim_ui.R:532`](../sim_ui.R#L532)); changing it alone would rescale every calibrated L.
 
-  The default `L` is **120 nm** (was 50), from runs A and B, which agree to 2 %. At the default
-  80 photons that gives σ ≈ 6.9 nm — consistent with the manual-mode defaults (σ_xy = 6, σ_z = 4)
-  so the two precision modes no longer disagree by 2×. Runs C and D sit at ~220 nm: a harder sample
-  (median 2 locs/trace, so σ comes from the longer-lived minority), which is the spread a single
-  default cannot cover — calibrate rather than trust it.
+**Precision Budget.** The panel predicts the error of each molecule's position, a trace median,
+against ground truth:
 
-  **L_eff is not the instrument's L.** Published final-iteration TCP diameters are ~40–75 nm, so
-  these effective values run 2–3× larger. That is expected: `L_eff = 2σ√N` absorbs everything that
-  inflates σ beyond the ideal CRB — drift, molecular motion within the trace, background, imperfect
-  centring. It is the right quantity to simulate with, and the wrong one to quote as an instrument
-  setting.
+```
+ε_TID = √( r² + (π/2)·link² + D·dye_spread² + (2σ_xy² [+ σ_z²])·f(n) )
+f(n)  = (π/2) / (n + π/2 − 1)        variance of the median of n Gaussian draws
+```
 
-  The measured σ_z/σ_x of 0.49–0.87 brackets the `sim_crlb_z_factor` default of 0.7, and every run
-  is below 1 — independent confirmation that MINFLUX z is *tighter* than xy.
-
-  The `2` in the prefactor is a convention that varies in the literature with pattern geometry. It is
-  **self-consistent here** because "Calibrate from a real run" inverts the same formula
-  (`L ≈ 2·σ·√N`, [`sim_ui.R:532`](../sim_ui.R#L532)). Do not "fix" it in isolation — that silently
-  rescales every previously calibrated L.
+`link` is the mean of a half-normal displacement, hence the `π/2`. `f(n)` is the finite-n form of the
+median's variance, averaged over the realized trace lengths. The panel reports the **label floor**
+`√(r² + (π/2)·link²)` separately, since no acquisition time removes it, and distinguishes "below the
+limit for now" from "not resolvable with this label".
 
 ### 1.5 Localizations (stage 5)
 
@@ -355,7 +345,7 @@ its producer applied — the same run would then yield a different σ_z per form
 
 > **Two different 0.7s.** This axial factor is a refractive-index correction on the *coordinates*.
 > `sim_crlb_z_factor` (also ≈0.7) is the σ_z/σ_xy *precision ratio*. They are unrelated and must not
-> be conflated — see `reference_minflux_axial_precision`.
+> be conflated.
 
 **The calibration gate** (`gate_real_run()`, [`sim_server.R:1559`](../sim_server.R#L1559)) restricts
 *which* localizations and traces those statistics come from, in two stages:
@@ -378,7 +368,7 @@ Measured, after gating:
 | Measured | How | Fills |
 |---|---|---|
 | Duration | `max(t0) − min(t0)` | hours / minutes |
-| Rate profile | binned traces/hour, log-linear fit of `|rate − late|` → τ | τ, and the model choice |
+| Rate profile | binned traces/hour, log-linear fit of `\|rate − late\|` → τ | τ, and the model choice |
 | Model | exponential vs flat residual comparison; sign of (early − late) picks decay/rise | `sim_acq_det_model`, `level` |
 | FOV | coordinate ranges × 1.1 | `sim_fov_x/y/z` |
 | Structure fraction | DBSCAN core-point test (≥3 neighbours within 60 nm) on trace medians | `sim_real_struct_frac`, overridable |
@@ -409,7 +399,7 @@ terms are i.i.d. and their difference is symmetric — verified unbiased to +0.1
 
 **What it does *not* transfer:** the structure geometry, the point-cloud shape, the trace-length
 distribution, or the labeling. It calibrates the *acquisition clock and the precision*, and you still
-have to pick a synthetic shape by hand. That gap is the subject of §8.
+have to pick a synthetic shape by hand.
 
 ## 5. The Confocal comparison view
 
@@ -438,386 +428,37 @@ round-trip. Full spec: [simulation_module.md](simulation_module.md).
 
 ---
 
-## 7. Known fidelity gaps and inconsistencies
+## 7. Limitations
 
-Ranked by how much they distort the tab's headline question. Items 1, 5, 6, 7 were found in this
-review; 2, 3, 4 come from the 2026-08-11 audit
-(from the 2026-08-11 audit). *Status 2026-09-17:* 7.10 is fixed. 7.1 is partly
-addressed: the Precision Budget now headlines the label floor, the per-molecule error ε and a
-resolvable / not-resolvable verdict (§8.2), but the acquisition timeline's "% resolved" and
-time-to-resolve still count first detection. The others are open.
+What the simulator does not model, and what that means for results built on its output.
 
-### 7.1 "% resolved" measures *discovery*, not *resolution* — the biggest one
+**"% resolved" counts discovery.** On the acquisition timeline a molecule counts as resolved when it is
+first detected. The resolution of a molecule is bounded by `ε(n) = √(r² + link² + σ_loc²/n)`: more
+localizations shrink only the last term, and the label terms are a floor that no acquisition time
+removes. Read the timeline as a detection curve and use the Precision Budget verdict for resolvability.
 
-The Acquisition tab reports "time to 90 % resolved", and a molecule counts as resolved the moment
-**any one of its dyes is detected once** ([`sim_server.R:208`](../sim_server.R#L208)). Meanwhile the
-Precision Budget calls the structure "resolvable" from a purely static criterion — GT spacing vs
-`2·√(r² + link² + σ²)` — with no time in it at all. Two panels, two different meanings of the same
-word, and neither is the quantity the user actually wants.
+**One σ for every localization.** Real MINFLUX precision is set per localization by its photon count.
+Simulated precision clouds are therefore homogeneous Gaussians, so they cannot exercise the precision-
+cloud QC, and inverse-variance weighting has no effect on simulated data.
 
-The physical quantity is time-dependent and neither panel computes it. Per molecule, the centroid
-error after `n` localizations is
+**The CSV export has no `eco`, `efo` or `cfr`.** Reloaded simulated data cannot run photon-weighted
+shape fits (they fall back to unweighted), the fiducial scan, or `efo`/`cfr` filters.
 
-```
-ε(n) = √( r_protein² + link²  +  σ_loc²/n )
-        └── fixed label bias ──┘   └ shrinks with sampling ┘
-```
+**Background is a plain photon loss.** `N_eff = N × (1 − bg)` understates the damage: MINFLUX position
+information lives in the contrast at the doughnut zero, and background fills that zero in. CRLB mode is
+optimistic at high background when used predictively. An `L` calibrated from a real run absorbs most of
+this.
 
-So more time buys you `σ_loc/√n` and **nothing else** — the label bias is a hard floor. A structure
-with 12 nm spacing and an IgG sandwich (link ≈ 20 nm) never resolves, no matter how long you run,
-and the tab will still cheerfully report "90 % resolved in 8 minutes". This is the single most
-misleading output in the simulator.
+**Re-blinks sit at exactly the same position.** Repeat detections of one fluorophore carry no
+between-blink motion or drift, so simulated data cannot calibrate or validate the de-blinking radius.
 
-**Fix direction:** make resolution a time-dependent, per-molecule quantity — accumulate localizations
-per molecule over the timeline, compute ε(n(t)), and report time-to-`ε(n) < spacing/2` alongside (not
-instead of) the discovery curve. Report the floor `√(r²+link²)` explicitly and say "never" when it
-exceeds the criterion.
+**Normal-mode timestamps are not physical.** They are a single ramp across all localizations, so
+time-domain tools (TSA, cycle time, detection over time, dark-cycle colouring) should only be run on
+Acquisition-mode output, which uses a detection profile but still a fixed cadence without dark cycles.
 
-### 7.2 σ_loc is constant across every localization
+**Crowding changes the timeline only.** It lowers the discovery rate, but crowded molecules get the
+same σ and trace lengths as isolated ones, whereas a second emitter in the doughnut biases the real
+localization.
 
-`gen_localizations()` applies one scalar σ to every point. Real MINFLUX σ is set **per localization**
-by that localization's photon count. Consequences:
-
-- Simulated precision clouds are homogeneous Gaussians. The app's own precision-cloud QC predicts
-  **leptokurtosis from the σ spread** rather than testing against 3 — so simulated data can never
-  exercise that check, and anything tuned against it is tuned against the wrong null.
-- Every inverse-variance weighting downstream becomes a no-op on simulated data.
-
-The correct implementation already exists ~1800 lines away, in the Phase 2 overlay
-([`sim_server.R:3097`](../sim_server.R#L3097)): draw `N ~ Poisson(photons)` per localization, set
-`σ = L/(2√N)`, add noise with that σ. Port it.
-
-### 7.3 The CSV export drops the MINFLUX-native columns
-
-`sim_dl_csv` ([`sim_server.R:2673`](../sim_server.R#L2673)) writes only `x, y, z, tid, tim` + GT
-columns. No `eco` / `efo` / `cfr`. Loading simulated SMLM data back into the SMLM tab therefore:
-
-| Feature | Default | Behaviour without `eco`/`efo` |
-|---|---|---|
-| Shape-fit photon weighting (`viewer_weight_eco`) | **ON** | silently falls back to unweighted |
-| Fiducial / contaminant scan | — | its primary BRIGHT signature is `efo` — cannot run |
-| efo / cfr metadata filters | — | inert |
-
-Fixing 7.2 produces `N` per localization, so `eco = N` and `efo = N/dwell` fall out for free. `cfr`
-has no counterpart in the model; **recommended: omit it and state that simulated data cannot exercise
-cfr-based tools.** A constant placeholder is the worst option — it reads as real.
-
-### 7.4 Background is modelled as a plain photon loss
-
-CRLB mode uses `N_eff = N × (1 − bg)`. This is the one place a camera-SMLM intuition genuinely does
-not transfer: MINFLUX position information lives in the **contrast at the doughnut zero**, and
-background **fills that zero in**, so the CRB degrades faster than the photon loss alone implies.
-The current model is optimistic, increasingly so at high background. Impact is confined to CRLB mode
-used *predictively* — if L came from "Calibrate from a real run", the error is largely absorbed into
-the calibrated L.
-
-### 7.5 Blink copies sit at *exactly* the same position
-
-Both over-counting models (`split_for_blinking`, and acquisition re-sampling of the pool) duplicate a
-fluorophore row **without re-drawing its position**. Real re-detections of the same dye are separated
-by the between-blink motion of the molecule plus any drift, which is precisely the quantity the SMLM
-tab's de-blink radius has to be set against — and which we already know `k_clear` is blind to
-(`reference_deblink_k_motion_blind`). Simulated data has zero between-blink displacement, so it
-**cannot be used to calibrate or validate the de-blink threshold**. Anything that looks like a clean
-de-blink result on simulated data is an artifact of this simplification.
-
-### 7.6 Timestamps in Normal mode are not physical
-
-`tim = seq(0, by = 10, length.out = total)` ([`sim_server.R:894`](../sim_server.R#L894)) — a single
-global ramp across *all* localizations of *all* traces. So every trace occupies a disjoint,
-non-overlapping time window, and the within-trace Δt is 10 (units unstated) instead of the ~ms cycle
-time. Any time-domain tool (TSA, cycle time, detection-over-time, dark-cycle colouring) reads garbage
-from a Normal-mode export. Acquisition mode overwrites this with detection-profile times + 0.01 s
-within-trace spacing, which is sane but still a fixed cadence with no dark cycles.
-
-### 7.7 Crowding affects the timeline but not the point cloud
-
-`sim_crowding` scales the per-molecule *discovery rate* in `sim_acq_live()`, but the generated
-localizations are untouched — crowded molecules get the same σ and the same trace lengths as isolated
-ones. In reality, a second emitter inside the doughnut degrades the localization itself (biased
-position, elevated `cfr`). The Acquisition summary and the MINFLUX view therefore tell different
-stories about the same crowding.
-
-### 7.8 Live timeline vs frozen point cloud can disagree
-
-`sim_result()` is an `eventReactive` on **Generate**; `sim_acq_live()` recomputes on every parameter
-change. Change the duration or rate and the timeline updates immediately while the displayed
-localizations, RMSE, and precision budget still reflect the parameters at the last Generate. This is
-intentional (responsiveness) but undocumented in the UI.
-
-### 7.9 Documentation drift
-
-The main [README](../README.md) claims "Simulated data can be sent directly to the SMLM or Tracking
-tabs for immediate analysis." There is no in-memory hand-off — the only route is
-*Download localizations (.csv)* and re-upload. (Corrected in the README as part of this review.)
-
-### 7.10 Precision Budget quadrature — **FIXED 2026-08-11**
-
-Found while documenting the labeling maths (§1.2.2). The panel used to compute
-
-```r
-theory <- sqrt(prot_r^2 + link^2 + sig_xy^2)      # every term wrong in a different way
-```
-
-Four errors, all optimistic:
-
-1. **`link` is a mean, not an RMS.** The level-1 displacement is half-normal with
-   `E[|d|²] = (π/2)·link²`, so the term is `√(π/2)·link` — using `link` understated it by **20 %**.
-2. **Units mixed.** `prot_r`/`link` are *radial* magnitudes, `sig_xy` a *per-axis* σ. The radial
-   variance of one localization is `2σ_xy² + σ_z²` (3D) or `2σ_xy²` (2D).
-3. **`dye_spread` omitted entirely** — for a polyclonal + secondary that is an 18 nm term.
-4. **No trace averaging.** A TID's position is the *median of its localizations*, so the
-   localization term must be divided down by the trace length. Without it, "observed vs theoretical"
-   compared two different quantities — and the panel's own note ("observed should approach
-   theoretical when traces are long") had it backwards.
-
-Now:
-
-```
-ε_TID = √( r² + (π/2)·link² + D·dye_spread² + (2σ_xy² [+ σ_z²])·f(n) )
-f(n) = (π/2) / (n + π/2 − 1)          variance of the median of n Gaussian draws
-```
-
-`f` is the finite-*n* form: the textbook asymptotic `π/(2n)` runs **+17 % at n = 3** and +9 % at
-n = 5, exactly the short traces MINFLUX produces. It is evaluated as the **mean over the realized
-trace lengths**, not at the median length — `f` is convex and Poisson lengths otherwise cost another
-5–7 % by Jensen.
-
-**Validated against the generator itself**: the formula is compared with the observed radial RMS
-`|TID median − GT|` produced by the real `expand_to_fluorophores` → `gen_localizations` chain, across
-12 regimes (2D/3D, label- and localization-dominated, trace lengths 3–60, all preset shapes). Worst
-error **2.4 %**; the old formula was off by −42 % to +76 % over the same set.
-
-The panel now also reports the **label floor** `√(r² + (π/2)·link²)` — the part no acquisition time
-removes — and the resolvability verdict distinguishes "⚠ below the limit *for now*" from
-"✖ not resolvable with this label", which is a different problem with a different fix.
-
-### What was checked and is **correct** — do not re-litigate
-
-- The `L/(2√N)` prefactor convention (self-consistent with the calibration inverse).
-- `σ_z = 0.7·σ_xy` — z tighter than xy is right for 3D MINFLUX.
-- The confocal PSF model (`0.21·λ/NA`, Airy pinhole, Bessel encircled energy).
-- Variance ∝ 1/photons — the 1/√N scaling is shared with camera SMLM; only the prefactor differs
-  (targeting-pattern size instead of spot width), so photon weighting is sound.
-- Phase 2's sampling overlay in full.
-
-### How to verify a change
-
-- Source helpers into an env rather than launching the app:
-  `e <- new.env(); sys.source("helpers_smlm.R", envir = e)` (`sys.source("global.R")` first for
-  constants; load `shinyjs` for UI checks).
-- Parse check every touched file: `Rscript -e "invisible(parse('sim_server.R'))"`.
-- **Acceptance test for 7.2:** simulate → export → load into the SMLM tab → run the precision cloud.
-  Before the fix the pooled cloud is a clean Gaussian; after it the σ spread should make it
-  leptokurtic and the panel's predicted-kurtosis check should sit near its expectation instead of
-  firing spuriously.
-- **Round-trip for 7.3:** export, confirm `eco`/`efo` present, reload, confirm `viewer_weight_eco`
-  reports a non-trivial `n_eff` instead of falling back.
-
----
-
-## 8. PLANNED — real-run calibration + honest time-to-resolve
-
-*Agreed scope, 2026-08-11. Two work items only.* **Build status (checked against `sim_server.R`,
-2026-09-17):** 8.1a gate **built** (`sim_real_gate_ui`: EFO / CFR / trace-length ranges with before and
-after counts). 8.1b profile **built** (small-n debiased per-axis σ, per-trace axis ratios, `eco_vec` and
-`len_vec` stored). 8.1c **not built**: the stored vectors are displayed but `gen_localizations` does not
-resample them, so the simulated cloud still uses one σ and Poisson/geometric trace lengths, and the
-bias-3 guard in 8.1d has nothing to guard yet. 8.2 **partly built**: the label floor, ε per molecule and
-the 2ε criterion are in the Precision Budget; ε_m(t) and a time-to-resolve based on it are not, so the
-timeline still reports discovery (§7.1). Explicitly
-**deferred** (considered and dropped as over-engineering for now): empirical cluster-geometry fitting,
-the simulated-vs-real round-trip validation, blink-displacement modelling, physical Normal-mode
-timestamps, the non-linear background CRB, and `cfr` emission. §7 keeps them on record.
-
-### 8.0 The workflow this has to serve
-
-> *"I think this structure may be an 8-molecule filament, labeled with Y. Given a **real** MINFLUX run,
-> how long do I need to image before I resolve it?"*
-
-The structure stays **hypothesised and hand-picked** — that is the point of the question, not a
-limitation. What the real run supplies is the *instrument and sample behaviour*: how fast traces
-arrive, how many localizations each trace yields, and how tight the resulting point cloud is.
-
-```
-  real run  ──gate──►  point-cloud profile  ──┐
-  (efo, cfr, trace length)                     │
-                                               ├──►  simulate  ──►  ε_m(t)  ──►  time to resolve
-  hypothesised structure (8-mol filament)  ────┤                                 (or "never")
-  labeling preset Y                        ────┘
-```
-
----
-
-### 8.1 Item 1 — gated point-cloud calibration
-
-**Goal:** replace the single scalar σ with a point-cloud model measured from a *user-selected subset*
-of a real run.
-
-#### 8.1a New gating controls
-
-Applied **before** any statistic is computed, in the "Calibrate from a real run" block:
-
-| Control | Acts on | Notes |
-|---|---|---|
-| `efo` range (min / max, kHz) | localizations | drop dim and abnormally bright locs |
-| `cfr` range (min / max) | localizations | drop poorly-centred locs |
-| Trace length range (min / max locs per `tid`) | whole traces | drop stubs and fiducial-like runaways |
-
-Columns may be absent (a plain CSV often has no `efo`/`cfr`): each control disables itself with a
-visible note rather than silently passing everything. Report **n before / n after** for both
-localizations and traces, so the gate's severity is never invisible.
-
-#### 8.1b What is measured from the surviving traces
-
-| Quantity | How | Used for |
-|---|---|---|
-| σ_x, σ_y, σ_z | within-trace SD per `tid`, **small-n debiased**, median over traces | per-axis cloud shape |
-| Axis ratios | `σ_y/σ_x`, `σ_z/σ_x` | anisotropy of the simulated cloud |
-| Photon distribution | the `eco` **vector** (not just its median) | per-localization σ |
-| Trace-length distribution | locs per `tid`, the **vector** | how many points a trace gets |
-| `L_eff` | `2·σ̄_xy·√N̄` (existing) | ties the two together |
-
-The small-n correction matters once the user controls the length gate — and the constant to use is
-**not** c₄; see §4, where the choice is derived and measured. Uncorrected, a short-trace-heavy gate
-biases the calibrated σ low by ~7.6 %.
-
-#### 8.1c How the simulator consumes the profile
-
-Two new options, each a *third* choice alongside what exists today — the current behaviour stays the
-default so nothing silently changes:
-
-1. **Trace length → "Empirical (from real run)"**, alongside Poisson and Geometric. Draw each
-   simulated trace's localization count by **resampling the measured vector** with replacement. No
-   distributional assumption, which is the honest choice given we already know real trace lengths are
-   neither Poisson nor cleanly geometric.
-
-2. **Precision → per-localization, anisotropic.** Per localization *i*, resample `N_i` from the
-   measured `eco` vector and set
-
-   ```
-   σ_x,i = L_eff / (2·√N_i)
-   σ_y,i = σ_x,i · (σ_y/σ_x)          ← measured ratio
-   σ_z,i = σ_x,i · (σ_z/σ_x)          ← measured ratio, NOT the 0.7 default
-   ```
-
-   This is 7.2 and 7.3 delivered together: `N_i` is exactly what `eco` should be, and
-   `efo_i = N_i / dwell` follows, so the CSV export gains both columns for free. The construction is
-   self-consistent — because `L_eff` was derived by inverting the same formula, the median simulated
-   σ reproduces the measured σ by construction, while the *spread* around it now comes from the real
-   photon distribution.
-
-   `cfr` stays **omitted**, per §7.3.
-
-#### 8.1d Three biases the UI must state, not hide
-
-These are properties of gating itself, not bugs, but they all push the same direction — **optimistic**
-— and they compound:
-
-1. **Gating on `efo`/`eco` selects bright localizations**, which are the precise ones. The calibrated
-   σ is therefore tighter than the run as a whole.
-2. **Gating on `cfr` selects well-centred molecules**, again the precise ones.
-3. **Gating on trace length is circular for the length model.** If you filter traces to ≥ 20 locs and
-   then resample that filtered distribution to predict how many points a trace yields, you have
-   hard-coded your own filter into the prediction and will over-estimate the photons available per
-   molecule. This is the one that most directly corrupts the time-to-resolve answer.
-
-Bias 3 deserves a hard guard rather than prose: when the length gate is active, either resample the
-length distribution from the **ungated** traces (recommended default — the gate then only cleans the
-σ estimate, which is what it is actually for), or require an explicit "use the gated length
-distribution" tick with the consequence spelled out next to it.
-
-There is also a physical conflation worth stating once in the doc and once in the UI: **within-trace
-SD is not pure localization precision.** It contains any real molecular motion, stage drift and
-sample wobble during the trace. On a static SMLM target that is small; on anything mobile it is not,
-and the calibrated σ is then an upper bound on precision rather than an estimate of it.
-
----
-
-### 8.2 Item 2 — resolution as a function of time
-
-**Goal:** replace "% resolved = % detected at least once" (§7.1) with the real quantity.
-
-#### 8.2a The error model, derived from the labeling model
-
-The four displacement levels of §1.2 average differently, and that is the whole result. For molecule
-*m* with `n_dye` of its dyes detected and `n_loc` localizations accumulated in total:
-
-```
-                 ┌───── never averages ─────┐  ┌ averages over dyes ┐ ┌ averages over locs ┐
-ε_m(t) = √(  r_protein²  +  (π/2)·link²      +  D·dye_spread²/n_dye(t) + D·σ̄²/n_loc(t)     )
-```
-
-with `D` = 2 or 3 (the observed dimensionality). The `π/2` and the `D` are the two corrections §7.10
-records as missing from the current Precision Budget — `link_nm` is a *mean* magnitude while
-quadrature needs the RMS, and `dye_spread`/`σ̄` are *per-axis* while the others are radial.
-
-`r_protein` (epitope offset) and `link` (complex centre) are drawn **once per molecule** and shared by
-every dye and every localization on it — so no amount of acquisition time removes them.
-
-**The floor is `√(r_protein² + link²)`.** This single number decides whether the question has an
-answer at all, and it is a property of the *label*, not the run.
-
-#### 8.2b The criterion
-
-A molecule is resolved from its neighbour when `ε_m(t) < d_NN(m) / k`, with `d_NN` the ground-truth
-nearest-neighbour distance and `k` a user-set separation criterion (default 2, matching the existing
-Precision Budget). Flag in the UI that `k = 2` compares a spacing against a *single* cloud's error;
-two independent clouds each of error ε separate at `d ≳ 2√2·ε`, so `k = 2√2 ≈ 2.83` is the stricter,
-arguably more correct reading. Offering both and defaulting to the existing convention keeps old
-numbers comparable while making the choice explicit.
-
-#### 8.2c What gets reported
-
-Replace the headline number; **keep the discovery curve as a second series** — it is still the right
-answer to "how much of the structure have I even seen", and `n_loc = 0 ⟹ ε = ∞` means the new
-criterion strictly subsumes it.
-
-| Output | Why |
-|---|---|
-| **Label floor** `√(r² + link²)` vs the criterion `d_NN/k` | the go / no-go, shown first |
-| **"Never resolvable" fraction** — molecules whose floor already exceeds the criterion | with the verdict *"change the label, not the run time"* |
-| Time-to-X %-resolved curve, for the molecules that can resolve | the actual answer |
-| Discovery curve (current "% resolved"), relabelled **"% detected"** | honest naming of what it always was |
-| ε(t) for the median molecule | shows how fast the σ/√n term is still buying anything |
-
-The relabelling is not cosmetic — with both curves on one plot, the gap between "detected" and
-"resolved" *is* the thing the tool exists to show.
-
-#### 8.2d One modelling assumption to state
-
-`dye_spread²/n_dye` assumes the analysis **merges all TIDs belonging to one molecule** into a single
-position — which is what clustering and de-blinking actually do downstream. If the dyes are *not*
-merged, each TID is its own apparent molecule and a polyclonal label makes the structure look denser,
-not more precise. The merged case is the right default because it matches the pipeline, but it is an
-assumption about the *analysis*, not about the physics, and the summary should say so.
-
----
-
-### 8.3 Build order
-
-1. ~~**8.1a** gating controls + before/after counts (self-contained, no model change).~~
-   **DONE 2026-08-11** — `gate_real_run()` + `sim_real_gate_ui` / `sim_real_gate_info`; calibration
-   now re-runs from one path on both upload and gate change (see §4).
-1b. **DONE 2026-08-11** — read path aligned with the SMLM tab (raw z + canonicalize) and a
-   user-controlled axial factor pre-filled from the file's own provenance. Prerequisite for the
-   σ_z/σ_x axis ratio in 8.1b, which would otherwise be biased by 0.7 and differ per file format.
-2. ~~**8.1b** profile measurement incl. the c₄ correction and the axis ratios.~~
-   **DONE 2026-08-11** — per-axis debiased σ ± nMAD, per-trace axis ratios, and the whole `eco` /
-   trace-length vectors kept for 8.1c. The c₄ constant in the original plan was wrong for a median
-   aggregator and was replaced (§4). Recovery verified against known σ and anisotropy.
-3. **8.1c** per-localization anisotropic σ + empirical trace lengths + `eco`/`efo` in the CSV export.
-   *This is where §7.2 and §7.3 close.*
-4. **8.2** the ε(t) model, the floor, the "never resolvable" verdict, and the relabelled curves.
-
-Steps 1–3 are additive and low-risk. Step 4 changes a headline number the tab already reports, so it
-lands last and keeps the old curve visible beside the new one.
-
-### 8.4 Open question
-
-**Whose spacing sets `d_NN`** — the ground-truth molecules (what you want to resolve) or the detected
-clusters (what you can actually see)? They differ by exactly the labeling efficiency: at 50 %
-efficiency the detected spacing is ~1.4× the true spacing, so using it reports a *shorter* time to
-resolve a structure you are only half seeing. Ground-truth spacing is the honest default for the
-"can I resolve my hypothesised structure" question; the detected spacing answers "can I resolve what
-I got", which is a different question worth exposing separately.
+**The timeline updates live, the point cloud on Generate.** After a parameter change, the localizations,
+RMSE and Precision Budget still show the last Generate until it is pressed again.

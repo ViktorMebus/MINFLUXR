@@ -4610,7 +4610,7 @@ smlm_server <- function(input, output, session) {
           "Methods: gyration-tensor shape anisotropy (Rudnick &amp; Gaspari, <i>J. Phys. A</i> <b>19</b>, L191, 1986); ",
           "linear/planar/spherical anisotropy coefficients (Westin et&nbsp;al., <i>MICCAI/Med. Image Anal.</i>, 1997/2002); ",
           "minimum-spanning-tree backbone (Prim, 1957). ",
-          "The labeling-displacement inverse (candidate-GT estimation, complex-radius merge, inward linkage displacement, stoichiometric cross-check) is a heuristic specific to this tool and checked against the simulator rather than against a known structure. Treat it quantitatively with care and cite it as exploratory.")))
+          "The labelling inverse is a heuristic of this app, checked against the simulator rather than a known structure. Cite it as exploratory.")))
   }
 
   # ── GT counting-standard calibration ───────────────────────────────────────
@@ -4845,7 +4845,7 @@ smlm_server <- function(input, output, session) {
     tagList(
       tags$ul(style = "margin:4px 0 8px 0;padding-left:18px;", rows),
       div(style = "font-size:12px;color:#7f8c8d;line-height:1.45;",
-          HTML("Shape is <b>inferred from the point distribution</b> (you don't declare it): from the gyration-tensor eigenvalues (linearity / planarity / sphericity) plus a hollow-centre test for rings. Contour length = diameter of the backbone's minimum spanning tree, so it follows curves where the straight extent underestimates. Spacing = median nearest-neighbour distance between estimated points."),
+          HTML("Shape is <b>inferred</b> from the gyration-tensor eigenvalues and a hollow-centre test for rings. Contour length follows the minimum spanning tree, so it tracks curves; spacing is the median nearest-neighbour distance."),
           gt_exploratory_note())
     )
   })
@@ -8689,7 +8689,7 @@ smlm_server <- function(input, output, session) {
     fp$largest_frac  <- cmp$largest_frac
     if (is.finite(cmp$largest_frac) && cmp$largest_frac < 0.5) {
       showNotification(sprintf(
-        "Window rejected: it came out in %d pieces with only %.0f%% of the area in the largest, i.e. it is tracking your structures rather than the cell - using the bounding box instead, since a window drawn round the clusters would erase the clustering it is meant to measure. Check the support map.",
+        "Footprint rejected: %d pieces, %.0f%% of the area in the largest, so it traces the structures rather than the cell. Using the bounding box instead; check the support map.",
         cmp$n, 100 * cmp$largest_frac), type = "warning", duration = 12)
       bb <- bbox_support(sp, use_3d = use_3d, h_nm = h)
       bb$rejected_footprint <- TRUE
@@ -8780,7 +8780,7 @@ smlm_server <- function(input, output, session) {
     fell_back <- grepl("bounding box", lg$window, fixed = TRUE)
     if (!any(fell_back) || all(fell_back)) return(invisible(NULL))
     showNotification(HTML(sprintf(
-      "<b>These files were not measured the same way.</b> %s fell back to the bounding box while the rest used the sample footprint. The bounding box counts empty field as sample and K scales with the window area, so those curves are inflated relative to the others - the sets are not on one scale. Check the support map, or turn the footprint window off so every file is measured by the same method.",
+      "<b>These files were not measured the same way.</b> %s fell back to the bounding box while the rest used the footprint, so their curves are not on the same scale. Check the support map, or turn the footprint window off for all files.",
       paste(utils::head(lg$dataset[fell_back], 4), collapse = ", "))),
       type = "warning", duration = NULL)
     invisible(NULL)
@@ -13241,11 +13241,11 @@ smlm_server <- function(input, output, session) {
     fb <- rows$dataset[grepl("bbox", rows$window_mode %||% "", fixed = TRUE)]
     if (length(fb) == nrow(rows))
       showNotification(HTML(sprintf(
-        "<b>Every window is a bounding box</b>, so these are densities per unit of imaged frame, not per unit of cell. Set the estimator mode to <b>grid</b> or <b>kde</b> under Density &amp; area normalization; <b>bbox</b> and <b>hull</b> produce no cell mask, which the calibrated eps and the dispersion index both need. (%s)",
+        "<b>Every window is a bounding box</b>, so densities are per imaged frame, not per cell. Set the estimator to <b>grid</b> or <b>kde</b> under Density &amp; area normalization. (%s)",
         rows$window_mode[1])), type = "warning", duration = NULL)
     else if (length(fb))
       showNotification(HTML(sprintf(
-        "<b>No footprint for %s.</b> Those files fell back to the bounding box, so their density is per unit of imaged FRAME rather than per unit of cell, and they are not on the same scale as the rest. Raise the gap-fill radius or check the support map.",
+        "<b>No footprint for %s.</b> Those files fell back to the bounding box and are not on the same scale as the rest. Raise the gap-fill radius or check the support map.",
         paste(utils::head(fb, 4), collapse = ", "))), type = "warning", duration = NULL)
   })
 
@@ -14487,21 +14487,26 @@ smlm_server <- function(input, output, session) {
         bw_sweep <- span * exp(seq(log(0.004), log(0.2), length.out = 12))
     }
 
+    # Single-file panel (active file only), so there is no set to share a gap-fill
+    # radius with and the per-file plateau is the right choice here.
+    kde_sup <- spatial_support_of(df, FALSE)
     res <- withProgress(message = "KDE co-localization...", value = 0.3,
       compute_kde_coloc(pts1[[ax[1]]], pts1[[ax[2]]],
                         pts2[[ax[1]]], pts2[[ax[2]]], bw, n_grid,
                         bw_sweep = bw_sweep, costes_nsim = costes_n,
                         null_mode = input$kde_null_mode %||% "shift",
-                        # Single-file panel (active file only), so there is no set
-                        # to share a gap-fill radius with and the per-file plateau
-                        # is the right choice here.
-                        support = spatial_support_of(df, FALSE)))
+                        support = kde_sup))
     if (is.null(res)) {
       showNotification("KDE computation failed.", type = "warning")
       kde_coloc_results(NULL); return()
     }
     res$dataset <- nm
     res$ax      <- ax
+    # Whether the randomisation ran inside the sample footprint. With edge correction
+    # on and the footprint switch off, the window passed in is still the bounding
+    # box, so the switch (and an accepted footprint) is what decides the reading.
+    res$footprint_null <- isTRUE(input$spatial_use_support) && !is.null(kde_sup) &&
+                          !isTRUE(kde_sup$rejected_footprint)
     kde_coloc_results(res)
   })
 
@@ -14566,13 +14571,18 @@ smlm_server <- function(input, output, session) {
         # Measured false-positive rates (simulation, see compute_kde_coloc header):
         # signal spread over the whole window -> shift 3% / csr 3%; signal confined to
         # one cell inside a larger window -> shift 53% / csr 93%, vs the 5% a calibrated
-        # test should give. Both nulls randomize over the bounding box, not the cell.
+        # test should give over the bounding box. Drawn inside the footprint instead,
+        # the test is conservative, so the caveat depends on which window was used.
         if (identical(r$null_mode, "csr")) tags$p(
           HTML("&#9888; The uniform-CSR null tests against complete spatial randomness, so it largely reports &ldquo;both channels are non-uniform&rdquo; and rejects far too readily. Prefer the <b>random-shift</b> null."),
           style = "font-size:12px; margin:0; color:#b26a00;")
         else tags$p(
-          HTML("&#9888; Calibrated only when the signal fills the field. If it is confined to a small part of the view, randomizing over the bounding box makes this reject too readily - treat a low p as weak evidence and confirm with g&#8321;&#8322;(r) against its CSR envelope."),
-          style = "font-size:12px; margin:0; color:#b26a00;"))
+          HTML(if (isTRUE(r$footprint_null))
+                 "Null drawn inside the sample footprint, so the test is conservative: p &gt; 0.05 can be quoted as not significant. Take a positive claim from g&#8321;&#8322;(r)."
+               else
+                 "&#9888; Null drawn over the bounding box, so for a structure filling part of the view this rejects too readily. Switch the footprint window on, or confirm with g&#8321;&#8322;(r)."),
+          style = paste0("font-size:12px; margin:0; color:",
+                         if (isTRUE(r$footprint_null)) "#555;" else "#b26a00;")))
     } else NULL
     tags$div(
       style = "margin-top:6px;",

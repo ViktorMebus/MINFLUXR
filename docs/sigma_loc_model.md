@@ -1,8 +1,8 @@
 # Localization precision for MINFLUX tracking: the model, its derivation, and its calibration
 
 This document derives the localization-error model the Tracking tab uses, states what each term is
-for, and shows what the immobile-sample data does and does not support. It supersedes the
-earlier survey of estimation options.
+for, explains why σ cannot be read off the trajectory, and describes how to calibrate the model on an
+immobile sample.
 
 ---
 
@@ -148,122 +148,76 @@ $\sqrt{R} \times$ rms step. Blur and precision enter the covariance in the same 
 built on the increment covariance can separate them from a single trajectory. This is an
 identifiability limit, not a choice of estimator. MLE inherits it.
 
-### 3.2 The measurement that confirms it
+### 3.2 What an immobile sample shows
 
-On an immobile sample all apparent motion is instrumental, so the MSD should be flat at $4\sigma^2$
-if the only error were white localization noise. Pooled over the fixed-cell datasets at $L = 100.8$ nm:
-
-| lag k | τ (ms) | MSD (nm²) | local log-log slope |
-|---|---|---|---|
-| 1 | 0.20 | 140 | – |
-| 2 | 0.41 | 247 | 0.80 |
-| 4 | 0.82 | 425 | 0.80 |
-| 7 | 1.43 | 596 | 0.40 |
-| 15 | 3.07 | 732 | 0.21 |
-| 45 | 9.22 | 1019 | 0.40 |
-| 174 | 35.7 | 1623 | 0.32 |
-
-Three regimes: a steep sub-diffusive rise at the shortest lags, a shoulder near 700–800 nm² around
-2–4 ms, then a slow secondary creep. Neither a plateau (pure white noise) nor a straight line (white
-noise plus free diffusion).
+On an immobile sample all apparent motion is instrumental, so the MSD would be flat at $4\sigma^2$ if
+the only error were white localization noise. On a feedback-tracked instrument it is not: it rises
+sub-diffusively at short lags, flattens into a shoulder and then creeps upward. It is neither a plateau
+(white noise alone) nor a straight line (white noise plus free diffusion).
 
 **This is a feedback signature.** The TCP center is updated from the previous, noisy estimate with a
-gain $g < 1$, so the error obeys $\varepsilon_i \approx (1-g)\varepsilon_{i-1} + g\,\eta_i$ — an AR(1)
-process, which relaxes on a timescale $t_c/g$ and looks sub-diffusive over exactly the lags we can
-observe. The residual motion is not sample motion and not free diffusion; it is the localization
-noise itself, filtered through the tracking loop.
+gain $g < 1$, so the error obeys $\varepsilon_i \approx (1-g)\varepsilon_{i-1} + g\,\eta_i$, an AR(1)
+process that relaxes on a timescale $t_c/g$ and looks sub-diffusive over exactly the lags that can be
+observed. The residual motion is the localization noise itself, filtered through the tracking loop.
 
 Two consequences:
 
-1. **The immobile MSD has power at every lag we can reach**, so there is no lag short enough for the
-   noise to stand alone. The wander and the noise are the same physical quantity, not two independent
+1. **The immobile MSD has power at every reachable lag**, so there is no lag short enough for the
+   noise to stand alone. The wander and the noise are one physical quantity, not two independent
    processes to be separated.
-2. **Fitting `MSD(k) = 4σ² + 4D_w·k·t_c` over short lags overestimates σ.** The curve is concave,
-   so a straight-line fit extrapolated back to zero returns an intercept above the true value.
+2. **Fitting `MSD(k) = 4σ² + 4D_w·k·t_c` over short lags overestimates σ.** The curve is concave, so a
+   straight-line fit extrapolated back to zero returns an intercept above the true value.
 
 ### 3.3 The internal-replicate channel, and why it fails too
 
-Each trace opens with an iteration ramp: the same molecule localized at $L$ = 302.4, 151.2 and 100.8 nm
-within ~1.7 ms, with **disjoint photons**. If those three errors were independent, a three-cornered-hat
-solve would give σ at each L with no motion model at all:
+Each trace opens with an iteration ramp: the same molecule localized at successively smaller $L$ within
+a few milliseconds, with **disjoint photons**. If those errors were independent, a three-cornered-hat
+solve would give σ at each L with no motion model:
 
 ```math
 \sigma_2^2 = \tfrac{1}{2}\left(V_{12} + V_{23} - V_{13}\right), \qquad V_{jk} = \text{Var}(x_j - x_k)
 ```
 
-and any common-mode drift cancels identically, because $\Delta t_{13} = \Delta t_{12} + \Delta t_{23}$.
-
-Run on 4067 fixed-cell triples: $V_{12} = 16.56^2$, $V_{23} = 8.54^2$, $V_{13} = 21.02^2$, giving
-$\sigma_2^2 = -47$ nm². **Negative**, so the premise is false: consecutive iteration errors are
-positively correlated, again through the feedback loop that centers each iteration on the previous
-one's estimate. The replicates are not independent, and the channel is unusable.
+and any common-mode drift would cancel, because $\Delta t_{13} = \Delta t_{12} + \Delta t_{23}$. The
+premise fails for the same reason as §3.2: each iteration is centered on the previous one's estimate,
+so consecutive iteration errors are positively correlated, and the solve can return a negative
+variance. The channel cannot isolate σ.
 
 ---
 
-## 4. What the immobile data does establish
+## 4. Testing the model on an immobile sample
 
 Since σ cannot be isolated, test the *model* instead. Bin segments by their own median ECO, fit the
 short-lag MSD within each bin, and regress the intercept on $\langle 1/N\rangle$. If
 $\sigma^2 = L^2/(a^2 N)$ the relation is linear **through the origin**; a photon-independent error
 floor (TCP placement, background, stage) would appear as a positive intercept.
 
-| sample | L (nm) | bins | N range | fit | R² | implied a |
-|---|---|---|---|---|---|---|
-| fixed cells | 100.8 | 39 | 24–41 | $\sigma^2 = 2247/N - 46$ | 0.66 | 3.80 |
-| fixed cells | 151.2 | 25 | 25–48 | $\sigma^2 = 3767/N - 51$ | 0.43 | 3.50 |
-| beads | 100.8 | 5 | 23–27 | $\sigma^2 = 2260/N - 25$ | 0.08 | 2.52 |
-| beads | 151.2 | 12 | **25–144** | $\sigma^2 = 7489/N - 19$ | **0.94** | 1.84 |
+**The prefactor is bracketed, not measured.** Because §3.2 shows the MSD intercept is biased *upward*,
+the fitted $a$ is a **lower bound on $a$**, equivalently an **upper bound on σ**. Theory gives the other
+side, $a \le 4$. The result is a window on σ, which is a stronger statement than a point estimate.
 
-**1. The functional form is right.** Every intercept is negative, i.e. consistent with zero: there is
-no photon-independent error floor. The strongest single line is the bead L151 set, where the photon
-count spans 6× and $\sigma^2 \propto 1/N$ holds at R² = 0.94. The model is not fitted to survive; it
-had a free way to fail and did not.
+**Calibrate on fixed cells labelled as the live sample, not on beads.** A bead is an extended, bright,
+coverslip-mounted object: it is not a point emitter, it sits at a different axial position relative to
+the doughnut, and its brightness drives the tracker harder, so it brackets $a$ only loosely.
 
-**2. The prefactor is bracketed, not measured.** Because §3.2 shows the MSD intercept is biased
-*upward*, the fitted $a$ is a **lower bound on $a$** — equivalently an **upper bound on σ**. Theory
-gives the other side, $a \le 4$. So for the fixed cells:
-
-```math
-3.80 \le a \le 4.00 \quad (L = 100.8\ \text{nm}) \qquad
-3.50 \le a \le 4.00 \quad (L = 151.2\ \text{nm})
-```
-
-At $L = 100.8$ that is a **5% window on σ**. This is a much stronger statement than a point estimate:
-whatever the true prefactor is, σ on this instrument is within 5% of the theoretical MINFLUX bound.
-
-**3. Beads are the wrong calibration standard.** They bracket only $1.84 \le a \le 4$. A 40 nm bead is
-an extended, bright, coverslip-mounted object: it is not a point emitter, it sits at a different axial
-position relative to the doughnut, and its brightness drives the tracker harder. Use fixed cells
-labelled exactly as the live sample.
-
-**4. There is mild evidence for the beam-size term.** $a$ falls from 3.80 to 3.50 between $L$ = 100.8
-and 151.2, i.e. σ rises ~8.6% faster than $\propto L$. Solving the Vogler denominator
-$\left|1 + \ln 2\,(L/\nu)^2\left((2x/L)^2 - 1\right)\right|$ for that excess gives $\nu \approx 255$ nm,
-a plausible doughnut FWHM. But two L values cannot distinguish a beam term from an L-dependent
-background difference, so this stays **off by default**. The practical escape is that you do not need
-the L-scaling to be right — **calibrate at the L you actually track at**, and the question is moot.
+**The beam-size term needs more than two diameters.** A prefactor that falls as $L$ grows suggests the
+beam-size denominator, but two $L$ values cannot distinguish it from an L-dependent background
+difference, so it is off by default. **Calibrate at the $L$ you track at**, and the L-scaling question
+does not arise.
 
 ---
 
 ## 5. The wander floor $D_w$
 
-The same fits give the wander as the short-lag slope. It is large and it scales with $L$:
+The same fits give the wander as the short-lag slope. Because it is the localization noise fed back
+through the loop, it scales the way $\sigma^2$ does: it falls with photon count and worsens steeply
+with $L$. It is therefore **not a constant of the instrument** and must never be subtracted silently:
+report $D - D_w$ beside $D$, and flag when the floor is a large fraction of the measurement.
 
-| sample | L (nm) | $D_w$ (nm²/ms) |
-|---|---|---|
-| fixed cells | 100.8 | 70 – 380 |
-| fixed cells | 151.2 | 297 – 1132 |
-| beads | 100.8 | 22 – 141 |
-
-Because it is the localization noise fed back through the loop, it scales the way $\sigma^2$ does:
-it falls with photon count and worsens with $L$. It is therefore **not a constant of the instrument**
-and must never be subtracted silently — report $D - D_w$ beside $D$ and flag when the floor is a
-large fraction of the measurement.
-
-Note also that $D_w$ from a straight-line short-lag fit is a *rate over those lags*, not a diffusion
-coefficient: the underlying process relaxes rather than diffuses. Treat it as "apparent diffusivity
-of a stationary target over the same lags you fit your data on", which is exactly the comparison that
-matters, and quote the lag range with it.
+$D_w$ from a straight-line short-lag fit is a *rate over those lags*, not a diffusion coefficient: the
+underlying process relaxes rather than diffuses. Treat it as the apparent diffusivity of a stationary
+target over the lags you fit your data on, which is the comparison that matters, and quote the lag
+range with it.
 
 ---
 
@@ -276,76 +230,55 @@ matters, and quote the lag range with it.
 | `tim` | required | cycle time, gap structure, and the lag axis. |
 | `itr` | required | select the final (reiterated) iteration. |
 | `vld` | required | drop invalid records. |
-| **EFO** | **not needed for σ** | $= \text{ECO}/t$; adds no information the pair (ECO, $t_c$) lacks. Useful for QC (fiducial detection), not for precision. |
-| **cfr** | **not needed** | tested below. |
+| **EFO** | **not needed for σ** | $= \text{ECO}/t$; adds nothing the pair (ECO, $t_c$) lacks. Useful for QC (fiducial detection). |
+| **cfr** | **not needed for σ** | it also reflects how well the emitter is centered, so it is not a clean background measure. |
 | `dcr` | not needed for σ | axial/color discrimination. |
 
-**The cfr test.** `cfr` is the center-to-outer frequency ratio, the natural background/SBR indicator,
-so if background mattered beyond the photon count, high-`cfr` localizations should be noisier at
-matched ECO. Over 1.70 million single-cycle steps from the fixed cells, MSD(1) by cfr quartile within
-ECO tertiles:
-
-| ECO | cfr Q1 | Q2 | Q3 | Q4 | ratio Q4/Q1 |
-|---|---|---|---|---|---|
-| ~27 | 181 | 180 | 173 | 168 | 0.93 |
-| ~39 | 116 | 110 | 105 | 102 | 0.88 |
-| ~59 | 60 | 47 | 40 | 43 | 0.71 |
-
-The effect is 7–12% in MSD, so ~4–6% in σ, and it runs **the wrong way** for a background
-explanation: higher cfr gives *tighter* steps, because cfr also tracks how well-centered the emitter
-is. There is no case for adding it. (The third row is confounded — ECO itself varies 59–79 inside
-that tertile.)
-
-**Conclusion: ECO and L_TCP are sufficient.** One photon count, one pattern diameter, one prefactor.
+**ECO and L_TCP are sufficient:** one photon count, one pattern diameter, one prefactor.
 
 ---
 
-## 7. Is Vogler's approach the right one for MINFLUX?
+## 7. The photon-budget model for MINFLUX
 
-**Yes for the form, with two qualifications.**
+**The form is right, with two qualifications.**
 
-The photon-budget CRLB is the correct channel, and it is the only one available: §3 shows the
-trajectory cannot supply σ independently on a feedback-tracked instrument, no matter which estimator
-is used. Vogler's Eq. 1 is that CRLB with the two refinements that matter — the emitter-offset term
-(essential for tracking, where the molecule is never at the TCP center) and the beam-size denominator.
+The photon-budget CRLB is the correct channel, and the only one available: §3 shows the trajectory
+cannot supply σ independently on a feedback-tracked instrument, whatever the estimator. Eq. 1 of Vogler
+et al. 2025 is that CRLB with the two refinements that matter: the emitter-offset term, essential for
+tracking, where the molecule is never at the TCP center, and the beam-size denominator.
 
-The qualifications:
-
-1. **The beam-size term should be opt-in, not default.** It requires ν, an instrument constant most
-   users cannot state, and its effect is confined to $L \to \nu$. Our own data supports it only
-   weakly. Defaulting it on imports an unverifiable number into everyone's σ.
-2. **The prefactor is not universal.** Vogler's parameterization implicitly fixes the collection
-   efficiency, background and estimator of one microscope. Exposing $a$ with the ideal 4 as its
-   ceiling is what makes the model portable, and gives every user a self-check: if their calibration
-   returns $a > 4$, something is wrong (usually σ underestimated by an over-cleaned dataset); if it
-   returns $a \ll 4$, background or alignment dominates and the photon model alone will understate σ.
+1. **The beam-size term is opt-in.** It requires ν, an instrument constant most users cannot state,
+   and its effect is confined to $L \to \nu$. Defaulting it on would import an unverifiable number into
+   every σ.
+2. **The prefactor is not universal.** A fixed prefactor implicitly fixes the collection efficiency,
+   background and estimator of one microscope. Exposing $a$, with the ideal 4 as its ceiling, makes the
+   model portable and gives a self-check: a calibration returning $a > 4$ means something is wrong
+   (usually σ underestimated by an over-cleaned dataset), and $a \ll 4$ means background or alignment
+   dominates, so the photon model alone will understate σ.
 
 ---
 
-## 8. Recommendation
+## 8. How the app uses it
 
-**Use $\sigma_i = \dfrac{L_\text{TCP}}{a\sqrt{N_i}}\left[1 + c\left(x/L\right)^2\right]$, per localization,
-with $a$ defaulting to 4.**
+$\sigma_i = \dfrac{L_\text{TCP}}{a\sqrt{N_i}}\left[1 + c\left(x/L\right)^2\right]$ per localization,
+with $a$ defaulting to 4. The default is the theoretical bound rather than a fitted number because:
 
-Defaulting to the theoretical bound rather than to a fitted number is the more honest choice, because:
+- a fitted value is biased in a known direction (§3.2), so it is a bound, not an estimate;
+- $a = 4$ makes σ a stated *lower bound* on the localization error, the conservative direction for
+  every downstream test that subtracts σ (JDD, confinement, D-map, HMM);
+- it is portable with no calibration, and any user can improve on it.
 
-- the fitted value is provably biased in a known direction (§3.2), so it is a bound, not an estimate;
-- $a = 4$ makes σ a stated *lower bound* on the localization error, which is the conservative direction
-  for every downstream test that subtracts σ (JDD, confinement, D-map, HMM) — those tests are then
-  anti-conservative in D and conservative in "is there structure", which is the right way round;
-- it is portable with no calibration at all, and any user can improve on it.
+In practice:
 
-Then:
-
-1. **Report the bracket, not a point value.** The calibration panel should show
-   "σ = 4.85 nm at N = 27 (a = 4, ideal); immobile-sample upper bound 5.11 nm (a = 3.80)".
-2. **Keep $a$ user-adjustable, with 4 as a hard upper limit** and a warning if a calibration returns
-   more.
-3. **Calibrate on fixed cells, not beads**, at the L you will track at, and treat the result as an
-   upper bound on σ.
+1. **Report the bracket**: σ at $a = 4$, and the immobile-sample bound when one has been measured.
+2. **$a$ is user-adjustable, with 4 as its upper limit.**
+3. **Calibrate on fixed cells, not beads**, at the $L$ you track at, and treat the result as an upper
+   bound on σ.
 4. **Report $D_w$ alongside D**, never subtract it, and quote the lag range it was fitted over.
-5. **Fix the offset coefficient** $c$: the exact 1D two-beam value is 4, the app uses 2, and the
-   correct value for the 2D hexagonal TCP should be derived rather than inherited.
+
+**Limitation: the offset coefficient $c$.** The app uses $c = 2$. The exact value for a 1D two-beam
+pattern is 4, and the value for the 2D hexagonal TCP has not been derived. The term matters only when
+the emitter moves a sizeable fraction of $L$ within one localization, i.e. for fast diffusion.
 
 ### What to report in a methods section
 
@@ -355,27 +288,3 @@ Then:
 > identically labelled sample gave an upper bound of a ≥ X.XX from the short-lag MSD intercept,
 > bounding σ within X% of the ideal. The apparent diffusion coefficient of that immobile sample was
 > D_w = XXX nm²/ms over lags 1–5, quoted alongside all reported D.
-
----
-
-## Appendix: reproducing the numbers
-
-The analyses in §3–§6 were one-off scripts against local `Test data/`, which is gitignored, so they
-are not part of the repo — they could not run in a fresh clone. What they did, in enough detail to
-rewrite:
-
-Common preparation: read the `.npy`, keep `vld == TRUE` and the final iteration, split traces at gaps
-above 7 cycles, trim leading/trailing dark cycles of 3+, keep segments with continuity ≥ 0.6 and
-≥ 150 localizations. `L` follows from the iteration count (2 → 302.4 nm, 3 → 151.2, 4 → 100.8);
-`t_c` is the modal single-cycle Δt.
-
-| § | analysis |
-|---|---|
-| 3.2 | pooled MSD over log-spaced lags 1–300, all fixed-cell files at L = 100.8; report the local log-log slope |
-| 3.3 | three-cornered hat on the opening iteration ramp: first record of itr 1/2/3 per trace, robust variance of each pairwise coordinate difference, then $\sigma_2^2 = (V_{12}+V_{23}-V_{13})/2$ |
-| 4, 5 | bin segments into ECO quartiles, fit `MSD(k) = 4σ² + 4D_w k t_c` on lags 1–5 within each bin, regress the intercept on $\langle 1/N
-angle$ weighted by pair count |
-| 6 | single-cycle squared steps only; cross-tabulate mean MSD(1) by cfr quartile within ECO tertiles |
-
-Datasets: `Test data/Fixed Tracking datasets/` (fixed E. coli, JF646, three strains),
-`Test data/Fixed beads dataset/` (40 nm red beads on coverslip).

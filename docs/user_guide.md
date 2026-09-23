@@ -564,11 +564,9 @@ De-blinking is a **global** switch (Display tab), and every batch analysis re-de
 enabling it once applies it to all loaded datasets - there is nothing to set per file.
 
 The panels with a **Unit** selector (Batch NN, Ripley's L, g(r)) default to **Auto**, which resolves to
-de-blinked molecules when de-blinking is on and trace IDs when it is off. That default exists because
-the two halves used to be able to disagree silently: a panel left on trace IDs would ignore de-blinking
-while its neighbours honoured it, and choosing a molecule unit with de-blinking *off* asked for
-molecules that were never created, so the panel came back empty with no explanation. Choosing a
-molecule unit explicitly while de-blinking is off now falls back to trace IDs with a warning rather
+de-blinked molecules when de-blinking is on and trace IDs when it is off, so every panel follows the
+same de-blinking state. Choosing a molecule unit explicitly while de-blinking is off falls back to trace
+IDs with a warning rather
 than returning nothing.
 
 Note the **Crowding** panel needs unclustered background traces to reference its timing shift against.
@@ -1346,9 +1344,8 @@ Method (3) deliberately uses the **spacing between clusters**, not the mode. Thi
 
 #### What the interval structure looks like
 
-The comb is essentially exact: on real data the interval law regresses at R² > 0.999997, and each
-cycle-count peak is a near-delta spike rather than a broadened distribution - the within-cycle spread
-is a few hundredths of a percent. Two properties of the panel follow from that:
+The comb is essentially exact: each cycle-count peak is a near-delta spike rather than a broadened
+distribution, with a within-cycle spread of a few hundredths of a percent. Two properties of the panel follow from that:
 
 - **Binning is one bar per cycle count**, with edges on the classification boundaries
   $\text{SW} + (k \pm \tfrac{1}{2}) t_c$. Fixed-width bins alias against the comb and put bar centres
@@ -1554,9 +1551,9 @@ app-wide value and nothing downstream consumes it.
 
 #### Instrument constants, and porting to another microscope
 
-Three values in *Acquisition Parameters* describe the microscope itself. The
-Treat the defaults as starting points. Measure them on the system that produced the data, or state
-in the methods that the defaults were used.
+Three values in *Acquisition Parameters* describe the microscope itself. Treat the defaults as
+starting points: measure them on the system that produced the data, or state in the methods that the
+defaults were used.
 
 | field | what it is | how to measure |
 |---|---|---|
@@ -1565,7 +1562,10 @@ in the methods that the defaults were used.
 | **wander floor $D_w$** | apparent diffusion the tracking loop produces on a stationary target | the slope of the same MSD fit |
 
 Fixed cells labelled as usual are a better calibration sample than dye on glass, because $a$ should
-absorb the background of the real optical environment.
+absorb the background of the real optical environment. Tracker wander is sub-diffusive, so a straight
+line fitted to short lags lands above the true intercept and inflates σ: the measured $a$ is a lower
+bound, and the true value lies between it and 4. Two or more diameters also test whether σ ∝ L holds,
+which is what the beam FWHM ν field is for if it does not.
 
 #### The wander floor
 
@@ -1580,6 +1580,17 @@ photon budget, so one constant would over-correct dim tracks and under-correct b
 A D of the same order as the floor is not resolved above the instrument. Because the floor falls
 faster than the photon count rises, the effective lever is to **raise the photon limit**, trading
 $D_\text{max}$ headroom for a floor you can get under.
+
+#### What to report in a methods section
+
+- The acquisition parameters from the sequence: TCP diameter of the repeated iteration, photon limit,
+  dwell time, damping, pattern and maxOffTime.
+- The values measured from the data: cycle time, median ECO and EFO, time to localization, and the
+  number of tracks and localizations after cleaning, with the data-selection funnel.
+- The three instrument constants above, and how each was obtained.
+- D and σ_loc, with the route used for each.
+
+Table 2 of Vogler et al. 2025 is a good template.
 
 #### What the simulator round-trip still covers
 
@@ -1627,12 +1638,12 @@ The panel reports this as a percentage and warns below 15%.
 
 #### Lateral vs axial precision
 
-The pooled σ averages x, y **and** z, but MINFLUX axial precision is typically worse than lateral, so
-one pooled number over-states $\sigma_{xy}$ and under-states $\sigma_z$. Both are computed separately,
-with the anisotropy ratio $\sigma_z / \sigma_{xy}$ (reported as `sig_aniso`). Above 1.3 the panel warns and
-offers the lateral value to enter manually - the **D-map is an x–y map and the HMM never reads z**, so
-feeding those a z-inflated floor makes them *over*-subtract noise. The app-wide default is left pooled,
-since changing it silently would move every existing result.
+The pooled σ averages x, y **and** z, and in MINFLUX the axial precision differs from the lateral one,
+usually by being tighter. One pooled number then misstates $\sigma_{xy}$. Both are computed separately,
+with the ratio $\sigma_z / \sigma_{xy}$ (reported as `sig_aniso`). When the two differ by more than 1.3×
+in either direction, the panel warns and gives the lateral value to enter manually: the **D-map is an
+x–y map and the HMM never reads z**, so a pooled floor makes them over-subtract noise when z is wider
+and under-subtract it when z is tighter. The app-wide default stays pooled.
 
 #### Diagnostics and QC flags
 

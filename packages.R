@@ -246,7 +246,7 @@ TCP_CRLB_PREFACTOR <- 4
 # wavelength, so it belongs to the instrument, not the software. It is exposed as
 # an Acquisition Parameter for exactly that reason. An immobile-sample run at two or
 # three different L over-determines nu and tests the model - see
-# docs/tracking_sigma_and_cve_plan.md section 7.
+# docs/sigma_loc_model.md.
 # 0 = OFF, i.e. the large-beam (nu -> infinity) limit, which is what this microscope
 # measures. Vogler Eq. 1's denominator predicts sigma*sqrt(N)/L rising 39% from
 # L = 100.8 to 151.2 nm; the fixed-cell series measured a ratio of **1.04**. The

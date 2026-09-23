@@ -45,3 +45,7 @@ private/
 # next to each one is the tracked result; re-running the script recreates the log.
 tests/validation/results/*.log
 tests/validation/results/*_before_fix.csv
+
+# Validation runs on real acquisitions: the scripts are tracked, their results stay local.
+tests/validation/results/fiducial_labelled.csv
+tests/validation/results/hotspot_realdata_recheck.csv

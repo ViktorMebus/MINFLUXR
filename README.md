@@ -88,6 +88,11 @@ localization precision that the MSD, JDD, confinement, HMM and D-map panels all 
 
 ## How far to trust a panel
 
+Analysis methods specific to MINFLUX are thinly covered in the literature. Most panels here are
+MINFLUXR's own adaptation of an established method to MINFLUX data, and some are tools built for it.
+They are one considered reading of how such data should be handled, not a community standard, so
+check a result against the method box before relying on it.
+
 Every analysis panel carries a rating chip in its method box:
 
 | Chip | Meaning |
@@ -112,7 +117,6 @@ results are in `tests/validation/`.
 | [`docs/simulator.md`](docs/simulator.md) | The Simulator tab: what each stage models and where it departs from real MINFLUX |
 | [`docs/simulation_module.md`](docs/simulation_module.md) | The ground-truth diffusion simulator: model, validation and the CVE round-trip on D |
 | [`docs/sigma_loc_model.md`](docs/sigma_loc_model.md) | The tracking localization-precision model: derivation and immobile-sample calibration |
-| [`docs/tracking_sigma_and_cve_plan.md`](docs/tracking_sigma_and_cve_plan.md) | Record of the σ_loc / CVE decisions, including the fixed-cell and bead measurements of tracker wander |
 | [`THIRD-PARTY.md`](THIRD-PARTY.md) | External work this builds on, what was taken and what was changed |
 | File headers in `helpers_*.R`, `server_*.R`, `R/est_*.R` | Code architecture: each file opens with a map of its contents, data flow and conventions |
 

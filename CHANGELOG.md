@@ -69,6 +69,21 @@ First public release (Zenodo).
 
 ### Documentation, licensing and tests
 
+- Documentation and in-app text describe what each tool does and where it stops being reliable.
+  Help text in the Tracking tab is one or two sentences per control, with the longer explanations
+  in `docs/user_guide.md` and `docs/MINFLUX_analysis_methods.md`.
+- The lateral/axial precision warning fires in both directions. It previously warned only when the
+  axial precision was worse, although in MINFLUX it is usually the tighter of the two.
+- The displacement panel's resolution floor now states the right direction: confinement on a scale
+  larger than the free extent is what the test cannot see.
+- The SMLM and simulator tabs got the same pass. The documentation now says plainly that most tools
+  are MINFLUXR's own adaptation of established methods, not a community standard.
+- The fiducial scan is rated amber: it is tool-original and has not been validated by other groups.
+- The KDE co-localization caveat now follows the window the randomisation used. Inside the sample
+  footprint the test is conservative; over the bounding box it rejects too readily.
+- Help text for the bivariate L₁₂ and g₁₂ envelopes describes the random-labelling null they use by
+  default. Help text for Ripley's "all files" mode now says it draws one curve per file.
+
 - Licensed **GPL-3.0-or-later** (`LICENSE`), required by the MinSpt port. `THIRD-PARTY.md`
   records what was taken from MinSpt and pyMINFLUX and what was changed.
 - `CITATION.cff` with full author metadata and the works to cite alongside it.

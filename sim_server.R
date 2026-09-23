@@ -3954,10 +3954,9 @@ sim_server <- function(input, output, session) {
   # ── sim_trk_kcurve() - displacement vs dark-gap length ──────────────────────
   # GOAL: the diagnostic the new sampling knobs exist to drive. Mean per-axis ⟨Δx²⟩
   # against the number of cycles k a step spans, next to the free-diffusion
-  # expectation. Free Brownian motion grows linearly in k; the real tracking test files
-  # flatten out after k = 2 (see docs/tracking_sigma_and_cve_plan.md §2.3), and
-  # re-acquisition shrinkage / speed-dependent dark cycles are the candidate causes
-  # this table is meant to discriminate.
+  # expectation. Free Brownian motion grows linearly in k; real tracking data often
+  # flattens after k = 2, and re-acquisition shrinkage / speed-dependent dark cycles
+  # are the candidate causes this table is meant to discriminate.
   # returns: data.frame(k, n, msq, expect, pct) or NULL.
   sim_trk_kcurve <- reactive({
     res <- sim_trk_result(); if (is.null(res)) return(NULL)
@@ -4090,12 +4089,12 @@ sim_server <- function(input, output, session) {
         if (identical(res$motion, "confined")) {
           tau_c   <- if (res$D_um2_s > 0) (res$L_c^2 / (res$D_um2_s * 1000)) else Inf   # ms
           med_dur <- stats::median(unlist(lapply(split(df$tim, df$tid), function(t) (max(t) - min(t)) * 1000)))
-          verdict <- if (is.finite(tau_c) && tau_c < 0.5 * med_dur) "✓ RESOLVABLE" else "⚠ NOT resolvable - looks free"
-          sprintf("Confined (OU, L_c=%.0f nm): CVE gives the LOCAL D at single-cycle lags (≈ truth); confinement is an MSD plateau ≈ 2·d·L_c² in the Tracking tab. Resolvability: τ_c = L_c²/D ≈ %.3g ms vs median track duration ≈ %.3g ms → %s. (If τ_c ≳ track duration, free diffusion over a short track mimics the same extent - the key artifact to test.)",
+          verdict <- if (is.finite(tau_c) && tau_c < 0.5 * med_dur) "\u2713 resolvable" else "\u26a0 not resolvable: looks free"
+          sprintf("Confined (OU, L_c = %.0f nm): the CVE gives the local D; confinement shows as an MSD plateau \u2248 2\u00b7d\u00b7L_c\u00b2. \u03c4_c = L_c\u00b2/D \u2248 %.3g ms against a median track of %.3g ms: %s.",
                   res$L_c, tau_c, med_dur, verdict)
         }
         else if (identical(res$motion, "directed"))
-          "Directed: the CVE local D reflects the diffusive part; the drift shows as an upward-curving MSD / a sustained drift-velocity in the Tracking tab."
+          "Directed: the CVE gives the diffusive part; the drift shows as an upward-curving MSD and a sustained drift velocity."
         else if (identical(res$motion, "twostate"))
           "Two-state: mixed mobile/immobile steps - the CVE gives a population-average D; load in the Tracking tab and fit the HMM to recover the two states."
         else

@@ -658,10 +658,7 @@ tracking_server <- function(input, output, session) {
     eco_med      <- if (length(ecov)) stats::median(ecov) else NA_real_
     # Invert the blur-aware CVE for L and compare against the sequence's L. The two
     # routes share no assumptions, so agreement is a real check on the prefactor.
-    # (An implied-L cross-check used to sit here: invert the CVE sigma to recover L,
-    # as a proxy for calibrating the prefactor. The prefactor is now measured directly
-    # on a fixed sample, so it was removed rather than left to rot. See
-    # docs/tracking_sigma_and_cve_plan.md sections 10-12.)
+    # The prefactor itself is calibrated on an immobile sample; see docs/sigma_loc_model.md.
 
     list(sigma = sigma, sigma2 = sigma2, cov1 = cov1, n_pairs = length(vals),
          R_blur = R_blur, msq = msq, n_vert = n_vert, t_coll = t_coll,
@@ -760,14 +757,20 @@ tracking_server <- function(input, output, session) {
                          "the covariance carries little of it" else "not the app-wide value")))
     else NULL
 
-    # ── lateral vs axial (3D only) - a pooled sigma over-states the lateral floor,
-    #    which the x-y-only tools (D-map, 2D JDD/MSD) would then over-subtract.
+    # ── lateral vs axial (3D only) - the pooled sigma averages x, y and z, so when
+    #    the axial precision differs from the lateral one it misstates the floor the
+    #    x-y-only tools (D-map, 2D JDD/MSD) subtract. The axial spread is usually the
+    #    TIGHTER one in MINFLUX, so the warning is two-sided: an axial-tighter file
+    #    (ratio < 1/1.3) under-subtracts in those tools just as an axial-wider one
+    #    over-subtracts.
     aniso_line <- if (isTRUE(b$has_z) && is.finite(b$sigma_xy) && is.finite(b$sigma_z))
       row(dim_(sprintf("lateral %.2f  \u00b7  axial %.2f nm", b$sigma_xy, b$sigma_z)),
-          if (is.finite(b$sig_aniso) && b$sig_aniso > 1.3)
+          if (is.finite(b$sig_aniso) && (b$sig_aniso > 1.3 || b$sig_aniso < 1 / 1.3))
             warn(htmltools::HTML(sprintf(
-              "  &#9888; axial is %.1f\u00d7 wider. Enter %.2f nm for the D-map and 2D JDD.",
-              b$sig_aniso, b$sigma_xy))) else NULL)
+              "  &#9888; axial is %.1f\u00d7 %s. Enter %.2f nm (lateral) for the D-map and 2D JDD.",
+              if (b$sig_aniso > 1) b$sig_aniso else 1 / b$sig_aniso,
+              if (b$sig_aniso > 1) "wider" else "tighter",
+              b$sigma_xy))) else NULL)
     else NULL
 
     # ── how well sigma is resolved (r1 -> 0 means the per-track spread is motion) ──
@@ -962,17 +965,17 @@ tracking_server <- function(input, output, session) {
     verdict <- if (!is.finite(r_mol)) NULL
       else if (!coupled)
         htmltools::tags$p(style = "font-size:0.85em; color:#1a8a1a; margin:4px 0;",
-          sprintf("D is within 20%% across continuity (most continuous quarter %.2f× the rest), so continuity is not tracking mobility here and the continuity gate is not selecting on speed.", r_mol))
+          sprintf("D is within 20%% across continuity (most continuous quarter %.2f\u00d7 the rest): the continuity gate is not selecting on speed.", r_mol))
       else
         htmltools::tags$div(style = "font-size:0.85em; margin:4px 0;",
           htmltools::tags$p(style = "color:#B8860B; margin:0 0 3px 0;",
             htmltools::HTML(sprintf(
-              "&#9888; <b>Across molecules</b>, the most continuous quarter diffuses %.0f%% %s than the rest (D %.3g vs %.3g µm²/s). Continuity follows mobility here, so any per-track statistic is sensitive to how strictly tracks are gated.",
+              "&#9888; <b>Across molecules</b>, the most continuous quarter is %.0f%% %s than the rest (D %.3g vs %.3g \u00b5m\u00b2/s): per-track statistics depend on how strictly tracks are gated.",
               100 * abs(r_mol - 1), if (r_mol < 1) "slower" else "faster",
               tab$D_um2_s[4], attr(tab, "D_rest_um2_s")))),
           htmltools::tags$p(style = "color:#555; margin:0;",
             htmltools::HTML(sprintf(
-              "<b>On the pooled D</b>, that quarter already holds %.0f%% of the localizations, so keeping only it would move D from %.3g to %.3g µm²/s (%+.0f%%). Pooled D weights each track by its steps, which gives the long, continuous tracks most of the say either way.",
+              "<b>On the pooled D</b>, that quarter holds %.0f%% of the localizations, so keeping only it moves D from %.3g to %.3g \u00b5m\u00b2/s (%+.0f%%).",
               100 * share4, attr(tab, "D_all_um2_s"), tab$D_um2_s[4], 100 * (r_pool - 1)))))
 
     fmt <- function(v, d) ifelse(is.finite(v), formatC(v, format = "f", digits = d), "-")
@@ -991,7 +994,7 @@ tracking_server <- function(input, output, session) {
           function(h) htmltools::tags$th(h, style = "padding:1px 8px; text-align:right; border-bottom:1px solid #ccc; color:#666;")))),
         htmltools::tags$tbody(rows)),
       htmltools::tags$p(style = "font-size:0.8em; color:#888; margin:5px 0 0 0;",
-        sprintf("Tracks ranked by the continuity score (half-life %.3g cycles, as in the continuity gate) and split into four equal groups; D is the pooled CVE of each group.", H)))
+        sprintf("Four equal groups by continuity score (half-life %.3g cycles); D is the pooled CVE of each.", H)))
   })
 
 
@@ -2212,11 +2215,11 @@ tracking_server <- function(input, output, session) {
       fo    <- cc$frac_one_cycle
       verdict <- if (is.finite(fo)) {
           if (fo >= 0.7)
-            sprintf("data quality (raw): GOOD - %.0f%% single-cycle (integrated) steps.", fo * 100)
+            sprintf("data quality (raw): GOOD, %.0f%% single-cycle (integrated) steps.", fo * 100)
           else if (fo >= 0.5)
-            sprintf("data quality (raw): MODERATE - %.0f%% single-cycle steps; some dark-cycle dropouts.", fo * 100)
+            sprintf("data quality (raw): MODERATE, %.0f%% single-cycle steps; some dark-cycle dropouts.", fo * 100)
           else
-            sprintf("data quality (raw): POOR - %.0f%% single-cycle steps; frequent dark cycles.", fo * 100)
+            sprintf("data quality (raw): POOR, %.0f%% single-cycle steps; frequent dark cycles.", fo * 100)
         } else if (is.finite(ratio)) {
           if (ratio < 1.4) "data quality (raw): GOOD (typical interval ≈ 1 cycle)."
           else if (ratio < 2.3) sprintf("data quality (raw): MODERATE (typical interval ≈ %.1f cycles).", ratio)
@@ -5418,7 +5421,7 @@ tracking_server <- function(input, output, session) {
           # reads as a discrepancy unless the decomposition is spelled out.
           if (is.finite(rc$cycle) && is.finite(rc$sw))
             tags$div(style = "color:#666; font-weight:normal; margin-top:1px;",
-              sprintf("Cycle time %.4g + SW %.3g = %.4g ms between consecutive integrated localizations (the typical Δt above). The cycle time is the instrument's repeat unit, not an observable gap; it converts an interval into a cycle count.",
+              sprintf("Cycle time %.4g + SW %.3g = %.4g ms, the typical \u0394t between consecutive localizations. The cycle time itself is the repeat unit, not an observable gap.",
                       rc$cycle, rc$sw, rc$cycle + rc$sw))
           else NULL)
       else if (!is.null(cc) && is.finite(cc$cycle) && cc$cycle > 0)
@@ -5428,7 +5431,7 @@ tracking_server <- function(input, output, session) {
           sprintf("   ·   from %d Δt peaks (need ≥2 for the regression fit)", length(cc$centers %||% numeric(0)))),
       if (is.finite(hw) && hw > 0)
         tags$div(style = "color:#888; margin-top:2px;",
-          sprintf("Hardware atomic cycle = %.4g ms. If the typical Δt is ≈2× this, dark cycles dominate (the molecule is often briefly unseen between localizations).", hw)),
+          sprintf("Hardware cycle = %.4g ms. A typical \u0394t near twice this means dark cycles dominate.", hw)),
       tags$div(style = "color:#888; margin-top:2px; font-size:0.95em;",
         "This estimate is independent of the histogram bin slider (which is display-only).",
         " The peak-fit cycle time regresses the Δt density peaks (1×, 2×, 3×… the cycle) against",
@@ -5709,8 +5712,8 @@ tracking_server <- function(input, output, session) {
             tags$td(if (is.finite(r$dAICc)) sprintf("%.1f", r$dAICc) else "-"))
         })),
       tags$div(style = "color:#888; margin-top:3px;",
-        "Each cluster's own ensemble MSD is fitted with the free, confined, directed and anomalous models. On Auto the best is chosen by AICc; a cluster set to a specific model uses that one. ",
-        tags$b("ΔAICc"), " is the gap between the two best models - below ~2 they are not distinguishable on this data. MSD lag points are correlated, so this ranks models, it is not a likelihood test.")
+        "Each cluster's ensemble MSD is fitted with every model; Auto picks the lowest AICc. ",
+        tags$b("\u0394AICc"), " below about 2: the two best models are not distinguishable. It ranks models; it is not a test.")
     )
   })
 
@@ -7255,47 +7258,42 @@ tracking_server <- function(input, output, session) {
           sprintf("real Δt averages %+.1f%% vs the linearized axis (lag × cycle + SW) over the fit window. ", bias_pct),
           if (is.finite(bias_pct) && abs(bias_pct) > 1)
             tags$span(
-              "Both axes carry one SW, so they coincide at lag 1; real Δt then pulls ahead because it accrues an SW ",
-              tags$b("per step"), " while the linearized axis charges it once. This shifts ", tags$b("absolute"),
-              " D by about that much between the two, but ", tags$b("cancels for relative A-vs-B comparisons"), ". ",
+              "This shifts absolute D by about that much and cancels in comparisons between datasets. ",
               if (linear_tau)
-                "The linearized axis is in use. It is the published convention (Vogler et al. 2025) and the one absolute D was validated against. "
+                "Linearized axis in use, the published convention (Vogler et al. 2025)."
               else
-                "The real-Δt axis is in use - literal elapsed time per bin. This is a cross-check; the linearized axis (Vogler et al. 2025) is the published convention and the reference for absolute D. ")
-          else tags$span(style = "color:#3a7d3a;", "The two axes agree here (overhead negligible) - the choice doesn't matter.")),
+                "Real-\u0394t axis in use, as a cross-check; the linearized axis is the published convention.")
+          else tags$span(style = "color:#3a7d3a;", "The two axes agree here.")),
       if (is.finite(d$trust_lag))
         tags$div(style = "margin-top:2px;",
           tags$b("Pair-count trust boundary: "),
-          sprintf("counts stay ≥20%% of peak up to lag %d (≈ %.3g ms). Beyond that the MSD tail is sparse and wobbles - keep the upper fit limit at or below it.",
+          sprintf("counts stay \u2265 20%% of peak up to lag %d (\u2248 %.3g ms); keep the upper fit limit at or below it.",
                   d$trust_lag, d$trust_lag * d$tc)),
       tags$div(style = "color:#888; margin-top:2px;",
-        tags$b("Reading the right-hand (red) curve: "),
-        "a rise from 1 to a plateau is the expected shape. A pair spanning k cycles in m steps takes k·t_c + ",
-        tags$b("m"), "·SW of real time, while the linearized axis charges SW once (k·t_c + SW). So the ratio is 1 at lag 1 and rises to about 1 + (steps per cycle)·SW/t_c, at most 1 + SW/t_c. ",
+        tags$b("Red curve: "),
+        "real time over lag \u00d7 cycle. It should rise from 1 to a plateau between 1 and 1 + SW/t_c. ",
         if (is.finite(d$plateau))
           tags$span("Plateau here: ", tags$b(sprintf("%.3f", d$plateau)),
                     sprintf(" (+%.1f%%)", 100 * (d$plateau - 1)),
                     if (is.finite(d$ceiling_ratio))
-                      sprintf(", within an allowed band of 1.000–%.3f (= 1 + SW/t_c, SW ≈ %.3g ms). ",
+                      sprintf(", band 1.000\u2013%.3f (SW \u2248 %.3g ms). ",
                               d$ceiling_ratio, d$sw_eff) else ". ") else NULL,
-        "The excess over 1 is the absolute-D difference between the two axis conventions; it cancels in A-vs-B comparisons. ",
         tags$b("Cycle-time check: "),
-        "a correct cycle time puts the plateau between 1 and 1 + SW/t_c. ",
         if (identical(d$tc_flag, "too_large"))
           tags$span(style = "color:#c03030;",
-            sprintf("⚠ It is %.3f, below 1. Real elapsed time cannot be shorter than the linearized axis, so the cycle time is too large - re-check it in TSA.",
+            sprintf("\u26a0 %.3f is below 1, so the cycle time is too large. Re-check it in TSA.",
                     d$plateau))
         else if (identical(d$tc_flag, "too_small"))
           tags$span(style = "color:#c03030;",
-            sprintf("⚠ It is %.3f, above the %.3f ceiling - more overhead than one SW per step allows, so the cycle time is too small - re-check it in TSA.",
+            sprintf("\u26a0 %.3f is above the %.3f ceiling, so the cycle time is too small. Re-check it in TSA.",
                     d$plateau, d$ceiling_ratio))
         else if (identical(d$tc_flag, "ok"))
-          tags$span(style = "color:#3a7d3a;", "Within the band - consistent with the cycle time in use.")
+          tags$span(style = "color:#3a7d3a;", "Within the band, consistent with the cycle time in use.")
         else NULL,
-        " This is a one-sided bound, not a cycle-time estimate: a mildly over-estimated cycle time still lands inside the band. The plateau's level is the signal, not its flatness.",
+        " A mildly over-estimated cycle time can still land inside the band.",
         tags$br(),
-        tags$b("Left-hand (blue) curve: "),
-        "pairs backing each lag, on a log axis. Jagged at low lag because dark gaps make some cycle-lags reachable more often than others; it then falls away because a track of N localizations offers only ~(N−k) pairs at lag k. Keep the upper fit limit where it is still well populated.")
+        tags$b("Blue curve: "),
+        "pairs per lag (log axis). Keep the upper fit limit where it is well populated.")
     )
   })
 
@@ -7389,7 +7387,7 @@ tracking_server <- function(input, output, session) {
     }
     extra <- switch(model,
       confined  = if (isTRUE(fr$degenerate))
-                    "  |  ⚠ no plateau reached in window - L_c unconstrained (MSD still rising; lengthen tracks / raise the upper limit, or this population isn't confined on this timescale)"
+                    "  |  \u26a0 no plateau in the window, so L_c is unconstrained. Raise the upper limit, or the population is not confined on this timescale."
                   else sprintf("  |  confinement size L_c = %.0f nm%s  ·  plateau = %.3g µm²  ·  τ_c = %.3g ms",
                                fr$L_conf,
                                if (is.finite(sig_eff) && is.finite(fr$L_conf) && fr$L_conf < 2 * sig_eff)
@@ -7659,7 +7657,7 @@ tracking_server <- function(input, output, session) {
         else if (cc$frac_integ > 0.7)
           "Good tracking - most cycles localized, modest dark fraction."
         else
-          "Frequent dropouts - consider that Dark cycles add temporal gaps; the gap-split filter (Display tab) may help downstream analysis."
+          "Frequent dropouts. Splitting tracks at gaps (Display tab) keeps long dark gaps out of the analyses."
       )
     )
   })
@@ -7962,7 +7960,7 @@ tracking_server <- function(input, output, session) {
     jf <- jdd_fit(cj$jumps, cj$dt_all, n_comp = n_comp, use_z = use_z_jdd, norm_dt = norm_dt,
                   sigma_loc = sigma_loc,
                   R_abs = MSD_BLUR_R * t_c_jdd,
-                  progress = function(f) incProgress(f, detail = "fitting Rayleigh mixture"))
+                  progress = function(f) incProgress(f, detail = "fitting jump-distance mixture"))
 
     list(mids = jf$mids, dens = jf$dens, sigs = jf$sigs, ws = jf$ws, D_vals = jf$D_vals,
          n_comp = n_comp, norm_dt = norm_dt, n_jumps = length(cj$jumps),
@@ -8511,7 +8509,7 @@ tracking_server <- function(input, output, session) {
       if (nzchar(dims)) htmltools::span(style = "color:#666;", sprintf("  (%s)", dims)) else NULL,
       if (identical(.geom_for_null(g), "free"))
         htmltools::div(style = "color:#b26a00;",
-          "No bounding shape - this band matches the unbounded null above. Set a shape in Sample geometry to test against a closed cell.")
+          "No bounding shape, so this band matches the unbounded null. Set a shape in Sample geometry to test a closed cell.")
       else NULL)
   })
 
@@ -8708,7 +8706,7 @@ tracking_server <- function(input, output, session) {
         if (is.finite(Dc) && is.finite(Dm) && Dc > 0 && Dm > 0 && abs(log(Dm / Dc)) > log(1.3))
           htmltools::div(style = "color:#B8860B; margin-top:3px; font-size:0.93em;",
             htmltools::HTML(sprintf(
-              "&#9888; CVE D = %.3g vs MSD D = %.3g µm²/s (%.1f× apart) - the split below is D-sensitive.",
+              "&#9888; CVE D = %.3g vs MSD D = %.3g \u00b5m\u00b2/s (%.1f\u00d7 apart), so the split below depends on which D is used.",
               Dc / 1e3, Dm / 1e3, max(Dm, Dc) / min(Dm, Dc))))
         else NULL
       },
@@ -8725,7 +8723,7 @@ tracking_server <- function(input, output, session) {
         pt <- tryCatch(conf_ci_bundle(), error = function(e) NULL)
         if (is.null(pt) || !nrow(pt) || !all(c("tid", "ci_class") %in% names(pt)))
           htmltools::div(style = "color:#555; margin-top:4px;",
-            htmltools::HTML("The <b>confinement index</b> above is the primary call on confinement. Run it to see how far the two agree track by track."))
+            htmltools::HTML("Run the <b>confinement index</b>, the primary call, to see how far the two agree."))
         else {
           m <- merge(res[, c("tid", "class")], pt[, c("tid", "ci_class")], by = "tid")
           if (!nrow(m)) NULL else {
@@ -8733,7 +8731,7 @@ tracking_server <- function(input, output, session) {
             both    <- sum(ci_conf & m$class == "sub-diffusive")
             htmltools::div(style = "color:#555; margin-top:4px;",
               htmltools::HTML(sprintf(
-                "Agreement with the <b>confinement index</b> (the primary call): of its <b>%d</b> confined tracks, <b>%d</b> (%.0f%%) also fall below this panel's free displacement band, over %d tracks both panels scored.",
+                "Of the <b>%d</b> tracks the confinement index calls confined, <b>%d</b> (%.0f%%) also fall below this band (%d tracks scored by both).",
                 sum(ci_conf), both,
                 if (sum(ci_conf)) 100 * both / sum(ci_conf) else 0, nrow(m))))
           }
@@ -8741,7 +8739,7 @@ tracking_server <- function(input, output, session) {
       },
       htmltools::div(style = "color:#555; margin-top:5px;",
         htmltools::HTML(sprintf(
-          "Resolution floor <b>%.0f nm</b> RMS free extent - confinement below this is invisible.", resolv))),
+          "Resolution floor: <b>%.0f nm</b> RMS free extent. Confinement on a larger scale is invisible.", resolv))),
       {
         # ONE ensemble D sets the band for every track, so a population with a wide
         # spread of per-track D reads as sub-diffusive at the slow end even when every
@@ -8755,7 +8753,7 @@ tracking_server <- function(input, output, session) {
         if (is.finite(sdl) && sdl > 0.35)
           htmltools::div(style = "color:#B8860B; margin-top:5px; font-size:0.95em;",
             htmltools::HTML(sprintf(
-              "&#9888; Wide per-track D (sd log<sub>10</sub>D = %.2f, ~%.0f× across the 5-95%% range). One ensemble D sets the band, so slow-but-free tracks fall below it: the sub-diffusive %% is an upper bound.",
+              "&#9888; Wide per-track D (sd log<sub>10</sub>D = %.2f, ~%.0f\u00d7 across the 5\u201395%% range): slow free tracks fall below the band, so the sub-diffusive %% is an upper bound.",
               sdl, 10^(2 * 1.645 * sdl))))
         else NULL
       },
@@ -8763,7 +8761,7 @@ tracking_server <- function(input, output, session) {
         gn <- trk_disp_geom_null()
         if (is.null(gn))
           htmltools::div(style = "color:#B8860B; margin-top:5px; font-size:0.95em;",
-            htmltools::HTML("&#9888; Infinite-plane null - free diffusion on a curved or finite surface already reads mildly sub-diffusive. Enable <b>Step 2</b> to separate truly confined from geometrically constrained. The super-diffusive call is specific but insensitive, so a low %% does not rule out transport."))
+            htmltools::HTML("&#9888; Infinite-plane null: free diffusion on a curved cell already reads mildly sub-diffusive. <b>Step 2</b> separates the two. A low directed % does not rule out transport."))
         else {
           gc <- gn$gclass
           fc <- mean(gc == "confined"); fg2 <- mean(gc == "free-on-geometry"); fd <- mean(gc == "directed")
@@ -8776,16 +8774,16 @@ tracking_server <- function(input, output, session) {
           htmltools::tagList(
             htmltools::div(style = "margin-top:7px; padding-top:5px; border-top:1px solid #ddd;",
               htmltools::HTML(sprintf(
-                "<b>Step 2 - vs free diffusion on %s</b> (%s; surface D = %.3g µm²/s, projection-matched): <b style='color:#2c7fb8;'>%.0f%% confined</b> · <b style='color:#1B9E5A;'>%.0f%% free-on-geometry</b> · <b style='color:#e31a1c;'>%.0f%% directed</b>.",
+                "<b>Step 2, free diffusion on %s</b> (%s; surface D = %.3g \u00b5m\u00b2/s): <b style='color:#2c7fb8;'>%.0f%% confined</b> · <b style='color:#1B9E5A;'>%.0f%% free-on-geometry</b> · <b style='color:#e31a1c;'>%.0f%% directed</b>.",
                 geom_lab, gn$dims, gn$D_surf / 1e3, 100 * fc, 100 * fg2, 100 * fd))),
             htmltools::div(style = "color:#555; margin-top:4px;",
               htmltools::HTML(
                 if (unbounded)
-                  sprintf("Unbounded geometry, so this barely differs from the infinite-plane null (%.0f%% confined) - pick a closed surface to test finite size.", 100 * fc)
+                  sprintf("Unbounded geometry, so this matches the infinite-plane null (%.0f%% confined). Pick a closed surface to test finite size.", 100 * fc)
                 else sprintf(
                   "Of the %.0f%% called sub-diffusive on the plane, geometry keeps <b>%.0f%% as truly confined</b>%s",
                   100 * f_sub, 100 * fc,
-                  if (fc <= 0.08) " - at the ~5% free baseline, so consistent with free surface diffusion."
+                  if (fc <= 0.08) ", at the ~5% free baseline: consistent with free surface diffusion."
                   else " - the excess over the ~5% free baseline."))),
             htmltools::div(style = "color:#555; margin-top:4px; font-size:0.94em;",
               htmltools::HTML(
@@ -9041,7 +9039,7 @@ tracking_server <- function(input, output, session) {
     ac1_lbl <- if (isTRUE(bd$have_cyc)) sprintf("AC(%.0f ms)", bd$t_cycle) else "AC(lag 1 step)"
     dark_note <- if (is.finite(bd$frac_dropped_dark %||% NA_real_) && (bd$frac_dropped_dark %||% 0) > 0)
       tags$span(style = "color:#888;", tags$br(),
-        sprintf("%.0f%% of steps span > %d dark cycle(s) and were excluded (long gaps break the irregular-Δt link / may bridge a merged molecule).",
+        sprintf("%.0f%% of steps span more than %d dark cycle(s) and were left out.",
                 100 * bd$frac_dropped_dark, bd$max_dark))
     else NULL
     noise_note <- if (is.finite(bd$frac_below_noise %||% NA_real_))
@@ -9575,7 +9573,7 @@ tracking_server <- function(input, output, session) {
         "<div style='margin-top:4px; color:#555;'>Median tail integrated fraction = <b>%.2f</b>%s</div>",
         med_ti, if (med_ti < 0.5) " - track ends are search-dominated" else "")),
       htmltools::HTML(
-        "<div style='margin-top:6px; color:#B8860B; font-size:0.95em;'>&#9888; Segment velocity is <b>not independent evidence</b> - the threshold that found it was a speed. Judge on corroboration and a matched negative control.</div>")
+        "<div style='margin-top:6px; color:#B8860B; font-size:0.95em;'>&#9888; Segment velocity is <b>not independent evidence</b>: the flag that found it was a speed. Judge on corroboration and a matched negative control.</div>")
     )
   })
 
