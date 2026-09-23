@@ -1,10 +1,15 @@
-## Diagnostic: is the fast switching on GP67H-014 produced by dark-cycle steps?
+## Diagnostic: is the fast switching on the tracking test file produced by dark-cycle steps?
 ## Fits K = 2 using single-cycle steps only (tracks split at every dark cycle), after
 ## tabulating mean r2 by cycles per step (the compression that would fake a slow state).
-## RUN  Rscript tests/validation/hmm_real_gp67h_integrated.R > tests/validation/results/hmm_real_gp67h_integrated.log
+## RUN  Rscript tests/validation/hmm_real_tracking_integrated.R > tests/validation/results/hmm_real_tracking_integrated.log
 setwd(normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", "..")))
 source("helpers_shared.R"); source("R/est_hmm.R")
-f <- list.files("Test data", "GP67H-track-014_filtered.*csv$", full.names = TRUE)[1]
+# The test data is local and not part of the repository. Point MINFLUXR_TRACK_PATTERN at a
+# filename pattern under "Test data/" to run this on a different tracking acquisition.
+f <- list.files("Test data", Sys.getenv("MINFLUXR_TRACK_PATTERN", "track.*_filtered.*csv$"), full.names = TRUE)[1]
+stopifnot(!is.na(f))
+cat("file:", basename(f), "
+")
 d <- utils::read.csv(f); d$tim <- d$tim * 1000; d$tid <- as.character(d$tid)
 t_c <- 0.1914; sw <- 0.0107; R_abs <- (1/6.2) * t_c
 d$sig <- 100.8 / (4 * sqrt(pmax(d$eco, 1))) * 1.016

@@ -109,7 +109,7 @@ jdd_collect_jumps <- function(df, min_pts = 2L, step_mode = "consec", bin_width 
 #     s² = 2D·(1 − 2·R_abs·⟨1/Δt⟩) + 2σ²·⟨1/Δt⟩
 # so D = (s² − 2σ²⟨1/Δt⟩) / (2·(1 − 2·R_abs·⟨1/Δt⟩)). The previous version used
 # D = (s² − 2σ²/median Δt)/2: no blur term and the median in place of ⟨1/Δt⟩.
-# Simulated (GP67H timings, photon σ, blur R = 1/6.2, D 0.05 / 0.215 / 1 µm²/s):
+# Simulated (MINFLUX tracking timings, photon σ, blur R = 1/6.2, D 0.05 / 0.215 / 1 µm²/s):
 # old −30% single-cycle and −26% to −54% pooled; corrected +1% in both modes.
 #
 # RETURNS list(mids, dens, sigs, ws, D_vals, dt0, inv_dt, r_noise, d_fit)

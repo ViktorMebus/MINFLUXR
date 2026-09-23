@@ -1748,7 +1748,7 @@ sd_by_tid <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT, robust = FALSE) {
 #   NOTHING here, because all of its points agree with each other; deciding its
 #   fate stays with the spread filter and the rogue rules. Only a trace that is
 #   tight apart from a few strays loses those strays. Measured on real data
-#   (collaborator-cond02-B2, k = 4): a dataset-wide sigma flags 7.6% of all
+#   (imaging file A, k = 4): a dataset-wide sigma flags 7.6% of all
 #   localizations, this rule flags 3.4%, and the difference is almost entirely
 #   points inside legitimately broad traces.
 #
@@ -5318,7 +5318,7 @@ cluster2_member_col <- function(df, member_col = NULL) {
 #
 # THE AXES ARE NOT EQUAL, AND NOT IN THE DIRECTION CAMERA SMLM TRAINS YOU TO
 # EXPECT. MINFLUX z is typically TIGHTER than x/y, the opposite of astigmatism
-# or biplane imaging. Measured on the collaborator cond02 files: sx 6.84 / sy 6.81 /
+# or biplane imaging. Measured on the a real imaging file files: sx 6.84 / sy 6.81 /
 # sz 4.11 nm on B2-010 and 7.07 / 7.16 / 4.17 nm on B3-008, a z:lateral ratio of
 # 0.60 and 0.59. Anything that wraps a structure isotropically therefore
 # over-wraps it axially by about two thirds, so `per_axis = TRUE` returns the
@@ -5470,7 +5470,7 @@ cluster_density_field <- function(pts, grid_res = 22L, pad = 0, sigma = NULL,
   # out. The skin that comes back is an ellipsoidal shell in real space, tighter
   # on whichever axis is measured better.
   #
-  # For MINFLUX that axis is usually z (measured z:lateral 0.60 on collaborator cond02),
+  # For MINFLUX that axis is usually z (measured z:lateral 0.60 on a real imaging file),
   # so an isotropic wrap inflates the structure axially by about two thirds. Note
   # the direction: this is the opposite of astigmatic camera SMLM, and assuming
   # the camera convention here would make the error worse rather than better.
@@ -5548,7 +5548,7 @@ cluster_density_field <- function(pts, grid_res = 22L, pad = 0, sigma = NULL,
   # ── bandwidth: the SMOOTHNESS dial, largely independent of the offset ──
   # AUTO = SIGMA_GAP_FACTOR x gap. Because the contour level is re-measured at
   # `offset` with the current sigma, raising sigma does not inflate the surface
-  # the way it did when the two were tied together. Measured on collaborator cond02, the
+  # the way it did when the two were tied together. Measured on a real imaging file, the
   # MEDIAN vertex-to-molecule distance moved 25.6 -> 29.0 nm against a 25.3 nm
   # target across a 5x sigma sweep.
   #
@@ -6807,10 +6807,10 @@ link_complete_threshold <- function(M, thr, max_comp = 2000L) {
 #   cluster. That matches the merge-only rule: de-blinking never removes a
 #   molecule (see deblink_assign_singletons).
 #
-# COMPLETE LINKAGE IS THE DEFAULT (measured on the collaborator file, 2026-08-09)
+# COMPLETE LINKAGE IS THE DEFAULT (measured on a real imaging file, 2026-08-09)
 #   Single linkage merges through chains, so a group's diameter is not bounded
 #   by `thr`. That is visible in the real data without any ground truth - on
-#   250218 collaborator-cond02-B2 at k = 2.5 (thr = 15.2 nm) single linkage produces a
+#   250218 imaging file A at k = 2.5 (thr = 15.2 nm) single linkage produces a
 #   group spanning 27.5 nm, 1.8x the threshold and 4.5 sigma across; at k = 5 it
 #   spans 73.2 nm. Complete linkage caps the diameter at `thr` by construction
 #   (15.1 nm and 30.1 nm for the same two settings).
@@ -10441,7 +10441,7 @@ compute_foci_table <- function(pts, eps, minPts = 5L, use_3d = FALSE) {
 #   The formula ignores two things the real estimator has: neighbourhoods overlap,
 #   so the per-unit estimates are spatially correlated, and units near the edge of
 #   the footprint lose neighbours. Both could shift the baseline. Measured on the
-#   10 membrane-protein footprints at k = 5, 60 randomisations each, drawing into each file's
+#   10 two-condition footprints at k = 5, 60 randomisations each, drawing into each file's
 #   own footprint at its own n: the simulated median CV came out 0.53-0.59 against
 #   the predicted 0.577, and it did NOT track the unit count (Spearman -0.07 over
 #   an 86-546 range). So the closed form is usable as-is and no simulation is

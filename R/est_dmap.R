@@ -14,7 +14,7 @@
 ##   SE = SD of the per-step contributions / √n, scaled by the same blur factor.
 ##
 ## BLUR TERM (added 2026-09-17). The 2026-09-16 fix was verified on simulated
-## tracks without motion blur. With blur (R = 1/6.2, GP67H timings) the unblurred
+## tracks without motion blur. With blur (R = 1/6.2, MINFLUX tracking timings) the unblurred
 ## form reads D about 30% low, the same bias found and fixed in the JDD.
 ##
 ## UNITS: nm, ms, D nm²/ms.

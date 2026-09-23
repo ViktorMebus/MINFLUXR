@@ -1,6 +1,6 @@
 # Recovery tests for the tracking estimators extracted from the server
 # (est_cve.R, est_msd.R, est_jdd.R, est_dmap.R, est_cpd.R), against ground truth
-# from sim_ct_state_tracks() (est_hmm.R) at GP67H-like acquisition settings:
+# from sim_ct_state_tracks() (est_hmm.R) at tracking-like acquisition settings:
 # t_c 0.192 ms, SW 0.011 ms, dark-cycle mix, per-localization photon σ, blur R = 1/6.2.
 TCP_CRLB_PREFACTOR <- if (exists("TCP_CRLB_PREFACTOR")) TCP_CRLB_PREFACTOR else 4
 for (f in c("R/est_hmm.R", "R/est_cve.R", "R/est_msd.R", "R/est_jdd.R", "R/est_dmap.R", "R/est_cpd.R"))

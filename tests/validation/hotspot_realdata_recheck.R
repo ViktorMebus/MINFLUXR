@@ -1,19 +1,22 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## tests/validation/hotspot_example_recheck.R  -  hotspot metrics on the membrane-protein set
+## tests/validation/hotspot_realdata_recheck.R  -  hotspot metrics on the two-condition set
 ## ─────────────────────────────────────────────────────────────────────────────
-## Re-runs the Local Density & Hotspots statistics on the 10 membrane-protein acquisitions
+## Re-runs the Local Density & Hotspots statistics on the 10 two-condition acquisitions
 ## (4 cond01 without IDR, 6 cond02 with IDR) after the 2026-09-17 fixes (whole-
 ## quadrat VMR, extended eps grid, max_focus_ratio), to check the published
 ## separation still holds. A headless approximation of the app pipeline: trace
 ## length >= 5, per-axis spread < 10 nm, trace-ID centroids, 2D, footprint at
 ## 25 nm pitch with the bridging-jump gap fill shared by the whole set, eps
 ## calibrated per cell (5%, minPts 5), k 5, quadrat 250 nm.
-## RUN  Rscript tests/validation/hotspot_example_recheck.R   (needs Test data/)
+## RUN  Rscript tests/validation/hotspot_realdata_recheck.R   (needs Test data/)
 ## ─────────────────────────────────────────────────────────────────────────────
 root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
 setwd(root)
 suppressMessages(suppressWarnings({ source("packages.R"); source("helpers_shared.R"); source("helpers_smlm.R") }))
-files <- list.files("Test data/collaborator membrane-protein project", "\\.npy$", full.names = TRUE)
+# The acquisitions are local and not part of the repository: point MINFLUXR_SMLM_TESTDIR
+# at the folder holding the two-condition .npy files.
+files <- list.files(Sys.getenv("MINFLUXR_SMLM_TESTDIR", "Test data"), "[.]npy$",
+                    full.names = TRUE, recursive = TRUE)
 cond  <- ifelse(grepl("cond01", files), "cond01", "cond02")
 
 units <- lapply(files, function(f) {
@@ -62,4 +65,4 @@ for (m in c("density", "cv_ratio", "enh_q90", "frac_above", "vmr", "max_focus_n"
   cat(sprintf("  %-16s cond01 %8.3g - %-8.3g cond02 %8.3g - %-8.3g %s  rank-sum p %.3f\n", m, a[1], a[2], b[1], b[2],
               if (disj) "DISJOINT" else "overlap ", p))
 }
-utils::write.csv(rows, file.path(root, "tests", "validation", "results", "hotspot_example_recheck.csv"), row.names = FALSE)
+utils::write.csv(rows, file.path(root, "tests", "validation", "results", "hotspot_realdata_recheck.csv"), row.names = FALSE)

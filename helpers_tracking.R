@@ -474,7 +474,7 @@ split_by_tid_to_dir <- function(df, out_dir,
 #
 # WHY THE NULL IS BLURRED. A MINFLUX localization averages the path over the photon
 # collection window, which LOWERS every MSD lag by 2*d*2*R*D*t_c - the opposite sign
-# to the sigma^2 offset. At GP67H timings (D 0.215 um^2/s, t_c 0.192 ms, sigma 5 nm)
+# to the sigma^2 offset. At MINFLUX tracking timings (D 0.215 um^2/s, t_c 0.192 ms, sigma 5 nm)
 # the blur term is about half of sigma^2, so an unblurred null carries twice the
 # real offset, its free CI sits too low, and real free tracks drift toward "directed".
 # Blur is simulated exactly in its second moments: with a collection window tau

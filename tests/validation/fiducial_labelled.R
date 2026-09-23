@@ -8,7 +8,7 @@
 ##   labelled acquisition available:
 ##     Test data/Fiducial test/Samples w beads   (3 files, beads present)
 ##     Test data/Fiducial test/Samples wo beads  (4 files, no beads)
-##     the original pair: ...targetP3-P3img...-001 (fiducial section) vs ...-002 (clean)
+##     plus any labelled pair where one acquisition is known to contain fiducials
 ##
 ##   A file WITH beads should flag at least one trace; a file WITHOUT should flag
 ##   none. Reports which rule fired (lifetime / brightness) and the evidence.

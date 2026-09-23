@@ -1,15 +1,19 @@
 ## ─────────────────────────────────────────────────────────────────────────────
 ## tests/validation/app_smlm_spatial_smoke.R  -  SMLM spatial panels on real data
 ## ─────────────────────────────────────────────────────────────────────────────
-## Loads two membrane-protein acquisitions into the SMLM tab in a test session, runs Ripley
+## Loads two SMLM acquisitions into the SMLM tab in a test session, runs Ripley
 ## L(r) and g(r) with the CSR envelope on, and checks that the curves, the global
 ## band and the global p-value are produced and that the figures build.
-## RUN  Rscript tests/validation/app_smlm_spatial_smoke.R   (needs Test data/)
+## RUN  Rscript tests/validation/app_smlm_spatial_smoke.R
+##      Point MINFLUXR_SMLM_TESTDIR at a folder holding at least two .npy
+##      acquisitions; that folder is local and not part of the repository.
 ## ─────────────────────────────────────────────────────────────────────────────
 root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
 setwd(root)
 suppressMessages(suppressWarnings(source("global.R")))
-fs <- list.files("Test data/collaborator membrane-protein project", "[.]npy$", full.names = TRUE)[1:2]
+dir_in <- Sys.getenv("MINFLUXR_SMLM_TESTDIR", "Test data")
+fs <- list.files(dir_in, "[.]npy$", full.names = TRUE, recursive = TRUE)[1:2]
+stopifnot(length(fs) == 2L, !any(is.na(fs)))
 
 shiny::testServer(smlm_server, {
   store <- list()

@@ -1408,7 +1408,7 @@ smlm_ui <- fluidPage(
                 .detail(HTML(
                   "Neither choice is free of a bias, so this is a real setting rather than a default to leave alone.<br><br>",
                   "<b>Centroids</b> are one point per trace, or per de-blinked molecule, which is what every analysis on this tab counts. A sparsely labelled cell gives a raggeder, smaller footprint, so the area carries a little of the unit count: on synthetic pairs with identical geometry and a 4&times; labelling difference the supports came out 5.01e6 against 3.82e6&nbsp;nm&sup2;, reading a 4.0&times; density ratio as 3.05&times;.<br><br>",
-                  "<b>All localizations</b> sample the same region more densely, so the outline is smoother. But the number of localizations in a trace is how long that fluorophore stayed on before going dark, which is photophysics, and it feeds the gap-filling sweep. On the membrane-protein set this inflated the area enough to loosen the randomisation-calibrated eps, and the largest-focus size stopped separating the two conditions (10&ndash;24 against 19&ndash;52 units, where centroids gave 6&ndash;12 against 19&ndash;51).")),
+                  "<b>All localizations</b> sample the same region more densely, so the outline is smoother. But the number of localizations in a trace is how long that fluorophore stayed on before going dark, which is photophysics, and it feeds the gap-filling sweep. A brighter or longer-lived label therefore enlarges the footprint on its own, which loosens the randomisation-calibrated eps and can flatten the difference between conditions.")),
                 numericInput("dens_grid_h", "Grid cell (nm)", value = 100, min = 10, step = 10),
                 conditionalPanel(
                   condition = "input.dens_support_mode == 'kde'",
@@ -1975,8 +1975,8 @@ smlm_ui <- fluidPage(
             selected = "tid"),
           helpText("One point per trace, or per de-blinked molecule. Raw localizations are not offered."),
           .detail(HTML(
-            "Localizations inside a single trace sit a few nanometres apart, so their local density measures how long that fluorophore stayed on before going dark. On the membrane-protein pair the enhancement then reaches 3,000 to 17,000 times the cell mean and neither the CV nor the 90th percentile separates the two conditions. The same statistics on trace-ID centroids separate them cleanly.<br><br>",
-            "<b>Trace IDs</b> count blinking events, <b>de-blinked molecules</b> merge repeated blinks of one fluorophore. Both work here. Trace IDs gave the wider margin on the membrane-protein pair (90th-percentile enhancement 2.7&ndash;5.0 against 13.1&ndash;72.4, versus 2.1&ndash;5.0 against 6.6&ndash;53.1 for molecules), because de-blinking removes a few points from the densest spots.")),
+            "Localizations inside a single trace sit a few nanometres apart, so their local density measures how long that fluorophore stayed on before going dark rather than how the molecules are arranged. Densities built from them run orders of magnitude above the cell mean and are dominated by photophysics, which is why centroids are the unit here.<br><br>",
+            "<b>Trace IDs</b> count blinking events, <b>de-blinked molecules</b> merge repeated blinks of one fluorophore. Both work here. De-blinking removes a few points from the densest spots, so trace IDs usually give the larger enhancement and molecules the more conservative one.")),
           checkboxInput("hot_use_3d", "Use 3-D coordinates (z)", value = FALSE),
           helpText("3-D measures density in spheres and quadrats as cubes. Use it for genuinely 3-D data; a thin membrane sheet is 2-D."),
           numericInput("hot_k", "k for local density", value = 5, min = 1, max = 50, step = 1),

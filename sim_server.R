@@ -3294,7 +3294,7 @@ sim_server <- function(input, output, session) {
   # GOAL: increments for fractional Brownian motion, the standard model of
   # ANOMALOUS diffusion. Successive increments are correlated (anti-correlated for
   # H < 0.5), which makes MSD grow as t^alpha with alpha = 2H instead of t^1.
-  # A cell-wall protein in a crowded peptidoglycan mesh is subdiffusive: the GP67H
+  # A cell-wall protein in a crowded peptidoglycan mesh is subdiffusive: the the tracking test data
   # files measure alpha ~ 0.78.
   # n: number of increments. H: Hurst exponent (alpha/2), 0 < H < 1.
   # returns: numeric(n), unit variance per increment, correlated.
@@ -3367,7 +3367,7 @@ sim_server <- function(input, output, session) {
     # Real Δt obey Δt = k·t_c + SW exactly, so the MODAL Δt is t_c + SW, not t_c.
     # Take the mode as a first guess, assign each Δt its cycle count k, then read
     # t_c off the SPACING between the levels and SW off the intercept. Taking the
-    # mode for the cycle time inflates it by SW (~5% on the GP67H files).
+    # mode for the cycle time inflates it by SW (~5% on the tracking test files).
     hb    <- hist(dtv[dtv < stats::quantile(dtv, 0.98)], breaks = 400, plot = FALSE)
     modal <- hb$mids[which.max(hb$counts)]                         # modal Δt = t_c + SW
     k0    <- round(dtv / modal)
@@ -3856,7 +3856,7 @@ sim_server <- function(input, output, session) {
       # MINFLUX CRLB for a hexagonal TCP of diameter L with N detected photons.
       # Cross-checked on real tracking data: L = 100.8 nm (patGeoFactor 0.28) and the
       # median eco of ~38 photons give 4.1 nm, exactly the blur-aware CVE sigma of the
-      # GP67H tracking files.
+      # tracking test files.
       sig   <- L_tcp / (TCP_CRLB_PREFACTOR * sqrt(N))  # per-localization σ_loc (nm)
       bpos  <- attr(pos, "blurpos")                    # blurred path, or NULL when off
       true_pos <- if (!is.null(bpos)) bpos[idx, , drop = FALSE] else pos[idx, , drop = FALSE]
@@ -3954,7 +3954,7 @@ sim_server <- function(input, output, session) {
   # ── sim_trk_kcurve() - displacement vs dark-gap length ──────────────────────
   # GOAL: the diagnostic the new sampling knobs exist to drive. Mean per-axis ⟨Δx²⟩
   # against the number of cycles k a step spans, next to the free-diffusion
-  # expectation. Free Brownian motion grows linearly in k; the real GP67H files
+  # expectation. Free Brownian motion grows linearly in k; the real tracking test files
   # flatten out after k = 2 (see docs/tracking_sigma_and_cve_plan.md §2.3), and
   # re-acquisition shrinkage / speed-dependent dark cycles are the candidate causes
   # this table is meant to discriminate.
@@ -4120,9 +4120,8 @@ sim_server <- function(input, output, session) {
                 if (is.finite(v) && abs(v - 100) > 15) "color:#b26a00;font-weight:bold;" else ""),
                 sprintf("%.0f%%", v))))),
           htmltools::tags$p(style = "color:#888; font-size:0.84em; margin-top:3px;",
-            "Free diffusion holds this row near 100% at every k. The GP67H tracking files fall to ",
-            "~75% at k=2 and ~30% by k=6, which is what the gap-shrinkage and speed-dependent-dark ",
-            "controls are for."))
+            "Free diffusion holds this row near 100% at every k. Real tracking files fall well below ",
+            "that by k=6, which is what the gap-shrinkage and speed-dependent-dark controls are for."))
       }),
       # Projection artifact: 2D imaging of a CURVED-surface protein under-measures the
       # azimuthal motion (its out-of-plane component is dropped), so the recovered D is a

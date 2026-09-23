@@ -433,7 +433,7 @@ statistic below did.
   cv_ratio, VMR, frac_above and max_focus_ratio hold their chance baseline across density and footprint
   shape. Power is weak in sparse cells: the clustered rod at 200 units gave max_focus_ratio 1.8 and VMR 2.1.
   Raw max_focus_n and focus count still move with density.
-- **Real-data recheck after the fixes (`tests/validation/hotspot_example_recheck.R`, 2026-09-17).** membrane-protein set,
+- **Real-data recheck after the fixes (`tests/validation/hotspot_realdata_recheck.R`, 2026-09-17).** two-condition imaging set,
   4 cond01 vs 6 cond02, trace-ID centroids, 25 nm pitch, shared gap fill: density overlaps (rank-sum
   p = 0.91), while cv_ratio 1.60–2.42 vs 3.27–6.19, enh_q90 1.83–3.82 vs 16.3–53.9, frac_above 1.1–8.5% vs
   21.8–37.9%, whole-quadrat VMR 1.30–2.81 vs 3.37–7.97, max_focus_n 6–12 vs 18–51 and **max_focus_ratio
@@ -443,11 +443,27 @@ statistic below did.
   shape; real-data validation still one data set.
 
 ### I-A.4 Bivariate Ripley L₁₂(r) & pair cross-correlation g₁₂(r) — [Part II §6.2]
-- **L₁₂:** cross-type K from the n₁×n₂ distance matrix, **K₁₂(r) = area · #{d ≤ r} / (n₁·n₂)**, same
-  L-transform. Measures co-clustering of two channels (>0 attraction, <0 segregation).
-- **g₁₂ (PCF):** the *derivative* form — count cross pairs in the **annulus/shell** (r−dr/2, r+dr/2],
-  normalise by shell area (2D `π(hi²−lo²)`) or volume (3D `4/3·π(hi³−lo³)`):
-  **g₁₂(r) = area · #{annulus} / (n₁·n₂·shell)**. **g₁₂ = 1 under CSR**, >1 attraction, <1 repulsion.
+- **L₁₂:** cross-type K from the n₁×n₂ distance matrix. Write |A| for the window area (volume in 3D)
+  and P(r) = #{(i,j) : d_ij ≤ r} for the number of cross pairs within r — every pair is counted once,
+  because the two channels are distinct point sets and the matrix is already full, so there is no
+  ×2 as in the univariate case. Without edge correction
+
+  **K₁₂(r) = |A| · P(r) / (n₁·n₂)**
+
+  With edge correction on (the default), each pair at distance d contributes 1/γ̄(d) in place of
+  1/|A|, γ̄ being the window's isotropised set covariance, so |A| in the numerator is replaced by
+  |A|²/γ̄(d) and the weight is applied per shell. Same L-transform as the univariate case,
+  `L₁₂ = √(K₁₂/π)` (2D) or `(3K₁₂/4π)^{1/3}` (3D). Plotted as L₁₂(r) − r: >0 attraction,
+  <0 segregation.
+- **g₁₂ (PCF):** the *derivative* form. Count only the cross pairs whose distance falls in the shell
+  (lo, hi] = (r−dr/2, r+dr/2], call that P_shell(r), and normalise by the shell's own area or volume
+  V_shell = π(hi²−lo²) in 2D, (4/3)·π(hi³−lo³) in 3D:
+
+  **g₁₂(r) = |A| · P_shell(r) / (n₁·n₂·V_shell(r))**
+
+  |A| is the window and V_shell the shell: the two are different areas, and only the ratio of the
+  expected to the observed pair density is dimensionless. The same per-shell edge weighting applies.
+  **g₁₂ = 1 under CSR**, >1 attraction, <1 repulsion.
   PCF is scale-local (not cumulative like K), so it localises the interaction distance more sharply.
 - Same ≤2000 subsample and the same two window switches as L(r) (bounding box, edge-corrected, by
   default).
@@ -726,7 +742,7 @@ accurate only to the grid resolution. Use the Ripley/PCF panels for density stat
   weighting is only sound downstream of the `eco`/`cfr` metadata filters that remove implausibly bright
   events. This is a real limit on the method, not a caveat about the implementation: the same statistic
   that makes a trace informative also makes it suspect.
-  ⚠ *Measured on the collaborator test file (unfiltered):* per-trace photon budgets span **50 → 13 174 (263×)**,
+  ⚠ *Measured on a real imaging file (unfiltered):* per-trace photon budgets span **50 → 13 174 (263×)**,
   and on the largest structure weighting moved the fitted sphere radius from **359 nm to 149 nm** while
   `n_eff` fell from 170 to 83. On a **filtered** dataset the two fits agree closely (user-observed),
   which is the expected behaviour and supports the reading above: most of that 2.4× swing was
@@ -785,7 +801,7 @@ each population to its own total, separating a difference in *shape* (timing) fr
   distribution (two-sided p = (1 + #{|ρ_b| ≥ |ρ_obs|})/(B+1), default B = 200). Rank-based, so it tests
   the **trend** and is unaffected by a constant clustered-vs-background offset — which the band alone is
   *not*: a global offset pushes every point off the band without any crowding dependence.
-  *Validated on the collaborator test file* (472 traces, 20 qualifying structures): null-band coverage 0.052
+  *Validated on a real imaging file* (472 traces, 20 qualifying structures): null-band coverage 0.052
   against a nominal 0.05, null ρ centred on 0, and band width vs cluster size ρ = −0.92 (small clusters
   correctly get wide intervals). Observed on that file: ρ = −0.23, p ≈ 0.40 — **no significant
   crowding–timing trend**.
@@ -829,7 +845,7 @@ resulting t_c drives gap-splitting, the quality gate, cycle-index MSD binning an
 **cycle count** is `n_cyc = round(Δt / t_c)`; **integrated (single-cycle)** steps have n_cyc = 1.
 
 #### Measured on real data (2026-07-30) — Δt is QUANTISED, not distributed
-Checked directly against `Test data/251027-202407_GP67H-track-014.npy` (650,042 within-track steps,
+Checked directly against a real tracking acquisition (650,042 within-track steps,
 `tim` stored as float64 so this is real structure, not a storage artefact):
 
 - **Δt = k·t_c + SW, essentially exactly.** Only 4,432 distinct Δt values across 650k steps. Regressing
@@ -890,13 +906,13 @@ photon model assumes nothing about the motion.
   the covariance. R is bounded rather than assumed: `R_hi = min(1/6, t_c/(6·Δt))` (collection spans the
   cycle) and `R_lo` from the measured collection window `eco/efo` delivered as a staircase over the
   pattern vertices (`.blur_R_duty`); `R_lo` is used. **R = 0 (the old σ² = −cov₁) under-reported σ ~3×**
-  on the GP67H files (1.5 vs 4.1 nm).
+  on the tracking test files (1.5 vs 4.1 nm).
 - **Free bias-corrected D:** `D_cve = ⟨Δ²⟩/(2Δt) + cov₁/Δt` per axis. **Blur-independent**, so D is
   unaffected by the choice of R.
 - **Tracker wander floor D_w** (`trk_dw_floor`, manual, default off): the apparent D the tracking loop
   produces on an immobile target. Reported beside D as `D − D_w` with a warning when D_w > 20% / 50% of
   D; **never subtracted silently**. Measured at L = 100.8 nm: 0.036 µm²/s on rigid beads, 0.07–0.16 µm²/s
-  on fixed cells (≈17% to ≤74% of the live GP67H D). Re-measure per sequence; it scales steeply with L.
+  on fixed cells (≈17% to ≤74% of the live-sample D). Re-measure per sequence; it scales steeply with L.
 - **Increment-consistency check:** a sub-diffusive walk already has r₁ = 2^(α−1) − 1 before noise, and
   noise or blur can only push r₁ lower, so **r₁_observed > 2^(α−1) − 1** means the trajectory was smoothed
   before export (galvo damping, DMP > 0). Reported as a data-quality flag; no estimator can recover σ
@@ -964,7 +980,7 @@ photon model assumes nothing about the motion.
   earlier `R = 0` was a porting deviation. The slope, and so D, is unaffected. Simulated check (1D, full-cycle
   window, D = 0.215 µm²/s, t_c = 0.192 ms, σ = 5 nm): R = 0 read σ = 3.30 nm, the blur-corrected form 4.98 nm.
   The CVE's instrument-modelled bound R ∈ [R_lo, R_hi] brackets 1/6.2; the difference moves σ² by < 2 nm²
-  at GP67H timings. A constant keeps the MSD panel independent of the CVE run. The drawn fit line still uses
+  at MINFLUX tracking timings. A constant keeps the MSD panel independent of the CVE run. The drawn fit line still uses
   the raw fitted intercept, because the data sit on the blurred line. The non-linear models (confined,
   directed, anomalous) still read σ from their offset C without the blur term; they are lab tier and their
   offset is rarely separable anyway.
@@ -1000,7 +1016,7 @@ per-segment log₁₀D distribution is then fit with a **BIC-selected Gaussian m
 `max_g` states).
 - **Variance scaling (fixed 2026-09-17).** `cpt.mean`'s Normal cost assumes unit variance. log of a scaled
   χ²_d has fixed variance trigamma(d/2) (π²/6 ≈ 1.64 in 2D, 0.93 in 3D), so the signal is now divided by
-  its SD before PELT. Simulated single free population (GP67H timings, t_c 0.192 ms, SW 0.011 ms, dark-cycle
+  its SD before PELT. Simulated single free population (MINFLUX tracking timings, t_c 0.192 ms, SW 0.011 ms, dark-cycle
   mix, σ 5 nm, 150 tracks): unscaled, 28% / 35% / 51% of 2D tracks were cut at N = 100 / 300 / 1000 steps
   (3D: 5%); scaled, 8% / 9% / 3%.
 - **GMM component count is confounded by segment length (measured 2026-09-17, not fixed).** The mixture
@@ -1025,9 +1041,9 @@ included. σ_k is the **per-axis** spread in both cases. MINFLUX handling:
 - **Noise and blur correction (fixed 2026-09-17):** with √Δt normalisation a component's per-axis variance is
   **σ² = 2D·(1 − 2R·t_c·⟨1/Δt⟩) + 2σ_loc²·⟨1/Δt⟩**, so **D = (σ² − 2σ_loc²⟨1/Δt⟩) / (2·(1 − 2R·t_c·⟨1/Δt⟩))**,
   clamped ≥ 0, R = `MSD_BLUR_R`. The earlier form `(σ² − 2σ_loc²/median Δt)/2` had no blur term and used the
-  median Δt. Simulated (GP67H timings, photon σ, blur R = 1/6.2, one population at D = 0.05 / 0.215 / 1
+  median Δt. Simulated (MINFLUX tracking timings, photon σ, blur R = 1/6.2, one population at D = 0.05 / 0.215 / 1
   µm²/s): old **−30%** on single-cycle steps and **−26% to −54%** pooled; corrected **+1%** in both modes. On
-  GP67H-014 (single-cycle, one component) D moved 0.108 → **0.205 µm²/s**, against CVE 0.221. With one
+  the tracking test file (single-cycle, one component) D moved 0.108 → **0.205 µm²/s**, against CVE 0.221. With one
   component the MLE is now closed form (σ² = ⟨r²⟩/d). A **noise-floor jump distance** `√(2d)·σ_loc·√⟨1/Δt⟩`
   marks where peaks are noise-dominated.
 
@@ -1056,7 +1072,7 @@ Viterbi-path-counting version is in git history.
 - **Fitting.** All tracks at once. Tracks are cut into 256-step chunks, each starting from the stationary
   distribution (composite likelihood; only transitions across chunk edges are lost), sorted longest first so
   the scaled forward recursion runs vectorised over chunks. P(Δt) is computed once per unique Δt (MINFLUX Δt
-  is quantised: 40 unique values on GP67H-014). Parameters on log scale (D ordered slow → fast by cumulative
+  is quantised: 40 unique values on the tracking test file). Parameters on log scale (D ordered slow → fast by cumulative
   increments), BFGS from three rate starts (dwell ≈ 5, 30, 300 cycles), best log-likelihood kept. About
   12 s for 60k localizations, 4.7 min for 393k.
 - **Uncertainty.** Parametric draws from the inverse Hessian give CIs for D, rates and dwell times; these
@@ -1076,7 +1092,7 @@ Viterbi-path-counting version is in git history.
   direction, and exports `state_true`.
 
 #### Recovery sweep (`tests/validation/hmm_recovery_sweep.R`)
-Ground truth from `sim_ct_state_tracks` at GP67H acquisition settings (t_c 0.192 ms, SW 0.011 ms, dark-cycle
+Ground truth from `sim_ct_state_tracks` at the tracking acquisition settings (t_c 0.192 ms, SW 0.011 ms, dark-cycle
 mix 72/20/5/3%, photon σ median ≈ 4.2 nm, blur R = 1/6.2), 200 tracks × 300 localizations, D_fast 0.3 µm²/s,
 symmetric dwells, 3 replicates per cell, 54 fits (all converged, median 16 s). Mean relative error:
 
@@ -1112,8 +1128,8 @@ symmetric dwells, 3 replicates per cell, 54 fits (all converged, median 16 s). M
 - **Not covered by the sweep:** asymmetric dwells, K > 2, heterogeneous D within a state, subdiffusion,
   galvo damping, the multi-cycle compression seen in real files.
 
-#### Real data: GP67H-track-014
-`tests/validation/hmm_real_gp67h.R` and `hmm_real_gp67h_integrated.R` (2026-09-17). 393,193 localizations,
+#### Real data: a tracking acquisition
+`tests/validation/hmm_real_tracking.R` and `hmm_real_tracking_integrated.R` (2026-09-17). 393,193 localizations,
 679 tracks, 392,514 steps, t_c 0.1914 ms, photon σ per localization (L 100.8 nm, a = 4).
 
 | Model | D (µm²/s) | occupancy | mean dwell | BIC |
@@ -1165,13 +1181,13 @@ the windowed lag bins. Ideal free motion gives CI = 1, confinement < 1, directed
 - **Blur and σ spread in the null (2026-09-17).** Null tracks are blur-averaged over a collection window
   τ = 6R·t_c with R = 1/6.2 (window average = B(t_i) + w/2 + N(0, Dτ/6) per axis), and when σ_loc comes
   from the photon model each null localization draws its σ from the measured per-localization values
-  (the MSD offset is set by mean σ², above median σ² for long-tailed photon counts). Simulated at GP67H
+  (the MSD offset is set by mean σ², above median σ² for long-tailed photon counts). Simulated at the tracking test data
   values (N = 200, D = 0.215 µm²/s, t_c = 0.192 ms, photon σ median 4.2 nm, 3000 true free tracks):
   the old static, unblurred null gave 4.4% confined / 7.3% directed; the blurred one 5.5% / 4.6%. At
   D = 0.04 µm²/s both give ~5% / 5%, since blur scales with D.
 
 **Retired: the Rg/Rmax shape classifier (`conf_bundle`).** Removed as a per-track classifier after it
-contradicted every other tool on real data (GP67H track-013: 0% confined / 53.5% "directed" where CI
+contradicted every other tool on real data (a second tracking file: 0% confined / 53.5% "directed" where CI
 found 75% confined; 16.8% agreement) and detected 0–4% of simulated confinement at a 5% false-positive
 rate. Long real tracks have occasional large excursions that inflate Rmax, pushing the ratio into the
 "directed" tail. Retired 2026-08-03; the panel and server code were moved out of the app
@@ -1357,7 +1373,7 @@ unbiased; a mis-linked jump now shows up as a large per-cell SE instead of being
 than a per-cell MSD fit in small cells (e.g. *E. coli*) where no τ-bin has enough steps. *(Citation
 corrected: this is the CVE short-lag limit, Vestergaard 2014 / Vogler 2025 — not Ostersehlt 2022.)*
 *Fixed 2026-09-17:* the blur factor. The 2026-09-16 mean form was verified on simulated tracks without
-motion blur; with blur (R = 1/6.2, GP67H timings) it read **−30%** at D = 0.05, 0.215 and 1 µm²/s, and the
+motion blur; with blur (R = 1/6.2, MINFLUX tracking timings) it read **−30%** at D = 0.05, 0.215 and 1 µm²/s, and the
 blur-corrected form reads **+1%**.
 
 ### I-B.10 Fast-diffusion ceiling (D_max)
@@ -1545,7 +1561,7 @@ ways that matter for every downstream estimator:
 - **Our handling:** rates are no longer counted along the Viterbi path, which read dwell times +50% long
   at 10/20 ms dwells (MLE: 9.9/18.8 ms, truth 10/20). The recovery sweep sets the usable range; states
   outside it are flagged in the app.
-- **Why still 🟡:** validated in silico only, on one simulated acquisition; and on real GP67H data the fit
+- **Why still 🟡:** validated in silico only, on one simulated acquisition; and on real tracking data the fit
   returns dwell times of 1.4–2.5 cycles, inside the range the sweep cannot resolve (see §I-B.5 real data),
   so on current data it describes the step distribution rather than demonstrating switching.
 
@@ -1798,7 +1814,7 @@ footprint).
 - **Scope of d′: it grades a split, it does not detect one.** The GMM is a sound estimator of the split
   and is the right tool here — the point is only that requesting G = 2 always yields two components,
   because a single-dye DCR distribution is **skewed** and a two-Gaussian mixture fits skewed unimodal
-  data better than one Gaussian. On a **confirmed single-colour file** (collaborator, no DCR pooling applied)
+  data better than one Gaussian. On a **confirmed single-colour file** (no DCR pooling applied)
   the routine still returned a *"workable"* split at d′ = 2.65. **A BIC G=1 vs G=2 comparison does not
   help and was deliberately not added as a gate:** it also favoured two components on that file
   (ΔBIC = +16.9) and on a synthetic skewed-unimodal gamma control (+21.1), while *missing* a genuine
@@ -2117,7 +2133,7 @@ corrected (was Ostersehlt 2022 → Vestergaard 2014 / Vogler 2025).
 6. **✅ DONE — crowding-vs-timing null.** Implemented as a within-file label permutation with a per-structure
    95% band and a Spearman trend test (§I-A.9), rather than the simulator null originally proposed: the
    permutation is exact and assumption-free, while a simulator null would import a bleaching model
-   calibrated from this same kind of data. Validated on the collaborator file (coverage 0.052 vs nominal 0.05).
+   calibrated from this same kind of data. Validated on a real imaging file (coverage 0.052 vs nominal 0.05).
 7. **✅ DONE — photon-weighted shape fitting.** `viewer_weight_eco` supplies w = Σ`eco` per trace to the
    `mle_fit_*` optimisers, with weighted RMSD and `n_eff` reported (§6.5). **Follow-up:** the resulting
    sensitivity (radius 359 → 149 nm on one test structure) suggests the viewer should report a

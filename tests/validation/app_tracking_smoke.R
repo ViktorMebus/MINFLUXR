@@ -1,7 +1,7 @@
 ## ─────────────────────────────────────────────────────────────────────────────
 ## tests/validation/app_tracking_smoke.R  -  Tracking-tab smoke test on real data
 ## ─────────────────────────────────────────────────────────────────────────────
-## Loads a GP67H subset through the Tracking tab's own upload path in a test
+## Loads a the tracking test data subset through the Tracking tab's own upload path in a test
 ## session, runs every panel whose estimator lives in R/est_*.R (CVE, MSD, JDD,
 ## change-point, D-map, HMM, per-state MSD) through its Run button, and renders
 ## each output. Prints the headline numbers so a refactor that changes results
@@ -11,15 +11,20 @@
 root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
 setwd(root)
 suppressMessages(suppressWarnings(source("global.R")))
-f <- normalizePath(list.files("Test data", "GP67H-track-014_filtered.*csv$", full.names = TRUE)[1])
-d <- utils::read.csv(f); keep <- unique(d$tid)[1:150]; tmp <- file.path(tempdir(), "gp67h_sub.csv")
+# The test data is local and not part of the repository. Point MINFLUXR_TRACK_PATTERN at a
+# filename pattern under "Test data/" to run this on a different tracking acquisition.
+f <- normalizePath(list.files("Test data", Sys.getenv("MINFLUXR_TRACK_PATTERN", "track.*_filtered.*csv$"), full.names = TRUE)[1])
+stopifnot(!is.na(f))
+cat("file:", basename(f), "
+")
+d <- utils::read.csv(f); keep <- unique(d$tid)[1:150]; tmp <- file.path(tempdir(), "track_sub.csv")
 utils::write.csv(d[d$tid %in% keep, ], tmp, row.names = FALSE)
 
 try_out <- function(output, ids) for (o in ids)
   cat(sprintf("  %-28s %s\n", o, tryCatch({ output[[o]]; "ok" }, error = function(e) paste("ERR:", conditionMessage(e)))))
 
 shiny::testServer(tracking_server, {
-  session$setInputs(trk_file = data.frame(name = "gp67h_sub.csv", size = file.size(tmp), type = "text/csv",
+  session$setInputs(trk_file = data.frame(name = "track_sub.csv", size = file.size(tmp), type = "text/csv",
                                           datapath = tmp, stringsAsFactors = FALSE))
   session$setInputs(trk_msd_cycle_ms = 0.1914, trk_L_tcp = 100.8, trk_cve_run = 0)   # 0 = unclicked, as at app start
   cat("rows:", nrow(trk()), " cycle:", trk_cycle_time(), "\n")

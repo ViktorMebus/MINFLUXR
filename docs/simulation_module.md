@@ -279,8 +279,8 @@ Everything is labelled a **simulation / validation tool**; it does not alter the
 
 ## 9. Default parameters — where they come from
 
-The Diffusion / Tracking defaults are the measured values of the GP67H tracking test data
-(`251027-200445_GP67H-track-013_filtered…csv`, `251027-202407_GP67H-track-014_filtered…csv`) and of the
+The Diffusion / Tracking defaults are the measured values of two real MINFLUX tracking
+acquisitions of a bacterial membrane protein, and of the
 stock 2D tracking sequence (`Test data/Tracking Imaging Sequences/Tracking_2D_Oct2022.json`).
 
 | Field | Default | Source |
@@ -322,7 +322,7 @@ predicting t_cyc and `eco` rather than calibrating them from data.
 ## 10. Which mechanism flattens the k-curve?
 
 Real MINFLUX tracking files show per-axis ⟨Δx²⟩ growing far more slowly with the dark-gap length k
-than free diffusion allows (GP67H: 100 / 75 / 53 / 42 / 36 / 30 % of expectation for k = 1…6, see
+than free diffusion allows (the tracking test data: 100 / 75 / 53 / 42 / 36 / 30 % of expectation for k = 1…6, see
 `tracking_sigma_and_cve_plan.md` §2.3). The simulator now carries the three candidate mechanisms, and
 the summary panel prints the same k-curve, so they can be told apart. Sweeps at D = 0.3 µm²/s,
 free geometry, 250 tracks:
@@ -357,11 +357,11 @@ The caveat worth carrying: the R_reacq that reproduces the real k-curve is ~50 n
 323 nm search field of the sequence's first iteration. Either the effective re-acquisition range is
 much tighter than the field, or censoring is not the whole story.
 
-## 11. Audit against GP67H-track-014 (2026-08-26)
+## 11. Audit against a real tracking acquisition (2026-08-26)
 
 Every statistic below is measured the same way on the real file and on simulator output.
-GP67H is a cell-wall protein on the E. coli surface, so the reference model is surface diffusion on a
-rod with little freedom.
+The protein tracked in that file sits on the surface of a rod-shaped bacterium, so the reference
+model is surface diffusion on a rod with little freedom.
 
 | statistic | REAL filtered | REAL raw | SIM before | SIM after |
 |---|---|---|---|---|
@@ -370,7 +370,7 @@ rod with little freedom.
 | eco var/mean | 18.9 | 16.0 | 1.00 | 15.2 |
 | eco floor | 20 (= phtLimit) | 20 | none | 20 |
 | σ_loc q10–q90 | 2.87–5.25 nm | 3.13–5.50 | 3.72–4.60 | 2.85–5.63 |
-| per-track D | 0.329 µm²/s | 0.335 | 0.219 | 0.31 (GP67H preset) |
+| per-track D | 0.329 µm²/s | 0.335 | 0.219 | 0.31 (preset) |
 | MSD α (3–30 cycles) | 0.78 | 0.67 | 0.97 | 0.88 |
 | ⟨Δx²⟩ decline k=1→6 | ×3.0 | ×3.0 | ×1.05 | ×1.44 |
 | length-vs-D (Spearman) | −0.42 | −0.36 | 0.00 | −0.18 |
@@ -442,7 +442,7 @@ included: α = 0.78 in → 0.75 out.
 This exposes an estimator failure worth carrying to the tracking tab: **on subdiffusive tracks the CVE
 mis-attributes the anti-correlated fBm increments to localization noise.** Across all geometries at
 α = 0.78 it returns D about 65% of truth while inflating σ_loc from 4.4 to ~4.9 nm. Both errors point
-the same way the real data does, which is a reason to be careful about reading a low CVE D on GP67H as
+the same way the real data does, which is a reason to be careful about reading a low CVE D on the tracking test data as
 a slow molecule rather than a subdiffusive one.
 
 ### Hop diffusion, and the length-vs-D coupling
@@ -456,7 +456,7 @@ a corral and slower motion between them. Measured α over 3–40 cycles:
 |---|---|---|---|---|---|
 | α | 0.61 | 0.69 | 0.81 | 0.88 | 0.86 |
 
-So a 60 nm corral at ~12% permeability sits on the measured GP67H α of 0.78, and is at least as
+So a 60 nm corral at ~12% permeability sits on the measured the tracking test data α of 0.78, and is at least as
 plausible for a cell-wall protein in a peptidoglycan mesh as fBm is. **The two are not distinguished
 by α alone** — telling them apart is a question for the tracking tab, not the simulator.
 
@@ -476,7 +476,7 @@ truncating the fast tracks compresses the length range that the correlation live
 
 Why it matters at all: this coupling is what decides whether a pooled D and a per-track median D
 agree. Pooling weights by step count, so when the slow molecules are the long ones they dominate the
-pooled number. On GP67H that gap is 0.22 against 0.33, a 40% disagreement between two defensible ways
+pooled number. On the tracking test data that gap is 0.22 against 0.33, a 40% disagreement between two defensible ways
 of reporting one D.
 
 ### Remaining gaps
@@ -487,7 +487,7 @@ of reporting one D.
 - **Full anticorrelation strength.** −0.33 against −0.42, and only with a near-maximal coupling.
 - `cfr` and `dcr` remain absent — deliberately out of scope.
 
-### A GP67H-like parameter set
+### A parameter set matched to that acquisition
 
 Rod surface, radius 480 nm, cylinder 3000 nm, 2 cells; D 0.45 µm²/s with CV 0.35; confined,
 L_c 60 nm; cycle 0.192 ms, SW 0.011, p_dark 0.28; photons 38, limit 20, spread 0.55; τ 0.55 with
@@ -526,7 +526,7 @@ as such, rather than mixed in with settings that describe reality.
 
 ### What Calibrate now reads from a file
 
-| field | measured as | GP67H |
+| field | measured as | measured value |
 |---|---|---|
 | cycle time, SW | regression of Δt on cycle count | 0.192 ms, 0.0103 ms |
 | photons | median eco | 37 |

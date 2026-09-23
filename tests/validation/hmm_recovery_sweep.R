@@ -17,7 +17,7 @@ n_reps <- if (length(args)) as.integer(args[1]) else 3L
 root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
 suppressMessages({ source(file.path(root, "helpers_shared.R")); source(file.path(root, "R/est_hmm.R")) })
 
-# Acquisition matched to the GP67H tracking files (docs/simulation_module.md §9)
+# Acquisition matched to the tracking test files (docs/simulation_module.md §9)
 t_c <- 0.192; sw <- 0.011; R <- 1 / 6.2; gap_p <- c(0.72, 0.20, 0.05, 0.03)
 set.seed(99); eco <- pmax(20, rlnorm(1e5, log(36), 0.6)); sig_pool <- 100.8 / (4 * sqrt(eco))
 D_fast <- 300                                              # nm²/ms = 0.3 µm²/s

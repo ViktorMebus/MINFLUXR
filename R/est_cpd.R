@@ -73,7 +73,7 @@ cpd_segment_tracks <- function(df, min_seg = 8L, use_z = FALSE, noise_sig2 = 0,
     # so its BIC penalty is only calibrated on a unit-variance signal. log of a
     # scaled chi-square with d degrees of freedom has a fixed variance whatever D
     # and Δt are: trigamma(d/2) = π²/6 ≈ 1.64 in 2D, 0.93 in 3D. Unscaled, the 2D
-    # penalty is 1.64× too weak. Simulated single free population (GP67H timings,
+    # penalty is 1.64× too weak. Simulated single free population (MINFLUX tracking timings,
     # σ 5 nm): unscaled 28% / 35% / 51% of tracks cut at N = 100 / 300 / 1000
     # steps; scaled 8% / 9% / 3%.
     log_r2n_std <- log_r2n / sqrt(trigamma(ndim / 2))

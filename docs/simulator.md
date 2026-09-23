@@ -236,14 +236,14 @@ Two modes:
 
   | Run | traces | locs/trace | σ_x | σ_y | σ_z | σ_z/σ_x | photons | L_eff |
   |---|--:|--:|--:|--:|--:|--:|--:|--:|
-  | collaborator B2 cond02 | 546 | 8 | 7.06 | 7.16 | 6.17 | 0.87 | 73 | **121** |
-  | collaborator B3 cond02 | 472 | 7 | 6.72 | 7.31 | 5.63 | 0.84 | 71 | **118** |
-  | JE2 001 (fiducials) | 3679 | 2 | 10.56 | 9.21 | 5.50 | 0.49 | 137 | **231** |
-  | JE2 002 (clean) | 4583 | 2 | 11.01 | 10.17 | 6.84 | 0.61 | 105 | **217** |
+  | Imaging run A | 546 | 8 | 7.06 | 7.16 | 6.17 | 0.87 | 73 | **121** |
+  | Imaging run B | 472 | 7 | 6.72 | 7.31 | 5.63 | 0.84 | 71 | **118** |
+  | Imaging run C (with fiducials) | 3679 | 2 | 10.56 | 9.21 | 5.50 | 0.49 | 137 | **231** |
+  | Imaging run D (clean) | 4583 | 2 | 11.01 | 10.17 | 6.84 | 0.61 | 105 | **217** |
 
-  The default `L` is **120 nm** (was 50), from the two collaborator runs, which agree to 2 %. At the default
+  The default `L` is **120 nm** (was 50), from runs A and B, which agree to 2 %. At the default
   80 photons that gives σ ≈ 6.9 nm — consistent with the manual-mode defaults (σ_xy = 6, σ_z = 4)
-  so the two precision modes no longer disagree by 2×. The JE2 runs sit at ~220 nm: a harder sample
+  so the two precision modes no longer disagree by 2×. Runs C and D sit at ~220 nm: a harder sample
   (median 2 locs/trace, so σ comes from the longer-lived minority), which is the spread a single
   default cannot cover — calibrate rather than trust it.
 

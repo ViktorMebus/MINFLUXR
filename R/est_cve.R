@@ -79,7 +79,7 @@ cve_core <- function(dx, dy, dz, dt, integ_step, has_z = FALSE, t_c = NA_real_,
   # with R = t_collect/(6*dt). R = 0 is the instantaneous-exposure special case,
   # where it collapses to sigma^2 = -cov1 - which is what this used to compute,
   # and it under-reports sigma by ~3x on real tracking data (1.5 vs 4.1 nm on the
-  # GP67H files). Collection spans the cycle t_c out of a step dt = t_c + SW, so
+  # tracking test files). Collection spans the cycle t_c out of a step dt = t_c + SW, so
   # R = t_c/(6*dt); a full-cycle window at SW = 0 gives the familiar 1/6.
   dt_int  <- mean(dt[integ_step], na.rm = TRUE)
   # R is not a single knowable number: it depends on how the cycle's photons are

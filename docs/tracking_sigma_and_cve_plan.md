@@ -1,6 +1,6 @@
 # CVE and σ_loc in MINFLUX tracking — verdict and plan
 
-Status (updated 2026-09-16): **implemented.** Written 2026-08-24 as a plan from the GP67H tracking test
+Status (updated 2026-09-16): **implemented.** Written 2026-08-24 as a plan from the tracking test
 data and the simulator round-trip built the same day (see `simulation_module.md` §5 and §9). The
 blur-aware CVE and photon-budget σ_loc shipped (§9, §11); the prefactor note in §11 records the later
 return to a = 4. The current method is summarised in `MINFLUX_analysis_methods.md` §I-B.1. Sections 1–8
@@ -62,7 +62,7 @@ for §6's immobile-sample calibration, not against it.
 Three separate problems, in increasing order of severity:
 
 1. **The app assumes the wrong R.** A MINFLUX localization integrates photons over its collection
-   window, so R = τ/(6·Δt) > 0. **τ is measurable, not assumable: τ = eco/efo**, which on both GP67H
+   window, so R = τ/(6·Δt) > 0. **τ is measurable, not assumable: τ = eco/efo**, which on both the tracking test data
    files is 0.1061 ms of a 0.192 ms cycle — 55%, giving **R ≈ 0.087**. Using R = 0 under-reports
    σ_loc by ~2.4× (1.5 and 1.3 nm against **3.17 and 3.09 nm**). This is blur, not precision.
 2. **The estimate is dominated by the assumption, not by the data.** At R = 1/6, 91% of σ² comes
@@ -133,7 +133,7 @@ Ordered by value; each is independently shippable.
 
 Three quantities the app currently infers or assumes are written in the data:
 
-| quantity | where it is | value on GP67H |
+| quantity | where it is | measured value |
 |---|---|---|
 | collection window τ | **eco / efo**, per localization | 0.1061 ms, quantised in units of 0.1061 |
 | blur coefficient R | τ / (6·Δt) | 0.087 |
@@ -206,14 +206,14 @@ estimator of §3 does track the true R.
 | censoring on/off at fixed D | how much apparent confinement does it manufacture in the Tracking tab's confinement tools? |
 | heterogeneous D × censoring | does it reproduce the real 0.22 pooled vs 0.30 per-track gap quantitatively? |
 | D sweep at fixed σ | at what D does CVE σ become unusable (r₁ → 0)? Predicted: already, here. |
-| α sweep 0.6 → 1.0 at fixed D, σ | how much of the app's D deficit on GP67H is subdiffusion rather than slowness? |
+| α sweep 0.6 → 1.0 at fixed D, σ | how much of the app's D deficit on the tracking test data is subdiffusion rather than slowness? |
 | hop corral size / permeability | can an α-matched hop model be told apart from fBm by any statistic the app computes? |
 
 ## 6b. Estimator failure modes, measured in the simulator
 
 Each of these was produced by simulating data with a known ground truth and running the app's own
 estimator over it. They are properties of the estimator, so they transfer to real acquisitions with
-the same character — and GP67H has all three characters.
+the same character — and the tracking test data has all three characters.
 
 | condition | effect on D | effect on σ_loc | why |
 |---|---|---|---|
@@ -222,7 +222,7 @@ the same character — and GP67H has all three characters.
 | **τ growing over a gap** | **≈ +7%** | small | single-cycle steps next to a gap have mismatched averaging windows; the CVE assumes they are equal |
 | population heterogeneity | pooled D ≠ per-track median | inflated | ⟨Δx²⟩ pools molecules of different D |
 
-**The three σ_loc errors stack, and they all point the same way.** On GP67H the app reports 1.3–1.5 nm.
+**The three σ_loc errors stack, and they all point the same way.** On the tracking test data the app reports 1.3–1.5 nm.
 Correcting R to the measured value takes it to ≈ 3.1 nm. Correcting for α = 0.78 subdiffusion would
 take it lower again, ≈ 2.7 nm. Each correction is itself model-dependent, which is the point: the
 covariance route cannot deliver a trustworthy σ_loc on data like this, at any level of care.
@@ -252,7 +252,7 @@ calibrates the imaging iteration, not the tracking one.
 
 ---
 
-## 7. Mode-invariance, measured on GP67H (added 2026-08-27)
+## 7. Mode-invariance, measured on the tracking test data (added 2026-08-27)
 
 **Question:** does the photon route work for directed, free *and* confined motion, given these tracks
 are confined?
@@ -354,7 +354,7 @@ the paper's 20.03 / 14.35 / 9.08 (within 1.3%).
   direction (smaller under confinement, larger under directed motion).
 - Degrades to L/(4 sqrt(N)) if nu is cleared - the nu -> infinity limit.
 
-**Effect on GP67H: sigma_loc 4.09 -> 5.04 nm (013) and 4.20 -> 5.18 nm (014), +23%.** Every downstream
+**Effect on the two tracking test files: sigma_loc 4.09 -> 5.04 nm and 4.20 -> 5.18 nm, +23%.** Every downstream
 noise floor moves with it: D-map, JDD bias term, confinement correction, HMM noise state,
 directionality and speed. Results quoted before this change are not comparable.
 
@@ -373,7 +373,7 @@ different L** so nu is over-determined and Eq. 1's L-dependence is tested rather
 ## 10. The fixed-cell calibration, measured (2026-09-02)
 
 24 files, `Test data/Fixed Tracking datasets/`, fixed E. coli + 4 nM JF646, three strains
-(GP67H, GP170H, HaloCtrl) across TrkSeq2D (DMP 2) and cal_L101 / L151 / L302 (DMP 0).
+(two labelled samples and a control) across TrkSeq2D (DMP 2) and cal_L101 / L151 / L302 (DMP 0).
 Naming verified against the data: iteration count identifies the sequence (4/3/2 -> L101/L151/L302)
 and cfr ceiling separates CFR-on from CFR-off. **All 24 filenames are consistent with their contents.**
 
@@ -434,7 +434,7 @@ section 8 inferred from the r1 violation, now measured directly.
 ### 10.4 The finding that matters most for the biology
 
 **D_w on FIXED cells with the live-cell sequence (DMP 2, L = 100.8) is 70-125 nm^2/ms
-= 0.07-0.125 um^2/s.** The live GP67H D_CVE is 0.215 um^2/s. So an instrumental floor accounts for
+= 0.07-0.125 um^2/s.** The live-sample D_CVE is 0.215 um^2/s. So an instrumental floor accounts for
 **roughly a third to a half** of the diffusion coefficient measured on the live data.
 
 This is not a sigma_loc issue - it is a D issue, and it is larger than any of the sigma corrections
@@ -455,7 +455,7 @@ segments only (>=200 localizations, 60-90% of localizations retained) - the numb
 | prefactor 1/a | 3.7 | **3.62** |
 
 So the conclusion is not an artefact of dirty traces. Per L, calibration sequences, excluding
-HaloCtrl (whose larger wander makes its intercept extrapolation unreliable): a = 0.276 (L=100.8),
+the control sample (whose larger wander makes its intercept extrapolation unreliable): a = 0.276 (L=100.8),
 0.304 (L=151.2).
 
 L302 survives cleaning with only **3% of localizations** - confirmed unusable.
@@ -473,7 +473,7 @@ L302 survives cleaning with only **3% of localizations** - confirmed unusable.
   a from L=101 to L=151; the measurement says 4%. nu does not transfer from Vogler's instrument.
 - `.crlb_doughnut()` now keeps the **moving-emitter term when nu is off**: the large-beam limit is
   `sigma = L/(a sqrt(N)) * [1 + 2(x/L)^2]`, x = sqrt(2 D t_loc). Verified: a = 0.278 at both L, and
-  the x-term adds +2% at D = 0.21 um2/s (GP67H), +8% at 1.0, **+39% at 5.0** (a fast cytosolic
+  the x-term adds +2% at D = 0.21 um2/s (the tracking test data), +8% at 1.0, **+39% at 5.0** (a fast cytosolic
   protein). That is the mode-awareness - smaller under confinement, larger under fast/directed motion.
 
 ### The mounting caveat on D_w
@@ -530,7 +530,7 @@ At L = 100.8 the tracker's own floor is 36 nm^2/ms = **0.036 um^2/s**; the fixed
 ~124 is contributed by the agarose mount, incomplete fixation, single-molecule photophysics, or some
 mixture. These data cannot split those further.
 
-**Against a live GP67H D of 0.215 um^2/s: the instrument floor alone is ~17%, and the full fixed-cell
+**Against a live-sample D of 0.215 um^2/s: the instrument floor alone is ~17%, and the full fixed-cell
 floor would be ~74%.** The latter is an upper bound - it includes anything the fixation failed to
 immobilise.
 

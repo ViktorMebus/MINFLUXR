@@ -1,6 +1,6 @@
 # CLAIM: the confinement-index null reproduces the free-track CI distribution when
 # real tracks are motion-blurred and carry a spread of photon-model sigma.
-# Measured 2026-09-17 at GP67H values: blurred null 5.5% confined / 4.6% directed on
+# Measured 2026-09-17 at MINFLUX tracking values: blurred null 5.5% confined / 4.6% directed on
 # true free tracks; the old static, unblurred null gave 4.4% / 7.3%.
 test_that("blurred CI null keeps false-positive rates near 5% on blurred free tracks", {
   skip_if_not_slow()

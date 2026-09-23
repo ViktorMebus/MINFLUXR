@@ -6544,7 +6544,7 @@ smlm_server <- function(input, output, session) {
       # See the tc2 block: one dataset-wide precision, so every Median Cluster in
       # the view is wrapped on the same physical ruler.
       # Per-axis: MINFLUX z is usually TIGHTER than x/y (measured z:lateral 0.60
-      # on the collaborator cond02 files), so an isotropic wrap over-wraps axially.
+      # on the a real imaging file files), so an isotropic wrap over-wraps axially.
       iso_precision <- smlm_loc_precision_nm(df, per_axis = TRUE)
       c2_diag <- new.env(parent = emptyenv()); c2_diag$rows <- list()
 
@@ -8628,7 +8628,7 @@ smlm_server <- function(input, output, session) {
   ##   "locs" - every localization. A denser sample of the same region, so a
   ##            smoother outline, but trace LENGTH is photophysics (how long one
   ##            fluorophore stayed on), and it enters the closing sweep. Measured on
-  ##            the membrane-protein set: the localization outline inflated the area enough to
+  ##            the two-condition set: the localization outline inflated the area enough to
   ##            loosen the CSR-calibrated eps, and the largest-focus size went from
   ##            cleanly separating the conditions (6-12 against 19-51 units) to
   ##            overlapping (10-24 against 19-52), by sweeping diffuse background
@@ -12933,7 +12933,7 @@ smlm_server <- function(input, output, session) {
   ## across cells - the only thing that says whether a between-condition difference is
   ## bigger than the between-cell variability.
   ##
-  ## Measured on the four real collaborator acquisitions (mean g over 30-300 nm, common r grid):
+  ## Measured on the four real a real imaging file acquisitions (mean g over 30-300 nm, common r grid):
   ## cond01 1.24 / 1.50, cond02 2.31 / 4.38. Between-condition 2.44x against a
   ## within-condition spread of 1.21x and 1.89x, and no overlap - so averaging is
   ## justified there. But at r = 20 nm the two cond02 files read 5.03 and 14.32, so the
@@ -13113,7 +13113,7 @@ smlm_server <- function(input, output, session) {
   ## Localizations inside one trace sit a few nm apart, so the k-th neighbour
   ## distance collapses to the localization precision and the local density
   ## measures HOW LONG THAT FLUOROPHORE STAYED ON, not how the protein is
-  ## arranged. Measured on the membrane-protein pair: on localizations the enhancement runs
+  ## arranged. Measured on the two-condition pair: on localizations the enhancement runs
   ## to 3,000-17,000x the cell mean and NEITHER the CV nor the 90th percentile
   ## separates the conditions (CV 1.46-1.74 against 1.23-2.54, overlapping), while
   ## the same statistics on trace-ID centroids are cleanly disjoint. Trace length
@@ -13342,12 +13342,12 @@ smlm_server <- function(input, output, session) {
     #
     # Every focus is boxed, not only the biggest, and each carries its count. That
     # is deliberate: "largest" ranks by member count while the eye reads DENSITY,
-    # and the two disagree in half the membrane-protein files - a big loose focus outranks a
+    # and the two disagree in half the two-condition files - a big loose focus outranks a
     # small tight one. Boxing all of them with their counts removes the question of
     # which one the panel picked.
     if (isTRUE(input$hot_show_foci) && !is.null(o$foci) && nrow(o$foci$table)) {
       tb  <- o$foci$table
-      # Boxing every focus is unreadable on a busy cell - one membrane-protein file yields 23.
+      # Boxing every focus is unreadable on a busy cell - one two-condition file yields 23.
       # The table is ordered largest first, so taking the head keeps the ones worth
       # looking at. 0 means "all", for when the spatial arrangement of the small
       # ones is the point.

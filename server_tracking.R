@@ -1862,7 +1862,7 @@ tracking_server <- function(input, output, session) {
     dark_gap <- if (use_dark && is.finite(t_c) && t_c > 0) dark_cyc * t_c else Inf
     # Length floor. Gap splitting promises segments of at least `min_len` localizations,
     # and peeling ends afterwards would quietly break that promise (measured on
-    # GP67H-014: 41 segments fell to 41-49). Trimming therefore stops at the floor: a
+    # the tracking test file: 41 segments fell to 41-49). Trimming therefore stops at the floor: a
     # track keeps a slightly dark end rather than dropping below the declared minimum.
     floor_len <- if (isTRUE(isolate(input$trk_split_gaps_enable)))
                    max(1L, as.integer(isolate(input$trk_split_min_len) %||% 1L)) else 1L
@@ -9909,7 +9909,7 @@ tracking_server <- function(input, output, session) {
       stringsAsFactors = FALSE)
     # Two states with the same D differ only in how long they last: the model is
     # describing a non-exponential dwell distribution of ONE diffusivity, not a
-    # separate state. Seen on GP67H-014 at K = 3 (D 0.026 / 0.026 / 0.49 µm²/s,
+    # separate state. Seen on the tracking test file at K = 3 (D 0.026 / 0.026 / 0.49 µm²/s,
     # dwells 17 / 0.26 / 0.17 ms). Flag adjacent states within 5% of each other.
     same_D <- rep(FALSE, K)
     for (k in seq_len(K - 1L)) if (abs(fit$D[k + 1L] / fit$D[k] - 1) < 0.05) same_D[c(k, k + 1L)] <- TRUE

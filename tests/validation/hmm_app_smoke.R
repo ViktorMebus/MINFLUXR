@@ -1,11 +1,16 @@
 setwd("C:/Users/viktorhm/repos/MINFLUXR")
 suppressMessages(suppressWarnings(source("global.R")))
-f <- normalizePath(list.files("Test data", "GP67H-track-014_filtered.*csv$", full.names = TRUE)[1])
+# The test data is local and not part of the repository. Point MINFLUXR_TRACK_PATTERN at a
+# filename pattern under "Test data/" to run this on a different tracking acquisition.
+f <- normalizePath(list.files("Test data", Sys.getenv("MINFLUXR_TRACK_PATTERN", "track.*_filtered.*csv$"), full.names = TRUE)[1])
 # keep the app test quick: a subset of tracks
-d <- utils::read.csv(f); keep <- unique(d$tid)[1:150]; tmp <- file.path(tempdir(), "gp67h_sub.csv")
+stopifnot(!is.na(f))
+cat("file:", basename(f), "
+")
+d <- utils::read.csv(f); keep <- unique(d$tid)[1:150]; tmp <- file.path(tempdir(), "track_sub.csv")
 utils::write.csv(d[d$tid %in% keep, ], tmp, row.names = FALSE)
 shiny::testServer(tracking_server, {
-  session$setInputs(trk_file = data.frame(name = "gp67h_sub.csv", size = file.size(tmp),
+  session$setInputs(trk_file = data.frame(name = "track_sub.csv", size = file.size(tmp),
                                           type = "text/csv", datapath = tmp, stringsAsFactors = FALSE))
   cat("rows in trk():", tryCatch(nrow(trk()), error = function(e) paste("ERR", conditionMessage(e))), "\n")
   session$setInputs(trk_msd_cycle_ms = 0.1914); cat("cycle:", tryCatch(trk_cycle_time(), error = function(e) conditionMessage(e)), "\n")
