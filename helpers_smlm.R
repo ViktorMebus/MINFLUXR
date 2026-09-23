@@ -7780,7 +7780,7 @@ apply_clustering_pipeline <- function(df, input) {
     # Splitting the trace instead is the honest reading: the localizations really
     # were recorded in different exchange rounds, so they are not evidence of one
     # simultaneously-present molecule. It does mean a straddling trace is counted
-    # twice - see the boundary-splitting note in docs/channel_unification_plan.md.
+    # twice - the boundary case is split so each channel counts it once.
     tid_plurality <- df %>%
       dplyr::filter(cluster != 0L) %>%
       dplyr::group_by(tid, channel, cluster) %>%

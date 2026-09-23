@@ -320,7 +320,7 @@ r1 the other way. Something is injecting *positive* increment correlation, which
 filter does. `damping: 2`.
 
 This is a second, independent line of evidence for the damping hypothesis of
-`sigma_loc_estimation.md` section 1b, reached without touching the sigma ceiling argument.
+the earlier options survey (section 1b), reached without touching the sigma ceiling argument.
 
 ### What it rules out
 
@@ -359,7 +359,7 @@ noise floor moves with it: D-map, JDD bias term, confinement correction, HMM noi
 directionality and speed. Results quoted before this change are not comparable.
 
 **The app now prints a value its own covariance check calls impossible** (section 1b of
-`sigma_loc_estimation.md`: the data caps sigma at 4.13 nm). That is intended - the disagreement is the
+the earlier options survey: the data caps sigma at 4.13 nm). That is intended - the disagreement is the
 finding, and section 8 says why the covariance side is the untrustworthy one here.
 
 **Smoothing check shipped.** The status line reports alpha (from cycle-lags 1 and 8), the fGn bound

@@ -2,7 +2,7 @@
 
 This document derives the localization-error model the Tracking tab uses, states what each term is
 for, and shows what the immobile-sample data does and does not support. It supersedes the
-options survey in `sigma_loc_estimation.md`.
+earlier survey of estimation options.
 
 ---
 
@@ -373,7 +373,8 @@ above 7 cycles, trim leading/trailing dark cycles of 3+, keep segments with cont
 |---|---|
 | 3.2 | pooled MSD over log-spaced lags 1–300, all fixed-cell files at L = 100.8; report the local log-log slope |
 | 3.3 | three-cornered hat on the opening iteration ramp: first record of itr 1/2/3 per trace, robust variance of each pairwise coordinate difference, then $\sigma_2^2 = (V_{12}+V_{23}-V_{13})/2$ |
-| 4, 5 | bin segments into ECO quartiles, fit `MSD(k) = 4σ² + 4D_w k t_c` on lags 1–5 within each bin, regress the intercept on $\langle 1/Nangle$ weighted by pair count |
+| 4, 5 | bin segments into ECO quartiles, fit `MSD(k) = 4σ² + 4D_w k t_c` on lags 1–5 within each bin, regress the intercept on $\langle 1/N
+angle$ weighted by pair count |
 | 6 | single-cycle squared steps only; cross-tabulate mean MSD(1) by cfr quartile within ECO tertiles |
 
 Datasets: `Test data/Fixed Tracking datasets/` (fixed E. coli, JF646, three strains),

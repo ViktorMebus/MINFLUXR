@@ -4,7 +4,7 @@
 departs from real MINFLUX.* Last reviewed 2026-08-11; §7 intro and §8 status checked against the code 2026-09-17 · Code: [`sim_server.R`](../sim_server.R),
 [`sim_ui.R`](../sim_ui.R) · Companions: [simulation_module.md](simulation_module.md) (Phase 2 design
 spec), [MINFLUX_analysis_methods.md](MINFLUX_analysis_methods.md) (the analysis side),
-[simulator_smlm_fidelity_handoff.md](simulator_smlm_fidelity_handoff.md) (the 2026-08-11 audit; superseded by §7 and §8 here).
+the 2026-08-11 fidelity audit, now superseded by §7 and §8 here.
 
 ---
 
@@ -442,7 +442,7 @@ round-trip. Full spec: [simulation_module.md](simulation_module.md).
 
 Ranked by how much they distort the tab's headline question. Items 1, 5, 6, 7 were found in this
 review; 2, 3, 4 come from the 2026-08-11 audit
-([handoff](simulator_smlm_fidelity_handoff.md)). *Status 2026-09-17:* 7.10 is fixed. 7.1 is partly
+(from the 2026-08-11 audit). *Status 2026-09-17:* 7.10 is fixed. 7.1 is partly
 addressed: the Precision Budget now headlines the label floor, the per-molecule error ε and a
 resolvable / not-resolvable verdict (§8.2), but the acquisition timeline's "% resolved" and
 time-to-resolve still count first detection. The others are open.
