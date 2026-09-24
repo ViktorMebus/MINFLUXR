@@ -1102,7 +1102,64 @@ smlm_ui <- fluidPage(
           column(5, actionButton("mplex_clear", "Clear",
                                  class = "btn-default btn-sm", style = "width:100%"))
         ),
-        verbatimTextOutput("mplex_summary")
+        verbatimTextOutput("mplex_summary"),
+
+        # ── Align channels: nudge one channel in x / y (/ z) ──────────────────
+        # Shown once a multiplex is built. Arrow buttons add one step to the
+        # selected channel's offset; the number boxes hold the total offset and
+        # accept typed values. Server side: MULTIPLEX CHANNEL ALIGNMENT block.
+        conditionalPanel(
+          condition = "output.mplex_active == true",
+          tags$div(style = "border-top:1px solid #e3e3e3; margin-top:6px; padding-top:6px;",
+          tags$b("Align channels"),
+          helpText("Shift one channel to correct an offset between exchange rounds. The loaded files stay unchanged."),
+          fluidRow(
+            column(8, selectInput("mplex_nudge_ch", "Channel to move", choices = character(0))),
+            column(4, numericInput("mplex_nudge_step", "Step (nm)", value = 5, min = 0.1, step = 1))
+          ),
+          # Arrow pad: 3x3 grid for x/y, plus a z column for axial data.
+          tags$div(style = "display:flex; gap:14px; align-items:center; margin:2px 0 8px;",
+            tags$div(style = "display:grid; grid-template-columns:repeat(3, 34px); grid-template-rows:repeat(3, 30px); gap:3px;",
+              tags$span(),
+              actionButton("mplex_nudge_up",    NULL, icon = icon("arrow-up"),    class = "btn-default btn-sm", title = "+y"),
+              tags$span(),
+              actionButton("mplex_nudge_left",  NULL, icon = icon("arrow-left"),  class = "btn-default btn-sm", title = "-x"),
+              tags$span(style = "text-align:center; line-height:30px; color:#888; font-size:0.8em;", "xy"),
+              actionButton("mplex_nudge_right", NULL, icon = icon("arrow-right"), class = "btn-default btn-sm", title = "+x"),
+              tags$span(),
+              actionButton("mplex_nudge_down",  NULL, icon = icon("arrow-down"),  class = "btn-default btn-sm", title = "-y"),
+              tags$span()
+            ),
+            conditionalPanel(
+              condition = "output.mplex_align_3d == true",
+              tags$div(style = "display:grid; grid-template-columns:34px; grid-template-rows:repeat(3, 30px); gap:3px;",
+                actionButton("mplex_nudge_zup",   NULL, icon = icon("chevron-up"),   class = "btn-default btn-sm", title = "+z"),
+                tags$span(style = "text-align:center; line-height:30px; color:#888; font-size:0.8em;", "z"),
+                actionButton("mplex_nudge_zdown", NULL, icon = icon("chevron-down"), class = "btn-default btn-sm", title = "-z")
+              )
+            )
+          ),
+          fluidRow(
+            column(4, numericInput("mplex_nudge_dx", "dx (nm)", value = 0, step = 1)),
+            column(4, numericInput("mplex_nudge_dy", "dy (nm)", value = 0, step = 1)),
+            column(4, conditionalPanel(
+              condition = "output.mplex_align_3d == true",
+              numericInput("mplex_nudge_dz", "dz (nm)", value = 0, step = 1)))
+          ),
+          fluidRow(
+            column(6, actionButton("mplex_nudge_reset", "Reset channel",
+                                   class = "btn-default btn-sm", style = "width:100%")),
+            column(6, actionButton("mplex_nudge_reset_all", "Reset all",
+                                   class = "btn-default btn-sm", style = "width:100%"))
+          ),
+          verbatimTextOutput("mplex_offsets_txt"),
+          .detail(
+            tags$p("Each arrow moves the selected channel by one step. +x is right and +y is up in the XY view; z moves along the optical axis and is offered for 3D data only. The boxes hold the total offset and also accept typed values."),
+            tags$p("Offsets are stored per source file (or time window) and are re-applied when the multiplex is rebuilt. Every plot, analysis and export of the multiplex uses the shifted coordinates."),
+            tags$p(tags$b("Choosing the offset. "), "Align on a feature that is present in every round, such as fiducial beads or a reference label imaged in each round. Aligning two different targets onto each other by eye sets their overlap by hand, which biases cross-channel colocalization and cross-channel nearest-neighbour results toward colocalization. Record the offsets shown above with the analysis."),
+            label = "How alignment works"
+          ))
+        )
       ),
       ),  # /Multiplexed MINFLUX
       tags$hr(),

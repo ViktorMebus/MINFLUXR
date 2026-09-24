@@ -592,7 +592,8 @@ smlm_server <- function(input, output, session) {
         d$mplex_channel <- j; d$mplex_label <- lab; d$mplex_color <- col
         parts[[length(parts) + 1L]] <- d
         spec[[length(spec) + 1L]] <- list(channel = j, label = lab, color = col,
-          n_loc = nrow(d), n_trace = dplyr::n_distinct(d$tid))
+          n_loc = nrow(d), n_trace = dplyr::n_distinct(d$tid),
+          src = paste0("file:", fs[j]))   # alignment offsets are keyed on the source
       }
       if (!length(parts)) {
         showNotification("Selected files contained no data.", type = "error"); return()
@@ -641,7 +642,8 @@ smlm_server <- function(input, output, session) {
       spec <- lapply(seq_len(nch), function(j) {
         sub <- d[d$mplex_channel == j, , drop = FALSE]
         list(channel = j, label = labs[j], color = cols[j],
-             n_loc = nrow(sub), n_trace = dplyr::n_distinct(sub$tid))
+             n_loc = nrow(sub), n_trace = dplyr::n_distinct(sub$tid),
+             src = paste0("tim:", j))       # alignment offsets are keyed on the source
       })
     }
 
@@ -651,6 +653,11 @@ smlm_server <- function(input, output, session) {
 
     st <- smlm_file_store(); st[[mplex_name]] <- combined; smlm_file_store(st)
     mplex_spec_rv(spec)
+    # The freshly built dataset carries no alignment shift yet. Re-apply the
+    # offsets remembered for any source that is still part of the multiplex, so
+    # rebuilding (e.g. after renaming a channel) keeps the alignment.
+    mplex_applied$off <- list()
+    combined <- .mplex_apply_offsets(update_active = FALSE) %||% combined
     uploaded_df_rv(combined)
     updateSelectInput(session, "active_file", choices = names(st), selected = mplex_name)
     updateSelectInput(session, "color_mode", selected = "multiplex")
@@ -664,6 +671,7 @@ smlm_server <- function(input, output, session) {
     st <- smlm_file_store()
     if (!is.null(st[[mplex_name]])) { st[[mplex_name]] <- NULL; smlm_file_store(st) }
     mplex_spec_rv(NULL)
+    mplex_applied$off <- list()   # nothing is shifted any more (offsets are kept for a rebuild)
     rem <- names(smlm_file_store())
     if (length(rem)) {
       updateSelectInput(session, "active_file", choices = rem, selected = rem[1])
@@ -686,11 +694,239 @@ smlm_server <- function(input, output, session) {
       character(1)), collapse = "\n")
   })
 
+  # =========================================================================
+  # MULTIPLEX CHANNEL ALIGNMENT - nudge one channel in x / y (/ z)
+  # =========================================================================
+  # GOAL
+  #   Exchange rounds of a multiplex acquisition can land slightly offset from
+  #   each other (the sample settles while buffers are exchanged). This block
+  #   lets the user translate individual channels of the built multiplex so the
+  #   rounds line up again.
+  #
+  # DESIGN
+  #   * Offsets act on the synthetic "★ Multiplex" entry only. The loaded source
+  #     files are never modified. "Clear" + "Build" restores the original
+  #     coordinates exactly; "Reset" subtracts the shift again (float residue
+  #     ~1e-13 nm).
+  #   * Two bookkeeping tables, both named lists  source-key -> c(x, y, z) nm:
+  #       mplex_offsets_rv   what the user WANTS (drives the controls)
+  #       mplex_applied$off  what is currently BAKED INTO the combined data
+  #     Applying adds (wanted - applied) to that channel's rows. Working in
+  #     deltas means repeated nudges never re-read or copy the sources, and a
+  #     later in-place edit of the store (the axial rescale) stays consistent.
+  #   * Offsets are keyed on the SOURCE ("file:<name>" or "tim:<j>"), not on the
+  #     channel number, so rebuilding the multiplex with a different file
+  #     selection cannot move the wrong round. Clearing the multiplex keeps the
+  #     wanted offsets; the next Build re-applies them.
+  #   * The STORE entry is the truth (batch tools and file switching read it),
+  #     and it carries its baked-in offsets as attr(, "mplex_off").
+  #   * The ACTIVE copy (uploaded_df_rv) is deliberately NOT replaced on a nudge.
+  #     Replacing it re-runs the whole filter pipeline and rebuilds every filter
+  #     widget at the new data's full range, which resets the user's filters.
+  #     Instead plottable_data() adds the RESIDUAL shift (store offsets minus the
+  #     offsets baked into the active copy) right after filtering. The filters
+  #     are translation-free (metadata, per-trace spread, trace length), so
+  #     applying the shift after them gives the same point set.
+  #   * Clustering is per channel on a multiplex, and a per-channel translation
+  #     keeps every within-channel distance. plottable_data() therefore reuses
+  #     the last clustering when only the shift changed (see .mplex_clu_memo).
+  #   * z offsets are only offered for axial data (smlm_z_state() == "3d"), the
+  #     same planar test every other axis-bearing control uses.
+  # =========================================================================
+  mplex_offsets_rv <- reactiveVal(list())                     # wanted offsets, by source key
+  mplex_applied    <- new.env(); mplex_applied$off <- list()  # baked-in offsets (plain state)
+
+  .mplex_zero <- c(x = 0, y = 0, z = 0)
+  # Source key of one spec entry (older specs without $src fall back to the channel).
+  .mplex_key <- function(c) c$src %||% paste0("ch:", c$channel)
+  # Offset for one source key from a table, zero when absent.
+  .mplex_off_of <- function(tbl, key) {
+    v <- tbl[[key]]
+    if (is.null(v) || length(v) != 3L || any(!is.finite(v))) .mplex_zero else v
+  }
+
+  # GOAL: bring the combined multiplex data in the STORE to the WANTED offsets.
+  # ARGS  update_active : replot the active view (FALSE from the Build handler,
+  #                       which does that itself).
+  # RETURNS the updated combined data.frame (offsets in attr "mplex_off"), or
+  #         NULL when nothing is built.
+  .mplex_apply_offsets <- function(update_active = TRUE) {
+    sp <- isolate(mplex_spec_rv())
+    st <- isolate(smlm_file_store())
+    d  <- st[[mplex_name]]
+    if (is.null(sp) || is.null(d) || !nrow(d)) return(NULL)
+    want    <- isolate(mplex_offsets_rv())
+    has_z   <- "z" %in% names(d) && has_axial_data(d)   # never shift a planar z = 0 column
+    changed <- FALSE
+    for (c in sp) {
+      key <- .mplex_key(c)
+      w <- .mplex_off_of(want, key)
+      a <- .mplex_off_of(mplex_applied$off, key)
+      if (!has_z) w["z"] <- a["z"]                       # z untouched on planar data
+      delta <- w - a
+      if (all(abs(delta) < 1e-9)) next                   # this channel is already there
+      rows <- which(d$mplex_channel == c$channel)        # this channel's localizations
+      d$x[rows] <- d$x[rows] + delta[["x"]]
+      d$y[rows] <- d$y[rows] + delta[["y"]]
+      if (has_z) d$z[rows] <- d$z[rows] + delta[["z"]]
+      mplex_applied$off[[key]] <- w                      # record what is now baked in
+      changed <- TRUE
+    }
+    attr(d, "mplex_off") <- mplex_applied$off            # the data says how it was shifted
+    if (!changed) return(d)
+    st[[mplex_name]] <- d
+    smlm_file_store(st)
+    # The active copy stays as it is (see DESIGN); a replot lets plottable_data()
+    # pick up the residual shift. A multiplex sitting in the store behind another
+    # active file just keeps its new coordinates.
+    if (update_active && identical(isolate(input$active_file), mplex_name))
+      plot_trigger(Sys.time())
+    d
+  }
+
+  # GOAL: add the shift the active copy does not carry yet.
+  #   The active copy (uploaded_df_rv) was taken from the store at some point and
+  #   carries the offsets baked in at that moment in attr "mplex_off". The store
+  #   is now at mplex_applied$off. The difference, per channel, is added here.
+  # ARGS  df : any frame derived from the active copy (keeps mplex_channel).
+  # RETURNS df with the residual shift applied; unchanged for non-multiplex data.
+  .mplex_residual_shift <- function(df) {
+    if (!is.data.frame(df) || !nrow(df) || !"mplex_channel" %in% names(df)) return(df)
+    act <- isolate(uploaded_df_rv())
+    sp  <- isolate(mplex_spec_rv())
+    if (is.null(act) || is.null(sp)) return(df)
+    base  <- attr(act, "mplex_off") %||% list()          # offsets inside the active copy
+    has_z <- "z" %in% names(df) && has_axial_data(act)
+    for (c in sp) {
+      key   <- .mplex_key(c)
+      delta <- .mplex_off_of(mplex_applied$off, key) - .mplex_off_of(base, key)
+      if (all(abs(delta) < 1e-9)) next
+      rows <- which(df$mplex_channel == c$channel)
+      df$x[rows] <- df$x[rows] + delta[["x"]]
+      df$y[rows] <- df$y[rows] + delta[["y"]]
+      if (has_z) df$z[rows] <- df$z[rows] + delta[["z"]]
+    }
+    df
+  }
+
+  # Last multiplex clustering, reused while only the channel shift changes.
+  # Plain environment: a cache, and must not trigger anything when written.
+  .mplex_clu_memo <- new.env()
+
+  # Apply shortly after the last change, so a run of quick clicks costs one
+  # re-plot rather than one per click.
+  mplex_offsets_debounced <- debounce(reactive(mplex_offsets_rv()), 300)
+  observeEvent(mplex_offsets_debounced(), {
+    .mplex_apply_offsets()
+  }, ignoreInit = TRUE)
+
+  # TRUE when the active dataset has axial data; drives the z row of the pad.
+  output$mplex_align_3d <- reactive(identical(smlm_z_state(), "3d"))
+  outputOptions(output, "mplex_align_3d", suspendWhenHidden = FALSE)
+
+  # Channel picker: label shown, source key as the value. Channel 2 is selected
+  # by default so channel 1 acts as the fixed reference.
+  observeEvent(mplex_spec_rv(), {
+    sp <- mplex_spec_rv()
+    if (is.null(sp) || !length(sp)) {
+      updateSelectInput(session, "mplex_nudge_ch", choices = character(0)); return()
+    }
+    keys <- vapply(sp, .mplex_key, character(1))
+    labs <- vapply(sp, function(c) sprintf("Ch%d  %s", c$channel, c$label), character(1))
+    cur  <- isolate(input$mplex_nudge_ch)
+    sel  <- if (!is.null(cur) && cur %in% keys) cur else keys[min(2L, length(keys))]
+    updateSelectInput(session, "mplex_nudge_ch", choices = stats::setNames(keys, labs),
+                      selected = sel)
+  }, ignoreNULL = FALSE)
+
+  # Show the selected channel's wanted offset in the three number boxes.
+  .mplex_show_offset <- function(key) {
+    v <- .mplex_off_of(isolate(mplex_offsets_rv()), key)
+    updateNumericInput(session, "mplex_nudge_dx", value = round(v[["x"]], 2))
+    updateNumericInput(session, "mplex_nudge_dy", value = round(v[["y"]], 2))
+    updateNumericInput(session, "mplex_nudge_dz", value = round(v[["z"]], 2))
+  }
+  observeEvent(input$mplex_nudge_ch, {
+    req(nzchar(input$mplex_nudge_ch))
+    .mplex_show_offset(input$mplex_nudge_ch)
+  })
+
+  # GOAL: add one step to the selected channel's wanted offset (arrow buttons).
+  .mplex_nudge <- function(axis, sign) {
+    key <- input$mplex_nudge_ch
+    if (is.null(key) || !nzchar(key)) return()
+    step <- suppressWarnings(as.numeric(input$mplex_nudge_step))
+    if (!length(step) || !is.finite(step) || step <= 0) return()
+    tbl <- mplex_offsets_rv()
+    v <- .mplex_off_of(tbl, key)
+    v[[axis]] <- v[[axis]] + sign * step
+    tbl[[key]] <- v
+    mplex_offsets_rv(tbl)
+    .mplex_show_offset(key)                              # keep the boxes in step
+  }
+  # +y is "up" and +x is "right", matching the 2D XY plot axes.
+  observeEvent(input$mplex_nudge_left,  .mplex_nudge("x", -1))
+  observeEvent(input$mplex_nudge_right, .mplex_nudge("x", +1))
+  observeEvent(input$mplex_nudge_up,    .mplex_nudge("y", +1))
+  observeEvent(input$mplex_nudge_down,  .mplex_nudge("y", -1))
+  observeEvent(input$mplex_nudge_zup,   .mplex_nudge("z", +1))
+  observeEvent(input$mplex_nudge_zdown, .mplex_nudge("z", -1))
+
+  # Typed offsets: debounced so a half-typed number is not applied. When the
+  # boxes were only updated to mirror a button or a channel switch, the values
+  # already equal the table and this is a no-op.
+  mplex_typed <- debounce(reactive(list(input$mplex_nudge_dx,
+                                        input$mplex_nudge_dy,
+                                        input$mplex_nudge_dz)), 600)
+  observeEvent(mplex_typed(), {
+    key <- isolate(input$mplex_nudge_ch)
+    if (is.null(key) || !nzchar(key)) return()
+    v <- vapply(mplex_typed(), function(e)                # NULL / "" / NA -> NA
+      suppressWarnings(as.numeric(e %||% NA)[1]), numeric(1))
+    tbl <- isolate(mplex_offsets_rv())
+    cur <- .mplex_off_of(tbl, key)
+    v[!is.finite(v)] <- cur[!is.finite(v)]              # an emptied box keeps its value
+    names(v) <- names(.mplex_zero)
+    if (all(abs(v - round(cur, 2)) < 1e-9)) return()     # boxes only mirror the table
+    tbl[[key]] <- v
+    mplex_offsets_rv(tbl)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$mplex_nudge_reset, {
+    key <- input$mplex_nudge_ch
+    if (is.null(key) || !nzchar(key)) return()
+    tbl <- mplex_offsets_rv(); tbl[[key]] <- .mplex_zero
+    mplex_offsets_rv(tbl)
+    .mplex_show_offset(key)
+  })
+  observeEvent(input$mplex_nudge_reset_all, {
+    mplex_offsets_rv(lapply(mplex_offsets_rv(), function(v) .mplex_zero))
+    if (nzchar(input$mplex_nudge_ch %||% "")) .mplex_show_offset(input$mplex_nudge_ch)
+  })
+
+  # Readout of every channel's offset as currently baked into the data.
+  output$mplex_offsets_txt <- renderText({
+    sp <- mplex_spec_rv()
+    plot_trigger()                                       # refresh after each apply
+    if (is.null(sp) || !length(sp)) return("")
+    show_z <- identical(smlm_z_state(), "3d")
+    paste(vapply(sp, function(c) {
+      v <- .mplex_off_of(mplex_applied$off, .mplex_key(c))
+      if (show_z)
+        sprintf("Ch%d  %s:  dx %+.1f  dy %+.1f  dz %+.1f nm", c$channel, c$label,
+                v[["x"]], v[["y"]], v[["z"]])
+      else
+        sprintf("Ch%d  %s:  dx %+.1f  dy %+.1f nm", c$channel, c$label, v[["x"]], v[["y"]])
+    }, character(1)), collapse = "\n")
+  })
+
   # Split the active multiplex dataset into a named list (label → channel df) so
   # the per-file Analysis loops produce one result per channel. NULL when the
   # active dataset is not a multiplex. Used by the *_by_channel toggles.
   mplex_split_active <- reactive({
-    df <- uploaded_df_rv()
+    df <- uploaded_df_rv()                           # keeps the reactive dependency
+    plot_trigger()                                   # refresh after each nudge is applied
+    df <- .mplex_residual_shift(df)                  # include any alignment nudge
     if (is.null(df) || !"mplex_label" %in% names(df) || !nrow(df)) return(NULL)
     ord  <- order(df$mplex_channel)
     labs <- unique(df$mplex_label[ord])
@@ -848,11 +1084,19 @@ smlm_server <- function(input, output, session) {
       # Tell the reset observer this is a rescale of the SAME data, not a new
       # dataset - otherwise every metadata filter the user set is wiped.
       z_rescale_guard(TRUE)
+      # Multiplex z alignment offsets are in the same nm, so they rescale with
+      # the data; otherwise the next nudge would undo a stale (unscaled) shift.
+      .scale_z <- function(tbl) lapply(tbl, function(v) { v[["z"]] <- v[["z"]] * ratio; v })
+      mplex_applied$off <- .scale_z(mplex_applied$off)
+      mplex_offsets_rv(.scale_z(isolate(mplex_offsets_rv())))
       store <- lapply(store, function(d) {
         if (is.data.frame(d) && "z" %in% names(d)) d$z <- d$z * ratio
+        if (!is.null(attr(d, "mplex_off"))) attr(d, "mplex_off") <- mplex_applied$off
         d
       })
       smlm_file_store(store)
+      if (nzchar(isolate(input$mplex_nudge_ch) %||% ""))
+        .mplex_show_offset(isolate(input$mplex_nudge_ch))
       cur <- isolate(input$active_file)
       if (!is.null(cur) && nzchar(cur) && !is.null(store[[cur]])) uploaded_df_rv(store[[cur]])
       # The z spread filter is expressed in nm, and nm along z just changed
@@ -4850,6 +5094,14 @@ smlm_server <- function(input, output, session) {
     )
   })
 
+  # What the 2D view last showed: the multiplex point-set key and view plane of
+  # the last render, and the view plane a zoom was made in. Used to keep the
+  # zoom across a re-render of the same data (see the layout step below).
+  .smlm2d_view <- new.env()
+  observeEvent(smlm_zoom_ranges(), {
+    .smlm2d_view$zoom_vp <- .smlm2d_view$vp %||% (input$view_plane_2d %||% "XY")
+  }, ignoreNULL = FALSE)
+
   output$scatter2D <- renderPlotly({
     req(input$mode3d == "2D")
     if (is.null(input$file) || is.null(plot_trigger())) {
@@ -4999,9 +5251,13 @@ smlm_server <- function(input, output, session) {
       for (chv in chans) {
         sub <- ptso[!is.na(ptso$mplex_channel) & ptso$mplex_channel == chv, , drop = FALSE]
         if (!nrow(sub)) next
+        # WebGL: a multiplex is usually many channels of full acquisitions, and
+        # SVG redraws of tens of thousands of markers are what makes each
+        # re-render (e.g. an alignment nudge) feel slow. Plain circle markers
+        # only, which scattergl supports.
         fig <- fig %>% plotly::add_trace(
           data = sub, x = ~x, y = ~y,
-          type = "scatter", mode = "markers",
+          type = "scattergl", mode = "markers",
           name = sub$mplex_label[1],
           marker = list(size = input$median_point_size %||% 4, color = sub$mplex_color[1]),
           text = ~hover_text,
@@ -5137,6 +5393,18 @@ smlm_server <- function(input, output, session) {
     grid_col <- if (isTRUE(input$dark_mode)) "rgba(255,255,255,0.18)" else "rgba(0,0,0,0.18)"
     zero_col <- if (isTRUE(input$dark_mode)) "rgba(255,255,255,0.25)" else "rgba(0,0,0,0.25)"
     
+    # Multiplex alignment: a re-render of the SAME point set (same rows, same
+    # settings; only a channel shift or a display option changed) keeps the
+    # user's zoom, so one can zoom onto a structure and nudge. Any other change
+    # of the point set, or a different view plane, falls back to the full extent.
+    rows_key <- .mplex_clu_memo$key
+    zr <- isolate(smlm_zoom_ranges())
+    if (!is.null(rows_key) && identical(rows_key, .smlm2d_view$rows_key) &&
+        identical(vp, .smlm2d_view$zoom_vp) && !is.null(zr))
+      lim <- list(x = zr$x, y = zr$y)
+    .smlm2d_view$rows_key <- rows_key
+    .smlm2d_view$vp       <- vp
+
     fig <- fig %>%
       plotly::layout(
         title = "2D Scatter Plot",
@@ -5691,6 +5959,10 @@ smlm_server <- function(input, output, session) {
   # ==========================================================================
   plottable_data <- eventReactive(plot_trigger(), {
     df <- filtered_df()
+    # Multiplex channel alignment: shift not yet in the active copy (see the
+    # MULTIPLEX CHANNEL ALIGNMENT block). Before the crops, so a crop box drawn
+    # on the aligned view selects the aligned points.
+    df <- .mplex_residual_shift(df)
     df <- apply_trimmer(df, input)
     # 2D zoom crop - applied server-side so it works in both 2D and 3D without
     # relying on the browser round-trip from update* calls.
@@ -5743,7 +6015,42 @@ smlm_server <- function(input, output, session) {
     # the two "must agree". They cannot disagree any more: the plot and the
     # batch tools now run the SAME function, and channels (none / 2-colour split
     # / multiplex) come from resolve_channels() inside it.
-    df <- apply_clustering_pipeline(df, input)
+    # Multiplex: clustering runs per channel, and a channel nudge only
+    # translates a channel, so it cannot change any cluster. When the same rows
+    # meet the same settings, reuse the last result and move its coordinates by
+    # the change in offset. Anything else (a crop that now selects other points,
+    # a changed setting, another dataset) misses the key and re-clusters.
+    mp_key <- NULL
+    if ("mplex_channel" %in% names(df) && !is.null(isolate(mplex_spec_rv()))) {
+      mp_key <- digest::digest(list(
+        df$tid, df$tim, df$mplex_channel,                      # which rows
+        if (".dataset_tag" %in% names(df)) df$.dataset_tag[1], # which build
+        isolate(z_scale_applied()),
+        lapply(.PREP_KEY_INPUTS, function(k) input[[k]]),      # every clustering input
+        input$remove_rogues, input$rogue_rule, input$rogue_factor
+      ), algo = "xxhash64")
+    }
+    memo <- .mplex_clu_memo
+    if (!is.null(mp_key) && identical(memo$key, mp_key)) {
+      cl <- memo$df
+      for (c in isolate(mplex_spec_rv())) {                    # move to the current offsets
+        k <- .mplex_key(c)
+        delta <- .mplex_off_of(mplex_applied$off, k) - .mplex_off_of(memo$off, k)
+        if (all(abs(delta) < 1e-9)) next
+        rows <- which(cl$mplex_channel == c$channel)
+        cl$x[rows] <- cl$x[rows] + delta[["x"]]
+        cl$y[rows] <- cl$y[rows] + delta[["y"]]
+        if ("z" %in% names(cl)) cl$z[rows] <- cl$z[rows] + delta[["z"]]
+      }
+      df <- cl
+    } else {
+      df <- apply_clustering_pipeline(df, input)
+    }
+    if (!is.null(mp_key)) {
+      memo$key <- mp_key; memo$df <- df; memo$off <- mplex_applied$off
+    } else {
+      memo$key <- NULL; memo$df <- NULL                        # free the memory
+    }
     # Colour is presentation, so it is applied here rather than inside the cached
     # chain - see attach_channel_colors(). This is what keeps the colour pickers
     # out of the prepared-data cache key.
@@ -8946,7 +9253,14 @@ smlm_server <- function(input, output, session) {
     fr <- tryCatch(fiducial_results(), error = function(e) NULL)
     ex <- if (!is.null(fr) && all(c("flagged", "tid", "dataset") %in% names(fr)))
       sort(fr$tid[fr$flagged %in% TRUE & fr$dataset == fname]) else NULL
-    paste(fname, needs_cluster, two_color,
+    # DATA VERSION. The file name alone does not identify the data: a multiplex
+    # is rebuilt under the same name, the axial calibration rescales z in place,
+    # and a channel alignment nudge shifts coordinates in place.
+    sdf <- smlm_file_store()[[fname]]
+    ver <- paste(if (is.data.frame(sdf) && ".dataset_tag" %in% names(sdf)) sdf$.dataset_tag[1],
+                 z_scale_applied(),
+                 paste(utils::capture.output(utils::str(attr(sdf, "mplex_off"))), collapse = ""))
+    paste(fname, needs_cluster, two_color, ver,
           paste(utils::capture.output(utils::str(vals, max.level = 2)), collapse = "|"),
           pm_txt,
           paste(ex, collapse = ","), sep = "##")
