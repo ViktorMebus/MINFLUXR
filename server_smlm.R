@@ -309,6 +309,14 @@ smlm_server <- function(input, output, session) {
         adopt_factor <- zc$factor
 
       df$.dataset_tag <- paste0(sample(c(0:9, letters[1:6]), 4, replace = TRUE), collapse = "")
+      # A CSV exported from a multiplex keeps its channels (see .mplex_adopt_csv).
+      if (identical(get_ext(fname), "csv")) {
+        df <- .mplex_adopt_csv(df, fname)
+        if (!is.null(attr(df, "mplex_spec")))
+          showNotification(sprintf("%s: multiplex with %d channels recognised.",
+                                   fname, length(attr(df, "mplex_spec"))),
+                           type = "message", duration = 6)
+      }
       store[[fname]] <- df
       new_names <- c(new_names, fname)
 
@@ -331,6 +339,7 @@ smlm_server <- function(input, output, session) {
     selected_df <- store[[new_names[1]]]
     if (!is.null(selected_df)) {
       uploaded_df_rv(selected_df)
+      .mplex_sync_active(selected_df)
       hist_base <- c("efo", "tid", "cfr", "tim", "eco", "dcr", "dwell", "fluo")
       hist_choices <- if ("dcr_pooled" %in% names(selected_df))
         c(hist_base, "dcr_pooled") else hist_base
@@ -365,6 +374,7 @@ smlm_server <- function(input, output, session) {
     else NULL
 
     uploaded_df_rv(df)
+    .mplex_sync_active(df)
 
     # Update histogram variable choices - show dcr_pooled only when present
     hist_base <- c("efo", "tid", "cfr", "tim", "eco", "dcr", "dwell", "fluo")
@@ -443,10 +453,14 @@ smlm_server <- function(input, output, session) {
   # Assign a tim vector to channel indices per the active TIM method.
   # Returns list(ch = integer channel per tim (NA = removed/wash), nch, method,
   # breaks/wins). Used by the colors UI, the preview histogram and the builder.
-  .mplex_tim_assign <- function(tim) {
-    method <- input$mplex_tim_method %||% "breaks"
+  # The method / breakpoints / windows default to the controls; the builder
+  # passes them explicitly when rebuilding from a settings file.
+  .mplex_tim_assign <- function(tim, method = input$mplex_tim_method,
+                                breaks_txt = input$mplex_tim_breaks,
+                                windows_txt = input$mplex_tim_windows) {
+    method <- method %||% "breaks"
     if (identical(method, "windows")) {
-      wins <- .mplex_parse_windows(input$mplex_tim_windows)
+      wins <- .mplex_parse_windows(windows_txt)
       ch <- rep(NA_integer_, length(tim))
       for (w in seq_len(nrow(wins))) {
         inw <- is.na(ch) & tim >= wins[w, 1] & tim <= wins[w, 2]
@@ -454,7 +468,7 @@ smlm_server <- function(input, output, session) {
       }
       list(ch = ch, nch = nrow(wins), method = "windows", wins = wins)
     } else {
-      br <- .mplex_parse_breaks(input$mplex_tim_breaks)
+      br <- .mplex_parse_breaks(breaks_txt)
       list(ch = findInterval(tim, br) + 1L, nch = length(br) + 1L,
            method = "breaks", breaks = br)
     }
@@ -567,27 +581,74 @@ smlm_server <- function(input, output, session) {
     )
   })
 
-  observeEvent(input$mplex_build, {
-    mode <- input$mplex_mode %||% "files"
-    spec <- list()
+  # =========================================================================
+  # .mplex_build(cfg) - BUILD THE COMBINED MULTIPLEX DATASET
+  # =========================================================================
+  # GOAL
+  #   One builder for every way a multiplex is made: the Build button (cfg read
+  #   from the controls) and "Load multiplex settings" (cfg read from a file).
+  #   Taking the recipe as an argument, rather than reading the controls, is
+  #   what lets a settings file rebuild without waiting for the per-channel
+  #   label / colour widgets to be rendered first.
+  #
+  # ARGS  cfg : list(mode = "files" | "tim",
+  #                  files  = file names, one channel each      [files mode]
+  #                  tim_file, tim_method, tim_breaks, tim_windows [tim mode]
+  #                  labels, colors = one per channel (optional; defaults used))
+  # RETURNS TRUE on success; FALSE after telling the user what is missing.
+  # SIDE EFFECTS registers the result as the "★ Multiplex" store entry, makes it
+  #   active, remembers cfg (for Save) and re-applies remembered alignment offsets.
+  # =========================================================================
+  mplex_cfg_rv <- reactiveVal(NULL)   # recipe of the last successful build
 
-    if (mode == "files") {
-      fs <- input$mplex_files
-      if (is.null(fs) || length(fs) < 1) {
-        showNotification("Pick at least one file to overlay.", type = "warning"); return()
+  # The controls, as a cfg. The TIM source is the active file, unless the active
+  # file IS the multiplex (a rebuild): then it is the file the last build split.
+  .mplex_cfg_from_inputs <- function() {
+    mode <- input$mplex_mode %||% "files"
+    if (identical(mode, "files")) {
+      fs <- input$mplex_files %||% character(0)
+      return(list(mode = "files", files = fs,
+        labels = vapply(seq_along(fs), function(j) input[[paste0("mplex_flab_", j)]] %||% "", ""),
+        colors = vapply(seq_along(fs), function(j) input[[paste0("mplex_fcol_", j)]] %||% "", "")))
+    }
+    act <- input$active_file %||% ""
+    if (identical(act, mplex_name)) act <- isolate(mplex_cfg_rv())$tim_file %||% ""
+    sp  <- .mplex_tim_assign(numeric(0))                  # only for the channel count
+    list(mode = "tim", tim_file = act,
+         tim_method  = input$mplex_tim_method %||% "breaks",
+         tim_breaks  = input$mplex_tim_breaks %||% "",
+         tim_windows = input$mplex_tim_windows %||% "",
+         labels = vapply(seq_len(sp$nch), function(j) input[[paste0("mplex_tlab_", j)]] %||% "", ""),
+         colors = vapply(seq_len(sp$nch), function(j) input[[paste0("mplex_tcol_", j)]] %||% "", ""))
+  }
+
+  .mplex_build <- function(cfg) {
+    store <- smlm_file_store()
+    spec  <- list()
+    pick  <- function(v, j, default) {                     # label/colour j, or the default
+      x <- if (length(v) >= j) v[[j]] else NULL
+      if (is.null(x) || is.na(x) || !nzchar(x)) default else x
+    }
+
+    if (identical(cfg$mode, "files")) {
+      fs <- cfg$files
+      if (!length(fs)) {
+        showNotification("Pick at least one file to overlay.", type = "warning"); return(FALSE)
       }
-      store <- smlm_file_store()
+      miss <- setdiff(fs, names(store))
+      if (length(miss)) {
+        showNotification(paste0("Load these files first: ", paste(miss, collapse = ", ")),
+                         type = "error", duration = 12); return(FALSE)
+      }
       defs  <- mplex_default_colors(length(fs))
       parts <- list()
       for (j in seq_along(fs)) {
         d <- store[[fs[j]]]
         if (is.null(d) || !nrow(d)) next
-        lab <- input[[paste0("mplex_flab_", j)]]
-        col <- input[[paste0("mplex_fcol_", j)]]
-        if (is.null(lab) || !nzchar(lab)) lab <- fs[j]
-        if (is.null(col) || !nzchar(col)) col <- defs[j]
+        lab <- pick(cfg$labels, j, fs[j]); col <- pick(cfg$colors, j, defs[j])
         d <- d %>% dplyr::select(-dplyr::any_of(
           c("mplex_channel", "mplex_label", "mplex_color", ".dataset_tag")))
+        attributes(d)[c("mplex_off", "mplex_spec", "mplex_store_name")] <- NULL
         d$tid <- suppressWarnings(as.numeric(d$tid)) + j * MPLEX_TID_OFF
         d$mplex_channel <- j; d$mplex_label <- lab; d$mplex_color <- col
         parts[[length(parts) + 1L]] <- d
@@ -596,44 +657,41 @@ smlm_server <- function(input, output, session) {
           src = paste0("file:", fs[j]))   # alignment offsets are keyed on the source
       }
       if (!length(parts)) {
-        showNotification("Selected files contained no data.", type = "error"); return()
+        showNotification("Selected files contained no data.", type = "error"); return(FALSE)
       }
       combined <- dplyr::bind_rows(parts)
 
     } else {
-      d <- isolate(uploaded_df_rv())
+      d <- store[[cfg$tim_file %||% ""]]
       if (is.null(d) || !nrow(d)) {
-        showNotification("No active file to split.", type = "warning"); return()
+        showNotification(sprintf("Load the file to split by time first: %s", cfg$tim_file %||% "(none)"),
+                         type = "warning", duration = 12); return(FALSE)
       }
       if (!"tim" %in% names(d)) {
-        showNotification("Active file has no tim column.", type = "error"); return()
+        showNotification("That file has no tim column.", type = "error"); return(FALSE)
       }
-      d <- d %>% dplyr::select(-dplyr::any_of(
-        c("mplex_channel", "mplex_label", "mplex_color")))
-      sp  <- .mplex_tim_assign(d$tim)
+      d <- d %>% dplyr::select(-dplyr::any_of(c("mplex_channel", "mplex_label", "mplex_color")))
+      attributes(d)[c("mplex_off", "mplex_spec", "mplex_store_name")] <- NULL
+      sp  <- .mplex_tim_assign(d$tim, cfg$tim_method, cfg$tim_breaks, cfg$tim_windows)
       nch <- sp$nch
       if (nch < 1L || (identical(sp$method, "breaks") && nch < 2L)) {
         showNotification(
           if (identical(sp$method, "windows"))
             "Enter at least one time window (start-end)."
           else "Enter at least one TIM breakpoint (seconds).",
-          type = "warning"); return()
+          type = "warning"); return(FALSE)
       }
       ch   <- sp$ch
       keep <- !is.na(ch)            # drop wash localizations (NA = outside windows)
       if (!any(keep)) {
         showNotification("No localizations fall inside the selected windows.",
-                         type = "error"); return()
+                         type = "error"); return(FALSE)
       }
       d  <- d[keep, , drop = FALSE]
       ch <- ch[keep]
       defs <- mplex_default_colors(nch)
-      labs <- vapply(seq_len(nch), function(j) {
-        v <- input[[paste0("mplex_tlab_", j)]]
-        if (is.null(v) || !nzchar(v)) paste0("Ch", j) else v }, character(1))
-      cols <- vapply(seq_len(nch), function(j) {
-        v <- input[[paste0("mplex_tcol_", j)]]
-        if (is.null(v) || !nzchar(v)) defs[j] else v }, character(1))
+      labs <- vapply(seq_len(nch), function(j) pick(cfg$labels, j, paste0("Ch", j)), character(1))
+      cols <- vapply(seq_len(nch), function(j) pick(cfg$colors, j, defs[j]), character(1))
       d$mplex_channel <- ch
       d$mplex_label   <- labs[ch]
       d$mplex_color   <- cols[ch]
@@ -645,18 +703,27 @@ smlm_server <- function(input, output, session) {
              n_loc = nrow(sub), n_trace = dplyr::n_distinct(sub$tid),
              src = paste0("tim:", j))       # alignment offsets are keyed on the source
       })
+      cfg$labels <- labs; cfg$colors <- cols
+    }
+    if (identical(cfg$mode, "files")) {             # record what was actually used
+      cfg$labels <- vapply(spec, `[[`, "", "label"); cfg$colors <- vapply(spec, `[[`, "", "color")
     }
 
     if (!"z" %in% names(combined)) combined$z <- 0
     combined$.dataset_tag <- paste0(
       sample(c(0:9, letters[1:6]), 4, replace = TRUE), collapse = "")
+    # The dataset describes itself: its channels, its store name and (below)
+    # the alignment baked into it. Everything downstream reads these.
+    attr(combined, "mplex_spec")       <- spec
+    attr(combined, "mplex_store_name") <- mplex_name
+    attr(combined, "mplex_off")        <- list()      # freshly built: nothing shifted yet
 
     st <- smlm_file_store(); st[[mplex_name]] <- combined; smlm_file_store(st)
+    mplex_cfg_rv(cfg)
+    mplex_target_rv(mplex_name)
     mplex_spec_rv(spec)
-    # The freshly built dataset carries no alignment shift yet. Re-apply the
-    # offsets remembered for any source that is still part of the multiplex, so
+    # Re-apply the offsets remembered for any source still in the multiplex, so
     # rebuilding (e.g. after renaming a channel) keeps the alignment.
-    mplex_applied$off <- list()
     combined <- .mplex_apply_offsets(update_active = FALSE) %||% combined
     uploaded_df_rv(combined)
     updateSelectInput(session, "active_file", choices = names(st), selected = mplex_name)
@@ -665,33 +732,48 @@ smlm_server <- function(input, output, session) {
     showNotification(sprintf("Built multiplex: %d channel(s), %d localizations.",
                              length(spec), nrow(combined)),
                      type = "message", duration = 6)
+    TRUE
+  }
+
+  observeEvent(input$mplex_build, {
+    .mplex_build(.mplex_cfg_from_inputs())
   }, ignoreInit = TRUE)
 
   observeEvent(input$mplex_clear, {
     st <- smlm_file_store()
     if (!is.null(st[[mplex_name]])) { st[[mplex_name]] <- NULL; smlm_file_store(st) }
-    mplex_spec_rv(NULL)
-    mplex_applied$off <- list()   # nothing is shifted any more (offsets are kept for a rebuild)
+    if (identical(mplex_target_rv(), mplex_name)) {  # the wanted offsets are kept for a rebuild
+      mplex_target_rv(NULL); mplex_spec_rv(NULL)
+    }
+    mplex_cfg_rv(NULL)
     rem <- names(smlm_file_store())
     if (length(rem)) {
       updateSelectInput(session, "active_file", choices = rem, selected = rem[1])
       uploaded_df_rv(smlm_file_store()[[rem[1]]])
+      .mplex_sync_active(smlm_file_store()[[rem[1]]])
     } else {
       updateSelectInput(session, "active_file", choices = character(0))
       uploaded_df_rv(NULL)
     }
-    if (identical(isolate(input$color_mode), "multiplex"))
+    if (is.null(mplex_spec_rv()) && identical(isolate(input$color_mode), "multiplex"))
       updateSelectInput(session, "color_mode", selected = "default")
   })
 
   output$mplex_summary <- renderText({
     sp <- mplex_spec_rv()
     if (is.null(sp) || !length(sp)) return("No multiplex built yet.")
-    paste(vapply(sp, function(c)
-      sprintf("Ch%d  %s:  %s loc,  %s traces",
-              c$channel, c$label,
-              format(c$n_loc, big.mark = ","), format(c$n_trace, big.mark = ",")),
-      character(1)), collapse = "\n")
+    src <- mplex_target_rv()
+    head <- if (!is.null(src) && !identical(src, mplex_name)) paste0("From file: ", src, "\n") else ""
+    paste0(head, paste(vapply(sp, function(c) {
+      line <- sprintf("Ch%d  %s:  %s loc,  %s traces",
+                      c$channel, c$label,
+                      format(c$n_loc, big.mark = ","), format(c$n_trace, big.mark = ","))
+      pr <- c$prior
+      if (length(pr) == 3L && any(abs(pr) > 1e-9))   # alignment already in the file
+        line <- paste0(line, sprintf("  (aligned in file: %+.1f, %+.1f, %+.1f nm)",
+                                     pr[[1]], pr[[2]], pr[[3]]))
+      line
+    }, character(1)), collapse = "\n"))
   })
 
   # =========================================================================
@@ -700,26 +782,35 @@ smlm_server <- function(input, output, session) {
   # GOAL
   #   Exchange rounds of a multiplex acquisition can land slightly offset from
   #   each other (the sample settles while buffers are exchanged). This block
-  #   lets the user translate individual channels of the built multiplex so the
+  #   lets the user translate individual channels of the multiplex so the
   #   rounds line up again.
   #
+  # WHICH DATASET IS "THE MULTIPLEX"
+  #   Either the built "★ Multiplex" entry, or a loaded CSV that was exported
+  #   from a multiplex (it carries mplex_channel / mplex_label). mplex_target_rv
+  #   names the store entry; mplex_spec_rv holds its channels. Each such store
+  #   entry describes itself through attributes:
+  #     attr "mplex_spec"        its channel list
+  #     attr "mplex_store_name"  its name in smlm_file_store
+  #     attr "mplex_off"         the offsets BAKED INTO its coordinates
+  #   .mplex_sync_active() points target + spec at the active dataset whenever
+  #   the active dataset is a multiplex.
+  #
   # DESIGN
-  #   * Offsets act on the synthetic "★ Multiplex" entry only. The loaded source
-  #     files are never modified. "Clear" + "Build" restores the original
-  #     coordinates exactly; "Reset" subtracts the shift again (float residue
-  #     ~1e-13 nm).
-  #   * Two bookkeeping tables, both named lists  source-key -> c(x, y, z) nm:
-  #       mplex_offsets_rv   what the user WANTS (drives the controls)
-  #       mplex_applied$off  what is currently BAKED INTO the combined data
-  #     Applying adds (wanted - applied) to that channel's rows. Working in
-  #     deltas means repeated nudges never re-read or copy the sources, and a
-  #     later in-place edit of the store (the axial rescale) stays consistent.
-  #   * Offsets are keyed on the SOURCE ("file:<name>" or "tim:<j>"), not on the
-  #     channel number, so rebuilding the multiplex with a different file
-  #     selection cannot move the wrong round. Clearing the multiplex keeps the
-  #     wanted offsets; the next Build re-applies them.
-  #   * The STORE entry is the truth (batch tools and file switching read it),
-  #     and it carries its baked-in offsets as attr(, "mplex_off").
+  #   * The loaded source files are never modified. "Clear" + "Build" restores
+  #     the original coordinates exactly; "Reset" subtracts the shift again
+  #     (float residue ~1e-13 nm).
+  #   * Two offset tables, both named lists  source-key -> c(x, y, z) nm:
+  #       mplex_offsets_rv            what the user WANTS (drives the controls)
+  #       attr(store entry, "mplex_off")  what is BAKED INTO that entry
+  #     Applying adds (wanted - baked) to that channel's rows. Working in deltas
+  #     means repeated nudges never re-read or copy the sources.
+  #   * Offsets are keyed on the SOURCE ("file:<name>", "tim:<j>",
+  #     "csv:<file>:<label>"), not on the channel number, so rebuilding the
+  #     multiplex with a different file selection cannot move the wrong round.
+  #     Clearing the multiplex keeps the wanted offsets; the next Build
+  #     re-applies them.
+  #   * The STORE entry is the truth (batch tools and file switching read it).
   #   * The ACTIVE copy (uploaded_df_rv) is deliberately NOT replaced on a nudge.
   #     Replacing it re-runs the whole filter pipeline and rebuilds every filter
   #     widget at the new data's full range, which resets the user's filters.
@@ -733,8 +824,8 @@ smlm_server <- function(input, output, session) {
   #   * z offsets are only offered for axial data (smlm_z_state() == "3d"), the
   #     same planar test every other axis-bearing control uses.
   # =========================================================================
-  mplex_offsets_rv <- reactiveVal(list())                     # wanted offsets, by source key
-  mplex_applied    <- new.env(); mplex_applied$off <- list()  # baked-in offsets (plain state)
+  mplex_offsets_rv <- reactiveVal(list())   # wanted offsets, by source key
+  mplex_target_rv  <- reactiveVal(NULL)     # store name of the current multiplex
 
   .mplex_zero <- c(x = 0, y = 0, z = 0)
   # Source key of one spec entry (older specs without $src fall back to the channel).
@@ -744,24 +835,81 @@ smlm_server <- function(input, output, session) {
     v <- tbl[[key]]
     if (is.null(v) || length(v) != 3L || any(!is.finite(v))) .mplex_zero else v
   }
+  # Offsets baked into a store entry (list() when none / not a multiplex).
+  .mplex_store_off <- function(name) {
+    if (is.null(name)) return(list())
+    attr(isolate(smlm_file_store())[[name]], "mplex_off") %||% list()
+  }
 
-  # GOAL: bring the combined multiplex data in the STORE to the WANTED offsets.
-  # ARGS  update_active : replot the active view (FALSE from the Build handler,
-  #                       which does that itself).
-  # RETURNS the updated combined data.frame (offsets in attr "mplex_off"), or
-  #         NULL when nothing is built.
+  # GOAL: point the alignment controls at the active dataset when it is a
+  # multiplex (built or loaded from CSV). Non-multiplex data leaves the current
+  # multiplex selection alone, so switching to a single file and back is free.
+  .mplex_sync_active <- function(df) {
+    if (!is.data.frame(df) || !"mplex_label" %in% names(df)) return(invisible(FALSE))
+    sp <- attr(df, "mplex_spec"); nm <- attr(df, "mplex_store_name")
+    if (is.null(sp) || is.null(nm)) return(invisible(FALSE))
+    mplex_target_rv(nm)
+    mplex_spec_rv(sp)
+    if (!isTRUE(isolate(input$mplex_enable))) updateCheckboxInput(session, "mplex_enable", value = TRUE)
+    updateSelectInput(session, "color_mode", selected = "multiplex")
+    invisible(TRUE)
+  }
+
+  # GOAL: recognise a CSV exported from a multiplex and describe it as one.
+  #   The export writes mplex_channel / mplex_label / mplex_color per row and the
+  #   total alignment shift already applied (mplex_dx_nm / _dy_nm / _dz_nm). The
+  #   shift is recorded in the spec as $prior (display and re-export only; the
+  #   coordinates already carry it) and the columns are dropped so they cannot
+  #   go stale. New nudges on the loaded file start from zero.
+  # RETURNS df, with the multiplex attributes when it is a multiplex CSV.
+  .mplex_adopt_csv <- function(df, fname) {
+    if (!is.data.frame(df) || !all(c("mplex_channel", "mplex_label") %in% names(df))) return(df)
+    df$mplex_channel <- suppressWarnings(as.integer(df$mplex_channel))
+    df <- df[!is.na(df$mplex_channel), , drop = FALSE]
+    if (!nrow(df)) return(df)
+    if (!"mplex_color" %in% names(df)) df$mplex_color <- NA_character_
+    chans <- sort(unique(df$mplex_channel))
+    defs  <- mplex_default_colors(length(chans))
+    pcol  <- c("mplex_dx_nm", "mplex_dy_nm", "mplex_dz_nm")
+    spec <- lapply(seq_along(chans), function(i) {
+      rows <- df$mplex_channel == chans[i]
+      col  <- df$mplex_color[rows][1]
+      if (is.na(col) || !nzchar(col)) { col <- defs[i]; df$mplex_color[rows] <<- col }
+      lab  <- as.character(df$mplex_label[rows][1])
+      pr   <- vapply(pcol, function(p)
+        if (p %in% names(df)) suppressWarnings(as.numeric(df[[p]][rows][1])) else 0, numeric(1))
+      pr[!is.finite(pr)] <- 0
+      list(channel = chans[i], label = lab, color = col,
+           n_loc = sum(rows), n_trace = dplyr::n_distinct(df$tid[rows]),
+           src = paste0("csv:", fname, ":", lab),
+           prior = stats::setNames(pr, c("x", "y", "z")))
+    })
+    df <- df[, setdiff(names(df), pcol), drop = FALSE]
+    attr(df, "mplex_spec")       <- spec
+    attr(df, "mplex_store_name") <- fname
+    attr(df, "mplex_off")        <- list()
+    df
+  }
+
+  # GOAL: bring the current multiplex in the STORE to the WANTED offsets.
+  # ARGS  update_active : replot the active view (FALSE from the builder, which
+  #                       does that itself).
+  # RETURNS the updated data.frame (offsets in attr "mplex_off"), or NULL when
+  #         there is no multiplex.
   .mplex_apply_offsets <- function(update_active = TRUE) {
-    sp <- isolate(mplex_spec_rv())
+    nm <- isolate(mplex_target_rv())
     st <- isolate(smlm_file_store())
-    d  <- st[[mplex_name]]
+    d  <- if (is.null(nm)) NULL else st[[nm]]
+    sp <- attr(d, "mplex_spec")
     if (is.null(sp) || is.null(d) || !nrow(d)) return(NULL)
     want    <- isolate(mplex_offsets_rv())
+    baked   <- attr(d, "mplex_off") %||% list()
     has_z   <- "z" %in% names(d) && has_axial_data(d)   # never shift a planar z = 0 column
     changed <- FALSE
     for (c in sp) {
       key <- .mplex_key(c)
       w <- .mplex_off_of(want, key)
-      a <- .mplex_off_of(mplex_applied$off, key)
+      a <- .mplex_off_of(baked, key)
       if (!has_z) w["z"] <- a["z"]                       # z untouched on planar data
       delta <- w - a
       if (all(abs(delta) < 1e-9)) next                   # this channel is already there
@@ -769,37 +917,38 @@ smlm_server <- function(input, output, session) {
       d$x[rows] <- d$x[rows] + delta[["x"]]
       d$y[rows] <- d$y[rows] + delta[["y"]]
       if (has_z) d$z[rows] <- d$z[rows] + delta[["z"]]
-      mplex_applied$off[[key]] <- w                      # record what is now baked in
+      baked[[key]] <- w                                  # record what is now baked in
       changed <- TRUE
     }
-    attr(d, "mplex_off") <- mplex_applied$off            # the data says how it was shifted
     if (!changed) return(d)
-    st[[mplex_name]] <- d
+    attr(d, "mplex_off") <- baked                        # the data says how it was shifted
+    st[[nm]] <- d
     smlm_file_store(st)
     # The active copy stays as it is (see DESIGN); a replot lets plottable_data()
     # pick up the residual shift. A multiplex sitting in the store behind another
     # active file just keeps its new coordinates.
-    if (update_active && identical(isolate(input$active_file), mplex_name))
+    if (update_active && identical(isolate(input$active_file), nm))
       plot_trigger(Sys.time())
     d
   }
 
   # GOAL: add the shift the active copy does not carry yet.
   #   The active copy (uploaded_df_rv) was taken from the store at some point and
-  #   carries the offsets baked in at that moment in attr "mplex_off". The store
-  #   is now at mplex_applied$off. The difference, per channel, is added here.
+  #   carries the offsets baked in at that moment in attr "mplex_off". Its store
+  #   entry may since have moved on. The difference, per channel, is added here.
   # ARGS  df : any frame derived from the active copy (keeps mplex_channel).
   # RETURNS df with the residual shift applied; unchanged for non-multiplex data.
   .mplex_residual_shift <- function(df) {
     if (!is.data.frame(df) || !nrow(df) || !"mplex_channel" %in% names(df)) return(df)
     act <- isolate(uploaded_df_rv())
-    sp  <- isolate(mplex_spec_rv())
+    sp  <- attr(act, "mplex_spec")
     if (is.null(act) || is.null(sp)) return(df)
     base  <- attr(act, "mplex_off") %||% list()          # offsets inside the active copy
+    now   <- .mplex_store_off(attr(act, "mplex_store_name"))
     has_z <- "z" %in% names(df) && has_axial_data(act)
     for (c in sp) {
       key   <- .mplex_key(c)
-      delta <- .mplex_off_of(mplex_applied$off, key) - .mplex_off_of(base, key)
+      delta <- .mplex_off_of(now, key) - .mplex_off_of(base, key)
       if (all(abs(delta) < 1e-9)) next
       rows <- which(df$mplex_channel == c$channel)
       df$x[rows] <- df$x[rows] + delta[["x"]]
@@ -837,6 +986,7 @@ smlm_server <- function(input, output, session) {
     sel  <- if (!is.null(cur) && cur %in% keys) cur else keys[min(2L, length(keys))]
     updateSelectInput(session, "mplex_nudge_ch", choices = stats::setNames(keys, labs),
                       selected = sel)
+    .mplex_show_offset(sel)                              # the boxes follow the new channel list
   }, ignoreNULL = FALSE)
 
   # Show the selected channel's wanted offset in the three number boxes.
@@ -909,15 +1059,137 @@ smlm_server <- function(input, output, session) {
     sp <- mplex_spec_rv()
     plot_trigger()                                       # refresh after each apply
     if (is.null(sp) || !length(sp)) return("")
+    baked  <- .mplex_store_off(mplex_target_rv())
     show_z <- identical(smlm_z_state(), "3d")
     paste(vapply(sp, function(c) {
-      v <- .mplex_off_of(mplex_applied$off, .mplex_key(c))
+      v <- .mplex_off_of(baked, .mplex_key(c))
       if (show_z)
         sprintf("Ch%d  %s:  dx %+.1f  dy %+.1f  dz %+.1f nm", c$channel, c$label,
                 v[["x"]], v[["y"]], v[["z"]])
       else
         sprintf("Ch%d  %s:  dx %+.1f  dy %+.1f nm", c$channel, c$label, v[["x"]], v[["y"]])
     }, character(1)), collapse = "\n")
+  })
+
+  # =========================================================================
+  # SAVE / LOAD MULTIPLEX SETTINGS
+  # =========================================================================
+  # GOAL
+  #   Store the recipe of the built multiplex (which files or time windows,
+  #   channel names and colours) together with the alignment offsets, so the
+  #   same aligned multiplex can be rebuilt in a later session in one step.
+  #
+  # FILE FORMAT  JSON with settings_type = "minfluxr_multiplex". The marker lets
+  #   the loaders tell file kinds apart: this loader rejects any other JSON, and
+  #   the filter-settings loader points the user here when given one of these.
+  #   Offsets are stored per channel with their source key, in nm at the saved
+  #   axial calibration (z_scale_applied); dz is rescaled on load if the
+  #   calibration has changed since.
+  #
+  # WHAT IT NEEDS ON LOAD  the same source files, loaded under the same names
+  #   (files mode) or the file that was split (time mode). Anything missing is
+  #   named and nothing is built.
+  # =========================================================================
+  MPLEX_SETTINGS_TYPE <- "minfluxr_multiplex"
+
+  # Save is offered only for a BUILT multiplex; a multiplex loaded from CSV is
+  # its own record and has no recipe to rebuild.
+  output$mplex_has_recipe <- reactive(!is.null(mplex_cfg_rv()))
+  outputOptions(output, "mplex_has_recipe", suspendWhenHidden = FALSE)
+
+  output$download_mplex_settings <- downloadHandler(
+    filename = function() paste0("multiplex_settings_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".json"),
+    content  = function(file) {
+      cfg <- mplex_cfg_rv()
+      sp  <- mplex_spec_rv()
+      want <- mplex_offsets_rv()
+      chans <- lapply(sp, function(c) {
+        v <- .mplex_off_of(want, .mplex_key(c))
+        list(channel = c$channel, label = c$label, color = c$color, source = .mplex_key(c),
+             dx_nm = unname(v[["x"]]), dy_nm = unname(v[["y"]]), dz_nm = unname(v[["z"]]))
+      })
+      s <- list(
+        settings_type   = MPLEX_SETTINGS_TYPE,
+        version         = 1L,
+        saved           = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+        mode            = cfg$mode,
+        files           = if (identical(cfg$mode, "files")) I(cfg$files) else NULL,
+        tim_file        = if (identical(cfg$mode, "tim")) cfg$tim_file else NULL,
+        tim_method      = if (identical(cfg$mode, "tim")) cfg$tim_method else NULL,
+        tim_breaks      = if (identical(cfg$mode, "tim")) cfg$tim_breaks else NULL,
+        tim_windows     = if (identical(cfg$mode, "tim")) cfg$tim_windows else NULL,
+        z_scale_applied = z_scale_applied(),
+        channels        = chans
+      )
+      s <- s[!vapply(s, is.null, logical(1))]
+      jsonlite::write_json(s, path = file, auto_unbox = TRUE, pretty = TRUE, digits = NA)
+    }
+  )
+
+  mplex_settings_reset_key <- reactiveVal(0)          # re-render clears the file box
+  output$mplex_settings_file_ui <- renderUI({
+    mplex_settings_reset_key()
+    fileInput("mplex_settings_file", "Load multiplex settings (.json)", accept = ".json")
+  })
+
+  # GOAL: rebuild a saved multiplex, with its names, colours and alignment.
+  observeEvent(input$mplex_settings_file, {
+    req(input$mplex_settings_file$datapath)
+    on.exit(mplex_settings_reset_key(mplex_settings_reset_key() + 1), add = TRUE)
+    s <- tryCatch(jsonlite::read_json(input$mplex_settings_file$datapath, simplifyVector = FALSE),
+                  error = function(e) NULL)
+    if (!is.list(s) || !identical(s$settings_type, MPLEX_SETTINGS_TYPE)) {
+      showNotification("This is not a multiplex settings file.", type = "error", duration = 8)
+      return()
+    }
+    chans <- s$channels %||% list()
+    cfg <- list(mode = s$mode %||% "files",
+                labels = vapply(chans, function(c) c$label %||% "", ""),
+                colors = vapply(chans, function(c) c$color %||% "", ""))
+    if (identical(cfg$mode, "files")) {
+      cfg$files <- as.character(unlist(s$files))
+    } else {
+      cfg$tim_file    <- s$tim_file %||% ""
+      cfg$tim_method  <- s$tim_method %||% "breaks"
+      cfg$tim_breaks  <- s$tim_breaks %||% ""
+      cfg$tim_windows <- s$tim_windows %||% ""
+    }
+
+    # Offsets first, so the build applies them. dz follows the calibration.
+    sz <- suppressWarnings(as.numeric(s$z_scale_applied %||% NA)[1])
+    zr <- if (is.finite(sz) && sz > 0) z_scale_applied() / sz else 1
+    tbl <- mplex_offsets_rv()
+    for (c in chans) {
+      if (is.null(c$source)) next
+      tbl[[c$source]] <- c(x = as.numeric(c$dx_nm %||% 0), y = as.numeric(c$dy_nm %||% 0),
+                           z = as.numeric(c$dz_nm %||% 0) * zr)
+    }
+    mplex_offsets_rv(tbl)
+
+    if (!isTRUE(.mplex_build(cfg))) return()
+
+    # Mirror the recipe in the controls, so a later Build reproduces it.
+    updateCheckboxInput(session, "mplex_enable", value = TRUE)
+    updateRadioButtons(session, "mplex_mode", selected = cfg$mode)
+    if (identical(cfg$mode, "files")) {
+      updateSelectInput(session, "mplex_files", selected = cfg$files)
+    } else {
+      updateRadioButtons(session, "mplex_tim_method", selected = cfg$tim_method)
+      updateTextInput(session, "mplex_tim_breaks",  value = cfg$tim_breaks)
+      updateTextInput(session, "mplex_tim_windows", value = cfg$tim_windows)
+    }
+    # Per-channel label / colour boxes are rendered from the controls above, so
+    # they exist only after the next flush.
+    pre <- if (identical(cfg$mode, "files")) c("mplex_flab_", "mplex_fcol_") else c("mplex_tlab_", "mplex_tcol_")
+    labs <- cfg$labels; cols <- cfg$colors
+    later::later(function() {
+      for (j in seq_along(labs)) {
+        if (nzchar(labs[j])) updateTextInput(session, paste0(pre[1], j), value = labs[j])
+        if (nzchar(cols[j])) colourpicker::updateColourInput(session, paste0(pre[2], j), value = cols[j])
+      }
+    }, delay = 0.6)
+    showNotification(paste0("Multiplex settings loaded: ", input$mplex_settings_file$name),
+                     type = "message", duration = 5)
   })
 
   # Split the active multiplex dataset into a named list (label → channel df) so
@@ -1087,11 +1359,13 @@ smlm_server <- function(input, output, session) {
       # Multiplex z alignment offsets are in the same nm, so they rescale with
       # the data; otherwise the next nudge would undo a stale (unscaled) shift.
       .scale_z <- function(tbl) lapply(tbl, function(v) { v[["z"]] <- v[["z"]] * ratio; v })
-      mplex_applied$off <- .scale_z(mplex_applied$off)
       mplex_offsets_rv(.scale_z(isolate(mplex_offsets_rv())))
       store <- lapply(store, function(d) {
         if (is.data.frame(d) && "z" %in% names(d)) d$z <- d$z * ratio
-        if (!is.null(attr(d, "mplex_off"))) attr(d, "mplex_off") <- mplex_applied$off
+        if (!is.null(attr(d, "mplex_off"))) attr(d, "mplex_off") <- .scale_z(attr(d, "mplex_off"))
+        sp <- attr(d, "mplex_spec")                  # alignment recorded in a loaded CSV
+        if (!is.null(sp)) attr(d, "mplex_spec") <- lapply(sp, function(c) {
+          if (length(c$prior) == 3L) c$prior[["z"]] <- c$prior[["z"]] * ratio; c })
         d
       })
       smlm_file_store(store)
@@ -2790,7 +3064,24 @@ smlm_server <- function(input, output, session) {
       # without this it could never be recomputed after re-import.
       optional_cols <- c("fluo", "tim", "itr", "dwell", "dcr_pooled",
                          "pcid", "scid", "n_in_cluster2",
-                         ".dataset_tag", "analysis_group")
+                         ".dataset_tag", "analysis_group",
+                         "mplex_channel", "mplex_label", "mplex_color")
+
+      # Multiplex: record per row the TOTAL alignment shift already in x/y/z
+      # (shift loaded with the file + nudges since), so a re-import can show
+      # it and the file documents how its channels were aligned.
+      act_mp <- isolate(uploaded_df_rv())
+      mp_sp  <- attr(act_mp, "mplex_spec")
+      if ("mplex_channel" %in% names(df) && !is.null(mp_sp)) {
+        now <- .mplex_store_off(attr(act_mp, "mplex_store_name"))
+        tot <- t(vapply(mp_sp, function(c) {
+          pr <- if (length(c$prior) == 3L) unname(c$prior) else c(0, 0, 0)
+          pr + unname(.mplex_off_of(now, .mplex_key(c)))
+        }, numeric(3)))
+        m <- match(df$mplex_channel, vapply(mp_sp, function(c) as.numeric(c$channel), numeric(1)))
+        df$mplex_dx_nm <- tot[m, 1]; df$mplex_dy_nm <- tot[m, 2]; df$mplex_dz_nm <- tot[m, 3]
+        optional_cols <- c(optional_cols, "mplex_dx_nm", "mplex_dy_nm", "mplex_dz_nm")
+      }
 
       keep <- c(
         intersect(core_cols, names(df)),
@@ -2824,6 +3115,13 @@ smlm_server <- function(input, output, session) {
   observeEvent(input$load_settings, {
     req(input$load_settings$datapath)
     raw <- jsonlite::fromJSON(input$load_settings$datapath)
+    # A multiplex settings file has its own loader; applying it here would read
+    # its fields as filter values.
+    if (identical(raw$settings_type, MPLEX_SETTINGS_TYPE)) {
+      showNotification("This is a multiplex settings file. Load it under Multiplexed MINFLUX.",
+                       type = "warning", duration = 8)
+      return()
+    }
     
     base_fil <- filters_defaults_from_data(uploaded_df())
     fil <- modifyList(base_fil, raw, keep.null = TRUE)
@@ -6021,7 +6319,10 @@ smlm_server <- function(input, output, session) {
     # the change in offset. Anything else (a crop that now selects other points,
     # a changed setting, another dataset) misses the key and re-clusters.
     mp_key <- NULL
-    if ("mplex_channel" %in% names(df) && !is.null(isolate(mplex_spec_rv()))) {
+    mp_act  <- isolate(uploaded_df_rv())
+    mp_spec <- attr(mp_act, "mplex_spec")
+    mp_off  <- .mplex_store_off(attr(mp_act, "mplex_store_name"))
+    if ("mplex_channel" %in% names(df) && !is.null(mp_spec)) {
       mp_key <- digest::digest(list(
         df$tid, df$tim, df$mplex_channel,                      # which rows
         if (".dataset_tag" %in% names(df)) df$.dataset_tag[1], # which build
@@ -6033,9 +6334,9 @@ smlm_server <- function(input, output, session) {
     memo <- .mplex_clu_memo
     if (!is.null(mp_key) && identical(memo$key, mp_key)) {
       cl <- memo$df
-      for (c in isolate(mplex_spec_rv())) {                    # move to the current offsets
+      for (c in mp_spec) {                                     # move to the current offsets
         k <- .mplex_key(c)
-        delta <- .mplex_off_of(mplex_applied$off, k) - .mplex_off_of(memo$off, k)
+        delta <- .mplex_off_of(mp_off, k) - .mplex_off_of(memo$off, k)
         if (all(abs(delta) < 1e-9)) next
         rows <- which(cl$mplex_channel == c$channel)
         cl$x[rows] <- cl$x[rows] + delta[["x"]]
@@ -6047,7 +6348,7 @@ smlm_server <- function(input, output, session) {
       df <- apply_clustering_pipeline(df, input)
     }
     if (!is.null(mp_key)) {
-      memo$key <- mp_key; memo$df <- df; memo$off <- mplex_applied$off
+      memo$key <- mp_key; memo$df <- df; memo$off <- mp_off
     } else {
       memo$key <- NULL; memo$df <- NULL                        # free the memory
     }

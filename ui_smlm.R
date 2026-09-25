@@ -1159,6 +1159,23 @@ smlm_ui <- fluidPage(
             tags$p(tags$b("Choosing the offset. "), "Align on a feature that is present in every round, such as fiducial beads or a reference label imaged in each round. Aligning two different targets onto each other by eye sets their overlap by hand, which biases cross-channel colocalization and cross-channel nearest-neighbour results toward colocalization. Record the offsets shown above with the analysis."),
             label = "How alignment works"
           ))
+        ),
+
+        # ── Save / load the multiplex recipe + alignment ─────────────────────
+        # Save appears once a multiplex has been built (a multiplex loaded from
+        # CSV already is its own record). Server: SAVE / LOAD MULTIPLEX SETTINGS.
+        tags$div(style = "border-top:1px solid #e3e3e3; margin-top:6px; padding-top:6px;",
+          conditionalPanel(
+            condition = "output.mplex_has_recipe == true",
+            downloadButton("download_mplex_settings", "Save multiplex settings",
+                           class = "btn-sm", style = "width:100%; margin-bottom:6px;")
+          ),
+          uiOutput("mplex_settings_file_ui"),
+          .detail(
+            tags$p("The settings file holds the channel sources (files, or the file and its time windows), channel names, colours and alignment offsets. Loading it rebuilds the multiplex with the same alignment. The source files must be loaded under the same names first."),
+            tags$p("Export MINFLUX data (.csv) from a multiplex keeps the channel number, name and colour of every localization, with the aligned coordinates and the shift applied to each channel. Loading that CSV restores the channels."),
+            label = "What is saved"
+          )
         )
       ),
       ),  # /Multiplexed MINFLUX
