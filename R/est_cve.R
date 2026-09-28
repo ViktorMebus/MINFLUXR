@@ -11,7 +11,7 @@
 ## WHAT LIVES HERE
 ##   cve_steps() ........ step arrays (dx, dy, dz, dt, single-cycle mask) per row
 ##   cve_core() ......... lag-1 covariance, R bounds (staircase photon-window
-##                        model .blur_R_duty() nested inside), blur-aware σ, D_cve, r1
+##                        R from blur_R_step() in est_blur.R), blur-aware σ, D_cve, r1
 ##   cve_estimate() ..... cve_steps() + cve_core() from a data.frame (tests, scripts)
 ##   .crlb_doughnut() ... photon-budget σ per localization (Vogler et al. 2025 Eq. 1)
 ##
@@ -58,7 +58,7 @@ cve_steps <- function(df, t_c, has_z = FALSE) {
 #   msq, sigma2, sigma, sigma_xy, sigma_z, sig_aniso, D_cve, r1_norm, noise_frac),
 #   or NULL when there are fewer than 20 consecutive single-cycle step products.
 cve_core <- function(dx, dy, dz, dt, integ_step, has_z = FALSE, t_c = NA_real_,
-                     t_coll = NA_real_, n_vert = 6L) {
+                     t_coll = NA_real_, n_vert = 6L, R_step = NA_real_) {
   n <- length(dx)
   # CVE lag-1 autocovariance over CONSECUTIVE integrated step pairs.
   lead_integ <- c(integ_step[-1], FALSE)
@@ -82,33 +82,19 @@ cve_core <- function(dx, dy, dz, dt, integ_step, has_z = FALSE, t_c = NA_real_,
   # tracking test files). Collection spans the cycle t_c out of a step dt = t_c + SW, so
   # R = t_c/(6*dt); a full-cycle window at SW = 0 gives the familiar 1/6.
   dt_int  <- mean(dt[integ_step], na.rm = TRUE)
-  # R is not a single knowable number: it depends on how the cycle's photons are
-  # distributed in time, and only part of that is visible in the data. So bound it.
-  #
-  #   R_hi - collection spans the whole cycle: R = t_c/(6*dt), capped at 1/6.
-  #   R_lo - collection is only the measured ECO/EFO window, delivered as a
-  #          staircase over the pattern's vertices, with the beam moves between
-  #          them and the terminal localization step contributing nothing.
-  #          Closed form for K equal dwells of a, moves of m, terminal r:
-  #            R = [ sum_i a*(s0(1-s0) + d(1-2*s0)/2 - d^2/3) + sum_i m*(i/K)(1-i/K) ] / dt
-  #          with d = 1/K and s0 = (i-1)/K.
-  # Vertex count is a weak lever (triangle 0.131 vs hexagon 0.137 at these
-  # timings); the terminal step is the strong one (0.165 without it, 0.137 with).
-  .blur_R_duty <- function(dt_ms, t_coll_ms, K, t_eod_ms = 0.0053, t_rep_ms = 0.020) {
-    if (!is.finite(dt_ms) || dt_ms <= 0 || !is.finite(t_coll_ms) || t_coll_ms <= 0 ||
-        !is.finite(K) || K < 1) return(NA_real_)
-    t_coll_ms <- min(t_coll_ms, dt_ms)
-    a  <- t_coll_ms / K
-    m  <- max(0, min(t_eod_ms, (dt_ms - t_coll_ms) / K))
-    d  <- 1 / K; i <- seq_len(K); s0 <- (i - 1) / K
-    dwell_part <- sum(a * (s0 * (1 - s0) + d * (1 - 2 * s0) / 2 - d^2 / 3))
-    flat_part  <- sum(m * (i / K) * (1 - i / K))
-    (dwell_part + flat_part) / dt_ms
-  }
+  # R depends on WHEN the photons that make up a localization are collected inside
+  # the step (vertices, dwell, moves, CFR centre, re-centring), not on L; the model
+  # and its validation are in est_blur.R. R_hi (collection spanning the whole cycle,
+  # t_c/(6*dt), capped at 1/6) is kept as the upper bound.
   R_hi <- if (is.finite(t_c) && t_c > 0 && is.finite(dt_int) && dt_int > 0)
             min(1/6, t_c / (6 * dt_int)) else 1/6
-  R_lo <- .blur_R_duty(dt_int, t_coll, n_vert)
-  if (!is.finite(R_lo) || R_lo <= 0 || R_lo > R_hi) R_lo <- R_hi
+  # R from the shared timing model (est_blur.R) so the CVE, MSD, JDD, D-map,
+  # change-point and HMM all use one blur. `R_step` from the caller (built from the
+  # sequence file when there is one) wins; otherwise the timeline is built from the
+  # measured collection window t_coll = eco/efo and the vertex count.
+  R_lo <- if (is.finite(R_step) && R_step > 0) R_step else
+            (blur_R_step(dt_int, t_coll, n_vert = n_vert)$R %||% NA_real_)
+  if (!is.finite(R_lo) || R_lo <= 0 || R_lo > R_hi) R_lo <- min(R_hi, BLUR_R_STEP_FALLBACK)
   R_blur <- R_lo   # the physically modelled value; R_hi bounds the other side
   sq_all  <- c(dx[integ_step]^2, dy[integ_step]^2)
   if (has_z) sq_all <- c(sq_all, dz[integ_step]^2)

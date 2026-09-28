@@ -12678,7 +12678,15 @@ smlm_server <- function(input, output, session) {
                                          collapse = "  \u00b7  "),
                                    sprintf("  \u00b7  (+%d more, %d with p < 0.05)", nrow(d) - 4,
                                            sum(d$global_p < 0.05, na.rm = TRUE)))
-    paste("Global test over the whole r range:", txt)
+    # Two-channel panels: say which null the p-value is against, since the three
+    # nulls answer different questions (see compute_ripley_envelope).
+    nl <- if ("null_mode" %in% names(env_res)) unique(stats::na.omit(env_res$null_mode)) else character(0)
+    nl_txt <- c(shift = "null: channel B shifted at random (independent placement)",
+                labels = "null: random labelling (do the channels differ in arrangement)",
+                csr = "null: independent random patterns in the window")[nl]
+    nl_txt <- nl_txt[!is.na(nl_txt)]
+    paste0("Global test over the whole r range: ", txt,
+           if (length(nl_txt)) paste0("  |  ", paste(nl_txt, collapse = "; ")) else "")
   }
 
   ## Caption as a plot annotation (NULL when no envelope was computed).
@@ -14751,10 +14759,11 @@ smlm_server <- function(input, output, session) {
             window_ranges = win, r_seq = lr$r, use_3d = use_3d,
             nsim = nsim, estimator = "L12", support = sup,
             edge_correct = isTRUE(input$spatial_edge_correct),
-            null_mode = input$coloc_null_mode %||% "labels", pts1 = pts1, pts2 = pts2)
+            null_mode = input$coloc_null_mode %||% "shift", pts1 = pts1, pts2 = pts2)
           if (!is.null(env)) {
             gp <- envelope_global_p(env, lr$Lr_minus_r)
             env$global_p <- gp$p %||% NA_real_
+            env$null_mode <- attr(env, "null_mode") %||% NA_character_
             env$dataset <- nm; env_list[[nm]] <- env
           }
         }
@@ -14953,10 +14962,11 @@ smlm_server <- function(input, output, session) {
             window_ranges = win, r_seq = g$r, use_3d = use_3d,
             nsim = nsim, estimator = "pcf", support = sup,
             edge_correct = isTRUE(input$spatial_edge_correct),
-            null_mode = input$coloc_null_mode %||% "labels", pts1 = pts1, pts2 = pts2)
+            null_mode = input$coloc_null_mode %||% "shift", pts1 = pts1, pts2 = pts2)
           if (!is.null(env)) {
             gp <- envelope_global_p(env, g$g12)
             env$global_p <- gp$p %||% NA_real_
+            env$null_mode <- attr(env, "null_mode") %||% NA_character_
             env$dataset <- nm; env_list[[nm]] <- env
           }
         }

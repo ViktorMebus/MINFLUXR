@@ -1451,7 +1451,7 @@ tracking_ui <- fluidPage(
           tags$p(style = "color:#888; margin:8px 0 0; font-size:0.95em;",
             "MINFLUX foundational: Balzarotti et al. 2017 (Science); Gwosch et al. 2020; ",
             "Schmidt et al. 2021; Wolff et al. 2023; Deguchi et al. 2023. ",
-            "Motion blur: Michalet & Berglund 2012. The CVE bounds R from the cycle timing and the photon collection window; the MSD fits use R = 1/6.2, the MinSpt toolbox value (Vogler et al. 2025). No direct measurement of R for MINFLUX has been published.")
+            "Motion blur: Berglund 2010; Michalet & Berglund 2012. Every estimator uses one R, computed from when the photons of a localization are collected (pattern, dwell, vertices, repeats and centre dwell from the sequence file, or the collection window eco/efo from the data). No direct measurement of R for MINFLUX has been published.")
         )
       )
     )  # end tabPanel("Analysis")

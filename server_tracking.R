@@ -479,7 +479,8 @@ tracking_server <- function(input, output, session) {
     }
     if (!is.finite(n_vert) || n_vert < 1L) n_vert <- 6L
     # CVE core (covariance, blur bounds, σ, D) lives in est_cve.R.
-    cc <- cve_core(dx, dy, dz, dt, integ_step, has_z, t_c, t_coll, n_vert)
+    cc <- cve_core(dx, dy, dz, dt, integ_step, has_z, t_c, t_coll, n_vert,
+                   R_step = trk_blur()$R_step)
     shiny::validate(shiny::need(!is.null(cc),
       "Too few consecutive integrated steps for a CVE estimate - relax filters or check the cycle time."))
     pair <- cc$pair; prod_x <- cc$prod_x; prod_y <- cc$prod_y; prod_z <- cc$prod_z
@@ -741,7 +742,17 @@ tracking_server <- function(input, output, session) {
           b$r1_fgn / b$r1_norm)) else "  \u2713 consistent"))
     } else NULL
 
-    # CVE cross-check. Agreement between the implied L and the L in use is the
+    # Motion blur used by every estimator (trk_blur(), est_blur.R), and where it came
+    # from. Damping in the sequence smooths positions ACROSS steps, which no blur model
+    # describes, so it is flagged rather than corrected.
+    bl <- tryCatch(trk_blur(), error = function(e) NULL)
+    blur_line <- if (!is.null(bl)) row(
+      dim_(sprintf("motion blur R = %.3f per step, from %s", bl$R_step, bl$source)),
+      if (!is.null(bl$note)) warn(sprintf("  (sequence file not used: %s)", bl$note)) else NULL,
+      if (is.finite(bl$damping %||% NA_real_) && bl$damping > 0)
+        warn(htmltools::HTML(sprintf(
+          "  &#9888; sequence damping = %g: positions are smoothed across steps, so no blur model applies and D from single steps is approximate",
+          bl$damping))) else NULL) else NULL
     # evidence that the photon prefactor is right; a large gap means one is wrong.
     # CVE sigma, kept only as a sanity read on the covariance. It is NOT a precision
     # measurement: ~90% of it is the assumed blur term, and on immobile samples the
@@ -845,7 +856,7 @@ tracking_server <- function(input, output, session) {
     } else NULL
 
     htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
-      sigma_line, smooth_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line,
+      sigma_line, smooth_line, blur_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line,
       dw_line, qc_line)
   })
 
@@ -2383,6 +2394,12 @@ tracking_server <- function(input, output, session) {
     prep  <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "patRepeat")))
     pht   <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "phtLimit")))
     pdw   <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "patDwellTime"))) # seconds (timeout)
+    # Timing inputs for the blur model (est_blur.R): the CFR check adds a centre dwell
+    # of ctrDwellFactor x dwell when ccrLimit > 0, and `damping` > 0 smooths the
+    # exported positions across steps, which no blur model describes.
+    ccr   <- suppressWarnings(as.numeric(getp(itrs[[length(itrs)]], "ccrLimit")))
+    cdf   <- suppressWarnings(as.numeric(getp(seq, "ctrDwellFactor")))
+    dmp   <- suppressWarnings(as.numeric(getp(seq, "damping")))
     final_pat <- tail(pats[!is.na(pats)], 1L)
     if (length(final_pat) == 0) final_pat <- NA_character_
     dim_final <- suppressWarnings(as.integer(tail(dims[!is.na(dims)], 1L)))
@@ -2406,10 +2423,77 @@ tracking_server <- function(input, output, session) {
       patRepeat = prep,
       phtLimit = pht,
       patDwellTime_ms = if (is.finite(pdw)) pdw * 1000 else NA_real_,
+      cfr_on = is.finite(ccr) && ccr > 0,
+      ctrDwellFactor = if (is.finite(cdf)) cdf else NA_real_,
+      damping = if (is.finite(dmp)) dmp else NA_real_,
       L_by_itr = L_by_itr,
       L_tcp_nm = L_final,
       headstart = if (is.finite(hs)) hs else NA_integer_
     )
+  })
+
+  # ── trk_blur() - ONE MOTION-BLUR COEFFICIENT FOR EVERY TRACKING ESTIMATOR ───
+  # GOAL: the blur R of a localization, from the photon-collection timeline of the
+  # acquisition (est_blur.R), converted once into the forms the estimators use:
+  # R_abs (ms, JDD / D-map / change-point / HMM), R_msd (relative to the cycle, MSD
+  # fits and the confinement null) and R_step (the CVE).
+  # Inputs, best first: the sequence JSON (pattern, dwell, pattern repeats, CFR
+  # centre dwell); otherwise the data (collection window eco/efo, the hardware
+  # pattern setting). The step dt is the mean single-cycle interval of the data.
+  # eta (passes per localization) = eco / (efo * dwell) when the dwell is known.
+  trk_blur <- reactive({
+    df  <- trk(); t_c <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
+    out <- list(R_step = BLUR_R_STEP_FALLBACK, R_abs = NA_real_, R_msd = MSD_R_FALLBACK,
+                source = "fallback (standard 2D sequence)", damping = NA_real_, detail = NULL)
+    if (is.null(df) || !nrow(df) || !is.finite(t_c) || t_c <= 0) return(out)
+    d  <- df[order(df$tid, df$tim), c("tid", "tim", intersect(c("eco", "efo"), names(df)))]
+    m  <- nrow(d); same <- c(FALSE, d$tid[-1] == d$tid[-m])
+    dt <- c(NA_real_, diff(d$tim)); dt[!same] <- NA_real_
+    one <- is.finite(dt) & round(dt / t_c) == 1
+    dt_int <- if (any(one)) mean(dt[one]) else t_c
+    med <- function(v) { v <- v[is.finite(v) & v > 0]; if (length(v)) stats::median(v) else NA_real_ }
+    t_coll <- if (all(c("eco", "efo") %in% names(d))) med(d$eco / d$efo) * 1000 else NA_real_   # ms
+    sp <- tryCatch(if (is.null(input$trk_seq_json)) NULL else trk_seq_params(), error = function(e) NULL)
+    has_seq <- !is.null(sp) && isTRUE(sp$ok) && is.finite(sp$patDwellTime_ms)
+    b <- NULL; note <- NULL
+    if (has_seq) {
+      eta <- if (is.finite(t_coll)) max(1, round(t_coll / sp$patDwellTime_ms)) else 1
+      b <- blur_R_step(dt_int, sp$patDwellTime_ms, pattern = sp$final_pattern,
+                       n_vert = sp$vertices, pat_repeat = sp$patRepeat %||% 1, eta = eta,
+                       cfr = isTRUE(sp$cfr_on), ctr_factor = sp$ctrDwellFactor %||% 0)
+      src <- sprintf("sequence file (%s, %.0f µs dwell%s%s)", sp$final_pattern %||% "?",
+                     1000 * sp$patDwellTime_ms, if (isTRUE(sp$cfr_on)) ", CFR" else "",
+                     if (eta > 1) sprintf(", %d passes", eta) else "")
+      # A sequence whose collection alone outlasts the measured step does not describe
+      # this data (e.g. an imaging sequence loaded with tracking data); one whose final
+      # pattern is axial has no lateral R. Both fall back to the data, and say so.
+      if (is.null(b) || !is.finite(b$R)) {
+        note <- sprintf("the sequence's final pattern (%s) gives no lateral blur", sp$final_pattern %||% "?")
+        b <- NULL
+      } else if (isTRUE(b$overrun)) {
+        note <- sprintf("the sequence needs %.0f µs per localization but the data step is %.0f µs, so it does not match this data",
+                        1000 * b$t_loc_ms, 1000 * dt_int)
+        b <- NULL
+      }
+    }
+    if (is.null(b) && is.finite(t_coll)) {
+      # Lateral polygon only: an axial pattern loaded from a sequence can set the
+      # vertex control to 2, which says nothing about the lateral collection.
+      nv <- suppressWarnings(as.integer(input$trk_hw_vertices %||% 6L))
+      if (!is.finite(nv) || nv < 3L) nv <- 6L
+      b <- blur_R_step(dt_int, t_coll, n_vert = nv)
+      src <- sprintf("data (collection window eco/efo %.0f µs, %d vertices)", 1000 * t_coll, nv)
+    }
+    if (!is.null(b) && is.finite(b$R)) {
+      o <- blur_offsets(b$R, dt_int, t_c)
+      out <- c(o, list(source = src, detail = b))
+    } else {
+      out$R_abs <- blur_offsets(out$R_step, dt_int, t_c)$R_abs
+    }
+    out$note    <- note
+    out$damping <- if (!is.null(sp) && isTRUE(sp$ok)) sp$damping else NA_real_
+    out$dt_int  <- dt_int
+    out
   })
 
   # Apply the parsed sequence: set the gap-split threshold from maxOffTime, enable
@@ -5617,13 +5701,13 @@ tracking_server <- function(input, output, session) {
       cand <- list(
         free      = list(fr = free_fr, k = 2L),
         confined  = list(fr = tryCatch(.msd_model_fit(s, y, np, ub$ndim, "confined",
-                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff),
+                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff, R = trk_blur()$R_msd),
                                        error = function(e) NULL), k = 3L),
         directed  = list(fr = tryCatch(.msd_model_fit(s, y, np, ub$ndim, "directed",
-                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff),
+                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff, R = trk_blur()$R_msd),
                                        error = function(e) NULL), k = 3L),
         anomalous = list(fr = tryCatch(.msd_model_fit(s, y, np, ub$ndim, "anomalous",
-                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff),
+                                        FALSE, ub$t_cycle, coef_override = ub$coef_eff, R = trk_blur()$R_msd),
                                        error = function(e) NULL), k = 3L))
       aic <- vapply(names(cand), function(nm) aicc_of(cand[[nm]]$fr, cand[[nm]]$k), numeric(1))
       if (!any(is.finite(aic))) return(NULL)
@@ -5875,7 +5959,7 @@ tracking_server <- function(input, output, session) {
     result <- withProgress(message = "Segmenting tracks…", value = 0,
       cpd_segment_tracks(df, min_seg = min_seg, use_z = use_z_cpd,
                          noise_sig2 = noise_D_off,
-                         R_abs = MSD_BLUR_R * t_c_cpd,
+                         R_abs = trk_blur()$R_abs,
                          progress = function(f) incProgress(f)))
     shiny::validate(shiny::need(
       !is.null(result) && nrow(result) >= 3L,
@@ -6012,7 +6096,7 @@ tracking_server <- function(input, output, session) {
     }
   )
 
-  # MSD fit core (MSD_BLUR_R, .olsf_sig2, .michalet_p, msd_fit_olsf,
+  # MSD fit core (blur R from trk_blur(), .olsf_sig2, .michalet_p, msd_fit_olsf,
   # msd_fit_olsf_iterative) lives in est_msd.R since 2026-09-17.
 
   msd_fit_result <- function(tau, msd, k, anomalous = TRUE, ndim = 2L) {
@@ -6755,14 +6839,14 @@ tracking_server <- function(input, output, session) {
     if (sum(ok) < 3L) return(NULL)
     if (isTRUE(input$trk_uni_iterative)) {
       # Bela's exact iterative loop - converges on the lowest, least-noisy lags.
-      msd_fit_olsf_iterative(tau_use[ok], ub$msd[ok], ndim = ub$ndim, R = MSD_BLUR_R,
+      msd_fit_olsf_iterative(tau_use[ok], ub$msd[ok], ndim = ub$ndim, R = trk_blur()$R_msd,
                              dt_cycle = ub$t_cycle, N = sum(ok),
                              coef_override = ub$coef_eff)
     } else {
       # Robust full-window-anchored Michalet (default).
       msd_fit_olsf(tau_use[ok], ub$msd[ok], ub$npairs[ok],
                    k = sum(ok), ndim = ub$ndim,
-                   auto_pmin = TRUE, R = MSD_BLUR_R, Npts = 1e4, dt_cycle = ub$t_cycle,
+                   auto_pmin = TRUE, R = trk_blur()$R_msd, Npts = 1e4, dt_cycle = ub$t_cycle,
                    coef_override = ub$coef_eff)
     }
   }
@@ -6782,7 +6866,7 @@ tracking_server <- function(input, output, session) {
     if (sum(ok) < 4L) return(NULL)
     .msd_model_fit(tau_use[ok], ub$msd[ok], ub$npairs[ok], ub$ndim, model,
                    isTRUE(input$trk_uni_iterative), ub$t_cycle,
-                   coef_override = ub$coef_eff)
+                   coef_override = ub$coef_eff, R = trk_blur()$R_msd)
   }
 
   # Cached per-track analysis from the UNIFIED MSD - the single source for the
@@ -6829,11 +6913,11 @@ tracking_server <- function(input, output, session) {
       okc <- is.finite(mv); if (sum(okc) < 3L) return(NULL)
       tt <- tau_w[okc]; yy <- mv[okc]; N_tr <- sum(is.finite(col))
       fr_tr <- if (use_iter)
-        msd_fit_olsf_iterative(tt, yy, ndim = ub$ndim, R = MSD_BLUR_R, dt_cycle = t_c_e, N = N_tr,
+        msd_fit_olsf_iterative(tt, yy, ndim = ub$ndim, R = trk_blur()$R_msd, dt_cycle = t_c_e, N = N_tr,
                                coef_override = ub$coef_eff)
       else
         msd_fit_olsf(tt, yy, rep(1L, length(tt)), k = length(tt), ndim = ub$ndim,
-                     auto_pmin = TRUE, R = MSD_BLUR_R, Npts = N_tr, dt_cycle = t_c_e,
+                     auto_pmin = TRUE, R = trk_blur()$R_msd, Npts = N_tr, dt_cycle = t_c_e,
                      coef_override = ub$coef_eff)
       if (is.null(fr_tr) || !is.finite(fr_tr$D) || fr_tr$D <= 0) return(NULL)
       # Confinement index: actual MSD growth vs the free-diffusion expectation,
@@ -6881,10 +6965,10 @@ tracking_server <- function(input, output, session) {
       eD <- if (sum(winc) >= 3L) {
         frc <- tryCatch(
           if (use_iter) msd_fit_olsf_iterative(tau_sel[winc], emsd[winc], ndim = ub$ndim,
-                                               R = MSD_BLUR_R, dt_cycle = ub$t_cycle, N = sum(winc),
+                                               R = trk_blur()$R_msd, dt_cycle = ub$t_cycle, N = sum(winc),
                                                coef_override = ub$coef_eff)
           else msd_fit_olsf(tau_sel[winc], emsd[winc], rep(1L, sum(winc)), k = sum(winc),
-                            ndim = ub$ndim, auto_pmin = TRUE, R = MSD_BLUR_R, Npts = 1e4,
+                            ndim = ub$ndim, auto_pmin = TRUE, R = trk_blur()$R_msd, Npts = 1e4,
                             dt_cycle = ub$t_cycle, coef_override = ub$coef_eff),
           error = function(e) NULL)
         if (!is.null(frc) && is.finite(frc$D)) frc$D / 1e3 else NA_real_
@@ -7431,7 +7515,7 @@ tracking_server <- function(input, output, session) {
         # and the anomalous model a sub-diffusive exponent, purely from the ceiling.
         fg <- if (sum(w) < 4L) NULL else
           tryCatch(.msd_model_fit(gm$tau[w], gm$msd[w], rep(1000L, sum(w)), ub$ndim,
-                                  model, FALSE, ub$t_cycle, coef_override = attr(gm, "coef")),
+                                  model, FALSE, ub$t_cycle, coef_override = attr(gm, "coef"), R = trk_blur()$R_msd),
                    error = function(e) NULL)
         if (is.null(fg)) NULL else {
           Dtrue <- attr(gm, "D")
@@ -7959,13 +8043,13 @@ tracking_server <- function(input, output, session) {
       "Too few jumps - lower 'Min points per TID' or relax filters."))
     jf <- jdd_fit(cj$jumps, cj$dt_all, n_comp = n_comp, use_z = use_z_jdd, norm_dt = norm_dt,
                   sigma_loc = sigma_loc,
-                  R_abs = MSD_BLUR_R * t_c_jdd,
+                  R_abs = trk_blur()$R_abs,
                   progress = function(f) incProgress(f, detail = "fitting jump-distance mixture"))
 
     list(mids = jf$mids, dens = jf$dens, sigs = jf$sigs, ws = jf$ws, D_vals = jf$D_vals,
          n_comp = n_comp, norm_dt = norm_dt, n_jumps = length(cj$jumps),
          use_z = use_z_jdd, d_fit = jf$d_fit, dt0 = jf$dt0, inv_dt = jf$inv_dt, sigma_loc = sigma_loc,
-         r_noise = jf$r_noise, R_abs = MSD_BLUR_R * t_c_jdd,
+         r_noise = jf$r_noise, R_abs = trk_blur()$R_abs,
          step_mode = step_mode, integrated_only = integ_only, t_cycle = t_c_jdd,
          min_dt_used = if (min_dt > 0) min_dt else NA_real_,
          max_dt_used = if (is.finite(max_dt)) max_dt else NA_real_)
@@ -8245,7 +8329,7 @@ tracking_server <- function(input, output, session) {
                        ndim = ndim, gap_p = gap_p, min_lag = min_lag, max_lag = max_lag,
                        progress = function(f) setProgress(0.85 * f,
                          detail = sprintf("%d of %d (length, D) cells", round(f * ncell), ncell)),
-                       R_blur = MSD_BLUR_R))   # same blur coefficient as the MSD fits
+                       R_blur = trk_blur()$R_msd))   # same blur coefficient as the MSD fits
     # nearest cell in (log N, log D)
     idx <- withProgress(message = "Confinement: matching tracks to the null…", value = 0.85, {
       ln <- log(nul$n); lD <- log(nul$D)
@@ -9755,7 +9839,7 @@ tracking_server <- function(input, output, session) {
   #   step of any Δt has transition matrix expm(Q·Δt): dark cycles are handled
   #   exactly. Emission: r² over x,y is Gamma(1, 2·v) with the per-axis variance
   #       v = 2·D_s·(Δt − 2·R·t_c) + σ_j² + σ_{j+1}²
-  #   i.e. diffusion, motion blur (MSD_BLUR_R) and the noise of both localizations.
+  #   i.e. diffusion, motion blur (trk_blur()) and the noise of both localizations.
   #   D is therefore noise- and blur-corrected by construction.
   #
   # WHAT CHANGED AND WHY (2026-09-17)
@@ -9791,7 +9875,7 @@ tracking_server <- function(input, output, session) {
     t_c     <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
     shiny::validate(shiny::need(is.finite(t_c) && t_c > 0,
       "Cycle time unknown - run Data Quality & Calibration first."))
-    R_abs   <- MSD_BLUR_R * t_c                         # blur offset in ms, as in the MSD fits
+    R_abs   <- trk_blur()$R_abs                         # blur offset in ms, shared (est_blur.R)
 
     # ── Noise model ──────────────────────────────────────────────────────────
     # The emission needs each step's noise variance. With the photon model active,
@@ -10251,7 +10335,7 @@ tracking_server <- function(input, output, session) {
                # Same motion/projection correction as the main MSD panel, so a
                # per-state D is on the same footing as the ensemble D.
                tryCatch(.msd_model_fit(tau_use[okf], msd[okf], npk[okf], ndim, model, use_iter, t_c,
-                                       coef_override = 2 * .msd_d_eff(ndim)),
+                                       coef_override = 2 * .msd_d_eff(ndim), R = trk_blur()$R_msd),
                         error = function(e) NULL) else NULL
       list(state = k, n_seg = n_seg[k], n_pts = n_pts[k], D_hmm = bd$D_vals[k] / 1e3,
            lag = lag_v, tau = tau_use, msd = msd, npairs = npk, fr = fr)
@@ -10420,7 +10504,7 @@ tracking_server <- function(input, output, session) {
       res <- dmap_compute(df, n_bins = input$trk_dmap_bins, min_pts = input$trk_dmap_min_pts,
                           t_c = t_c_dmap, integrated_only = isTRUE(input$trk_dmap_integrated_only),
                           sigma_loc = sig_use,
-                          R_abs = MSD_BLUR_R * t_c_dmap)
+                          R_abs = trk_blur()$R_abs)
     })
     shiny::validate(shiny::need(is.null(res$error), res$error %||% ""))
     res

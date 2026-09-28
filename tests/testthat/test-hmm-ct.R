@@ -22,9 +22,9 @@ test_that("parameter packing round-trips and keeps D ordered", {
 test_that("one-state limit: the emission likelihood is maximised near the true D", {
   set.seed(4)
   Q <- matrix(c(-1e-6, 1e-6, 1e-6, -1e-6), 2)
-  df <- sim_ct_state_tracks(60, 200, D = c(200, 200.0001), Q = Q, sigma = 4, seed = 4)
+  df <- sim_ct_state_tracks(60, 200, D = c(200, 200.0001), Q = Q, sigma = 4, seed = 4, R_blur = 0.106)
   pr <- hmm_ct_prepare(df, sigma = 0)
-  R_abs <- 0.192 / 6.2
+  R_abs <- 0.192 * 0.106                          # the R the tracks were simulated with
   nll <- function(lD) -sum(.hmm_emissions(pr, exp(lD), R_abs, log = TRUE)[!is.na(pr$R2)])
   D_hat <- exp(optimize(nll, c(log(10), log(5000)))$minimum)
   expect_lt(abs(D_hat / 200 - 1), 0.05)          # blur + noise terms are right
@@ -40,7 +40,7 @@ test_that("two-state recovery: MLE unbiased, decoded-path counting biased long",
   set.seed(1); eco <- pmax(20, rlnorm(1e5, log(36), 0.6))
   df <- sim_ct_state_tracks(200, 300, D, Q, sigma = 100.8 / (4 * sqrt(eco)), seed = 11)
   pr <- hmm_ct_prepare(df, sigma = 0)
-  f  <- hmm_ct_fit(pr, K = 2, R_abs = t_c / 6.2, t_c = t_c)
+  f  <- hmm_ct_fit(pr, K = 2, R_abs = t_c * 0.106, t_c = t_c)   # the simulator default R
   expect_true(all(abs(f$D / D - 1) < 0.15))
   expect_true(all(abs(f$dwell_ms / dw - 1) < 0.15))
   vs  <- hmm_ct_viterbi(pr, f)

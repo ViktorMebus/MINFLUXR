@@ -306,13 +306,37 @@ analysis and is saved in the settings JSON.
   mask, re-estimate, average the ratio) and dilates the mask by whole cells to the implied area. It is
   applied to the Ripley, g, L₁₂, g₁₂ and co-localization window, and not to the hotspot panel, whose eps
   calibration randomises inside the same mask and is self-consistent.
-- **Two-channel null.** `null_mode = "labels"` (default) keeps the observed points and permutes which
-  channel each belongs to, so both marginals and the window cancel. `"csr"` draws independent uniform
-  patterns in the window; it is anti-conservative for L₁₂ and g₁₂, because the estimated window's
-  *shape* still differs from the cell. Random labelling tests "the two channels are a random labelling of
-  one pattern", so two species occupying genuinely different parts of the cell reject on that alone.
-- **Calibration.** In simulation the global test holds near its nominal 5% for all four statistics
-  under random labelling (`tests/validation/results/`).
+- **Two-channel null — three choices, three different questions.**
+  - `"shift"` (default): channel A stays where it is and channel B is translated as a rigid whole by a
+    random vector, wrapping inside the box (toroidal shift; Lotwick & Silverman 1982; `.shift_channel`).
+    Each channel keeps its own clustering exactly and only their registration is broken, so this is the
+    null for **"are A and B placed independently"**, the co-localization question. Shifts shorter than
+    the largest radius analysed are rejected (a near-zero shift keeps part of the association and costs
+    power silently); with a footprint, a shift is accepted when ≥ 90% of B lands in the cell, otherwise
+    the best of 100 candidates is used, and points outside the cell are dropped. In a concave cell the
+    90% rule is rarely met, so the best-of-100 path is the usual one; it is what was validated.
+  - `"labels"` keeps the observed points and permutes which channel each belongs to. It tests **"do the
+    two channels differ in arrangement"**. Two species that share the same clusters ARE a random
+    labelling of one pattern, so it cannot detect them; two unrelated clustered species read as
+    exclusion, because the pooled pattern is more clustered than either cross pair.
+  - `"csr"` draws independent uniform patterns in the window. It ignores each channel's own clustering
+    and calls almost any pair of clustered channels co-localized.
+- **Calibration** (`tests/validation/coloc_null_clustered.R`; clustered channels in an L-shaped cell,
+  footprint window and edge correction on, 60 replicates × 99 simulations, global test at 5%):
+
+  | truth | null | L₁₂ rejects | g₁₂ rejects |
+  |---|---|---|---|
+  | independent clustered species | shift | **6.7%** | **3.3%** |
+  | | labels | 100% (all "exclusion") | 100% (all "exclusion") |
+  | | csr | 97% | 100% |
+  | same clusters | shift | 100% | 100% |
+  | | labels | **1.7%** | **3.3%** |
+  | B within ~8 nm of A | shift | 100% | 100% |
+  | | labels | 100% | **5%** |
+
+  On independent **unclustered** (CSR) channels, the only case where random labelling is exact, it holds
+  1.7% (L₁₂) and 3.3% (g₁₂), and the CSR-in-window null 21.7% and 8.3%
+  (`spatial_envelope_coverage.R`).
 
 ### I-A.3a Sample footprint & labelling-density thinning (opt-in) — [Part II §6.2b]
 Block 8b of `helpers_smlm.R`.
@@ -390,8 +414,9 @@ statistics can.
 - Same ≤2000 subsample and the same two window switches as L(r) (bounding box, edge-corrected, by
   default).
 - **Envelope:** the same `compute_ripley_envelope` (with `estimator = "L12"` / `"pcf"` and both `n₁`,
-  `n₂`), with the global band and p-value of §I-A.3. The default null is random labelling of the
-  observed points; the CSR-in-window null is the alternative. For L₁₂ the observed curve above the band
+  `n₂`), with the global band and p-value of §I-A.3. The default null is a random shift of channel B
+  (§I-A.3, two-channel null); random labelling and CSR-in-window are the alternatives, and the plot
+  caption names the null used. For L₁₂ the observed curve above the band
   = co-localization at that scale, below = exclusion; for g₁₂ the band **brackets g = 1** and the
   observed curve rising above it at short r = attraction.
 
@@ -697,8 +722,7 @@ heterogeneity and drift.
 - **CVE with motion blur** (Vestergaard 2014): **σ² = R·⟨Δx²⟩ + (2R − 1)·cov₁**, averaged over x, y[, z],
   using **only consecutive integrated (single-cycle) step pairs** so variable dark-cycle Δt cannot bias
   the covariance. R is bounded rather than assumed: `R_hi = min(1/6, t_c/(6·Δt))` (collection spans the
-  cycle) and `R_lo` from the measured collection window `eco/efo` delivered as a staircase over the
-  pattern vertices (`.blur_R_duty`); `R_lo` is used. The instantaneous-exposure form (R = 0,
+  cycle) and R from the photon-collection timeline of the sequence (§I-B.1a); `R_hi` is the upper bound. The instantaneous-exposure form (R = 0,
   σ² = −cov₁) under-reports σ severalfold on blurred data.
 - **Free bias-corrected D:** `D_cve = ⟨Δ²⟩/(2Δt) + cov₁/Δt` per axis. **Blur-independent**, so D is
   unaffected by the choice of R.
@@ -740,6 +764,50 @@ heterogeneity and drift.
 - The app-wide σ_loc (priority above) is the **noise floor** consumed by the D-map, JDD, confinement,
   HMM, directionality, change-point and speed tools.
 
+### I-B.1a Motion blur R — one value for every estimator (`R/est_blur.R`, `trk_blur()`)
+A localization averages the molecule's path over the time its photons are collected, which lowers every
+step's squared displacement by a constant: per axis **E[Δx²] = 2D(Δt − 2R·Δt) + 2σ²** (Berglund 2010;
+Vestergaard, Blainey & Flyvbjerg 2014). Every estimator that reads single steps or an MSD intercept needs R.
+
+- **What sets R.** R = (1/Δt)∫ S(t)(1 − S(t)) dt, with S(t) the cumulative weight the estimate gives the
+  path. So R is set by **when** the photons are collected inside the step: dwell per vertex, number and
+  order of vertices, pattern repeats, passes to reach the photon limit (η), beam moves between vertices
+  (t_EOD ≈ 5 µs), the CFR centre dwell and re-centring (t_REP ≈ 20 µs) (Vogler et al. 2025, Eq. 4–7).
+  **The TCP diameter L does not enter**: simulated with a MINFLUX estimator at L = 50, 101 and 302 nm and
+  D = 0.2 and 2 µm²/s, R stayed at 0.084–0.095, inside the Monte-Carlo scatter.
+- **The MINFLUX-specific part.** A vertex senses only the displacement along its own direction, so the
+  linearised estimator weights vertex i by u²ᵢ,ₐ on axis a (hexagon x: 1, ¼, ¼, 1, ¼, ¼; y: 0, ¾, ¾, 0,
+  ¾, ¾). R differs per axis and depends on the visiting order, taken as angular. The pooled estimators use
+  the mean over x and y.
+- **Inputs, best first:** the sequence JSON (pattern, `patDwellTime`, `patRepeat`, CFR from
+  `ccrLimit` > 0 with `ctrDwellFactor`), with η = ECO/(EFO·dwell) from the data; otherwise the data alone
+  (collection window ECO/EFO, the hardware-pattern vertex count). Δt is the mean single-cycle interval.
+  Fallback without either: R = 0.10 per step (the standard 2D sequence). A sequence file is **not used**
+  when its collection timeline alone is longer than the measured step (for example an imaging sequence
+  loaded with tracking data: 2175 µs against a 205 µs step) or when its final pattern is axial-only
+  (`zline*`); the panel says which, and the data route is used. An unknown pattern name is treated as a
+  regular polygon with the parsed vertex count.
+- **Conversions** (`blur_offsets`): R_abs = R·Δt (ms; each step's effective diffusion time is Δt − 2R_abs,
+  JDD / D-map / change-point / HMM), R_msd = R_abs/t_c (MSD / OLSF and the confinement null).
+- **Validation** (`tests/testthat/test-blur.R`; GP67H sequence: hexagon, 100 µs dwell, CFR, Δt 203 µs):
+
+  | R per step | value | single-step D on simulated MINFLUX localizations |
+  |---|---|---|
+  | full simulation (photon counts + linearised estimator) | x 0.096, y 0.097 | truth |
+  | timing model, projection weights (used) | x 0.103, y 0.097 → 0.100 | within 2% |
+  | timing model, equal vertex weights | 0.106 | +2–3% |
+  | MinSpt constant 1/6.2 of t_c | 0.152 | **+15–17%** |
+
+  R moves with the sequence (fast triangle 50 µs: 0.067; two pattern repeats: 0.129; two passes: 0.120),
+  so no constant stands in for it.
+- **Deliberate deviation from MinSpt.** MinSpt passes R = 1/6.2, cited in its code to Schmidt et al. 2020
+  with a question mark; Schmidt et al. 2021 (Nat. Commun. 12:1478) mention blur only qualitatively and give
+  no coefficient, and no sequence field sets one. Until 2026-09-28 the app used it for the MSD, JDD, D-map,
+  change-point and HMM.
+- **Damping is not blur.** A sequence with `damping` > 0 smooths the exported positions **across** steps
+  (the increment-consistency check in §I-B.1 detects it). No R describes that; the Data Quality panel
+  warns when the sequence says damping > 0, and D from single steps is then approximate.
+
 ### I-B.2 Unified MSD, optimal-fit OLSF & fit models — [Part II §2.1, §2.7, §3a]
 `msd_unified_bundle` + `msd_unified_fit` + `.msd_model_fit`.
 - **Binning:** per-track **cumulative cycle-index** lag (the MinSpt timeline) — `dcyc = round((Δt − sw)/t_c)`,
@@ -757,9 +825,8 @@ heterogeneity and drift.
   the lowest, least-noisy lags). Fit window default **5–50 cycles** (Vogler `fit_limits`).
 - **Motion blur in the OLSF.** The intercept of a blurred MSD is `a = 2d(σ² − 2R·D·Δt)` (Michalet &
   Berglund 2012), so the fits report `σ² = a/(2d) + 2R·D·Δt` and pass R into the reduced error x, with
-  **R = 1/6.2** (`MSD_BLUR_R`), the value MinSpt passes to its OLSF. The slope, and so D, is unaffected;
-  reading the intercept with R = 0 under-reports σ. The CVE's instrument-modelled bound R ∈ [R_lo, R_hi]
-  brackets 1/6.2, and a constant keeps the MSD panel independent of the CVE run. The drawn fit line uses
+  R = R_msd from the sequence timing (§I-B.1a). The slope, and so D, is unaffected; reading the intercept
+  with R = 0 under-reports σ (by ~20% at the physical R). The drawn fit line uses
   the raw fitted intercept, because the data sit on the blurred line. The non-linear models (confined,
   directed, anomalous) read σ from their offset C without the blur term; their offset is rarely
   separable anyway.
@@ -814,9 +881,9 @@ included. σ_k is the **per-axis** spread in both cases. MINFLUX handling:
   the d cancels. This also makes the σ_loc term below dimensionally consistent with it.
 - **Noise and blur correction:** with √Δt normalisation a component's per-axis variance is
   **σ² = 2D·(1 − 2R·t_c·⟨1/Δt⟩) + 2σ_loc²·⟨1/Δt⟩**, so **D = (σ² − 2σ_loc²⟨1/Δt⟩) / (2·(1 − 2R·t_c·⟨1/Δt⟩))**,
-  clamped ≥ 0, R = `MSD_BLUR_R`. Both corrections use the mean of 1/Δt over the jumps in the fit, so
-  pooled steps of mixed cycle count are handled exactly. Without the blur term D reads about 30% low at
-  MINFLUX cycle times. With one component the MLE is closed form (σ² = ⟨r²⟩/d). A **noise-floor jump
+  clamped ≥ 0, R from §I-B.1a. Both corrections use the mean of 1/Δt over the jumps in the fit, so
+  pooled steps of mixed cycle count are handled exactly. Without the blur term D reads about 20% low at
+  MINFLUX tracking timings; with the old constant 1/6.2 it read 15–17% high. With one component the MLE is closed form (σ² = ⟨r²⟩/d). A **noise-floor jump
   distance** `√(2d)·σ_loc·√⟨1/Δt⟩` marks where peaks are noise-dominated.
 - **2D and 3D.** The d-dimensional law is used when z is included, so the fitted σ is per axis in both
   cases and the σ_loc term subtracts the right noise floor. The **HMM** and **D-map** read x and y only,
@@ -830,7 +897,7 @@ included. σ_k is the **per-axis** spread in both cases. MINFLUX handling:
   transition matrix **P(Δt) = expm(Q·Δt)** (scaling-and-squaring Taylor, `.expm_small`), so dark cycles are
   exact and the **rates are parameters of the likelihood**. Emission: squared step length over x, y,
   **r² ~ Gamma(d/2, 2v)** with per-axis variance **v = 2·D_s·(Δt − 2R·t_c) + σ_j² + σ_{j+1}²**
-  (diffusion, motion blur with R = `MSD_BLUR_R` = 1/6.2, and the noise of both localizations). With the
+  (diffusion, motion blur with R from §I-B.1a, and the noise of both localizations). With the
   photon model active each localization carries its own σ from its photon count, which the panel derives
   itself if the calibration has not been run. D is therefore noise- and blur-corrected by construction.
   Initial distribution = stationary distribution of Q.
@@ -879,7 +946,7 @@ the windowed lag bins. Ideal free motion gives CI = 1, confinement < 1, directed
   is compared with the null **at its own localization count**, because the free range moves strongly
   with track length, and, when noise matters (x = σ²/(D·t_c) > 0.3 somewhere and the D spread is ≥ 2×),
   **at its own D**, so the slow half of a heterogeneous population is not judged against a null built for
-  the fast half. Null tracks are blur-averaged over a collection window τ = 6R·t_c with R = 1/6.2, and
+  the fast half. Null tracks are blur-averaged over a collection window τ = 6R·t_c with R from §I-B.1a, and
   when σ_loc comes from the photon model each null localization draws its σ from the measured
   per-localization values (the MSD offset is set by mean σ², which a long-tailed photon count pushes
   above median σ²).
@@ -1138,7 +1205,7 @@ ways that matter for every downstream estimator:
 | **Cycle time** (one localization) | ~0.4 ms–a few ms; set by photon budget, **not** a fixed clock | No single nominal Δt | Balzarotti 2017; Wolff 2023; Deguchi 2023 |
 | **Irregular Δt** | consecutive locs separated by integer multiples of a base cycle (skipped/"dark" cycles) | **Estimators assuming constant Δt are biased** | Scheiderer/Marin/Ries 2025; Marin & Ries 2025 |
 | **Gaps / dark cycles** | photobleaching budget + µs–ms blinking abort/skip cycles — *structural*, not noise | Must be modelled, not smoothed away | Marin & Ries 2025 (SimuFLUX) |
-| **Motion blur (R factor)** | ≈ 0.13–0.17: photons are collected across the TCP cycle (§I-B.1) | σ from a covariance or MSD intercept is under-read unless R enters; D is unaffected | Michalet & Berglund 2012; Vestergaard 2014; MinSpt uses R = 1/6.2 |
+| **Motion blur (R factor)** | ≈ 0.07–0.13 per step, set by the sequence timing (§I-B.1a) | σ from a covariance or MSD intercept is under-read unless R enters; D is unaffected | Michalet & Berglund 2012; Vestergaard 2014; MinSpt uses R = 1/6.2 |
 | **Track length N** | photobleaching-limited; ~100× more locs/track than camera-SPT, but still short (tens–low hundreds) | Short-track estimator bias dominates | Balzarotti 2017; Deguchi 2023 |
 | **Trackable D ceiling** | ≈ 3 µm²/s (standard settings) before the loop loses lock | Fast diffusion is systematically under-estimated | Marin & Ries 2025; Vogler 2025 |
 
@@ -1150,7 +1217,7 @@ ways that matter for every downstream estimator:
 
 ### 2.1 MSD with optimal point-count fitting — 🟡 AMBER
 - **Implemented as:** unweighted OLSF `MSD = a + b·τ` with Michalet–Berglund optimal number of fit
-  points (`p_a`/`p_b`), `R = 1/6.2` (the MinSpt value), plus a **cycle-based MSD** that rounds each lag to the
+  points (`p_a`/`p_b`), R from the sequence timing (§I-B.1a; MinSpt uses 1/6.2), plus a **cycle-based MSD** that rounds each lag to the
   nearest integer number of acquisition cycles.
 - **Source:** Michalet 2010; Michalet & Berglund 2012 (optimal least-squares fitting / optimal `p*`).
   Cycle-based binning and the trackable-D ceiling: **Vogler et al. 2025**.
@@ -1306,7 +1373,7 @@ this section records what is *standard* (safe) versus *non-standard/unsolved* (d
    two-regime "kink" (5–9 lags) reflects their QD/PEG-linker probe's non-diffusive wobble; port the
    *diagnostic logic* (inspect the curve for where the low-lag regime ends) not the number.
 6. **Model σ_loc and motion blur in the linear fit:** ρ(iΔt)=2d(σ²−2RDΔt)+2dD·iΔt. MINFLUX integrates
-   photons over the cycle, so R ≈ 1/6 (the app uses 1/6.2, as MinSpt does); ignoring it under-reads σ from the intercept. Small σ_loc → small x → favours *fewer* MSD points, not more.
+   photons over part of the step, so R ≈ 0.07–0.13 depending on the sequence (§I-B.1a; MinSpt's 1/6.2 overstates it); ignoring it under-reads σ from the intercept. Small σ_loc → small x → favours *fewer* MSD points, not more.
 7. **Minimum track length is a JUDGEMENT CALL, not a literature constant.** There is **no
    MINFLUX-calibrated minimum-localizations rule**. The default of **50** follows MinSpt's practical
    choice (`filter_by_length(min_length=50)`), not a derived threshold. Kepten et al. 2015's

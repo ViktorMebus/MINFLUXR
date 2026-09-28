@@ -10761,6 +10761,76 @@ thin_units_to_p <- function(df, unit = "tid", p = 1, seed = 1L) {
   df[df[[key]] %in% keep, , drop = FALSE]
 }
 
+# =============================================================================
+# .shift_channel() - ONE RANDOM RIGID SHIFT OF A CHANNEL (the independence null)
+# =============================================================================
+#
+# GOAL
+#   Produce one draw of channel B under "A and B are placed independently": B keeps
+#   its own spatial structure exactly and only its registration with A is broken.
+#
+# HOW
+#   Translate every B point by the same random vector in x and y, wrapping around
+#   inside the analysis box (a toroidal shift; Lotwick & Silverman 1982). z is left
+#   alone: MINFLUX volumes are thin slabs, and an in-plane shift already breaks the
+#   registration.
+#
+# TWO RULES THAT MAKE IT WORK ON A REAL CELL
+#   1. Minimum shift = the largest radius analysed. A smaller shift leaves B close
+#      to where it was, so the "null" still contains part of the association and the
+#      test loses power without saying so.
+#   2. With a footprint, a shift is accepted only if >= 90% of the shifted points
+#      still land inside the cell; the rest are dropped. A shift that throws most of
+#      B into empty space is not a plausible arrangement of this cell, and accepting
+#      it makes the null anti-conservative (the KDE panel measured this). If no
+#      shift within 100 tries passes, the best candidate is used and flagged, since
+#      falling back to CSR would destroy B's clustering and bias the null the
+#      other way.
+#
+# ARGUMENTS
+#   pts           : list/data.frame with x, y (and z) of channel B
+#   window_ranges : 2 x d matrix of the box min/max, the same window as the estimator
+#   support       : estimate_support() object with $mask, or NULL
+#   min_shift     : smallest accepted toroidal shift, nm
+#   use_3d        : carry z through unchanged
+#
+# RETURNS list(x, y, z) with attr "fallback" TRUE when rule 2 could not be met.
+# =============================================================================
+.shift_channel <- function(pts, window_ranges, support = NULL, min_shift = 0,
+                           use_3d = FALSE, accept_frac = 0.9, max_tries = 100L) {
+  lo <- window_ranges[1, ]; wx <- window_ranges[2, 1] - lo[1]; wy <- window_ranges[2, 2] - lo[2]
+  x <- pts$x; y <- pts$y; z <- if (use_3d) pts$z else NULL
+  # The largest toroidal shift possible is half the box on each axis; never ask for
+  # more than half of that, or no shift can qualify in a small box.
+  min_shift <- min(min_shift, 0.5 * sqrt((wx / 2)^2 + (wy / 2)^2))
+  use_sup <- !is.null(support) && !is.null(support$mask)
+  best <- NULL; best_frac <- -1
+  for (i in seq_len(max_tries)) {
+    sx <- stats::runif(1, 0, wx); sy <- stats::runif(1, 0, wy)
+    # toroidal length of the shift: the short way round on each axis
+    if (sqrt(min(sx, wx - sx)^2 + min(sy, wy - sy)^2) < min_shift) next
+    cx <- lo[1] + ((x - lo[1] + sx) %% wx)
+    cy <- lo[2] + ((y - lo[2] + sy) %% wy)
+    if (!use_sup) return(list(x = cx, y = cy, z = z))
+    inside <- in_support(support, cx, cy, if (use_3d) z else NULL)
+    frac <- mean(inside)
+    if (frac >= accept_frac)
+      return(list(x = cx[inside], y = cy[inside], z = if (use_3d) z[inside] else NULL))
+    if (frac > best_frac) { best_frac <- frac; best <- list(cx = cx, cy = cy, inside = inside) }
+  }
+  if (is.null(best)) {
+    # No shift met even the minimum length (tiny box): use an unconstrained one.
+    sx <- stats::runif(1, 0, wx); sy <- stats::runif(1, 0, wy)
+    best <- list(cx = lo[1] + ((x - lo[1] + sx) %% wx), cy = lo[2] + ((y - lo[2] + sy) %% wy))
+    best$inside <- if (use_sup) in_support(support, best$cx, best$cy, if (use_3d) z else NULL)
+                   else rep(TRUE, length(x))
+  }
+  keep <- best$inside
+  out <- list(x = best$cx[keep], y = best$cy[keep], z = if (use_3d) z[keep] else NULL)
+  attr(out, "fallback") <- TRUE
+  out
+}
+
 ## ── Monte-Carlo CSR envelope for L(r) / L₁₂(r) / g₁₂(r) / g(r) ───────────────
 ## Generates `nsim` complete-spatial-randomness (CSR) patterns of `n` points
 ## (and `n2` for the cross statistics) uniformly inside the SAME window as the
@@ -10786,7 +10856,7 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
                                      nsim = 99L, estimator = c("L", "L12", "pcf", "g"),
                                      n2 = NULL, probs = c(0.025, 0.975),
                                      support = NULL, edge_correct = TRUE,
-                                     null_mode = c("csr", "labels"), pts1 = NULL, pts2 = NULL,
+                                     null_mode = c("csr", "labels", "shift"), pts1 = NULL, pts2 = NULL,
                                      progress = NULL) {
   estimator <- match.arg(estimator)
   if (is.null(r_seq) || !length(r_seq)) return(NULL)
@@ -10836,13 +10906,34 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
   #          channels are a random labelling of one pattern": if the two species
   #          genuinely occupy different regions of the cell, that difference alone
   #          makes the test reject, which is why it is offered rather than forced.
+  #          It CANNOT answer "are A and B placed independently": two species that
+  #          share the same clusters ARE a random labelling of one pattern (measured
+  #          0% detection), and two unrelated clustered species read as segregated
+  #          (100% "exclusion"), because their pooled pattern is more clustered
+  #          than either cross pair.
+  # "shift"  keeps channel A where it is and translates channel B as a rigid
+  #          whole by a random vector, wrapping inside the box (Lotwick & Silverman
+  #          1982). Each channel keeps its own clustering exactly; only their
+  #          registration is broken. This is the null for "are A and B placed
+  #          independently of each other", i.e. the co-localization question.
+  #          Measured on clustered channels filling the frame: 5% false positives on
+  #          independent species, 100% detection of shared clusters and heterodimers.
+  #          See .shift_channel() for the minimum shift and the footprint rule.
   null_mode <- match.arg(null_mode)
   use_labels <- identical(null_mode, "labels") && !is.null(pts1) && !is.null(pts2) &&
+                estimator %in% c("L12", "pcf")
+  use_shift  <- identical(null_mode, "shift") && !is.null(pts1) && !is.null(pts2) &&
                 estimator %in% c("L12", "pcf")
   if (use_labels) {
     pool <- rbind(data.frame(x = pts1$x, y = pts1$y, z = if (!is.null(pts1$z)) pts1$z else 0),
                   data.frame(x = pts2$x, y = pts2$y, z = if (!is.null(pts2$z)) pts2$z else 0))
     n1_lab <- nrow(pts1); n_pool <- nrow(pool)
+  }
+  shift_fallbacks <- 0L
+  if (use_shift) {
+    # Channel A stays fixed (as observed); channel B is re-drawn per simulation.
+    fixed1 <- list(x = pts1$x, y = pts1$y, z = if (is3d) pts1$z else NULL)
+    min_shift <- max(r_seq, na.rm = TRUE)
   }
 
   # Set covariance ONCE for the whole loop - it is a property of the window, and
@@ -10878,6 +10969,10 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
         i1 <- sample.int(n_pool, n1_lab)
         p1 <- as.list(pool[i1, ]); p2 <- as.list(pool[-i1, ])
         if (!is3d) { p1$z <- NULL; p2$z <- NULL }
+      } else if (use_shift) {
+        p1 <- fixed1
+        p2 <- .shift_channel(pts2, window_ranges, support, min_shift, is3d)
+        shift_fallbacks <- shift_fallbacks + isTRUE(attr(p2, "fallback"))
       } else p2 <- gen(n2)
       # edge_correct passed through (fixed 2026-09-17): the default TRUE here made
       # the envelope edge-corrected even when the observed curve was not.
@@ -10891,6 +10986,10 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
         i1 <- sample.int(n_pool, n1_lab)
         p1 <- as.list(pool[i1, ]); p2 <- as.list(pool[-i1, ])
         if (!is3d) { p1$z <- NULL; p2$z <- NULL }
+      } else if (use_shift) {
+        p1 <- fixed1
+        p2 <- .shift_channel(pts2, window_ranges, support, min_shift, is3d)
+        shift_fallbacks <- shift_fallbacks + isTRUE(attr(p2, "fallback"))
       } else p2 <- gen(n2)
       cv <- compute_pcf12(p1$x, p1$y, p1$z, p2$x, p2$y, p2$z,
                           r_seq = r_seq, use_3d = is3d,
@@ -10947,7 +11046,9 @@ compute_ripley_envelope <- function(n, window_ranges, r_seq, use_3d = FALSE,
   out <- data.frame(r = r_seq, lo = as.numeric(lo), hi = as.numeric(hi),
                     null_mean = mu, null_sd = sdv,
                     g_lo = mu - T_crit * sdv, g_hi = mu + T_crit * sdv)
-  attr(out, "null_mode") <- if (use_labels) "labels" else "csr"
+  attr(out, "null_mode") <- if (use_labels) "labels" else if (use_shift) "shift" else "csr"
+  # Shifts that could not meet the footprint rule and used the best candidate instead.
+  attr(out, "shift_fallbacks") <- if (use_shift) shift_fallbacks else NA_integer_
   attr(out, "T_sims") <- T_sims
   attr(out, "T_crit") <- T_crit
   attr(out, "alpha")  <- alpha

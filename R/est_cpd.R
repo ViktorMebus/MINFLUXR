@@ -38,7 +38,7 @@
 #             2 × min_seg steps are skipped
 # use_z     : include z in r² (3D data)
 # noise_sig2: σ_loc² (nm²) to subtract as σ²·mean(1/Δt); 0 = no subtraction
-# R_abs     : blur offset in ms (MSD_BLUR_R · t_c); the segment D is divided by
+# R_abs     : blur offset in ms (blur_offsets()$R_abs, est_blur.R); the segment D is divided by
 #             1 − 2·R_abs·mean(1/Δt). 0 = no blur correction. Without it D read
 #             about 30% low on blurred simulated tracks (same bias as JDD/D-map).
 # progress  : optional function(fraction) called once per track

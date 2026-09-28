@@ -7,6 +7,7 @@ documentation cites them.
 | File | Script | What it measures |
 |---|---|---|
 | `spatial_envelope_coverage.csv` | `spatial_envelope_coverage.R` | How often random data are called significant by the Ripley L, g(r), L₁₂ and g₁₂ envelopes |
+| `coloc_null_clustered.csv` | `coloc_null_clustered.R` | Which two-channel null answers the co-localization question on clustered channels |
 | `hotspot_csr_null.csv` | `hotspot_csr_null.R` | The baseline each hotspot statistic takes on random patterns, across density and cell shape |
 | `hmm_recovery_sweep.csv`, `_summary.csv` | `hmm_recovery_sweep.R` | Where the diffusive-state HMM recovers D and dwell times, over dwell time and D contrast |
 | `hmm_step_budget.csv` | `hmm_step_budget.R` | What the HMM step budget costs: D and dwell recovery at each budget |
@@ -56,3 +57,15 @@ results. They take their input from an environment variable:
 Each script prints the file it resolved to, because the pattern can match more than one acquisition.
 
 Run logs (`*.log`) are not tracked; re-running a script recreates its log.
+
+**Two-channel nulls on clustered channels** (Thomas clusters, L-shaped cell, footprint window and edge
+correction on, 60 replicates × 99 simulations, global test at 5%). Rejection rate:
+
+| Truth | Shift (default) L₁₂ / g₁₂ | Random labelling L₁₂ / g₁₂ | CSR in window L₁₂ / g₁₂ |
+|---|---|---|---|
+| Independent clustered species | 6.7% / 3.3% | 100% / 100%, all as exclusion | 97% / 100% |
+| Both species in the same clusters | 100% / 100% | 1.7% / 3.3% | 100% / 100% |
+| B within ~8 nm of A | 100% / 100% | 100% / 5% | 100% / 100% |
+
+Only the shift null is near nominal on independent species while detecting both kinds of
+co-localization. Random labelling is exact only for unclustered channels (table above).

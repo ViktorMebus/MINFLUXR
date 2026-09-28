@@ -9,7 +9,7 @@
 ##   builds the MSD curves (msd_unified_bundle) and calls these to fit them.
 ##
 ## WHAT LIVES HERE
-##   MSD_BLUR_R ............... motion-blur coefficient shared by the MSD fits, the
+##   (blur R: est_blur.R; callers pass the sequence-derived value) ... shared by the MSD fits, the
 ##                              confinement null and the HMM
 ##   .olsf_sig2() ............. intercept -> σ² with the blur offset added back
 ##   .michalet_p() ............ Michalet & Berglund optimal point count
@@ -64,11 +64,12 @@
 # so the intercept is coef·(σ² − 2·R·D·dT), not coef·σ². Reading σ² straight off
 # the intercept (R = 0) under-reports σ_loc: at D = 0.215 µm²/s, t_c = 0.192 ms and
 # σ = 5 nm it returns 3.3 nm (simulated, full-cycle window). D is unaffected.
-# 1/6.2 is the value the ported toolbox uses (Vogler et al., citing Schmidt et al.
-# 2020); the CVE's instrument-modelled bound [R_lo, R_hi] brackets it, and the
-# difference moves σ² by < 2 nm² at these timings. A constant keeps the MSD panel
-# independent of whether the CVE has been run.
-MSD_BLUR_R <- 1 / 6.2
+# R here is relative to the cycle time dT. It comes from the sequence timing
+# (blur_R_step() / blur_offsets() in est_blur.R, R_msd = R_step * dt / t_c); the
+# server passes it at every call. MinSpt passes a constant 1/6.2, which on MINFLUX
+# tracking timings is ~50% above what the photon-collection timeline gives (see
+# est_blur.R); the default below is the fallback for the standard 2D sequence.
+MSD_R_FALLBACK <- 0.106
 
 # Convert a linear fit's intercept to σ² by adding back the blur offset.
 # GOAL: one place for the intercept → σ² relation so every OLSF variant agrees.
@@ -82,7 +83,7 @@ MSD_BLUR_R <- 1 / 6.2
 # auto_pmin = FALSE: fit the first k points (caller-chosen window).
 # auto_pmin = TRUE : two-stage iterative Michalet optimal point selection.
 # `dt_cycle` is the cycle time (for x and the blur offset); `Npts` the trajectory
-# length for L(N). `R` is the motion-blur coefficient (MSD_BLUR_R at every call site).
+# length for L(N). `R` is the motion-blur coefficient relative to dT (blur_offsets()$R_msd).
 # Returns sigma_loc blur-corrected, and `intercept` (nm², the fitted offset) which is
 # what the drawn line uses, since the data sit on the blurred line.
 # coef_override: the MSD-vs-D coefficient, when it is NOT simply 2*ndim. A molecule
@@ -247,16 +248,16 @@ msd_fit_olsf_iterative <- function(tau, msd, ndim = 2L, R = 0, coef_override = N
 # anomalous. Returns $model, $D (nm²/ms), $sigma_loc (nm), $tau_fit, $msd_fit (nm²)
 # + extras (L_conf, tau_c_ms, plateau_um2, degenerate / v_um_s / alpha).
 .msd_model_fit <- function(s, y, npairs, ndim, model, use_iter, t_cycle,
-                           coef_override = NULL) {
+                           coef_override = NULL, R = MSD_R_FALLBACK) {
   coef_v <- if (is.null(coef_override)) 2L * ndim else coef_override
   if (identical(model, "linear")) {
     if (length(s) < 3L) return(NULL)
     return(if (isTRUE(use_iter))
-             msd_fit_olsf_iterative(s, y, ndim = ndim, R = MSD_BLUR_R, dt_cycle = t_cycle,
+             msd_fit_olsf_iterative(s, y, ndim = ndim, R = R, dt_cycle = t_cycle,
                                     N = length(s), coef_override = coef_override)
            else
              msd_fit_olsf(s, y, npairs, k = length(s), ndim = ndim,
-                          auto_pmin = TRUE, R = MSD_BLUR_R, Npts = 1e4, dt_cycle = t_cycle,
+                          auto_pmin = TRUE, R = R, Npts = 1e4, dt_cycle = t_cycle,
                           coef_override = coef_override))
   }
   if (length(s) < 4L) return(NULL)

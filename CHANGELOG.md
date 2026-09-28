@@ -3,6 +3,49 @@
 Notable changes to MINFLUXR. Versions follow [semantic versioning](https://semver.org);
 while the app is below 1.0 the panel layout and the settings JSON may still change between releases.
 
+## Unreleased
+
+### Co-localization (SMLM, two channels)
+
+- **New default null for L₁₂ and g₁₂: channel B shifted at random** as a whole (a toroidal shift,
+  Lotwick & Silverman 1982), restricted to shifts that keep it in the cell footprint and at least as long
+  as the largest radius analysed. Each channel keeps its own clustering and only their registration is
+  broken, which is the question "are the two placed independently". The previous default, random
+  labelling, answers a different question: on clustered channels it never detected two species sharing
+  the same clusters and read two unrelated clustered species as exclusion. Random labelling stays
+  available for the question it does answer (do the two channels differ in arrangement). Measured in
+  `tests/validation/coloc_null_clustered.R`.
+- The plot caption now names the null each p-value was computed against.
+- L₁₂ / g₁₂ results computed with the old default should be re-run before they are reported.
+
+### Tracking: motion blur
+
+- **Motion blur is now computed from the acquisition timing** (`R/est_blur.R`) and one value is used
+  by the CVE, MSD fits, jump-distance fit, D-map, change-point segmentation, HMM and confinement null.
+  R is set by when a localization's photons are collected: pattern, vertex order, dwell, pattern repeats,
+  passes to the photon limit, beam moves and the CFR centre dwell, read from the sequence file when one is
+  loaded and from the collection window eco/efo otherwise. The TCP diameter L does not enter.
+- The previous constant, MinSpt's R = 1/6.2, is about 50% above the value the timing gives on the
+  standard 2D tracking sequence (0.152 vs 0.100 per step). On simulated MINFLUX localizations it made the
+  single-step D estimates (jump distance, D-map, change-point, HMM) read 15–17% high; the timing model
+  reads within 2%. **Expect those D values to drop by roughly 12% on re-analysis.** The CVE D does not
+  depend on R and does not change; the MSD slope does not change, the σ read from its intercept does.
+- The Data Quality panel reports the blur value and where it came from, and warns when the sequence file
+  has damping switched on, which smooths positions across steps and is not a blur that any R describes.
+- A sequence file that does not fit the data (its collection alone outlasts the measured step, as an
+  imaging sequence does against tracking data) or whose final pattern is axial-only is not used for the
+  blur; the panel says why and takes the value from the data instead.
+
+### Multiplex
+
+- Channels of a multiplex can be aligned by nudging one channel in x, y (and z for 3D data). Offsets
+  are stored per source file or time window, re-applied when the multiplex is rebuilt, and saved in the
+  settings JSON. The panel warns against aligning two different targets onto each other, which would
+  build the co-localization into the data.
+- The multiplex recipe (source files or time windows, channel labels and colours) is saved with the
+  settings and rebuilds on load. A CSV exported from a multiplex keeps its channels and loads back as
+  one.
+
 ## 0.6.0 — 2026-09-18
 
 First public release (Zenodo).
@@ -37,8 +80,8 @@ First public release (Zenodo).
 - Ripley L, g(r), L₁₂ and g₁₂ now report a **global (studentized maximum-deviation) p-value**
   alongside the envelope band. The pointwise band alone was never a 5% test: on random data it
   was crossed almost always, where the global test now sits near its nominal level.
-- The bivariate envelopes can use a **random-labelling** null in addition to CSR-in-window, which
-  is the correct null when both channels share the same support.
+- The bivariate envelopes can use a **random-labelling** null in addition to CSR-in-window. (Superseded
+  as the default before release; see Unreleased.)
 - The analysis window is estimated from the localizations by occupancy and morphological closing,
   and its area is debiased, so a sparse pattern is no longer measured against a window that hugs
   its own points.
@@ -81,8 +124,7 @@ First public release (Zenodo).
 - The fiducial scan is rated amber: it is tool-original and has not been validated by other groups.
 - The KDE co-localization caveat now follows the window the randomisation used. Inside the sample
   footprint the test is conservative; over the bounding box it rejects too readily.
-- Help text for the bivariate L₁₂ and g₁₂ envelopes describes the random-labelling null they use by
-  default. Help text for Ripley's "all files" mode now says it draws one curve per file.
+- Help text for the bivariate L₁₂ and g₁₂ envelopes describes the null they use. Help text for Ripley's "all files" mode now says it draws one curve per file.
 
 - Licensed **GPL-3.0-or-later** (`LICENSE`), required by the MinSpt port. `THIRD-PARTY.md`
   records what was taken from MinSpt and pyMINFLUX and what was changed.

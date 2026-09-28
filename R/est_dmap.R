@@ -14,7 +14,7 @@
 ##   SE = SD of the per-step contributions / √n, scaled by the same blur factor.
 ##
 ## BLUR TERM (added 2026-09-17). The 2026-09-16 fix was verified on simulated
-## tracks without motion blur. With blur (R = 1/6.2, MINFLUX tracking timings) the unblurred
+## tracks without motion blur. With blur (MINFLUX tracking timings) the unblurred
 ## form reads D about 30% low, the same bias found and fixed in the JDD.
 ##
 ## UNITS: nm, ms, D nm²/ms.
@@ -28,7 +28,7 @@
 # t_c             : cycle time (ms), for integrated_only
 # integrated_only : keep only single-cycle steps (their midpoints are meaningful)
 # sigma_loc       : σ_loc (nm) to subtract; NA or ≤ 0 = no subtraction
-# R_abs           : blur offset in ms (MSD_BLUR_R · t_c); 0 = no blur correction
+# R_abs           : blur offset in ms (blur_offsets()$R_abs, est_blur.R); 0 = no blur correction
 #
 # RETURNS list(D_mat, SE_mat, N_mat, x_centers, y_centers, cell_w_nm, cell_h_nm,
 #   n_bins, n_steps, dt_med_ms, integrated_only, noise_subtracted, sigma_loc_nm),

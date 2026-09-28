@@ -26,7 +26,7 @@
 ##   displacement is Gaussian with variance
 ##       v_j = 2·D_s·(Δt_j − 2·R_abs) + σ_j² + σ_{j+1}²
 ##   (Brownian motion + motion blur + the localization noise of both ends;
-##   R_abs = R·t_c is the blur offset in ms, see MSD_BLUR_R), so
+##   R_abs = R·t_c is the blur offset in ms, from blur_offsets() in est_blur.R), so
 ##       r² ~ Gamma(shape = d/2, scale = 2·v_j).
 ##   Initial state distribution: the stationary distribution of Q.
 ##
@@ -286,7 +286,7 @@ hmm_ct_loglik <- function(theta, prep, K, R_abs = 0) {
 #
 # prep     : from hmm_ct_prepare()
 # K        : number of states (2-4)
-# R_abs    : blur offset in ms (MSD_BLUR_R · t_c); 0 = no blur
+# R_abs    : blur offset in ms (blur_offsets()$R_abs, est_blur.R); 0 = no blur
 # t_c      : cycle time (ms), used only to spread the starting rates
 # n_starts : starting points (rate scales ~5, 30 and 300 cycles dwell); the best
 #            log-likelihood wins. The likelihood is multimodal in the rates.
@@ -514,7 +514,7 @@ hmm_path_rates <- function(prep, step_states, K, t_c, gap_tol_cyc = 4L) {
 # at the start of each localization's collection window.
 sim_ct_state_tracks <- function(n_tracks, n_locs, D, Q, t_c = 0.192, sw = 0.011,
                                 gap_p = c(0.72, 0.20, 0.05, 0.03), sigma = 4,
-                                R_blur = 1 / 6.2, ndim = 2L, n_sub = 8L, seed = NULL) {
+                                R_blur = 0.106, ndim = 2L, n_sub = 8L, seed = NULL) {
   if (!is.null(seed)) set.seed(seed)
   K <- length(D); pi0 <- .ctmc_stationary(Q)
   tau <- min(t_c, 6 * R_blur * t_c)

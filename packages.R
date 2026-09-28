@@ -256,7 +256,7 @@ TCP_BEAM_FWHM_NM <- 0
 
 # ── Continuous-time HMM: validated range (est_hmm.R) ──────────────────────────
 # From tests/validation/hmm_recovery_sweep.R (simulated tracking acquisition: t_c 0.192
-# ms, SW 0.011 ms, dark-cycle mix, photon σ, blur R = 1/6.2, 200 tracks × 300 locs).
+# ms, SW 0.011 ms, dark-cycle mix, photon σ, blur R from the timing model, 200 tracks × 300 locs).
 # A state is flagged in the HMM summary when its fitted mean dwell is below
 # HMM_RESOLV_MIN_DWELL_CYC cycles, or when fewer than HMM_RESOLV_MIN_SWITCHES
 # switches out of it are expected over the whole data set. See the sweep results

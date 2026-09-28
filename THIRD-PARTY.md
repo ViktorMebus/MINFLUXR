@@ -22,8 +22,12 @@ This file records the external work it builds on, what was taken, and what was c
 - The linearized MSD axis is `k·t_c + SW`, matching MinSpt's `T_LIN`.
 - An "anchored" OLSF variant was added alongside the faithful iterative one, because the iterative loop is
   initialisation-dependent on short tracks.
-- Motion blur: both variants take `R` (default `MSD_BLUR_R = 1/6.2`, the MinSpt value) and add the blur
-  offset back when converting the fitted intercept to σ².
+- Motion blur: both variants take `R` and add the blur offset back when converting the fitted intercept
+  to σ², as MinSpt does. **The value differs from MinSpt on purpose.** MinSpt passes the constant
+  R = 1/6.2; MINFLUXR computes R from the acquisition's photon-collection timeline (`R/est_blur.R`), which
+  on the standard 2D tracking sequence gives about 0.10 per step against 0.152 for 1/6.2, and which
+  recovered D within 2% on simulated MINFLUX localizations where 1/6.2 read it 15–17% high
+  (`docs/MINFLUX_analysis_methods.md` §I-B.1a).
 
 **Because this code is a port of GPL-3.0 software, MINFLUXR as a whole is GPL-3.0.**
 
