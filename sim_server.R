@@ -338,7 +338,7 @@ sim_server <- function(input, output, session) {
     # Localization precision = SD of the repeated final localizations WITHIN a
     # trace (the molecule re-localized while ON), per axis, median over traces
     # with >= 3 localizations.  Photons/loc from the effective count (eco).
-    # Effective TCP diameter reproducing this precision: L_eff = 2·σ·√N.
+    # The CRLB-mode k and σ₀ are fitted from these per-trace variances below.
     #
     # CAVEAT (stated in the UI too): a within-trace SD is not pure localization
     # precision — it also contains any real molecular motion, stage drift and
@@ -407,9 +407,66 @@ sim_server <- function(input, output, session) {
     len_vec <- as.integer(nl[is.finite(nl)])       # ALL gated traces, not just okp
 
     photons  <- if ("eco" %in% names(df)) stats::median(df$eco, na.rm = TRUE) else NA_real_
-    sigma_xy <- mean(c(sigma_x, sigma_y), na.rm = TRUE)
-    L_eff    <- if (is.finite(sigma_xy) && is.finite(photons) && photons > 0)
-                  2 * sigma_xy * sqrt(photons) else NA_real_
+
+    # ── Precision model fit: σ² = A/N + B ────────────────────────────────────
+    # The CRLB-mode model is σ² = (k·σ_CRLB)² + σ₀², and σ_CRLB² ∝ 1/N, so the
+    # within-trace variance is LINEAR in 1/N: slope A = photon-limited term,
+    # intercept B = σ₀² (drift, vibration, motion). One (σ, N) pair cannot split
+    # the two; the spread of photon counts across traces can. Traces are binned
+    # by their mean eco and each bin's variance is POOLED (Σ(n−1)s² / Σ(n−1)),
+    # which is unbiased at any n, so no median debias is needed here.
+    prec_fit <- NULL
+    if ("eco" %in% names(df)) {
+      # Per-trace mean of 1/N, not 1/mean(N): σ² is linear in 1/N per
+      # localization, so a trace's variance averages 1/N (Jensen: 1/mean is low).
+      inv_all <- ifelse(is.finite(df$eco) & df$eco > 0, 1 / df$eco, NA_real_)
+      inv_tr  <- as.numeric(tapply(inv_all, df$tid, mean, na.rm = TRUE))
+      okf <- okp & is.finite(inv_tr) & inv_tr > 0
+      if (sum(okf) >= 30) {
+        v_tr  <- (sx[okf]^2 + sy[okf]^2) / 2       # per-trace variance, xy-averaged
+        dof   <- nl[okf] - 1                       # degrees of freedom per trace
+        inv_n <- inv_tr[okf]
+        nb    <- max(3L, min(8L, floor(sum(okf) / 20)))   # ≥ ~20 traces per bin
+        brk   <- unique(stats::quantile(inv_n, seq(0, 1, length.out = nb + 1)))
+        if (length(brk) >= 4) {
+          bin  <- cut(inv_n, brk, include.lowest = TRUE)
+          sdof <- tapply(dof, bin, sum)
+          pv   <- tapply(v_tr * dof, bin, sum) / sdof     # pooled variance per bin
+          px   <- tapply(inv_n * dof, bin, sum) / sdof    # matching mean 1/N
+          ok_b <- is.finite(pv) & is.finite(px) & sdof > 0
+          pv <- pv[ok_b]; px <- px[ok_b]; sdof <- sdof[ok_b]
+          # Var(pooled s²) ≈ 2σ⁴/dof, so weight each bin by dof / σ⁴.
+          w  <- sdof / pmax(pv, 1e-6)^2
+          A <- NA_real_; B <- NA_real_; se_A <- NA_real_; se_B <- NA_real_
+          if (length(pv) >= 3) {
+            fit <- stats::lm(pv ~ px, weights = w)
+            cf  <- summary(fit)$coefficients
+            B <- cf[1, 1]; A <- cf[2, 1]; se_B <- cf[1, 2]; se_A <- cf[2, 2]
+            # Both terms are variances, so neither may be negative. A negative
+            # one means the data cannot support it: drop it and refit the other.
+            if (B < 0) {
+              B <- 0; se_B <- NA_real_
+              A <- sum(w * px * pv) / sum(w * px^2)
+            }
+            if (A < 0) {
+              A <- 0; se_A <- NA_real_
+              B <- sum(w * pv) / sum(w)
+            }
+          }
+          # 1/N must span a useful range, or slope and intercept trade off freely.
+          span <- if (length(px) >= 2) max(px) / min(px) else 1
+          prec_fit <- list(
+            A = A, B = B, se_A = se_A, se_B = se_B,
+            c_phot   = sqrt(max(0, A)),            # photon term = c_phot / √N, nm
+            floor    = sqrt(max(0, B)),            # σ₀, nm
+            # SE of σ₀ by the delta method, from SE of B = σ₀².
+            se_floor = if (is.finite(se_B) && B > 0) se_B / (2 * sqrt(B)) else NA_real_,
+            span = span, n_bins = length(pv), n_traces = sum(okf),
+            ok   = is.finite(A) && is.finite(B) && span >= 1.5,
+            bin_n = 1 / px, bin_sigma = sqrt(pv))
+        }
+      }
+    }
 
     list(n_traces = n_tr, duration_hr = T_sec / 3600,
          rate_peak = R0, rate_mean = R_mean, rate_floor = Rf,
@@ -429,7 +486,7 @@ sim_server <- function(input, output, session) {
          len_q = if (length(len_vec))
                    stats::quantile(len_vec, c(0.25, 0.75), names = FALSE)
                  else c(NA_real_, NA_real_),
-         photons = photons, L_eff = L_eff)
+         photons = photons, prec_fit = prec_fit)
   }
 
   # ╔══════════════════════════════════════════════════════════════════════════╗
@@ -1326,14 +1383,10 @@ sim_server <- function(input, output, session) {
     }
 
     # ── Localization precision: manual or CRLB-derived ──────────────────────
-    # CRLB mode: σ ≈ L / (2√N_eff),  N_eff = N_photons × (1 − bg_fraction).
-    # Simplified 2D MINFLUX CRLB (equal pattern arms, ideal PSF, on-axis).
+    # CRLB mode: σ = √[(k·σ_CRLB)² + σ₀²], σ_CRLB = L/√(8N)·g(SBR) from the
+    # physical final-iteration L (smlm_sigma_loc in packages.R).
     if (identical(input$sim_prec_mode %||% "manual", "crlb")) {
-      crlb_L   <- max(1,    as.numeric(input$sim_crlb_L       %||% 100))
-      crlb_ph  <- max(1,    as.numeric(input$sim_crlb_photons %||% 50))
-      crlb_bg  <- max(0, min(0.99, as.numeric(input$sim_crlb_bg %||% 0.05)))
-      n_eff    <- max(1, crlb_ph * (1 - crlb_bg))
-      sigma_loc_xy <- max(0.1, crlb_L / (2 * sqrt(n_eff)))
+      sigma_loc_xy <- max(0.1, crlb_inputs()$total)
       sigma_loc_z  <- if (use_3d) {
         z_fac <- max(0.1, as.numeric(input$sim_crlb_z_factor %||% 0.7))
         max(0.1, sigma_loc_xy * z_fac)
@@ -1910,7 +1963,7 @@ sim_server <- function(input, output, session) {
                       value = round(a$struct_frac, 2))
     apply_real_rates(a, a$struct_frac)
 
-    # Measured localization precision → Manual σ; photons + effective L → CRLB.
+    # Measured localization precision → Manual σ; photons, k and σ₀ → CRLB.
     if (is.finite(a$sigma_x) && is.finite(a$sigma_y))
       updateNumericInput(session, "sim_precision_xy",
                          value = round(mean(c(a$sigma_x, a$sigma_y)), 1))
@@ -1918,8 +1971,28 @@ sim_server <- function(input, output, session) {
       updateNumericInput(session, "sim_precision_z", value = round(a$sigma_z, 1))
     if (is.finite(a$photons))
       updateNumericInput(session, "sim_crlb_photons", value = round(a$photons))
-    if (is.finite(a$L_eff))
-      updateNumericInput(session, "sim_crlb_L", value = round(a$L_eff))
+    # L stays the user's instrument setting. k is expressed relative to the
+    # ideal bound at the CURRENT L and background, so it reproduces the data.
+    # bound1 = σ_CRLB at N = 1, i.e. L·g/√8.
+    L_now  <- suppressWarnings(as.numeric(isolate(input$sim_crlb_L)))
+    bg_now <- suppressWarnings(as.numeric(isolate(input$sim_crlb_bg)))
+    if (!is.finite(L_now))  L_now  <- 40
+    if (!is.finite(bg_now)) bg_now <- 0.05
+    bound1 <- smlm_sigma_loc(L_now, 1, bg_now)$crlb
+    pf     <- a$prec_fit
+    if (!is.null(pf) && isTRUE(pf$ok)) {
+      updateNumericInput(session, "sim_crlb_k",     value = round(pf$c_phot / bound1, 2))
+      updateNumericInput(session, "sim_crlb_floor", value = round(pf$floor, 1))
+    } else if (is.finite(a$photons) && a$photons > 0 &&
+               is.finite(a$sigma_x) && is.finite(a$sigma_y)) {
+      # Photon counts too uniform to separate the terms: assume the ideal
+      # bound (k = 1) and give the rest of the measured variance to the floor.
+      sig_med <- mean(c(a$sigma_x, a$sigma_y))
+      crlb_m  <- bound1 / sqrt(a$photons)
+      updateNumericInput(session, "sim_crlb_k",     value = 1)
+      updateNumericInput(session, "sim_crlb_floor",
+                         value = round(sqrt(max(0, sig_med^2 - crlb_m^2)), 1))
+    }
   }
 
   # Re-calibrate whenever the run or the gate changes.  Everything downstream
@@ -1985,8 +2058,18 @@ sim_server <- function(input, output, session) {
         sprintf("Locs per trace: median %.0f (IQR %.0f–%.0f)",
                 a$len_med, a$len_q[1], a$len_q[2]),
         if (is.finite(a$photons)) tagList(tags$br(),
-          sprintf("%.0f photons/loc (n=%d) → L ≈ %.0f nm", a$photons,
-                  a$eco_n, a$L_eff)),
+          sprintf("%.0f photons/loc (n=%d)", a$photons, a$eco_n)),
+        # Precision model fit: photon term at the median N, and the floor.
+        {
+          pf <- a$prec_fit
+          if (!is.null(pf) && isTRUE(pf$ok)) tagList(tags$br(), sprintf(
+            "σ² vs 1/N over %d photon bins: photon term %.1f nm at median N, floor σ₀ %.1f%s nm",
+            pf$n_bins, pf$c_phot / sqrt(a$photons), pf$floor,
+            if (is.finite(pf$se_floor)) sprintf(" ± %.1f", pf$se_floor) else ""))
+          else if (is.finite(a$photons)) tagList(tags$br(), tags$span(
+            style = "color:#8a6d3b;",
+            "Photon counts too uniform to fit k and σ₀ separately; k set to 1 and the rest assigned to σ₀."))
+        },
         tags$br(),
         tags$span(style = "color:#666;", sprintf(
           "σ is small-n debiased (×%.3f at the median trace length). Within-trace SD also contains real motion and drift, so it bounds precision rather than measuring it.",
@@ -2529,17 +2612,34 @@ sim_server <- function(input, output, session) {
     )
   })
 
+  # ── CRLB precision inputs ────────────────────────────────────────────────────
+  # GOAL: one place that reads the CRLB-mode inputs, so Generate and the live
+  # preview can never disagree. Fallbacks match the sim_ui.R defaults.
+  crlb_inputs <- reactive({
+    # Cleared numericInputs arrive as NA; fall back to the default instead.
+    num <- function(x, d) {
+      x <- suppressWarnings(as.numeric(x))
+      if (length(x) != 1 || !is.finite(x)) d else x
+    }
+    L_nm   <- max(1, num(input$sim_crlb_L,       40))    # physical L
+    n_ph   <- max(1, num(input$sim_crlb_photons, 80))    # total photons
+    bg     <- max(0, min(0.99, num(input$sim_crlb_bg, 0.05)))
+    k      <- max(0, num(input$sim_crlb_k,       1))     # × bound
+    floor0 <- max(0, num(input$sim_crlb_floor,   6.5))   # nm, quadrature
+    s <- smlm_sigma_loc(L_nm, n_ph, bg, k, floor0)
+    c(s, list(floor = floor0))
+  })
+
   # ── CRLB precision preview (live - no Generate needed) ──────────────────────
   output$sim_crlb_preview <- renderUI({
     req(identical(input$sim_prec_mode %||% "manual", "crlb"))
-    L_nm    <- max(1,    as.numeric(input$sim_crlb_L       %||% 100))
-    n_ph    <- max(1,    as.numeric(input$sim_crlb_photons %||% 50))
-    bg_frac <- max(0, min(0.99, as.numeric(input$sim_crlb_bg %||% 0.05)))
-    n_eff   <- max(1, n_ph * (1 - bg_frac))
-    sig_xy  <- max(0.1, L_nm / (2 * sqrt(n_eff)))
+    s       <- crlb_inputs()
+    sig_xy  <- max(0.1, s$total)
     use_3d  <- identical(input$sim_view_mode, "3d")
     z_fac   <- max(0.1, as.numeric(input$sim_crlb_z_factor %||% 0.7))
     sig_z   <- sig_xy * z_fac
+    # Share of the variance the floor owns: tells the user whether more photons help.
+    floor_share <- if (s$total > 0) s$floor^2 / s$total^2 else 0
     tags$div(
       class = "alert alert-success",
       style = "padding:6px 10px; font-size:0.84em; margin-top:4px;",
@@ -2547,8 +2647,8 @@ sim_server <- function(input, output, session) {
       if (use_3d) sprintf("   |   \u03C3_z \u2248 %.2f nm", sig_z),
       tags$br(),
       tags$small(sprintf(
-        "L\u202F=\u202F%.0f nm,  N_eff\u202F=\u202F%.0f ph",
-        L_nm, n_eff))
+        "Ideal bound %.2f nm, \u00D7k = %.2f nm, floor %.2f nm (%.0f%% of variance)",
+        s$crlb, s$photon, s$floor, 100 * floor_share))
     )
   })
 

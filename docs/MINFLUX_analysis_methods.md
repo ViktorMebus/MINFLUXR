@@ -1108,13 +1108,15 @@ demonstrated ~2.5–3 µm²/s practical ceiling (Part II §3a item 8).
 
 ## I-C. Simulation
 
-The two simulators use **different** precision constants, deliberately. Both are heteroscedastic (σ varies
-per localization with the drawn photon count N):
+The two simulators use **different** precision constants, deliberately:
 - **Diffusion / tracking simulator:** **σ = L_TCP / (a·√N)** with the same `TCP_CRLB_PREFACTOR` (a = 4)
-  as the Tracking tab's σ_loc model, so the forward and inverse models cannot disagree.
-- **SMLM simulator (CRLB mode):** **σ = L_eff / (2·√N_eff)**, N_eff = N·(1 − background fraction). L_eff
-  is an *effective* diameter that absorbs drift, linker motion and imperfect centring, so it runs several
-  times the physical L; it can be fitted from a real run (`L_eff = 2·σ·√N`). See [simulator.md](simulator.md).
+  as the Tracking tab's σ_loc model, so the forward and inverse models cannot disagree. σ varies per
+  localization with the drawn photon count N.
+- **SMLM simulator (CRLB mode):** **σ = √[(k·σ_CRLB)² + σ₀²]**, σ_CRLB = L/(√8·√N)·g(SBR), the ideal
+  per-axis bound for a 2D doughnut pattern (Balzarotti 2017 Suppl. S27/S31; Marin & Ries 2025 Eq. 44).
+  L is the physical final-iteration diameter (~40 nm), k scales the photon-limited term and σ₀ is a
+  photon-independent floor (drift, vibration); both are fitted from a real run as the slope and intercept
+  of within-trace variance against 1/N. One σ is used for every localization. See [simulator.md](simulator.md) §1.4.
 
 ### I-C.1 SMLM structure + labelling simulator (`sim_server.R`, SMLM tab)
 Generates a *known* super-resolution scene to validate the SMLM estimators and the GT inverse.

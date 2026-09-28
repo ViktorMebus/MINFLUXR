@@ -46,7 +46,7 @@ the tab.
         │  efficiency, N dyes/molecule, epitope offset, linker, dye spread
   (3) TID multiplication              split_for_blinking()  [Normal]
         │  or  rate × duration sampling of the pool  [Acquisition]
-  (4) precision model                 manual σ  |  CRLB σ = L/(2√N_eff)
+  (4) precision model                 manual σ  |  CRLB σ = √[(k·L/√(8N)·g)² + σ₀²]
         │
   (5) localizations per trace         gen_localizations()           → locs
         │  Poisson or geometric trace length, σ added per localization
@@ -217,26 +217,53 @@ Real MINFLUX over-counts: one physical dye can be re-acquired many times and app
 Two modes:
 
 - **Manual** — you type σ_xy and σ_z directly.
-- **CRLB from photon budget** ([`sim_server.R:1264`](../sim_server.R#L1264)):
+- **CRLB from photon budget** (`smlm_sigma_loc()` in [`packages.R`](../packages.R)):
 
   ```
-  N_eff = N_photons × (1 − bg_fraction)
-  σ_xy  = L / (2 · √N_eff)
-  σ_z   = σ_xy × z_factor            (default 0.7 — z TIGHTER than xy)
+  σ_CRLB = L / (√8 · √N) · g,   g = √(4 − f) / (2 · (1 − f))
+  σ_xy   = √( (k · σ_CRLB)² + σ₀² )
+  σ_z    = σ_xy × z_factor            (default 0.7 — z TIGHTER than xy)
   ```
 
-  `L` is the effective targeting-pattern (TCP) diameter of the final iteration. `σ_z` defaults to
-  0.7 × `σ_xy`: in MINFLUX the axial precision is usually tighter than the lateral one.
+  `L` is the physical diameter of the final targeting pattern (TCP), the instrument setting (imaging
+  sequences end near 40 nm). `N` is the total detected photons per localization and `f` the background
+  fraction of them. `σ_z` defaults to 0.7 × `σ_xy`: in MINFLUX the axial precision is usually tighter
+  than the lateral one.
 
-  **`L` here is an effective value, not the instrument setting.** `L_eff = 2σ√N` absorbs everything
-  that widens σ beyond the ideal bound: drift, motion within a trace, background and imperfect
-  centring. It is therefore 2–3× larger than published final-iteration TCP diameters (~40–75 nm), and
-  that is the right quantity to simulate with. The default of **120 nm** is typical of fixed-sample
-  imaging; harder samples run near 220 nm. Use *Calibrate from a real run* rather than the default.
+  **The bound.** `σ_CRLB` is the ideal per-axis Cramér-Rao bound at the centre of a 2D doughnut
+  pattern (three exposures on a circle of diameter L plus one at the centre), in the small-L limit.
+  It is Balzarotti et al. 2017, Suppl. Eq. S27/S31, re-derived as Eq. 44/45 in Marin & Ries 2025
+  (arXiv:2410.12427). With SBR = (1 − f)/f, their background penalty
+  `√((1 + 1/SBR)(1 + 3/(4·SBR)))` reduces to `g` above; g = 1 at f = 0 and 1.05 at f = 0.05. The
+  small-L limit drops a beam-size factor `8σq²/(8σq² − L²)` that is about 1.03 at L = 40 nm.
 
-  The `2` in the prefactor is a convention that varies with pattern geometry in the literature. It is
-  self-consistent here because *Calibrate from a real run* inverts the same formula
-  (`L ≈ 2·σ·√N`, [`sim_ui.R:532`](../sim_ui.R#L532)); changing it alone would rescale every calibrated L.
+  **Two excess terms, because they scale differently with photons.**
+  - `k` multiplies the bound. It absorbs everything that degrades the photon-limited precision:
+    the hexagonal TCP of commercial systems (the bound above is for the triangular pattern), the
+    iterative estimator, detector effects. k = 1 is the ideal; k < 1 is possible only if the real
+    pattern beats the reference geometry.
+  - `σ₀` adds in quadrature. It absorbs everything that does not shrink with photons: residual drift,
+    vibration, motion of the dye within a trace. More photons cannot beat it, so a photon sweep with
+    σ₀ > 0 levels off where real data does.
+
+  A single multiplier cannot do both jobs. Folding drift into L (or k) makes the drift term shrink as
+  1/√N and over-promises what brighter dyes or longer dwell buy. Both terms have literature support:
+  camera SMLM finds a photon-independent multiplicative excess over the CRLB (Brenlla et al. 2025,
+  Biophys. Rep.), and MINFLUX reviews name setup instability as the leading error at the nanometre
+  scale (Scheiderer, Marin & Ries 2025, Nat. Photonics).
+
+  **Calibration.** *Calibrate from a real run* fits both terms. Since σ² = A/N + B, the within-trace
+  variance is linear in 1/N: traces are binned by their mean 1/eco (3–8 quantile bins, ≥ ~20 traces
+  each), each bin's variance is pooled (Σ(n−1)s² / Σ(n−1), unbiased at any n), and a weighted line
+  (weights dof/σ⁴) gives A (slope) and B = σ₀² (intercept). k = √A / (L·g/√8) at the L and background
+  set when calibrating, so change L first if yours is not 40 nm. A negative term is set to zero and the
+  other refitted. If 1/N spans less than 1.5× across bins, slope and intercept trade off freely: the
+  fit is refused, k is set to 1 and the rest of the measured variance goes to σ₀. On synthetic traces
+  (800 traces, lognormal photons) the fit recovers k within ~3% and σ₀ within ~0.3 nm.
+
+  The fit assumes the excess variance does not itself depend on brightness. Bright and dim traces
+  can differ in other ways (focal position, dye state), which the fit would read as a photon effect.
+  The within-trace variance also contains real motion, so on a mobile target σ₀ is an upper bound.
 
 **Precision Budget.** The panel predicts the error of each molecule's position, a trace median,
 against ground truth:
@@ -377,7 +404,7 @@ Measured, after gating:
 | Photon distribution | the whole `eco` vector (capped at 200 k) | per-localization σ (8.1c) |
 | Trace-length distribution | localizations per `tid`, the whole vector | trace lengths (8.1c) |
 | Photons | median `eco` | CRLB photons |
-| L | `L_eff = 2·σ·√N` | CRLB L |
+| k, σ₀ | weighted fit of pooled within-trace variance vs 1/eco across photon bins (§1.4) | CRLB k, floor |
 
 **Small-n debiasing.** The sample SD under-estimates σ at small *n*, and the length gate lets the
 user push short traces into the median, so each trace's SD is divided by its own correction factor.
@@ -444,10 +471,9 @@ cloud QC, and inverse-variance weighting has no effect on simulated data.
 **The CSV export has no `eco`, `efo` or `cfr`.** Reloaded simulated data cannot run photon-weighted
 shape fits (they fall back to unweighted), the fiducial scan, or `efo`/`cfr` filters.
 
-**Background is a plain photon loss.** `N_eff = N × (1 − bg)` understates the damage: MINFLUX position
-information lives in the contrast at the doughnut zero, and background fills that zero in. CRLB mode is
-optimistic at high background when used predictively. An `L` calibrated from a real run absorbs most of
-this.
+**Background uses the ideal-pattern penalty.** The SBR factor `g` is exact only for the triangular
+2D pattern at its centre. It ignores the emitter's offset from the pattern centre and the hexagonal
+TCP of commercial systems; a calibrated k absorbs the average of both.
 
 **Re-blinks sit at exactly the same position.** Repeat detections of one fluorophore carry no
 between-blink motion or drift, so simulated data cannot calibrate or validate the de-blinking radius.

@@ -135,11 +135,10 @@ please also cite Vogler et al. 2025 when you use them.
 
 MINFLUXR is licensed under the **GNU General Public License v3.0 or later** ([`LICENSE`](LICENSE)).
 
-GPL-3 is required rather than chosen: the time-signature analysis and the MSD/OLSF workflow are ports of
-MinSpt, which is GPL-3.0, and a port of GPL-3 code must itself be GPL-3.
+The MINFLUXR time-signature analysis and the MSD/OLSF workflow are R-adapted ports of Bela Vogler's Toolbox_for_MINFLUX_SPT (GPL-3.0)
 
-DCR pooling and the per-trace spread statistic are reimplemented in R from
-[pyMINFLUX](https://github.com/bsse-scf/pyMINFLUX) (Apache-2.0), which may be combined into a GPL-3 work.
+DCR pooling and the per-trace spread statistic are R-adapted ports from
+[pyMINFLUX](https://github.com/bsse-scf/pyMINFLUX) (Apache-2.0).
 No pyMINFLUX or MinSpt source is copied or bundled here.
 
 [`THIRD-PARTY.md`](THIRD-PARTY.md) records what was taken from each project, what was changed, and the
@@ -149,5 +148,7 @@ licences of the R packages MINFLUXR depends on (installed from CRAN, not redistr
 
 ## AI declaration
 
-This app was in parts coded by the author, in collaboration with Claude Code (Opus 4.6, 4.8 and 5). Claude Code was used to optimize, research and design experiments to uncover various implementation possibilities. Claude Code has been implemented in our workflow, to create or revise code, where various functionalities were tested by the authors, before being refined. I started this as a simple MINFLUX viewer, yet AI enabled expansion of the tool to be more profound. We hope this app can be used as a way to explore MINFLUX data, without having to have extensive coding experience.
+This app was in parts coded by the author, in collaboration with Claude Code (Opus 4.6, 4.8 and 5.5). Claude Code was used to optimize, research and design experiments to uncover various implementation possibilities. Claude Code has been implemented in our workflow, to create or revise code, where various functionalities were tested by the authors, before being refined. Code created by AI, was reviewed by the authors and other AI models. AI was used to create markdowns in the code to clarify its inputs, outputs and functionalities. 
+
+I started this as a simple MINFLUX viewer, yet AI enabled expansion of the tool to be more profound. We hope this app can be used as a way to explore MINFLUX data, without having to have extensive coding experience.
 

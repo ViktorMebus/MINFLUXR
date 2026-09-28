@@ -60,8 +60,8 @@ raw extent/MSD alone.
 
 - New tab **"Diffusion / Tracking"** in `sim_ui.R` (alongside MINFLUX / Confocal / Acquisition /
   Compare strategies), driven from `sim_server.R`.
-- **Reuse** the existing MINFLUX precision model: σ_loc = L_TCP / (2·√N_photons) (the sim already uses
-  L_eff = 2·σ·√N). Photon count N per localization ties to EFO·t_dwell; σ_loc is therefore
+- **Reuse** the existing MINFLUX precision model: σ_loc = L_TCP / (4·√N_photons) (`TCP_CRLB_PREFACTOR`,
+  shared with the Tracking tab). Photon count N per localization ties to EFO·t_dwell; σ_loc is therefore
   **heteroscedastic** (varies per localization), like reality.
 - **Output** the canonical frame `data.frame(tid, tim[s], x, y[, z] nm, efo, eco[, itr])` — identical
   to the importer's expectation — plus a **ground-truth sidecar** `data.frame(tid, D_true_um2_s,

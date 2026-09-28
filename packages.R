@@ -211,10 +211,8 @@ TCP_L_PER_GEOFACTOR_NM <- 360
 # tracking sigma_loc estimator and the tracking simulator so the forward and
 # inverse models cannot disagree.
 #
-# NOT the SMLM simulator's constant. That one uses an EFFECTIVE L in
-# sigma = L_eff/(2*sqrt(N)), where L_eff absorbs drift, linker motion and imperfect
-# centring and so runs several times the physical L. Different quantity, different
-# prefactor - see docs/simulator.md.
+# NOT the SMLM simulator's constant. That one models a 2D imaging pattern with
+# SMLM_CRLB_PREFACTOR = sqrt(8) (see below); same physical L, different geometry.
 # The prefactor is the IDEAL Cramer-Rao value, derived in docs/sigma_loc_model.md:
 # for two beams at +/- L/2 on a doughnut zero the photon split is binomial, and its
 # Fisher information at the TCP centre is 16*N/L^2, so a = sqrt(16) = 4. Everything
@@ -230,6 +228,36 @@ TCP_L_PER_GEOFACTOR_NM <- 360
 # L = 100.8 nm, which brackets the truth to 3.6 <= a <= 4.0 rather than fixing it.
 # Users measuring their own value should enter it as an upper bound on sigma.
 TCP_CRLB_PREFACTOR <- 4
+
+# ── SMLM simulator: 2D MINFLUX precision with a photon-independent floor ──────
+# Ideal per-axis Cramer-Rao bound at the centre of a 2D doughnut pattern (three
+# exposures on a circle of diameter L plus one at the centre), small-L limit:
+#   sigma_CRLB = L / (sqrt(8) * sqrt(N)) * g(SBR)
+#   g(SBR)     = sqrt( (1 + 1/SBR) * (1 + 3/(4*SBR)) )
+# N = total detected photons (signal + background). Balzarotti et al. 2017
+# Science Suppl. Eq. S27/S31; re-derived as Eq. 44/45 in Marin & Ries 2025
+# (arXiv:2410.12427). With the background FRACTION f = B/N, SBR = (1-f)/f and
+#   g = sqrt(4 - f) / (2 * (1 - f)).
+# The small-L limit drops a factor 8*sq^2/(8*sq^2 - L^2) that is ~1.03 at the
+# ~40 nm final imaging L and grows only as L approaches the beam size.
+SMLM_CRLB_PREFACTOR <- sqrt(8)
+
+# GOAL: localization precision for the SMLM simulator from a PHYSICAL pattern
+# diameter. Two excess terms, because they scale differently with photons:
+#   k      multiplies the bound: pattern geometry (hexagonal TCP), mLMS estimator
+#          loss, detector effects. Scales as 1/sqrt(N) like the bound itself.
+#   floor  adds in quadrature: drift, vibration, residual motion within a trace.
+#          Independent of N, so more photons cannot beat it.
+# Returns the ideal bound, the photon-limited term (k x bound) and the total.
+smlm_sigma_loc <- function(L_nm, n_photons, bg_frac = 0, k = 1, floor_nm = 0) {
+  f     <- max(0, min(0.99, bg_frac))                 # background fraction of N
+  n     <- max(1, n_photons)                          # total detected photons
+  g     <- sqrt(4 - f) / (2 * (1 - f))                # SBR penalty, 1 at f = 0
+  crlb  <- L_nm / (SMLM_CRLB_PREFACTOR * sqrt(n)) * g # ideal per-axis bound
+  phot  <- max(0, k) * crlb                           # photon-limited term
+  list(crlb = crlb, photon = phot, g = g,
+       total = sqrt(phot^2 + max(0, floor_nm)^2))     # quadrature sum
+}
 
 # ── Excitation doughnut FWHM (nm), the nu of Vogler Eq. 1 ─────────────────────
 # sigma = L/(4*sqrt(N)) is only the nu -> infinity limit of the doughnut CRLB. The

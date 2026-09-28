@@ -1008,7 +1008,10 @@ dye counts, the three displacement levels, TID multiplication, and a table of ev
 TIDs/molecule, detection probability and resolution floor - is derived in
 [docs/simulator.md §1.2](docs/simulator.md).
 
-**Localization precision** - either a manual σ (separate XY and Z) or a **CRLB from photon budget**.
+**Localization precision** - either a manual σ (separate XY and Z) or a **CRLB from photon budget**:
+the ideal 2D MINFLUX bound L/√(8N) from the physical final-iteration L (~40 nm), scaled by an efficiency
+factor k and combined in quadrature with a photon-independent floor σ₀. *Calibrate from a real run* fits k
+and σ₀ from how the within-trace variance changes with photon count ([docs/simulator.md §1.4](docs/simulator.md)).
 
 **Acquisition** *(acquisition mode)* - acquisition time in hours/minutes, structure and background
 detection rates, and a **Calibrate from a real run** loader: point it at a real `.npy` / `.json` /
@@ -1045,7 +1048,7 @@ Download the tracks and load them in the Tracking tab to check CVE / MSD / confi
 - **Survivorship** - optionally lose the molecule when the *true* displacement across a dark gap
   exceeds a re-acquisition radius. This is the dark-cycle bias that manufactures apparent confinement.
 - **Sampling model**: cycle time, dark-cycle probability, mean photons per localization, and the
-  effective (final-iteration) TCP diameter L, from which σ_loc = L / (2·√N_photons).
+  final-iteration TCP diameter L, from which σ_loc = L / (4·√N_photons).
 - **Calibrate from real MINFLUX data** - load a real file to auto-fill cycle time, photons, dark-cycle
   probability and median track length. Tip: apply your filters in the Tracking tab first, export the
   filtered CSV, and calibrate on that, so the model matches exactly the tracks you analyse.
