@@ -711,14 +711,17 @@ CVE σ > MSD-fit intercept. The photon model comes first because it assumes noth
 while the CVE σ is ~90% blur term at R ≈ 1/6: it mostly reports √R × RMS step and inherits population
 heterogeneity and drift.
 
-- **Photon-budget σ_loc** (`.crlb_doughnut`, Vogler et al. 2025 Eq. 1): per localization
-  **σᵢ = L_TCP/(a·√Nᵢ) · [1 + 2(x/L)²]**, N = `eco`, x = √(2·D_cve·t_loc) (the moving-emitter offset),
-  reported as the median. **a = `TCP_CRLB_PREFACTOR` = 4**, the ideal Cramér-Rao value; anything the
-  ideal omits only makes σ worse, so **σ is a stated lower bound**. An immobile-sample measurement brackets
-  a from the other side, because its MSD intercept is inflated by the sub-diffusive tracker wander, so the
-  true a lies between that value and 4 ([sigma_loc_model.md](sigma_loc_model.md)). The beam-size
-  denominator (ν, `TCP_BEAM_FWHM_NM`) is **off (0)** by default; enable it if an L-series on your system
-  shows that σ does not scale with L.
+- **Photon-budget σ_loc** (`.crlb_doughnut`, est_cve.R): per localization
+  **σᵢ = L_TCP/(a·√Nᵢ) · √(1 + c·⟨r²⟩/L²)**, N = `eco`, ⟨r²⟩ = d·D_cve·t_loc the
+  exposure-averaged offset of the moving emitter, reported as the median. c and d come from the **TCP
+  pattern** (`TCP_PATTERN_GEOM`: hexagon c = 8.6, square 9.0, triangle 13.7, octahedron 9.0 with d = 3),
+  derived from the Fisher matrix of an ideal doughnut zero and recomputed in the tests. **a** is a measured, effective value, taken from a calibration profile (`R/est_calib.R`; without one,
+  the pattern's ideal value, labelled uncalibrated): the ideal unbiased per-axis bound is
+  √8 = 2.83 for any planar pattern, but the instrument's estimator is biased toward the pattern centre
+  and the loop correlates successive errors, so exported positions beat it and a must be calibrated per
+  sequence on an immobile sample ([sigma_loc_model.md](sigma_loc_model.md)). The beam-size factor
+  1/|1 − ln2·(L/ν)²| (ν, `TCP_BEAM_FWHM_NM`) is **off (0)** by default; enable it if an L-series on
+  your system shows that σ does not scale with L.
 - **CVE with motion blur** (Vestergaard 2014): **σ² = R·⟨Δx²⟩ + (2R − 1)·cov₁**, averaged over x, y[, z],
   using **only consecutive integrated (single-cycle) step pairs** so variable dark-cycle Δt cannot bias
   the covariance. R is bounded rather than assumed: `R_hi = min(1/6, t_c/(6·Δt))` (collection spans the
@@ -1109,7 +1112,7 @@ demonstrated ~2.5–3 µm²/s practical ceiling (Part II §3a item 8).
 ## I-C. Simulation
 
 The two simulators use **different** precision constants, deliberately:
-- **Diffusion / tracking simulator:** **σ = L_TCP / (a·√N)** with the same `TCP_CRLB_PREFACTOR` (a = 4)
+- **Diffusion / tracking simulator:** **σ = L_TCP / (a·√N)** with `TCP_CRLB_PREFACTOR` (the 2D ideal-estimator value, √8)
   as the Tracking tab's σ_loc model, so the forward and inverse models cannot disagree. σ varies per
   localization with the drawn photon count N.
 - **SMLM simulator (CRLB mode):** **σ = √[(k·σ_CRLB)² + σ₀²]**, σ_CRLB = L/(√8·√N)·g(SBR), the ideal
@@ -1171,7 +1174,7 @@ validation loop (see [simulation_module.md](simulation_module.md) for the full d
 3. **Photobleaching → short tracks:** track length in cycles is **Geometric**, with the mean scaled so the
    *recorded median* (after dark-cycling) lands on the target `mean_len` (median ≈ ln2·mean, only
    (1−p_dark) recorded ⇒ mean_cycles = median/(ln2·(1−p_dark))).
-4. **Heteroscedastic σ_loc:** per recorded loc draw **N ~ Poisson(photons)**, σ = L_TCP/(a√N) with a = 4, add Gaussian
+4. **Heteroscedastic σ_loc:** per recorded loc draw **N ~ Poisson(photons)**, σ = L_TCP/(a√N) with a = `TCP_CRLB_PREFACTOR`, add Gaussian
    noise per axis; record `eco = N`, `efo = N/(t_c in s)`.
 5. **Survivorship (optional):** if the true displacement across a dark gap exceeds a re-acquisition radius
    `R_reacq`, the track terminates there — reproduces the dark-cycle survivorship bias (long jumps culled →

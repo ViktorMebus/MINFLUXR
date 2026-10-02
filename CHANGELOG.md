@@ -5,6 +5,74 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 
 ## Unreleased
 
+### Tracking: datasets
+
+- **Uploads now add to a list of loaded datasets** instead of replacing them. *Active dataset* shows
+  one file at a time (the default) or all loaded files merged, and *Remove selected dataset* drops a
+  file, so loading the wrong file no longer needs an app restart. Switching rebuilds the view exactly
+  as an upload does (chunks, filter ranges, the Filter & Rechunk reset point).
+- **Filters now apply to every loaded dataset** and survive switching between them. Each range
+  filter is stored as entered and shown clamped to the active dataset's range, so viewing a dataset
+  with a narrower range no longer changes it; *Reset Ranges* clears them. The spatial crop stays per
+  dataset. Settings files save and restore the stored filters.
+- **One filter pipeline** (`R/est_clean.R::filter_pipeline`) now serves the live view, Plot Data's
+  rechunk and Compare Cells. The rechunk had its own copy of every stage, which differed from the live
+  one (end-trim without the minimum-length floor, a different length-filter rule); results of the live
+  view are unchanged, verified stage by stage on real data.
+- **The Data Quality CVE now reads the filtered data**, like every other analysis. It read the data
+  after the gap split only, so its D and the MSD's D were computed on different data. With the default
+  settings (no cleaning) nothing changes; range filters on ECO / EFO select on mobility and now move
+  the CVE D as they already moved the other panels.
+- **Fixed: 3D CSV re-imports had their axial factor applied twice.** The upload path never returned a
+  CSV's z to raw before the session's calibration was applied; only an unused fallback reader did.
+
+### Tracking: compare cells
+
+- **New Compare Cells panel** (Analysis tab) for experiments where each file is one cell. Every file is
+  analysed on its own: its own cycle time from the data, the gap split, CVE D, D − D_w, photon-budget
+  σ_loc with that file's TCP diameter, pattern, prefactor and wander floor, and the correlated-error
+  check. Conditions are compared on one value per cell (mean and t-based 95% CI across cells), so
+  correlated tracks from one cell are not counted as independent. Settings are entered in an editable
+  table, filled by file name, and saved or loaded as CSV; blank settings follow Acquisition Parameters.
+- Compare Cells reads every loaded file directly, whichever dataset is active.
+- The per-file pipeline reproduces the Data Quality panel exactly for a single file (`R/est_percell.R`,
+  checked on real data and in `tests/testthat/test-percell.R`).
+- Cycle-time estimation, the adaptive split threshold and gap splitting moved out of the server into
+  `R/est_clean.R`, so the main pipeline and the per-cell comparison share one implementation. Results
+  are unchanged (verified value by value on a raw tracking file).
+
+### Tracking: localization precision
+
+- **New Instrument Calibration panel and calibration profiles.** It measures the photon-budget prefactor
+  a and the wander floor D_w on an immobile sample, per cell, from the short-lag MSD after the Display
+  filters, and keeps the median and quartiles as a named profile recording its sequence (pattern, L,
+  dwell, photon limit, damping) and instrument. Profiles save and load as JSON, are applied under
+  Acquisition Parameters, and per file in Compare Cells (`calibration` column).
+- **Without a calibration, a is the ideal-estimator value of the TCP pattern** (√8 in 2D) and the
+  Data Quality readout says "uncalibrated". There is no system-independent value; the previous fixed
+  default of 3.6 was one instrument's measurement. Uncalibrated σ is larger than before (×1.27 against
+  3.6) until a profile is loaded.
+- **The photon-budget prefactor is documented as a measured, effective value.** The previous
+  default of 4 was presented as the ideal 2D Cramér-Rao bound; 4 is the one-axis two-beam value, and the
+  ideal per-axis bound for any planar pattern is √8 = 2.83. Exported positions come out tighter than
+  that (biased estimator, loop-correlated errors), so no Cramér-Rao value bounds the prefactor and it
+  has to be calibrated per sequence. The input no longer has an upper limit of 4.
+- **The off-center term now depends on the TCP pattern** (new *TCP pattern* setting, read from the
+  sequence file): σ² grows as 1 + c·⟨r²⟩/L² with c = 8.6 (hexagon), 9.0 (square), 13.7 (triangle),
+  9.0 (octahedron), from the Fisher matrix of an ideal doughnut zero. The previous term,
+  1 + 2(x/L)², understated the motion penalty about threefold.
+- σ_loc at typical 2D tracking settings rises by about 13% (σ² by about 28%). Results from the
+  jump-distance fit, D-map, HMM and confinement null computed before this change should be re-run;
+  CVE D and the MSD slope are unaffected.
+
+### Tracking: correlated-error check
+
+- **The smoothing check now uses the single-cycle step duration** (t_c + SW) for its lag-8 pairs. It
+  compared against 8 · t_c, and at fast cycles (CFR off, short dwell) 8 · SW exceeds half a cycle,
+  so the check silently found no pairs. Results on sequences where it did report are unchanged.
+- Its message no longer attributes the signal to galvo damping alone: immobile samples exceed the
+  motion bound with damping off, because the tracking loop correlates successive errors.
+
 ### Co-localization (SMLM, two channels)
 
 - **New default null for L₁₂ and g₁₂: channel B shifted at random** as a whole (a toroidal shift,

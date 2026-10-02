@@ -213,21 +213,21 @@ TCP_L_PER_GEOFACTOR_NM <- 360
 #
 # NOT the SMLM simulator's constant. That one models a 2D imaging pattern with
 # SMLM_CRLB_PREFACTOR = sqrt(8) (see below); same physical L, different geometry.
-# The prefactor is the IDEAL Cramer-Rao value, derived in docs/sigma_loc_model.md:
-# for two beams at +/- L/2 on a doughnut zero the photon split is binomial, and its
-# Fisher information at the TCP centre is 16*N/L^2, so a = sqrt(16) = 4. Everything
-# the ideal omits - background, finite beam depth, 2D TCP geometry, mLMS estimator
-# loss - can only make sigma WORSE, so 4 is a hard ceiling on a and sigma computed
-# with it is a stated LOWER BOUND on the localization error.
 #
-# Do not default this to a fitted number. Calibrating a from the short-lag MSD
-# intercept of an immobile sample returns a FLOOR, not an estimate: the tracker
-# wander is sub-diffusive (log-log slope 0.80 on our fixed cells), the MSD is
-# concave, and a straight-line fit extrapolated to zero lag therefore lands above
-# the true intercept, inflating sigma and deflating a. That measurement gave 3.6 at
-# L = 100.8 nm, which brackets the truth to 3.6 <= a <= 4.0 rather than fixing it.
-# Users measuring their own value should enter it as an upper bound on sigma.
-TCP_CRLB_PREFACTOR <- 4
+# The prefactor a has no system-independent value. The ideal-estimator (unbiased)
+# value follows from the pattern geometry: sqrt(8) = 2.83 for any symmetric planar
+# pattern, sqrt(16/3) = 2.31 for an idealised octahedron (Balzarotti 2017;
+# Scheiderer, Marin & Ries 2024 Eq. 8; TCP_PATTERN_GEOM in R/est_cve.R). Exported
+# positions carry the instrument's own estimator, background and tracking loop, so
+# the effective a differs per instrument and per sequence and is MEASURED on an
+# immobile sample (Instrument Calibration, R/est_calib.R), kept as a named profile.
+# This constant is only the uncalibrated fallback for a 2D pattern, and the value
+# the tracking simulator draws its noise with; the app resolves the fallback per
+# pattern, and labels sigma computed with it as uncalibrated.
+TCP_CRLB_PREFACTOR <- sqrt(8)
+
+# The TCP pattern geometry (axes spanned, ideal prefactor, off-centre coefficient)
+# lives with the estimator, as TCP_PATTERN_GEOM in R/est_cve.R.
 
 # ── SMLM simulator: 2D MINFLUX precision with a photon-independent floor ──────
 # Ideal per-axis Cramer-Rao bound at the centre of a 2D doughnut pattern (three

@@ -10,9 +10,8 @@
 ## warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
 ## General Public License (LICENSE) for more details.
 ##
-## GPL-3 is required rather than chosen: the time-signature analysis and MSD/OLSF
-## workflow are ports of MinSpt (GPL-3.0). DCR pooling and the per-trace spread
-## statistic are reimplemented from pyMINFLUX (Apache-2.0), which GPL-3 permits.
+## The time-signature analysis and MSD/OLSF workflow are ports of MinSpt (GPL-3.0). DCR pooling and the per-trace spread
+## statistic are reimplemented from pyMINFLUX (Apache-2.0). The rest of the code is original work. 
 ## See THIRD-PARTY.md.
 ##
 ## File layout:

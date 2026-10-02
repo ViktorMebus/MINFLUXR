@@ -4,7 +4,7 @@
 # t_c 0.192 ms, SW 0.011 ms, dark-cycle mix, per-localization photon σ, blur R from the
 # timing model of the standard 2D sequence (MSD_R_FALLBACK, est_blur.R). These tests check the
 # algebra at a known R; test-blur.R checks that R against a simulated MINFLUX estimator.
-TCP_CRLB_PREFACTOR <- if (exists("TCP_CRLB_PREFACTOR")) TCP_CRLB_PREFACTOR else 4
+TCP_CRLB_PREFACTOR <- if (exists("TCP_CRLB_PREFACTOR")) TCP_CRLB_PREFACTOR else 3.6
 for (f in c("R/est_blur.R", "R/est_hmm.R", "R/est_cve.R", "R/est_msd.R", "R/est_jdd.R", "R/est_dmap.R", "R/est_cpd.R"))
   source(file.path(.repo_root, f))
 
@@ -87,7 +87,64 @@ test_that("change-point: few spurious segments on one free population, D unbiase
   expect_lt(abs(stats::weighted.mean(segs$D_nm2_ms, segs$n_steps) / 215 - 1), 0.05)
 })
 
-test_that("photon CRLB reduces to L/(a sqrt N) at nu = 0 and x = 0", {
-  expect_equal(.crlb_doughnut(100.8, 0, c(36, 100), 0, 4), 100.8 / (4 * sqrt(c(36, 100))))
-  expect_equal(.crlb_doughnut(100.8, 0, 36, 10, 4), 100.8 / (4 * 6) * (1 + 2 * (10 / 100.8)^2))
+test_that("photon CRLB reduces to L/(a sqrt N) for an immobile emitter with nu off", {
+  expect_equal(.crlb_doughnut(100.8, 0, c(36, 100), pref = 3.6), 100.8 / (3.6 * sqrt(c(36, 100))))
+  # motion adds the pattern's off-centre term, <r^2> = dim * D * t_loc
+  g <- TCP_PATTERN_GEOM$hexagon
+  expect_equal(.crlb_doughnut(100.8, 0, 36, D = 200, t_loc = 0.2, pref = 3.6, pattern = "hexagon"),
+               100.8 / (3.6 * 6) * sqrt(1 + g$c_off * g$dim * 200 * 0.2 / 100.8^2))
+  # the triangle loses precision off-centre faster than the hexagon
+  expect_gt(.crlb_doughnut(100.8, 0, 36, D = 200, t_loc = 0.2, pref = 3.6, pattern = "triangle"),
+            .crlb_doughnut(100.8, 0, 36, D = 200, t_loc = 0.2, pref = 3.6, pattern = "hexagon"))
+  # unknown pattern names fall back to the default geometry
+  expect_equal(.crlb_doughnut(100.8, 0, 36, D = 200, t_loc = 0.2, pref = 3.6, pattern = "zline"),
+               .crlb_doughnut(100.8, 0, 36, D = 200, t_loc = 0.2, pref = 3.6, pattern = TCP_PATTERN_DEFAULT))
+})
+
+# CLAIM (packages.R, TCP_PATTERN_GEOM): the ideal prefactor and the off-centre
+# coefficient of each pattern follow from the Fisher matrix of the multinomial photon
+# split over an ideal doughnut zero. Recomputed here independently, so the table
+# cannot drift from the physics it states.
+test_that("TCP pattern constants match the Fisher-matrix CRLB", {
+  verts <- function(pat, L) {
+    r <- L / 2
+    switch(pat,
+      triangle   = { a <- 2 * pi * (0:2) / 3; cbind(r * cos(a), r * sin(a)) },
+      square     = { a <- 2 * pi * (0:3) / 4; cbind(r * cos(a), r * sin(a)) },
+      hexagon    = { a <- 2 * pi * (0:5) / 6; cbind(r * cos(a), r * sin(a)) },
+      octahedron = r * rbind(diag(3), -diag(3)))
+  }
+  fisher <- function(b, pos, h = 1e-6) {
+    d <- ncol(b)
+    p <- function(q) { lam <- rowSums((matrix(q, nrow(b), d, byrow = TRUE) - b)^2) + 1e-14; lam / sum(lam) }
+    p0 <- p(pos)
+    G <- sapply(seq_len(d), function(j) { e <- numeric(d); e[j] <- h; (p(pos + e) - p(pos - e)) / (2 * h) })
+    t(G) %*% (G / p0)                                   # per photon
+  }
+  dirs <- function(d, n = 200) {
+    if (d == 2) { a <- 2 * pi * (0:(n - 1)) / n; return(cbind(cos(a), sin(a))) }
+    i <- 0:(n - 1) + 0.5; ph <- acos(1 - 2 * i / n); th <- pi * (1 + sqrt(5)) * i
+    cbind(cos(th) * sin(ph), sin(th) * sin(ph), cos(ph))
+  }
+  L <- 100; us <- c(0.05, 0.1, 0.15)
+  for (pat in names(TCP_PATTERN_GEOM)) {
+    g <- TCP_PATTERN_GEOM[[pat]]; b <- verts(pat, L)
+    expect_equal(ncol(b), g$dim, info = pat)
+    v0 <- mean(diag(solve(fisher(b, rep(0, g$dim)))))
+    expect_equal(L / sqrt(v0), g$a_ideal, tolerance = 1e-4, info = pat)
+    f <- sapply(us, function(u) mean(apply(dirs(g$dim), 1, function(dv)
+           mean(diag(solve(fisher(b, u * L * dv)))) / v0)))
+    c_fit <- unname(coef(lm(I(f - 1) ~ 0 + I(us^2))))
+    expect_equal(c_fit, g$c_off, tolerance = 0.05, info = pat)   # within 5%
+  }
+})
+
+test_that("pattern names accept short forms and 2D vertex counts", {
+  expect_equal(.tcp_pattern_name("6"), "hexagon")
+  expect_equal(.tcp_pattern_name(" Hexagonal "), "hexagon")
+  expect_equal(.tcp_pattern_name("3"), "triangle")
+  expect_equal(.tcp_pattern_name("oct"), "octahedron")
+  expect_equal(.tcp_pattern_name(""), "")
+  expect_true(is.na(.tcp_pattern_name("7")))
+  expect_identical(.tcp_geom("3"), TCP_PATTERN_GEOM$triangle)    # was a silent hexagon fallback
 })

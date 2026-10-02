@@ -141,6 +141,47 @@ cve_core <- function(dx, dy, dz, dt, integ_step, has_z = FALSE, t_c = NA_real_,
        sig_aniso = sig_aniso, D_cve = D_cve, r1_norm = r1_norm, noise_frac = noise_frac)
 }
 
+# ── smoothing_check() ─────────────────────────────────────────────────────────
+# GOAL: test whether the increments are consistent with ANY motion model. A
+# subdiffusive walk already has anti-correlated increments before any noise: for
+# fBm with exponent alpha, fGn gives cov1/var = 2^(alpha-1) - 1. Noise and blur can
+# only push r1 more negative, so an observed r1 ABOVE that bound means the reported
+# positions carry correlated error: galvo damping (DMP > 0) smooths them, and the
+# tracking loop, which centres each pattern on the previous estimate, correlates
+# successive errors on its own. The loop term dominates when true motion is small
+# (immobile samples exceed the bound with damping off), so the check flags
+# correlated error rather than identifying its source.
+# df  : localizations sorted by (tid, tim), as cve_steps() returns them
+# t_c : cycle time (ms)
+# dt1 : duration of one single-cycle STEP (ms), t_c + SW, i.e. cve_core()'s dt_int.
+#       Every step carries the switching overhead SW, so k consecutive single-cycle
+#       steps span k * dt1, not k * t_c; at fast cycles 8 * SW exceeds half a cycle.
+#       NA falls back to t_c.
+# RETURNS list(alpha_short = log(MSD(8)/MSD(1))/log 8 over runs of consecutive
+#   single-cycle steps, r1_fgn = the fGn bound 2^(alpha-1) - 1); NA where there are
+#   too few pairs.
+smoothing_check <- function(df, t_c, dt1 = NA_real_) {
+  n <- nrow(df)
+  step <- if (is.finite(dt1) && dt1 > 0) dt1 else t_c
+  msd_at <- function(kk) {
+    m <- n - kk
+    if (m < 10L) return(NA_real_)
+    sm2 <- df$tid[(kk + 1):n] == df$tid[1:m]          # same track
+    gp  <- df$tim[(kk + 1):n] - df$tim[1:m]
+    okg <- sm2 & is.finite(gp) & abs(gp - kk * step) < 0.5 * t_c  # kk single-cycle steps apart
+    if (sum(okg, na.rm = TRUE) < 20L) return(NA_real_)
+    v <- (df$x[(kk + 1):n][okg] - df$x[1:m][okg])^2 +
+         (df$y[(kk + 1):n][okg] - df$y[1:m][okg])^2
+    mean(v, na.rm = TRUE)
+  }
+  alpha_short <- if (!is.finite(t_c) || t_c <= 0) NA_real_ else {
+    m1 <- msd_at(1L); m8 <- msd_at(8L)
+    if (is.finite(m1) && is.finite(m8) && m1 > 0 && m8 > 0) log(m8 / m1) / log(8) else NA_real_
+  }
+  list(alpha_short = alpha_short,
+       r1_fgn = if (is.finite(alpha_short)) 2^(alpha_short - 1) - 1 else NA_real_)
+}
+
 # ── cve_estimate() ────────────────────────────────────────────────────────────
 # GOAL: CVE from a data.frame in one call (tests and scripts). Returns cve_core()'s
 # list plus n_steps and frac_integ, or NULL.
@@ -151,33 +192,90 @@ cve_estimate <- function(df, t_c, has_z = FALSE, t_coll = NA_real_, n_vert = 6L)
   c(cc, list(n_steps = st$n_steps, frac_integ = st$frac_integ))
 }
 
-# ── Doughnut CRLB, Vogler et al. 2025 Eq. 1 ─────────────────────────────────
-# sigma(x) = L/(4 sqrt(N)) * [1 + 2(x/L)^2] * |cosh(a) - (x/L) sinh(a)|
-#            / |1 + ln2 (L/nu)^2 ((2x/L)^2 - 1)| ,   a = 4 ln2 x L / nu^2
+# ── Emitter offset from the TCP centre, per pattern geometry ───────────────────
+# During tracking the emitter moves away from the TCP centre while photons are
+# collected, and precision falls off with that offset. Per-axis variance, averaged
+# over axes and over the direction of the offset, follows
+#     sigma^2(r) = sigma0^2 * (1 + c * <r^2> / L^2)
+# with r the radial offset. c comes from the Fisher matrix of the multinomial photon
+# split for an ideal doughnut zero, fitted for r/L <= 0.15 (tests/testthat/
+# test-estimators-tracking.R recomputes it). The triangle loses precision fastest
+# because it samples the fewest directions. `dim` is the number of axes the
+# pattern spans, which sets <r^2> = dim * D * t_loc (the offset averaged over the
+# exposure, since photons arrive throughout it). The octahedron values assume an
+# isotropic 3D zero, which real axial beams are not, so treat them as a guide.
+TCP_PATTERN_GEOM <- list(
+  hexagon    = list(dim = 2L, a_ideal = sqrt(8),    c_off = 8.6),
+  square     = list(dim = 2L, a_ideal = sqrt(8),    c_off = 9.0),
+  triangle   = list(dim = 2L, a_ideal = sqrt(8),    c_off = 13.7),
+  octahedron = list(dim = 3L, a_ideal = sqrt(16/3), c_off = 9.0)
+)
+TCP_PATTERN_DEFAULT <- "hexagon"
+
+# ── .tcp_pattern_name() ───────────────────────────────────────────────────────
+# GOAL: one canonical pattern name from what a user or a file may write: the name
+# itself, a short form, or the 2D vertex count (6 hexagon, 4 square, 3 triangle).
+# 6 means the hexagon, since the octahedron also has 6 vertices; 3D needs its name.
+# RETURNS a name in TCP_PATTERN_GEOM, "" for blank, or NA when not recognised.
+.tcp_pattern_name <- function(x) {
+  v <- tolower(trimws(as.character(x)))[1]
+  if (is.na(v) || !nzchar(v)) return("")
+  aliases <- c("6" = "hexagon", hex = "hexagon", hexagonal = "hexagon",
+               "4" = "square", sq = "square",
+               "3" = "triangle", tri = "triangle", triangular = "triangle",
+               oct = "octahedron", octahedral = "octahedron")
+  if (v %in% names(aliases)) v <- unname(aliases[v])
+  if (v %in% names(TCP_PATTERN_GEOM)) v else NA_character_
+}
+
+# ── .tcp_geom() ───────────────────────────────────────────────────────────────
+# GOAL: look up the geometry constants of a TCP pattern (axes spanned, ideal
+# prefactor, off-centre coefficient) from TCP_PATTERN_GEOM above.
+# Unknown or missing names fall back to the default (hexagon), so a sequence with
+# an unusual final pattern still gets a sensible 2D answer.
+.tcp_geom <- function(pattern = TCP_PATTERN_DEFAULT) {
+  p <- .tcp_pattern_name(pattern %||% TCP_PATTERN_DEFAULT)
+  g <- if (is.na(p)) NULL else TCP_PATTERN_GEOM[[p]]
+  if (is.null(g)) g <- TCP_PATTERN_GEOM[[TCP_PATTERN_DEFAULT]]
+  g
+}
+
+# ── .crlb_doughnut() - photon-budget sigma per localization ─────────────────
+# GOAL: per-axis localization precision of each localization from its photon
+# count, for the pattern the sequence actually ran.
 #
-# L  TCP diameter of the reiterated iteration
-# nu FWHM of the excitation doughnut (instrument constant)
-# N  detected photons for this localization (eco)
-# x  emitter offset from the TCP centre. Zero for an immobile emitter; while
-#    tracking, Vogler model it as the 1D diffusive spread over one localization,
-#    x = sqrt(2 D t_loc), which is why SPT precision is worse than imaging.
+#   sigma = L/(a sqrt(N)) * B * sqrt(1 + c <r^2>/L^2)
 #
-# Vectorised over N. Returns L/(4 sqrt(N)) when nu is not usable, i.e. the
-# nu -> infinity limit, so a missing constant degrades to the old behaviour.
-.crlb_doughnut <- function(L, nu, N, x = 0, pref = TCP_CRLB_PREFACTOR) {
+# L        TCP diameter of the reiterated iteration (nm)
+# nu       FWHM of the excitation doughnut (nm); 0 switches the beam term off
+# N        detected photons for this localization (eco), vectorised
+# D, t_loc diffusion coefficient (nm^2/ms) and time to localization (ms). They
+#          set the offset of the emitter from the TCP centre during the exposure,
+#          <r^2> = dim * D * t_loc (the end-point spread 2*dim*D*t_loc, averaged
+#          over the exposure because photons arrive throughout it). Zero for an
+#          immobile emitter.
+# pref     the effective prefactor a (measured, see packages.R)
+# pattern  TCP geometry: hexagon, square, triangle or octahedron. Sets dim and c.
+#
+# B is the beam-size factor of Vogler et al. 2025 Eq. 1 at the TCP centre,
+# 1/|1 - ln2 (L/nu)^2|, which makes sigma grow faster than L as L approaches nu.
+# The offset is handled by the pattern's own coefficient rather than by Eq. 1's
+# x-dependence, which is written for a single axis.
+.crlb_doughnut <- function(L, nu, N, D = 0, t_loc = 0, pref = TCP_CRLB_PREFACTOR,
+                           pattern = TCP_PATTERN_DEFAULT) {
   if (!length(N)) return(numeric(0))
   if (!is.finite(pref) || pref <= 0) pref <- TCP_CRLB_PREFACTOR
-  base <- L / (pref * sqrt(N))
+  base <- L / (pref * sqrt(N))                     # centred emitter, no beam term
   if (!is.finite(L) || L <= 0) return(base)
-  if (!is.finite(x) || x < 0) x <- 0
-  # nu off (0) = the large-beam limit. The denominator goes to 1 and cosh/sinh to
-  # 1/0, so Eq. 1 collapses to base * [1 + 2(x/L)^2] - the moving-emitter term
-  # SURVIVES. That term is what makes the estimate mode-aware: x = sqrt(2 D t_loc)
-  # is smaller under confinement and larger under directed or fast motion.
-  if (!is.finite(nu) || nu <= 0) return(base * (1 + 2 * (x / L)^2))
-  a   <- 4 * log(2) * x * L / nu^2
-  num <- (1 + 2 * (x / L)^2) * abs(cosh(a) - (x / L) * sinh(a))
-  den <- abs(1 + log(2) * (L / nu)^2 * ((2 * x / L)^2 - 1))
-  if (!is.finite(num) || !is.finite(den) || den <= 0) return(base)
-  base * num / den
+  g <- .tcp_geom(pattern)
+  # mean squared offset over the exposure; motion can only add to it
+  r2 <- if (is.finite(D) && D > 0 && is.finite(t_loc) && t_loc > 0) g$dim * D * t_loc else 0
+  off <- sqrt(1 + g$c_off * r2 / L^2)
+  # beam term, only where the parabolic-zero picture still holds (den well above 0)
+  B <- 1
+  if (is.finite(nu) && nu > 0) {
+    den <- abs(1 - log(2) * (L / nu)^2)
+    if (is.finite(den) && den > 0.1) B <- 1 / den
+  }
+  base * B * off
 }

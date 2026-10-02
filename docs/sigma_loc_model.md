@@ -85,45 +85,100 @@ I_F(x) = N \cdot \frac{L^2\left(4x^2-L^2\right)^2}{4D^4} \cdot \frac{D^2}{\left(
        = \frac{16N}{L^2\left(1 + 4x^2/L^2\right)^2}
 ```
 
-### 2.3 The bound
+### 2.3 The bound in 1D
 
 ```math
-\boxed{\;\sigma_\text{CRLB}(x) \;=\; I_F^{-1/2} \;=\; \frac{L}{4\sqrt{N}}\left[1 + 4\left(\frac{x}{L}\right)^2\right]\;}
+\sigma_\text{1D}(x) \;=\; I_F^{-1/2} \;=\; \frac{L}{4\sqrt{N}}\left[1 + 4\left(\frac{x}{L}\right)^2\right]
 ```
 
-Two things to read off this:
+At the center, $\sigma = L/(4\sqrt{N})$. The 4 is $\sqrt{16}$, and the 16 is $(p')^2/[p(1-p)] \cdot L^2$
+evaluated at $x = 0$, where $p' = -2/L$ and $p(1-p) = 1/4$. Tighter beams (smaller $L$) make $p$ swing
+faster per nanometre of displacement, which is why MINFLUX beats camera SMLM at equal $N$.
 
-- **At the center, $\sigma = L/(4\sqrt{N})$.** The 4 is not a fitted number. It is
-  $\sqrt{16}$, and the 16 is $\left(p'\right)^2/[p(1-p)] \cdot L^2 = (2/L)^2 \cdot 4 \cdot L^2$ evaluated
-  at $x = 0$, where $p' = -2/L$ and $p(1-p) = 1/4$. Tighter beams (smaller $L$) make $p$ swing faster
-  per nanometre of displacement, which is the entire reason MINFLUX beats camera SMLM at equal $N$.
-- **Precision degrades away from the center**, quadratically. During tracking the emitter is
-  displaced from the TCP center by whatever it moved since the last update, $x_\text{rms} \approx \sqrt{4Dt_\text{loc}}$.
+**This is the two-beam, one-axis case. Tracking data is 2D or 3D, and the prefactor changes.**
 
-> The app currently uses $\left[1 + 2(x/L)^2\right]$. The exact 1D two-beam result derived above is
-> $\left[1 + 4(x/L)^2\right]$. At $D = 0.2\ \mu\text{m}^2/\text{s}$, $t_c = 0.2$ ms and $L = 100.8$ nm
-> this is the difference between a 3.1% and a 6.2% correction, so it does not change any conclusion,
-> but the coefficient should be checked against the 2D hexagonal-TCP geometry rather than assumed.
+### 2.4 The bound for a real pattern
 
-### 2.4 What the ideal 4 does not include
+A 2D pattern places $K$ beams on a circle of diameter $L$ (3 for a triangle, 4 for a square, 6 for a
+hexagon). The same argument with a multinomial split instead of a binomial one:
 
-| effect | direction | why it is not derivable |
-|---|---|---|
-| finite doughnut depth / beam size ν | σ worse, and **faster than ∝ L** as $L \to \nu$ | needs the real PSF, not the parabola |
-| background photons | σ worse | carries no position information, flattens $p(x)$ |
-| 2D/3D TCP geometry (hexagon + center vs. two beams) | modest factor | different beam layout, different $p$ |
-| estimator inefficiency (mLMS is not maximum-likelihood) | σ worse | estimator-specific |
-| detector and electronics | σ worse | instrument-specific |
+1. Beam $k$ sits at $\mathbf{b}_k$ with $|\mathbf{b}_k| = L/2$, and $\sum_k \mathbf{b}_k = 0$ by symmetry.
+   Its rate is $\lambda_k \propto |\mathbf{r} - \mathbf{b}_k|^2$, and $p_k = \lambda_k / \sum_j \lambda_j$.
+2. At the center every beam is equally bright: $\lambda_k = L^2/4$, the total is $KL^2/4$, so $p_k = 1/K$.
+3. Moving the emitter along $x$ changes $\lambda_k$ at rate $-2b_{k,x}$ and leaves the total unchanged
+   (its derivative is $2Kx = 0$ at the center), so
+   ```math
+   \frac{\partial p_k}{\partial x} = \frac{-2\,b_{k,x}}{KL^2/4} = -\frac{8\,b_{k,x}}{KL^2}
+   ```
+4. Fisher information for a multinomial is $I_x = N \sum_k (\partial p_k/\partial x)^2 / p_k$:
+   ```math
+   I_x = N \sum_k \frac{64\, b_{k,x}^2}{K^2 L^4} \cdot K = \frac{64N}{KL^4} \sum_k b_{k,x}^2
+   ```
+5. For $K \ge 3$ evenly spaced beams, $\sum_k b_{k,x}^2 = K (L/2)^2 / 2 = KL^2/8$ (each beam contributes its
+   squared radius times $\cos^2$, which averages to $1/2$). So
+   ```math
+   I_x = \frac{8N}{L^2}, \qquad \boxed{\;\sigma_\text{2D} = \frac{L}{\sqrt{8N}}\;}
+   ```
 
-Every one of these multiplies σ by a constant **at fixed L**. So they collapse into one number:
+That is Balzarotti et al. 2017 and Eq. 8 of Scheiderer, Marin & Ries 2024. It does not depend on $K$:
+triangle, square and hexagon share $a = \sqrt{8} \approx 2.83$. The two-beam case gave 4 because both of
+its beams lie on the measured axis; in 2D, each beam's displacement is split between $x$ and $y$, so
+each photon carries less information about either one. An idealised octahedron (six beams on $\pm x$,
+$\pm y$, $\pm z$) gives $\sum_k b_{k,x}^2 = L^2/2$ with $K = 6$, so $I_x = 16N/(3L^2)$ and
+$a = \sqrt{16/3} \approx 2.31$.
+
+**Off the center, the patterns differ.** Solving the full Fisher matrix numerically (off-center the
+axes couple, so the per-axis variance is the diagonal of $I^{-1}$) and averaging over axes and over
+the direction of the offset gives, for small offsets,
 
 ```math
-\boxed{\;\sigma_i \;=\; \frac{L_\text{TCP}}{a\sqrt{N_i}}\left[1 + c\left(\frac{x}{L}\right)^2\right],
+\sigma^2(r) \;\approx\; \sigma_0^2\left(1 + c\,\frac{r^2}{L^2}\right)
+```
+
+| pattern | axes | ideal $a$ | off-center coefficient $c$ |
+|---|---|---|---|
+| triangle | 2 | $\sqrt{8} = 2.83$ | 13.7 |
+| square | 2 | $\sqrt{8} = 2.83$ | 9.0 |
+| hexagon | 2 | $\sqrt{8} = 2.83$ | 8.6 |
+| octahedron (isotropic idealisation) | 3 | $\sqrt{16/3} = 2.31$ | 9.0 |
+
+The triangle loses precision fastest off-center because it samples the fewest directions. Real 3D
+MINFLUX uses an axial beam whose profile differs from the lateral one, so the octahedron row is a
+guide rather than a prediction.
+
+During tracking the emitter drifts off the center while photons arrive. Its squared offset grows as
+$2\,d\,D\,s$ over time $s$ ($d$ = axes the pattern spans), and photons arrive throughout the exposure,
+so the exposure-averaged value is $\langle r^2 \rangle = d\,D\,t_\text{loc}$. At $D = 0.2\ \mu\text{m}^2/\text{s}$,
+$t_\text{loc} = 0.2$ ms and $L = 100.8$ nm this raises σ by about 3.5% for the hexagon and 5.5% for the
+triangle. The table is recomputed from the Fisher matrix in `tests/testthat/test-estimators-tracking.R`.
+
+### 2.5 Why the prefactor has to be measured
+
+The ideal bound leaves out effects that make σ worse:
+
+| effect | direction |
+|---|---|
+| finite doughnut depth / beam size ν | σ worse, and **faster than ∝ L** as $L \to \nu$ |
+| background photons | σ worse: they carry no position information and flatten $p$ |
+| detector and electronics | σ worse |
+
+and one that can make σ look *better*: **the instrument's estimator is biased.** The Cramér-Rao bound
+applies to unbiased estimators only. The Abberior estimator corrects a least-mean-squares estimate with
+pre-computed coefficients and reports positions that are pulled toward the TCP center, and the
+tracking loop centers each pattern on the previous estimate, which correlates successive errors. Both
+let the exported positions scatter less than an unbiased estimate would.
+
+Immobile-sample calibrations bear this out: fixed cells tracked with a 2D hexagonal sequence at
+$L = 100.8$ nm give $a$ of about 3.5 to 4.2, above the ideal $\sqrt{8}$. So **no Cramér-Rao value bounds $a$ in either direction for exported data**,
+and $a$ is an instrument constant to be measured, per sequence, rather than a derived number:
+
+```math
+\boxed{\;\sigma_i \;=\; \frac{L_\text{TCP}}{a\sqrt{N_i}}\,\sqrt{1 + c\,\frac{\langle r^2\rangle}{L^2}}\,,
 \qquad N_i = \text{ECO}_i \;}
 ```
 
-with $a \le 4$, and $a = 4$ the unreachable ideal. **The model has exactly one free parameter**, and
-it has a hard theoretical ceiling — which is what makes it falsifiable.
+What survives from the theory is the functional form: $\sigma^2 \propto L^2/N$, which §4 tests directly,
+and the pattern-specific coefficient $c$.
 
 ---
 
@@ -192,9 +247,13 @@ short-lag MSD within each bin, and regress the intercept on $\langle 1/N\rangle$
 $\sigma^2 = L^2/(a^2 N)$ the relation is linear **through the origin**; a photon-independent error
 floor (TCP placement, background, stage) would appear as a positive intercept.
 
-**The prefactor is bracketed, not measured.** Because §3.2 shows the MSD intercept is biased *upward*,
-the fitted $a$ is a **lower bound on $a$**, equivalently an **upper bound on σ**. Theory gives the other
-side, $a \le 4$. The result is a window on σ, which is a stronger statement than a point estimate.
+**What the fit returns is an effective prefactor.** Two biases act on the short-lag intercept in
+opposite directions. The concave wander of §3.2 pushes a straight-line intercept up, and the positive
+correlation that the tracking loop puts between successive errors pulls the lag-1 MSD down. Neither
+can be bounded from the data alone, so the fitted $a$ is neither an upper nor a lower bound. It is the
+value that reproduces the noise as it enters short-lag displacements, which is the quantity the
+downstream estimators subtract, and that is the sense in which it is the right calibration. Record it
+per sequence: pattern, $L$ and photon limit all change it.
 
 **Calibrate on fixed cells labelled as the live sample, not on beads.** A bead is an extended, bright,
 coverslip-mounted object: it is not a point emitter, it sits at a different axial position relative to
@@ -244,47 +303,49 @@ range with it.
 
 The photon-budget CRLB is the correct channel, and the only one available: §3 shows the trajectory
 cannot supply σ independently on a feedback-tracked instrument, whatever the estimator. Eq. 1 of Vogler
-et al. 2025 is that CRLB with the two refinements that matter: the emitter-offset term, essential for
-tracking, where the molecule is never at the TCP center, and the beam-size denominator.
+et al. 2025 is that CRLB with the two refinements that matter for tracking: the emitter-offset term,
+since the molecule is never exactly at the TCP center, and the beam-size denominator.
 
 1. **The beam-size term is opt-in.** It requires ν, an instrument constant most users cannot state,
    and its effect is confined to $L \to \nu$. Defaulting it on would import an unverifiable number into
    every σ.
-2. **The prefactor is not universal.** A fixed prefactor implicitly fixes the collection efficiency,
-   background and estimator of one microscope. Exposing $a$, with the ideal 4 as its ceiling, makes the
-   model portable and gives a self-check: a calibration returning $a > 4$ means something is wrong
-   (usually σ underestimated by an over-cleaned dataset), and $a \ll 4$ means background or alignment
-   dominates, so the photon model alone will understate σ.
+2. **The prefactor is not universal, and theory does not fix it.** The ideal unbiased value depends
+   only on the pattern ($\sqrt{8}$ in 2D), but exported positions come from a biased estimator inside a
+   feedback loop, and an immobile-sample calibration lands above that value (§2.5). Exposing $a$ as a
+   measured instrument constant is what makes the model portable. A calibration far *below*
+   $\sqrt{8}$ is the informative warning sign: background or alignment then dominates, and $\sigma$ grows
+   faster with falling $N$ than the photon model alone predicts.
+
+Eq. 1's offset term is written for one axis. The app replaces it with the coefficient of the actual
+pattern (§2.4), and keeps Eq. 1's beam factor evaluated at the center.
 
 ---
 
 ## 8. How the app uses it
 
-$\sigma_i = \dfrac{L_\text{TCP}}{a\sqrt{N_i}}\left[1 + c\left(x/L\right)^2\right]$ per localization,
-with $a$ defaulting to 4. The default is the theoretical bound rather than a fitted number because:
+```math
+\sigma_i = \frac{L_\text{TCP}}{a\sqrt{N_i}}\,B\,\sqrt{1 + c\,\frac{d\,D\,t_\text{loc}}{L^2}}
+```
 
-- a fitted value is biased in a known direction (§3.2), so it is a bound, not an estimate;
-- $a = 4$ makes σ a stated *lower bound* on the localization error, the conservative direction for
-  every downstream test that subtracts σ (JDD, confinement, D-map, HMM);
-- it is portable with no calibration, and any user can improve on it.
+per localization, where $B = 1/|1 - \ln 2\,(L/\nu)^2|$ is the beam factor (1 when ν is off), $c$ and $d$
+come from the **TCP pattern** setting, $D$ from the CVE and $t_\text{loc}$ is the single-cycle interval.
 
-In practice:
-
-1. **Report the bracket**: σ at $a = 4$, and the immobile-sample bound when one has been measured.
-2. **$a$ is user-adjustable, with 4 as its upper limit.**
-3. **Calibrate on fixed cells, not beads**, at the $L$ you track at, and treat the result as an upper
-   bound on σ.
-4. **Report $D_w$ alongside D**, never subtract it, and quote the lag range it was fitted over.
-
-**Limitation: the offset coefficient $c$.** The app uses $c = 2$. The exact value for a 1D two-beam
-pattern is 4, and the value for the 2D hexagonal TCP has not been derived. The term matters only when
-the emitter moves a sizeable fraction of $L$ within one localization, i.e. for fast diffusion.
+- **$a$ comes from a calibration profile**, measured on an immobile sample with the sequence in
+  question (*Instrument Calibration*, `R/est_calib.R`) and kept with the sequence it belongs to.
+  Without one, $a$ is the ideal-estimator value of the pattern ($\sqrt{8}$ in 2D) and σ is labelled
+  uncalibrated. There is no system-independent value to ship: the effective $a$ depends on the
+  instrument's estimator, background, photon limit, dwell, L and damping.
+- **The TCP pattern is read from the sequence file** (final iteration) when one is loaded, and can be
+  set by hand. Unrecognised patterns fall back to the hexagon.
+- **Calibrate on fixed cells labelled as the live sample**, with the sequence used on the live sample.
+- **Report $D_w$ alongside D**, never subtract it, and quote the lag range it was fitted over.
 
 ### What to report in a methods section
 
-> Localization precision was computed per localization from the MINFLUX Cramér-Rao bound,
-> σ = L/(a√N), with N the photon count at offset (ECO), L the TCP diameter taken from the acquisition
-> sequence (patGeoFactor × 360 nm = XXX nm) and a = 4 the ideal doughnut prefactor. A fixed,
-> identically labelled sample gave an upper bound of a ≥ X.XX from the short-lag MSD intercept,
-> bounding σ within X% of the ideal. The apparent diffusion coefficient of that immobile sample was
+> Localization precision was computed per localization from the MINFLUX photon budget,
+> σ = L/(a√N)·√(1 + c·⟨r²⟩/L²), with N the photon count at offset (ECO), L the TCP diameter taken
+> from the acquisition sequence (patGeoFactor × 360 nm = XXX nm), c = X.X the off-center coefficient
+> of the [hexagonal] pattern and ⟨r²⟩ the exposure-averaged offset of the moving emitter. The prefactor
+> a = X.XX was measured as the short-lag MSD intercept of a fixed, identically labelled sample tracked
+> with the same sequence. The apparent diffusion coefficient of that immobile sample was
 > D_w = XXX nm²/ms over lags 1–5, quoted alongside all reported D.

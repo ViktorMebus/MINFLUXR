@@ -168,8 +168,8 @@ tracking_server <- function(input, output, session) {
   TPC_MIN <- 5L
   .tids_per_chunk <- function() {
     v <- suppressWarnings(as.integer(isolate(input$trk_tids_per_chunk)))
-    if (!is.finite(v) || v < 1L) return(TIDS_PER_CHUNK_DEFAULT)   # blank / garbage
-    max(TPC_MIN, v)
+    if (!length(v) || !is.finite(v[1]) || v[1] < 1L) return(TIDS_PER_CHUNK_DEFAULT)   # unset / blank / garbage
+    max(TPC_MIN, v[1])
   }
 
   # ── Which chunk the selector lands on when it is rebuilt ────────────────────
@@ -313,20 +313,7 @@ tracking_server <- function(input, output, session) {
   # forgiven while 10–20-cycle steps are heavily down-weighted). The per-track score
   # is the mean weight over its steps, in [0,1] (1 = every step integrated). Returns
   # a named vector (tid → score). Half-life 0/NA → binary integrated fraction.
-  .continuity_scores <- function(df, t_c, half_life = 3) {
-    if (is.null(df) || !nrow(df) || !all(c("tid","tim") %in% names(df)) ||
-        !is.finite(t_c) || t_c <= 0) return(NULL)
-    utid <- unique(df$tid); tf <- match(df$tid, utid)     # integer track codes
-    ord  <- order(tf, df$tim, method = "radix")           # radix sort (fast on integers)
-    tf   <- tf[ord]; tim <- df$tim[ord]; n <- length(tf)
-    step <- c(FALSE, tf[-1] == tf[-n])
-    dt   <- c(NA_real_, diff(tim)); dt[!step] <- NA_real_
-    k    <- pmax(1L, as.integer(round(dt / t_c)))
-    w    <- if (is.finite(half_life) && half_life > 0) 2^(-(k - 1) / half_life)
-            else as.numeric(k == 1L)     # half-life 0 → pure integrated fraction
-    sc   <- tapply(w[step], tf[step], mean)               # by integer code
-    stats::setNames(as.numeric(sc), utid[as.integer(names(sc))])   # map codes → tids
-  }
+  .continuity_scores <- continuity_scores                  # R/est_clean.R
 
   # Does the z column carry REAL axial data, or is it a placeholder?
   # 2D MINFLUX exports routinely ship an all-zero (or constant) z column, and 0 is
@@ -417,7 +404,8 @@ tracking_server <- function(input, output, session) {
   # reported as `degenerate` - enter σ_loc manually in that case.
   # ============================================================================
   trk_cve_bundle <- eventReactive(input$trk_cve_run, {
-    df <- tryCatch(trk_gap_split(), error = function(e) NULL)
+    # The filtered data of the active dataset, as every other analysis reads it.
+    df <- tryCatch(trk_spatial_filtered(), error = function(e) NULL)
     req(!is.null(df), nrow(df) > 0, all(c("x","y","tid","tim") %in% names(df)))
     t_c   <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
     # Real axial data only - a placeholder all-zero z column would dilute both σ_loc
@@ -608,11 +596,11 @@ tracking_server <- function(input, output, session) {
                                   method = "spearman", use = "complete.obs")) else NA_real_
 
     # ── σ_loc from the photon budget - the value the app actually uses ─────────
-    # σ_i = L_TCP / (4*sqrt(N_i)) per localization, N = eco. This is a direct
-    # instrument model: it needs no assumption about the motion, is per-localization
-    # rather than pooled, and does not inherit the step-size inflation that
-    # population heterogeneity and drift push into the CVE's ⟨Δx²⟩ term.
-    # The CVE σ above is retained as a CROSS-CHECK on L, not as the noise floor.
+    # σ_i = L_TCP / (a*sqrt(N_i)) per localization, N = eco, a the measured effective
+    # prefactor, plus the pattern's off-centre term (.crlb_doughnut, est_cve.R). It is
+    # per-localization rather than pooled, and does not inherit the step-size
+    # inflation that population heterogeneity and drift push into the CVE's ⟨Δx²⟩
+    # term. The CVE σ above is kept as a diagnostic only.
     # ── Are the increments consistent with ANY motion model? ───────────────────
     # A subdiffusive walk already has anti-correlated increments before any noise:
     # for fBm with Hurst H = alpha/2, fGn gives cov1/var = 2^(alpha-1) - 1.
@@ -622,37 +610,24 @@ tracking_server <- function(input, output, session) {
     # correlation, i.e. the trajectory was smoothed before it was written - galvo
     # damping (DMP > 0) being the obvious candidate. No estimator can recover
     # sigma from filtered increments, so this is a data-quality flag, not a knob.
-    alpha_short <- {
-      msd_at <- function(kk) {
-        m <- n - kk
-        if (m < 10L) return(NA_real_)
-        sm2 <- df$tid[(kk + 1):n] == df$tid[1:m]
-        gp  <- df$tim[(kk + 1):n] - df$tim[1:m]
-        okg <- sm2 & is.finite(gp) & abs(gp - kk * t_c) < 0.5 * t_c
-        if (sum(okg, na.rm = TRUE) < 20L) return(NA_real_)
-        v <- (df$x[(kk + 1):n][okg] - df$x[1:m][okg])^2 +
-             (df$y[(kk + 1):n][okg] - df$y[1:m][okg])^2
-        mean(v, na.rm = TRUE)
-      }
-      m1 <- msd_at(1L); m8 <- msd_at(8L)
-      if (is.finite(m1) && is.finite(m8) && m1 > 0 && m8 > 0)
-        log(m8 / m1) / log(8) else NA_real_
-    }
-    r1_fgn <- if (is.finite(alpha_short)) 2^(alpha_short - 1) - 1 else NA_real_
+    sm <- smoothing_check(df, t_c, dt_int)              # R/est_cve.R
+    alpha_short <- sm$alpha_short; r1_fgn <- sm$r1_fgn
 
     L_tcp <- suppressWarnings(as.numeric(input$trk_L_tcp %||% DMAX_L_TCP_DEFAULT))
     if (!is.finite(L_tcp) || L_tcp <= 0) L_tcp <- DMAX_L_TCP_DEFAULT
     ecov  <- if ("eco" %in% names(df)) df$eco[is.finite(df$eco) & df$eco > 0] else numeric(0)
-    # Vogler Eq. 1 rather than its large-beam limit. x is the offset the emitter
-    # reaches between re-centrings, sqrt(2 D t_loc) with D from the CVE above -
-    # small here (~9 nm against L = 100.8) but it grows with D and shrinks with L.
+    # The emitter drifts off the TCP centre while photons are collected; D from the
+    # CVE above and the single-cycle interval set how far. The pattern sets how
+    # fast precision falls off with that offset (TCP_PATTERN_GEOM).
     nu_beam <- suppressWarnings(as.numeric(input$trk_beam_fwhm %||% TCP_BEAM_FWHM_NM))
     if (!is.finite(nu_beam) || nu_beam <= 0) nu_beam <- TCP_BEAM_FWHM_NM
-    x_off <- if (is.finite(D_cve) && D_cve > 0 && is.finite(dt_int) && dt_int > 0)
-               sqrt(2 * D_cve * dt_int) else 0
-    a_pref <- suppressWarnings(as.numeric(input$trk_crlb_pref %||% TCP_CRLB_PREFACTOR))
-    if (!is.finite(a_pref) || a_pref <= 0) a_pref <- TCP_CRLB_PREFACTOR
-    sig_phot_i   <- if (length(ecov)) .crlb_doughnut(L_tcp, nu_beam, ecov, x_off, a_pref) else numeric(0)
+    tcp_pat <- input$trk_tcp_pattern %||% TCP_PATTERN_DEFAULT
+    D_off   <- if (is.finite(D_cve) && D_cve > 0) D_cve else 0
+    t_off   <- if (is.finite(dt_int) && dt_int > 0) dt_int else 0
+    r_off   <- sqrt(.tcp_geom(tcp_pat)$dim * D_off * t_off)   # rms offset over the exposure, nm
+    a_pref <- .a_in_use(tcp_pat)
+    sig_phot_i   <- if (length(ecov)) .crlb_doughnut(L_tcp, nu_beam, ecov, D = D_off, t_loc = t_off,
+                                                     pref = a_pref, pattern = tcp_pat) else numeric(0)
     sig_phot_med <- if (length(sig_phot_i)) stats::median(sig_phot_i) else NA_real_
     sig_phot_iqr <- if (length(sig_phot_i) >= 5L)
                       as.numeric(diff(stats::quantile(sig_phot_i, c(.25, .75)))) else NA_real_
@@ -665,7 +640,7 @@ tracking_server <- function(input, output, session) {
          R_blur = R_blur, msq = msq, n_vert = n_vert, t_coll = t_coll,
          sig_phot = sig_phot_i, sig_phot_med = sig_phot_med, sig_phot_iqr = sig_phot_iqr,
          eco_med = eco_med, L_tcp = L_tcp, n_phot = length(ecov),
-         nu_beam = nu_beam, x_off = x_off,
+         nu_beam = nu_beam, r_off = r_off, tcp_pattern = tcp_pat,
          sig_simple = if (length(ecov)) stats::median(L_tcp / (a_pref * sqrt(ecov))) else NA_real_,
          a_pref = a_pref,
          alpha_short = alpha_short, r1_fgn = r1_fgn,
@@ -719,8 +694,11 @@ tracking_server <- function(input, output, session) {
     # The PHOTON estimate is the value the app uses; the CVE follows as a check.
     sigma_line <- if (is.finite(b$sig_phot_med))
       row(htmltools::tags$b(sigloc(), sprintf(" %.2f nm", b$sig_phot_med)),
-          dim_(sprintf("  CRLB (Vogler Eq. 1)  \u00b7  L = %.1f nm  \u00b7  \u03bd = %.0f nm  \u00b7  x = %.1f nm  \u00b7  median ECO %.0f  \u00b7  %s locs",
-                       b$L_tcp, b$nu_beam %||% NA_real_, b$x_off %||% 0,
+          dim_(sprintf("  photon budget  \u00b7  %s  \u00b7  L = %.1f nm  \u00b7  a = %.2f%s  \u00b7  offset %.1f nm  \u00b7  median ECO %.0f  \u00b7  %s locs",
+                       b$tcp_pattern %||% TCP_PATTERN_DEFAULT, b$L_tcp, b$a_pref %||% NA_real_,
+                       if (is.finite(b$nu_beam %||% NA_real_) && b$nu_beam > 0)
+                         sprintf("  \u00b7  \u03bd = %.0f nm", b$nu_beam) else "",
+                       b$r_off %||% 0,
                        b$eco_med %||% NA_real_, format(b$n_phot %||% 0L, big.mark = ","))),
           if (is.finite(b$sig_simple %||% NA_real_))
             dim_(sprintf("  \u00b7  %.2f before the motion term", b$sig_simple)) else NULL)
@@ -738,7 +716,7 @@ tracking_server <- function(input, output, session) {
         sprintf("increments: \u03b1 = %.2f \u2192 r\u2081 should be \u2264 %+.3f, observed %+.3f",
                 b$alpha_short %||% NA_real_, b$r1_fgn, b$r1_norm),
         if (viol) htmltools::HTML(sprintf(
-          "  &#9888; %.1f\u00d7 too weak \u2014 the trajectory looks smoothed (check galvo damping, DMP)",
+          "  &#9888; %.1f\u00d7 too weak: the positions carry correlated error (galvo damping, or the tracking loop when motion is small)",
           b$r1_fgn / b$r1_norm)) else "  \u2713 consistent"))
     } else NULL
 
@@ -821,6 +799,24 @@ tracking_server <- function(input, output, session) {
                    pair_txt(100 * fi_raw, 100 * fi_filt, "%.0f%%"),
                    pair_txt(c_raw, c_filt, "%.2f"),
                    if (is.finite(c_raw) && is.finite(c_filt) && (c_filt - c_raw) > 0.01) " \u25b2" else "")))
+    # Where a came from: a calibration profile, the ideal-estimator fallback
+    # (uncalibrated), or a value typed by hand.
+    prof_line <- if (is.finite(b$sig_phot_med %||% NA_real_)) {
+      a_used <- b$a_pref %||% NA_real_
+      ideal  <- .tcp_geom(b$tcp_pattern %||% TCP_PATTERN_DEFAULT)$a_ideal
+      prof   <- trk_cal_profiles()[[input$trk_cal_profile %||% ""]]
+      if (!is.null(prof) && isTRUE(abs(a_used - prof$a) < 1e-3))
+        row(dim_(sprintf("calibrated: %s  \u00b7  a = %.2f (quartiles %.2f\u2013%.2f over %d cells)",
+                         prof$name, prof$a, prof$a_q25 %||% NA_real_, prof$a_q75 %||% NA_real_,
+                         as.integer(prof$n_cells %||% NA))))
+      else if (isTRUE(abs(a_used - ideal) < 1e-9))
+        row(warn(sprintf(paste0("uncalibrated: a = %.2f is the ideal-estimator value for this pattern; ",
+                                "measure it for this sequence under Instrument Calibration"), a_used)))
+      else
+        row(dim_(sprintf("a = %.2f entered by hand  \u00b7  at the ideal-estimator value %.2f, %s would be %.2f nm",
+                         a_used, ideal, "\u03c3", b$sig_phot_med * a_used / ideal)))
+    } else NULL
+
     calib_line <- row(dim_(sprintf(
       "cycle %s  \u00b7  D %s \u00b5m\u00b2/s%s  \u00b7  %s steps",
       num(b$t_cycle, "%.4g ms", "unknown"), num(d_use / 1e3, "%.3g"),
@@ -856,7 +852,7 @@ tracking_server <- function(input, output, session) {
     } else NULL
 
     htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
-      sigma_line, smooth_line, blur_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line,
+      sigma_line, prof_line, smooth_line, blur_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line,
       dw_line, qc_line)
   })
 
@@ -1062,7 +1058,7 @@ tracking_server <- function(input, output, session) {
   
   # ---- Optional chunk picker (manifest.csv in same folder as upload) ----
   output$trk_chunk_ui <- renderUI({
-    req(input$trk_file)
+    req(trk_has_data())
     
     # If we're still preparing chunks, show a placeholder message
     if (isTRUE(rv$chunking)) {
@@ -1073,7 +1069,8 @@ tracking_server <- function(input, output, session) {
     }
     
     # Otherwise, if a manifest exists, show the chunk selector
-    dirp <- if (!is.null(rv$manifest_dir)) rv$manifest_dir else dirname(input$trk_file$datapath[1])
+    req(!is.null(rv$manifest_dir))
+    dirp <- rv$manifest_dir
     manf <- file.path(dirp, "manifest.csv")
     if (file.exists(manf)) {
       man <- readr::read_csv(manf, show_col_types = FALSE)
@@ -1206,17 +1203,209 @@ tracking_server <- function(input, output, session) {
                sprintf(" (applied: %.3f) - press Plot Data to apply.", appl))
   })
 
-  # ---- Big-file detection & chunking/compression on upload ---------------------
+  # ============================================================================
+  # DATASETS - uploads add files to a store; one VIEW of it is active
+  # ============================================================================
+  # Every uploaded file is read once and kept on disk (trk_store). The active
+  # view is either one file or all loaded files merged (track ids then prefixed
+  # F1_, F2_, ... so they cannot collide). Activating a view runs the ingest
+  # below - chunking, frozen raw statistics, the Filter & Rechunk reset point -
+  # exactly as an upload used to, so everything downstream sees a fresh dataset.
+  # Removing a file drops it from the store and activates another one.
+  trk_store     <- reactiveVal(list())          # name -> list(path, n, json_itr)
+  trk_view      <- reactiveVal(character(0))    # names of the files in the active view
+  trk_store_dir <- file.path(tempdir(), paste0("trk_store_", session$token))
+  .trk_last_active <- ""                        # last ingested view (guards the selector echo)
+  .trk_ingest_n    <- 0L                        # makes every ingest's chunk dir unique
+
+  # TRUE once there is a dataset to show (any view, or an adopted chunk manifest).
+  trk_has_data <- reactive(length(trk_view()) > 0L || !is.null(rv$manifest_dir))
+
+  # Name of the active view for labels and download file names.
+  trk_view_label <- reactive({
+    v <- trk_view()
+    if (!length(v)) "tracking" else if (length(v) == 1L) v
+    else sprintf("%d files merged (%s, …)", length(v), v[1])
+  })
+  trk_view_base <- reactive({
+    v <- trk_view()
+    if (!length(v)) return("tracking")
+    b <- tools::file_path_sans_ext(v[1])
+    if (length(v) > 1L) paste0(b, "_merged", length(v)) else b
+  })
+
+  # Loader for one file → data.frame (or NULL).  Returns attr "json_itr".
+  load_one_trk <- function(p, nm) {
+    d <- NULL; jitr <- NA_integer_
+    if (grepl("\\.csv(\\.gz)?$", nm)) {
+      d <- data.table::fread(p, showProgress = FALSE, nThread = max(1, parallel::detectCores()-1)) |>
+           as.data.frame()
+      # A CSV arrives with some axial factor already applied; return z to raw so
+      # trk_raw_df() applies the user's calibration once (it was applied twice).
+      d <- strip_csv_z_calibration(d)
+      d <- canonicalize_minflux_df(d)
+    } else if (grepl("\\.(qs|fst)$", nm)) {
+      # read_chunk_file reports a missing 'qs' rather than throwing, so a machine
+      # without it degrades to "this file was skipped" instead of a stack trace.
+      d <- read_chunk_file(p)
+      if (is.null(d)) return(NULL)
+    } else if (grepl("\\.rds$", nm)) {
+      d <- readRDS(p)
+      if (!is.data.frame(d)) return(NULL)
+      d <- canonicalize_minflux_df(d)
+    } else if (grepl("\\.json$", nm)) {
+      # z_scale = 1: chunks store RAW z. The axial calibration is applied once,
+      # in trk_raw_df(), so every format lands on the same footing.
+      d <- read_minflux_json_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE,
+                                   z_scale = 1.0)
+      jitr <- if ("itr" %in% names(d) && nrow(d) > 0) max(d$itr, na.rm = TRUE) else NA_integer_
+    } else if (grepl("\\.npy$", nm)) {
+      d <- read_minflux_npy_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE,
+                                  z_scale = 1.0)
+      jitr <- if ("itr" %in% names(d) && nrow(d) > 0) max(d$itr, na.rm = TRUE) else NA_integer_
+    } else {
+      return(NULL)
+    }
+    attr(d, "json_itr") <- jitr
+    d
+  }
+
+  # Choices for the Active dataset selector: every file, plus the merged view.
+  .trk_view_choices <- function(store) {
+    nm <- names(store)
+    ch <- stats::setNames(nm, nm)
+    if (length(nm) >= 2L)
+      ch <- c(ch, stats::setNames("__merged__", sprintf("All %d loaded files, merged", length(nm))))
+    ch
+  }
+
+  # ── .trk_ingest() ──────────────────────────────────────────────────────────
+  # GOAL: make one data.frame the active dataset: per-track summary, frozen raw
+  # statistics (histogram backgrounds, filter reset), chunks on disk, manifest.
+  # This is the body the upload observer used to run on its merged data.
+  .trk_ingest <- function(df, label) {
+    rv$bigfile_notice <- FALSE
+    rv$chunking <- TRUE
+    on.exit({ rv$chunking <- FALSE }, add = TRUE)
+    .trk_ingest_n <<- .trk_ingest_n + 1L
+    safe_base <- gsub("[^A-Za-z0-9_-]+", "_", label)
+    out_dir <- file.path(tempdir(), sprintf("chunks_%s_%d_%d", safe_base, as.integer(Sys.time()), .trk_ingest_n))
+
+    # Compute per-TID summary (duration in ms, n_pts) and sort longest-first
+    # tim * 1000 matches the ms conversion trk_raw_df() applies after chunk loading
+    tid_sum <- df %>%
+      dplyr::group_by(tid) %>%
+      dplyr::summarise(
+        duration_ms = (max(tim, na.rm = TRUE) - min(tim, na.rm = TRUE)) * 1000,
+        n_pts        = dplyr::n(),
+        .groups      = "drop"
+      ) %>%
+      dplyr::arrange(dplyr::desc(duration_ms))
+
+    # Reorder df rows so chunks end up sorted by duration (longest first)
+    df <- df[order(match(df$tid, tid_sum$tid)), , drop = FALSE]
+
+    # Freeze raw stats for histogram grey bars and filter reset.
+    # Done once per dataset - never overwritten by chunk switching or rechunking.
+    # tim stored in ms (raw file seconds; trk_raw_df multiplies by 1000).
+    loc_vec <- function(col) if (col %in% names(df)) df[[col]][is.finite(df[[col]])] else numeric(0)
+    trk_raw_stats_rv(list(
+      tid_length   = as.numeric(table(df$tid)),
+      tid_duration = tid_sum$duration_ms,
+      efo          = loc_vec("efo"),
+      cfr          = loc_vec("cfr"),
+      dcr          = loc_vec("dcr"),
+      tim          = loc_vec("tim") * 1000,
+      eco          = loc_vec("eco"),
+      dwell        = loc_vec("dwell"),
+      fluo         = loc_vec("fluo")
+    ))
+    trk_rechunk_stats_rv(NULL)  # clear any leftover rechunk stats from prior dataset
+    trk_rechunk_bbox(NULL)      # clear locked spatial extent from prior dataset
+    trk_spatial_filter(NULL)    # a crop drawn on another dataset does not apply here
+    trk_chunk_pref("__all__")   # a new dataset does not inherit a chunk scoping
+
+    user_tpc <- .tids_per_chunk()
+
+    manf <- split_by_tid_to_dir(
+      df, out_dir,
+      tids_per_chunk = user_tpc,
+      fmt = CHUNK_FORMAT
+    )
+    if (file.exists(manf)) {
+      rv$manifest_dir          <- dirname(manf)
+      rv$original_manifest_dir <- rv$manifest_dir
+      trk_data_key(as.character(as.numeric(Sys.time())))
+      # Save per-TID summary alongside the manifest
+      readr::write_csv(tid_sum, file.path(rv$manifest_dir, "tid_summary.csv"))
+      rv$chunking <- FALSE
+    } else {
+      # Fallback: compress to a single chunk, in whatever format the app writes.
+      # This used to call qs::qsave() unconditionally, which crashed the upload on
+      # any machine without qs even though CHUNK_FORMAT had already fallen back.
+      out_one <- file.path(out_dir, paste0(safe_base, ".", CHUNK_FORMAT))
+      dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+      if (identical(CHUNK_FORMAT, "qs") && requireNamespace("qs", quietly = TRUE))
+        qs::qsave(df, out_one, preset = "high")
+      else
+        fst::write_fst(as.data.frame(df), out_one, compress = 50)
+      man <- data.frame(chunk = 1L, n_tids = length(unique(df$tid)), file = out_one)
+      readr::write_csv(man, file.path(out_dir, "manifest.csv"))
+      readr::write_csv(tid_sum, file.path(out_dir, "tid_summary.csv"))
+      rv$manifest_dir          <- out_dir
+      rv$original_manifest_dir <- out_dir
+      trk_data_key(as.character(as.numeric(Sys.time())))
+      rv$chunking <- FALSE
+    }
+    invisible(NULL)
+  }
+
+  # ── .trk_activate() ────────────────────────────────────────────────────────
+  # GOAL: build the data of one view from the store and ingest it.
+  # sel : a file name, or "__merged__" for all loaded files
+  .trk_activate <- function(sel) {
+    store <- isolate(trk_store())
+    files <- if (identical(sel, "__merged__")) names(store) else intersect(sel, names(store))
+    if (!length(files)) return(invisible(NULL))
+    dfs <- lapply(seq_along(files), function(i) {
+      d <- read_chunk_file(store[[files[i]]]$path)
+      if (is.null(d)) return(NULL)
+      if (length(files) > 1L) d$tid <- paste0("F", i, "_", as.character(d$tid))
+      d
+    })
+    df <- dplyr::bind_rows(Filter(Negate(is.null), dfs))
+    if (!nrow(df)) {
+      showNotification("The selected dataset could not be read.", type = "error", duration = 8)
+      return(invisible(NULL))
+    }
+    .trk_last_active <<- sel
+    trk_view(files)
+    withProgress(message = sprintf("Preparing %s...", if (length(files) > 1L)
+                                     sprintf("%d merged files", length(files)) else files),
+                 value = 0.5, .trk_ingest(df, isolate(trk_view_base())))
+    if (length(files) > 1L)
+      showNotification(sprintf("Merged %d files into one dataset (%s localizations).",
+                               length(files), format(nrow(df), big.mark = ",")),
+                       type = "message", duration = 6)
+    invisible(NULL)
+  }
+
+  # Point the selector at a view and ingest it directly. Setting the selector to
+  # the value it already holds does not fire its observer (e.g. re-uploading a
+  # file of the same name), so the ingest cannot be left to the observer.
+  .trk_set_active <- function(sel) {
+    updateSelectInput(session, "trk_active", choices = .trk_view_choices(isolate(trk_store())),
+                      selected = sel)
+    .trk_activate(sel)
+  }
+
+  # ---- Upload: read every file into the store -------------------------------
   observeEvent(input$trk_file, {
     req(input$trk_file)
-    rv$bigfile_notice        <- FALSE
-    rv$manifest_dir          <- NULL
-    rv$original_manifest_dir <- NULL
-
-    # input$trk_file may hold several rows (multiple files selected for merging)
     n_files   <- nrow(input$trk_file)
     paths     <- input$trk_file$datapath
-    names_v   <- tolower(input$trk_file$name)
+    names_o   <- as.character(input$trk_file$name)          # as uploaded, for display
+    names_v   <- tolower(names_o)                           # for extension checks
     size_bytes <- sum(suppressWarnings(as.numeric(input$trk_file$size)), na.rm = TRUE)
     if (!is.finite(size_bytes) || size_bytes <= 0) {
       info <- tryCatch(file.info(paths), error = function(e) NULL)
@@ -1225,7 +1414,7 @@ tracking_server <- function(input, output, session) {
     size_mb <- round(as.numeric(size_bytes) / (1024^2), 1)
 
     # If a single file is uploaded next to an existing manifest, adopt it and bail.
-    # (Skipped for multi-file merges - those always re-chunk the combined data.)
+    # (Skipped for multi-file uploads.) The adopted chunks bypass the store.
     if (n_files == 1L) {
       dirp <- dirname(paths[1])
       if (file.exists(file.path(dirp, "manifest.csv"))) {
@@ -1241,177 +1430,83 @@ tracking_server <- function(input, output, session) {
       }
     }
 
-    # Always chunk/compress every upload for efficient chunked loading
-    rv$chunking <- TRUE
-    on.exit({ rv$chunking <- FALSE }, add = TRUE)
-    safe_base <- gsub("[^A-Za-z0-9_-]+", "_", tools::file_path_sans_ext(basename(names_v[1])))
-    if (n_files > 1L) safe_base <- paste0(safe_base, "_merged", n_files)
-    out_dir <- file.path(tempdir(), paste0("chunks_", safe_base, "_", as.integer(Sys.time())))
-
-    # Loader for one file → data.frame (or NULL).  Returns attr "json_itr".
-    load_one_trk <- function(p, nm) {
-      d <- NULL; jitr <- NA_integer_
-      if (grepl("\\.csv(\\.gz)?$", nm)) {
-        d <- data.table::fread(p, showProgress = FALSE, nThread = max(1, parallel::detectCores()-1)) |>
-             as.data.frame()
-        d <- canonicalize_minflux_df(d)
-      } else if (grepl("\\.(qs|fst)$", nm)) {
-        # read_chunk_file reports a missing 'qs' rather than throwing, so a machine
-        # without it degrades to "this file was skipped" instead of a stack trace.
-        d <- read_chunk_file(p)
-        if (is.null(d)) return(NULL)
-      } else if (grepl("\\.rds$", nm)) {
-        d <- readRDS(p)
-        if (!is.data.frame(d)) return(NULL)
-        d <- canonicalize_minflux_df(d)
-      } else if (grepl("\\.json$", nm)) {
-        # z_scale = 1: chunks store RAW z. The axial calibration is applied once,
-        # in trk_raw_df(), so every format lands on the same footing.
-        d <- read_minflux_json_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE,
-                                     z_scale = 1.0)
-        jitr <- if ("itr" %in% names(d) && nrow(d) > 0) max(d$itr, na.rm = TRUE) else NA_integer_
-      } else if (grepl("\\.npy$", nm)) {
-        d <- read_minflux_npy_as_df(p, keep_final_only = TRUE, keep_valid_only = TRUE,
-                                    z_scale = 1.0)
-        jitr <- if ("itr" %in% names(d) && nrow(d) > 0) max(d$itr, na.rm = TRUE) else NA_integer_
-      } else {
-        return(NULL)
-      }
-      attr(d, "json_itr") <- jitr
-      d
-    }
-
-    # Load all files; prefix TIDs per file so IDs never collide on merge.
-    df       <- NULL
-    json_itr <- NA_integer_
+    dir.create(trk_store_dir, showWarnings = FALSE, recursive = TRUE)
+    store <- trk_store(); added <- character(0); json_itr <- NA_integer_
+    keep_all <- c("tid","x","y","z","tim","itr","efo","cfr","dcr","eco","dwell","fluo")
     withProgress(message = sprintf("Loading %d file(s) (%.1f MB)...", n_files, size_mb), value = 0, {
-      dfs <- vector("list", n_files)
       for (fi in seq_len(n_files)) {
-        incProgress(1 / n_files, detail = basename(names_v[fi]))
+        incProgress(1 / n_files, detail = names_o[fi])
         di <- tryCatch(load_one_trk(paths[fi], names_v[fi]), error = function(e) NULL)
-        if (is.null(di) || !is.data.frame(di) || !nrow(di)) next
+        if (is.null(di) || !is.data.frame(di) || !nrow(di)) {
+          showNotification(sprintf("%s could not be read and was skipped.", names_o[fi]),
+                           type = "warning", duration = 8)
+          next
+        }
+        if (!all(c("tid","x","y","tim") %in% names(di))) {
+          showNotification(sprintf("%s is missing required columns (tid, x, y, tim) and was skipped.",
+                                   names_o[fi]), type = "error", duration = 8)
+          next
+        }
         ji <- attr(di, "json_itr"); if (!is.na(ji)) json_itr <- ji
-        if (n_files > 1L && "tid" %in% names(di))
-          di$tid <- paste0("F", fi, "_", as.character(di$tid))
-        dfs[[fi]] <- di
+        di$tid <- as.character(di$tid)
+        # Keep only the columns tracking needs  -  reduces stored file size significantly.
+        # No automatic CFR pre-filter: CFR is not a strong artefact indicator for
+        # tracking, and the metadata filter offers a CFR range when it is wanted.
+        di <- di[, intersect(keep_all, names(di)), drop = FALSE]
+        old <- store[[names_o[fi]]]
+        if (!is.null(old)) unlink(old$path)                    # same name: replaced
+        f <- file.path(trk_store_dir, sprintf("f%03d_%s.fst", length(store) + length(added) + 1L,
+                                              gsub("[^A-Za-z0-9_-]+", "_", tools::file_path_sans_ext(names_o[fi]))))
+        fst::write_fst(di, f, compress = 50)
+        store[[names_o[fi]]] <- list(path = f, n = nrow(di), json_itr = ji)
+        added <- c(added, names_o[fi])
       }
-      dfs <- Filter(Negate(is.null), dfs)
-      df  <- if (length(dfs)) dplyr::bind_rows(dfs) else NULL
     })
-    if (n_files > 1L && !is.null(df))
-      showNotification(sprintf("Merged %d files into one dataset (%s localizations).",
-                               n_files, format(nrow(df), big.mark = ",")),
-                       type = "message", duration = 7)
+    if (!length(added)) return(invisible(NULL))
+    trk_store(store)
 
-    if (!is.null(df) && is.data.frame(df)) {
-      if (!all(c("tid","x","y","tim") %in% names(df))) {
-        showNotification("File is missing required columns (tid, x, y, tim).", type = "error", duration = 8)
-        return(invisible(NULL))
-      }
-      df$tid <- as.character(df$tid)
+    # Show JSON iteration notification (mirrors SMLM tab behaviour)
+    if (!is.na(json_itr))
+      showNotification(sprintf(".json or .npy import: using final localization (itr = %d) for x/y.",
+                               as.integer(json_itr)), type = "message", duration = 8)
+    if (length(store) > 1L)
+      showNotification(sprintf("%d datasets loaded. Showing %s; switch or merge them under Active dataset.",
+                               length(store), added[1]), type = "message", duration = 7)
+    .trk_set_active(added[1])                                 # one file at a time by default
+  }, ignoreInit = TRUE)
 
-      # Keep only the columns tracking needs  -  reduces chunk file size significantly
-      keep_cols <- intersect(c("tid","x","y","z","tim","itr","efo","cfr","dcr","eco","dwell","fluo"), names(df))
-      df <- df[, keep_cols, drop = FALSE]
+  # User picks another view.
+  observeEvent(input$trk_active, {
+    sel <- input$trk_active
+    req(nzchar(sel %||% ""))
+    if (identical(sel, .trk_last_active)) return(invisible(NULL))   # already active
+    .trk_activate(sel)
+  }, ignoreInit = TRUE)
 
-      # NOTE: no automatic CFR pre-filter on upload. CFR is not a strong artefact
-      # indicator for tracking, so all localizations are kept. The user can still
-      # filter CFR manually via the metadata filter (CFR range) if desired.
-
-      # Show JSON iteration notification (mirrors SMLM tab behaviour)
-      if (!is.na(json_itr)) {
-        showNotification(
-          sprintf(".json or .npy import: using final localization (itr = %d) for x/y.", as.integer(json_itr)),
-          type = "message", duration = 8
-        )
-      }
-
-      # Compute per-TID summary (duration in ms, n_pts) and sort longest-first
-      # tim * 1000 matches the ms conversion trk_raw_df() applies after chunk loading
-      tid_sum <- df %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(
-          duration_ms = (max(tim, na.rm = TRUE) - min(tim, na.rm = TRUE)) * 1000,
-          n_pts        = dplyr::n(),
-          .groups      = "drop"
-        ) %>%
-        dplyr::arrange(dplyr::desc(duration_ms))
-
-      # Reorder df rows so chunks end up sorted by duration (longest first)
-      df <- df[order(match(df$tid, tid_sum$tid)), , drop = FALSE]
-
-      # Freeze raw stats for histogram grey bars and filter reset.
-      # Done once per upload - never overwritten by chunk switching or rechunking.
-      # tim stored in ms (raw file seconds; trk_raw_df multiplies by 1000).
-      loc_vec <- function(col) if (col %in% names(df)) df[[col]][is.finite(df[[col]])] else numeric(0)
-      trk_raw_stats_rv(list(
-        tid_length   = as.numeric(table(df$tid)),
-        tid_duration = tid_sum$duration_ms,
-        efo          = loc_vec("efo"),
-        cfr          = loc_vec("cfr"),
-        dcr          = loc_vec("dcr"),
-        tim          = loc_vec("tim") * 1000,
-        eco          = loc_vec("eco"),
-        dwell        = loc_vec("dwell"),
-        fluo         = loc_vec("fluo")
-      ))
-      trk_rechunk_stats_rv(NULL)  # clear any leftover rechunk stats from prior dataset
-      trk_rechunk_bbox(NULL)      # clear locked spatial extent from prior dataset
-      trk_chunk_pref("__all__")   # a new dataset does not inherit a chunk scoping
-
-      user_tpc <- .tids_per_chunk()
-
-      manf <- split_by_tid_to_dir(
-        df, out_dir,
-        tids_per_chunk = user_tpc,
-        fmt = CHUNK_FORMAT
-      )
-      if (file.exists(manf)) {
-        rv$manifest_dir          <- dirname(manf)
-        rv$original_manifest_dir <- rv$manifest_dir
-        trk_data_key(as.character(as.numeric(Sys.time())))
-        # Save per-TID summary alongside the manifest
-        readr::write_csv(tid_sum, file.path(rv$manifest_dir, "tid_summary.csv"))
-        man <- readr::read_csv(manf, show_col_types = FALSE)
-        rv$chunking <- FALSE
-        avg_dur <- round(mean(tid_sum$duration_ms, na.rm = TRUE))
-        showNotification(
-          paste0("Split into ", nrow(man), " chunks @ ~", user_tpc,
-                 " TIDs/chunk. Avg trace lifetime: ", avg_dur, " ms."),
-          type = "message", duration = 8
-        )
-      } else {
-        # Fallback: compress to a single chunk, in whatever format the app writes.
-        # This used to call qs::qsave() unconditionally, which crashed the upload on
-        # any machine without qs even though CHUNK_FORMAT had already fallen back.
-        out_one <- file.path(out_dir, paste0(safe_base, ".", CHUNK_FORMAT))
-        dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-        if (identical(CHUNK_FORMAT, "qs") && requireNamespace("qs", quietly = TRUE))
-          qs::qsave(df, out_one, preset = "high")
-        else
-          fst::write_fst(as.data.frame(df), out_one, compress = 50)
-        man <- data.frame(chunk = 1L, n_tids = length(unique(df$tid)), file = out_one)
-        readr::write_csv(man, file.path(out_dir, "manifest.csv"))
-        readr::write_csv(tid_sum, file.path(out_dir, "tid_summary.csv"))
-        rv$manifest_dir          <- out_dir
-        rv$original_manifest_dir <- out_dir
-        trk_data_key(as.character(as.numeric(Sys.time())))
-        rv$chunking <- FALSE
-        showNotification("File compressed to a single .qs chunk.", type = "message", duration = 8)
-      }
+  # Remove the selected file from the store and show another one.
+  observeEvent(input$trk_remove, {
+    sel <- input$trk_active %||% ""
+    store <- trk_store()
+    if (identical(sel, "__merged__")) {
+      showNotification("Select a single dataset to remove it.", type = "warning", duration = 5)
+      return(invisible(NULL))
+    }
+    if (!nzchar(sel) || is.null(store[[sel]])) return(invisible(NULL))
+    unlink(store[[sel]]$path)
+    store[[sel]] <- NULL
+    trk_store(store)
+    if (length(store)) {
+      .trk_set_active(names(store)[1])
     } else {
-      showNotification("File type not supported for chunking; loading as-is.", type = "warning", duration = 6)
+      .trk_last_active <<- ""
+      trk_view(character(0))
+      rv$manifest_dir <- NULL; rv$original_manifest_dir <- NULL
+      trk_raw_stats_rv(NULL)
+      updateSelectInput(session, "trk_active", choices = character(0))
+      trk_data_key(as.character(as.numeric(Sys.time())))
     }
-  }, ignoreInit = TRUE)
-  # Auto-plot fallback: fires only if chunking failed (unsupported file type).
-  # For all supported types, the chunk_sel observer handles the first plot after
-  # chunk_ui renders.
-  observeEvent(input$trk_file, {
-    if (is.null(rv$manifest_dir)) {
-      bump_clean()
-      fire_layout("file_nomanifest")
-    }
-  }, ignoreInit = TRUE)
+    showNotification(sprintf("%s removed.", sel), type = "message", duration = 4)
+  })
 
   # ── Adopt an axial factor recorded in an uploaded CSV ─────────────────────
   # Reads a small head of each file rather than the whole thing, so this stays
@@ -1451,7 +1546,7 @@ tracking_server <- function(input, output, session) {
   
   # ---- Load CSV/fast formats OR a pre-split chunk ----
   trk_raw_loaded <- reactive({
-    req(input$trk_file)
+    req(trk_has_data())
     required <- c("tid","x","y","tim")
     
     # Source for the WHOLE filter pipeline. The filters and gap-splitting must
@@ -1471,59 +1566,9 @@ tracking_server <- function(input, output, session) {
         }
       }
     }
-    if (!is.null(df)) {
-      # df already loaded (all chunks) - skip to post-processing below
-    } else {
-      path <- input$trk_file$datapath[1]
-      name <- tolower(input$trk_file$name[1])
-      df <- if (grepl("\\.(qs|fst)$", name)) {
-        d1 <- read_chunk_file(path)
-        shiny::validate(shiny::need(!is.null(d1),
-          paste("Could not read this file. A .qs file needs the 'qs' package installed;",
-                "re-export it as .csv or .fst if qs will not build on this machine.")))
-        d1
-      } else if (grepl("\\.rds$", name)) {
-        obj <- readRDS(path); shiny::validate(shiny::need(is.data.frame(obj), "RDS must contain a data.frame")); obj
-      } else if (grepl("\\.csv(\\.gz)?$", name)) {
-        # A CSV always arrives with some axial factor already applied; strip it
-        # back to raw so trk_raw_df() can apply the user's calibration alone.
-        cdf <- data.table::fread(path, showProgress = FALSE,
-                                 nThread = max(1, parallel::detectCores()-1)) |> as.data.frame()
-        cdf <- strip_csv_z_calibration(cdf)
-        zc  <- attr(cdf, "z_cal")
-        # Silent for planar data - a 2D upload should not mention z at all.
-        if (!is.null(zc) && isTRUE(zc$has_z)) {
-          showNotification(
-            sprintf("Axial calibration %.3f detected (%s)%s and removed; the Z factor below now applies.",
-                    zc$factor, zc$source,
-                    if (isTRUE(zc$certain)) "" else " - assumed, not recorded in the file"),
-            type = if (isTRUE(zc$certain)) "message" else "warning", duration = 8)
-        }
-        cdf
-      } else if (grepl("\\.json$", name)) {
-        withProgress(message = "Reading MINFLUX JSON...", value = 0, {
-          out <- read_minflux_json_as_df(path, keep_final_only = TRUE, keep_valid_only = TRUE,
-                                         z_scale = 1.0)
-          if (is.data.frame(out) && nrow(out) > 0) {
-            itr_used <- if ("itr" %in% names(out)) max(out$itr, na.rm = TRUE) else NA_integer_
-            if (!is.na(itr_used)) {
-              showNotification(
-                sprintf("JSON import: using final localization (itr = %d) for x/y.", as.integer(itr_used)),
-                type = "message", duration = 8
-              )
-            }
-          }
-          out
-        })
-      } else if (grepl("\\.npy$", name)) {
-        withProgress(message = "Reading MINFLUX .npy...", value = 0, {
-          read_minflux_npy_as_df(path, keep_final_only = TRUE, keep_valid_only = TRUE,
-                                 z_scale = 1.0)
-        })
-      } else {
-        shiny::validate(shiny::need(FALSE, "Unsupported file type"))
-      }
-    }
+    # Every dataset is ingested into chunks (.trk_ingest), so there is always a
+    # manifest once anything is loaded.
+    shiny::validate(shiny::need(!is.null(df) && nrow(df) > 0, "No dataset loaded."))
     
     # --- common post-processing (applies to both chunk & single-file) ---
     miss <- setdiff(required, names(df))
@@ -1592,10 +1637,8 @@ tracking_server <- function(input, output, session) {
   # Bounds come from trk_raw_stats_rv() (frozen at upload, whole dataset) so
   # Sticky bar label: filename + current chunk indicator
   output$trk_bar_label <- renderUI({
-    req(input$trk_file)
-    nm <- if (nrow(input$trk_file) > 1L)
-            sprintf("%d files merged (%s, …)", nrow(input$trk_file), input$trk_file$name[1])
-          else input$trk_file$name[1]
+    req(trk_has_data())
+    nm <- trk_view_label()
     # Chunks scope the playback animation only, so the label mentions them only in
     # Playback mode - in Full tracks the whole dataset is always shown.
     chunk_info <- if (!identical(input$trk_view_mode_main %||% "full", "playback")) "" else {
@@ -1622,11 +1665,8 @@ tracking_server <- function(input, output, session) {
       }
       orig_v <- orig_v[is.finite(orig_v)]; if (!length(orig_v)) return(NULL)
       bounds <- range(orig_v, na.rm = TRUE)
-      # Value: rechunk stats when available (all remaining TIDs), else full original range
-      val <- if (!is.null(rs_rechunk) && col %in% names(rs_rechunk)) {
-        curr_v <- rs_rechunk[[col]][is.finite(rs_rechunk[[col]])]
-        if (length(curr_v)) range(curr_v, na.rm = TRUE) else bounds
-      } else bounds
+      # Value: the stored filter, clamped to this dataset's range (full range if none).
+      val <- .filt_value(col, bounds)
       numericRangeInput(paste0(col, "_rng"), label, value = val, min = bounds[1], max = bounds[2])
     })
   }
@@ -1658,11 +1698,7 @@ tracking_server <- function(input, output, session) {
     }
     if (!length(lv)) return(NULL)
     bounds <- range(lv, na.rm = TRUE)
-    curr <- isolate(input$trk_tid_len)
-    snap <- isTRUE(isolate(trk_len_reset_flag())) || is.null(curr) ||
-            length(curr) != 2 || any(!is.finite(as.numeric(curr)))
-    val  <- if (snap) bounds
-            else c(max(bounds[1], min(as.numeric(curr))), min(bounds[2], max(as.numeric(curr))))
+    val <- .filt_value("tid_len", bounds)      # stored filter, clamped (full range if none)
     isolate(trk_len_reset_flag(FALSE))
     numericRangeInput("trk_tid_len", "Trace ID length (localizations)",
                       value = val, min = bounds[1], max = bounds[2])
@@ -1717,6 +1753,7 @@ tracking_server <- function(input, output, session) {
     trk_rechunk_stats_rv(NULL)  # clear rechunk stats so UIs revert to original upload ranges
     trk_rechunk_bbox(NULL)      # clear locked extent so axes revert to per-TID bbox
     trk_spatial_filter(NULL)    # clear any active spatial crop
+    for (k in names(.FILT_IDS)) trk_filt[[k]] <- NULL   # no range filters
     trk_len_reset_flag(TRUE)    # snap length + duration sliders to full range
     reset_dur_filter_flag(TRUE)
     reset_ranges_trigger(isolate(reset_ranges_trigger()) + 1L)
@@ -1727,11 +1764,9 @@ tracking_server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
 
-  # When TRUE, Stage 3 (trk_dur_filtered) bypasses input$trk_dur_filter entirely
-  # so the stale value from a previous dataset never touches new data. Cleared by
-  # trk_dur_filter_ui once it re-renders with the correct new range.
-  # Must only be set on NEW UPLOADS (trk_raw_stats_rv changes), NOT on rechunks.
-  # trk_data_key fires on both upload and rechunk; trk_raw_stats_rv only on upload.
+  # Legacy re-render flags for the length / duration widgets. The filters themselves
+  # live in trk_filt (FILTER SETTINGS above), so a new dataset can no longer receive
+  # a stale widget value, and these no longer change what is filtered.
   reset_dur_filter_flag <- reactiveVal(FALSE)
   # Sibling flag for the length slider: when TRUE the slider snaps to the full
   # detected range; otherwise it PRESERVES the user's current value (clamped to the
@@ -1771,19 +1806,78 @@ tracking_server <- function(input, output, session) {
     df <- trk_quality_filtered()
     shiny::validate(shiny::need(all(c("x","y","tid","tim") %in% names(df)),
                                 "Data must contain x, y, tid, tim."))
-    rng_filter <- function(dat, nm) {
-      rng <- input[[paste0(nm, "_rng")]]
-      if (is.null(rng) || !nm %in% names(dat)) return(dat)
-      v <- dat[[nm]]; v <- v[is.finite(v)]
-      # Stale guard: if the stored range has no overlap with the data, pass through.
-      if (length(v) && (rng[1] > max(v) || rng[2] < min(v))) return(dat)
-      dplyr::filter(dat, is.na(.data[[nm]]) | dplyr::between(.data[[nm]], rng[1], rng[2]))
-    }
-    df %>%
-      rng_filter("efo")   %>% rng_filter("cfr")   %>% rng_filter("dcr") %>%
-      rng_filter("tim")   %>% rng_filter("eco")   %>% rng_filter("dwell") %>%
-      rng_filter("fluo")
+    filter_ranges(df, trk_filt_ranges())                    # R/est_clean.R
   })
+
+  # ===========================================================================
+  #  FILTER SETTINGS - stored as the user set them, independent of any dataset
+  # ===========================================================================
+  # A range filter ("EFO between 50k and 200k") applies to every loaded dataset
+  # alike, so it is kept here as the user entered it. The pipeline reads these
+  # values; the widgets only DISPLAY them, clamped to the active dataset's range.
+  # Storing the clamped widget values instead would silently change the filter
+  # every time a dataset with a narrower range was shown. Reset Ranges clears them.
+  .FILT_IDS <- c(efo = "efo_rng", cfr = "cfr_rng", dcr = "dcr_rng", tim = "tim_rng",
+                 eco = "eco_rng", dwell = "dwell_rng", fluo = "fluo_rng",
+                 tid_len = "trk_tid_len", dur = "trk_dur_filter")
+  trk_filt    <- reactiveValues()                    # key -> c(lo, hi); NULL = no filter
+  .filt_shown <- new.env(parent = emptyenv())        # key -> list(val, bounds) last displayed
+
+  # The value a widget shows: the stored filter clamped into the dataset's bounds,
+  # or the full bounds when there is no filter. Remembered, so the echo of our own
+  # render is not mistaken for a user edit.
+  .filt_value <- function(key, bounds) {
+    sp  <- isolate(trk_filt[[key]])
+    val <- if (is.null(sp)) bounds
+           else c(min(max(sp[1], bounds[1]), bounds[2]), max(min(sp[2], bounds[2]), bounds[1]))
+    assign(key, list(val = val, bounds = bounds), envir = .filt_shown)
+    val
+  }
+
+  # A user edit becomes the stored filter; covering the full range clears it.
+  for (.k in names(.FILT_IDS)) local({
+    key <- .k; id <- .FILT_IDS[[.k]]
+    observeEvent(input[[id]], {
+      v <- suppressWarnings(as.numeric(input[[id]]))
+      if (length(v) != 2L || any(!is.finite(v))) return(invisible(NULL))
+      sh <- if (exists(key, envir = .filt_shown, inherits = FALSE)) get(key, envir = .filt_shown) else NULL
+      if (!is.null(sh) && isTRUE(all.equal(v, sh$val))) return(invisible(NULL))   # our own render
+      b <- sh$bounds
+      trk_filt[[key]] <- if (!is.null(b) && v[1] <= b[1] && v[2] >= b[2]) NULL else sort(v)
+      if (!is.null(sh)) assign(key, list(val = v, bounds = b), envir = .filt_shown)
+    }, ignoreInit = TRUE)
+  })
+  rm(.k)
+
+  # The prefactor a in use: the value entered (or set by a calibration profile),
+  # else the ideal-estimator value of the TCP pattern, which is uncalibrated.
+  .a_in_use <- function(pattern = input$trk_tcp_pattern) {
+    v <- suppressWarnings(as.numeric(input$trk_crlb_pref))
+    if (length(v) && is.finite(v[1]) && v[1] > 0) v[1]
+    else .tcp_geom(pattern %||% TCP_PATTERN_DEFAULT)$a_ideal
+  }
+
+  # The per-localization range filters, as filter_ranges() takes them.
+  trk_filt_ranges <- reactive(stats::setNames(
+    lapply(c("efo", "cfr", "dcr", "tim", "eco", "dwell", "fluo"), function(k) trk_filt[[k]]),
+    c("efo", "cfr", "dcr", "tim", "eco", "dwell", "fluo")))
+
+  # Every filter setting, for running the whole pipeline on any dataset
+  # (filter_pipeline() in R/est_clean.R): Plot Data's rechunk and Compare Cells.
+  # t_c / sw belong to the dataset and are filled in by the caller.
+  trk_filter_params <- function() isolate(list(
+    split   = list(enable = isTRUE(input$trk_split_gaps_enable), adaptive = isTRUE(input$trk_split_adaptive),
+                   gap_cycles = input$trk_split_gap_cycles, min_len = input$trk_split_min_len %||% 50L,
+                   maxoff_ms = tryCatch({ sp <- trk_seq_params()
+                                          if (!is.null(sp) && isTRUE(sp$ok) && is.finite(sp$maxOffTime_ms))
+                                            sp$maxOffTime_ms else 3.0 }, error = function(e) 3.0)),
+    trim    = list(enable = isTRUE(input$trk_endtrim_enable), dark = isTRUE(input$trk_endtrim_dark),
+                   dark_cycles = input$trk_endtrim_dark_cycles %||% 3L, efo = isTRUE(input$trk_endtrim_efo),
+                   efo_frac = suppressWarnings(as.numeric(input$trk_endtrim_efo_frac %||% 0.5))),
+    gate    = list(enable = isTRUE(input$trk_quality_enable),
+                   min_score = suppressWarnings(as.numeric(input$trk_quality_min_integ %||% 0.6)),
+                   half_life = suppressWarnings(as.numeric(input$trk_quality_darktol %||% 3))),
+    ranges  = trk_filt_ranges(), tid_len = trk_filt$tid_len, dur = trk_filt$dur))
 
   # ===========================================================================
   #  TRACKING FILTER PIPELINE  (read top-to-bottom; each stage feeds the next)
@@ -1821,37 +1915,10 @@ tracking_server <- function(input, output, session) {
     # Min-length applies in BOTH modes now (was adaptive-only): drop short fragments
     # so a fixed 7-cycle split doesn't manufacture 2–3-loc stubs and flood the plot.
     min_len <- max(1L, as.integer(isolate(input$trk_split_min_len %||% 50L)))
-    # Idempotency: strip our own "_s<N>" suffix (only when present) before splitting
-    # so it always operates on the ORIGINAL track. After a Filter & Rechunk bakes
-    # "_s" segments into the saved TIDs, trk_raw_df reloads them and (split still on)
-    # they'd otherwise be split a SECOND time (251_s1 → 251_s1_s1 …). Stripping
-    # recombines siblings in time order → splitting twice == splitting once.
-    if (any(grepl("_s", df$tid, fixed = TRUE)))
-      df$tid <- sub("_s\\d+$", "", as.character(df$tid), perl = TRUE)
-    # Fully VECTORISED split (no per-track split()/loop) with an INTEGER-coded RADIX
-    # sort. Sorting the character TIDs directly (base order() on character) was the
-    # real bottleneck on full raw data - ~25× slower than radix-sorting integer codes.
-    tf  <- match(df$tid, unique(df$tid))              # integer code per track
-    ord <- order(tf, df$tim, method = "radix")
-    df  <- df[ord, , drop = FALSE]; tf <- tf[ord]
-    n   <- nrow(df); tid <- as.character(df$tid)
-    newtrk <- c(TRUE, tf[-1] != tf[-n])               # first row of each track
-    dt     <- c(NA_real_, diff(df$tim)); dt[newtrk] <- NA_real_
-    is_gap <- is.finite(dt) & (dt > gap_thresh)       # split point at this row
-    grp    <- cumsum(newtrk)                          # track id 1..K
-    cg     <- cumsum(is_gap)
-    seg    <- cg - cg[newtrk][grp] + 1L               # 1-based segment # within track
-    nseg   <- (as.integer(rowsum(as.integer(is_gap), grp)) + 1L)[grp]  # #segments in track
-    new_tid <- tid; spl <- nseg > 1L
-    if (any(spl)) new_tid[spl] <- paste0(tid[spl], "_s", seg[spl])
-    if (min_len > 1L) {                               # drop segments shorter than min_len
-      u    <- unique(new_tid); mi <- match(new_tid, u)
-      keep <- tabulate(mi, length(u))[mi] >= min_len
-      df   <- df[keep, , drop = FALSE]; new_tid <- new_tid[keep]
-    }
-    if (!nrow(df)) return(df[0, , drop = FALSE])
-    df$tid <- new_tid
-    df
+    # The split itself (idempotent on an existing "_s<N>" suffix, radix-sorted,
+    # short fragments dropped) is split_gaps() in R/est_clean.R, shared with the
+    # per-cell comparison.
+    split_gaps(df, gap_thresh, min_len)
   })
 
   # Stage 2.45: end-trim (optional; pass-through when disabled).
@@ -1867,42 +1934,16 @@ tracking_server <- function(input, output, session) {
     df <- trk_gap_split()                  # inherits the clean_trigger recompute
     if (!isTRUE(isolate(input$trk_endtrim_enable)) || nrow(df) == 0 || !"tim" %in% names(df))
       return(df)
-    use_dark <- isTRUE(isolate(input$trk_endtrim_dark))
-    use_efo  <- isTRUE(isolate(input$trk_endtrim_efo)) && "efo" %in% names(df)
-    if (!use_dark && !use_efo) return(df)
-    t_c      <- tryCatch(isolate(trk_cycle_time()), error = function(e) NA_real_)
-    dark_cyc <- max(2L, as.integer(isolate(input$trk_endtrim_dark_cycles %||% 3L)))
-    efo_frac <- suppressWarnings(as.numeric(isolate(input$trk_endtrim_efo_frac %||% 0.5)))
-    dark_gap <- if (use_dark && is.finite(t_c) && t_c > 0) dark_cyc * t_c else Inf
-    # Length floor. Gap splitting promises segments of at least `min_len` localizations,
-    # and peeling ends afterwards would quietly break that promise (measured on
-    # the tracking test file: 41 segments fell to 41-49). Trimming therefore stops at the floor: a
-    # track keeps a slightly dark end rather than dropping below the declared minimum.
+    # Length floor: gap splitting promises segments of at least `min_len`
+    # localizations, so trimming stops there rather than breaking that promise.
     floor_len <- if (isTRUE(isolate(input$trk_split_gaps_enable)))
                    max(1L, as.integer(isolate(input$trk_split_min_len) %||% 1L)) else 1L
-    tf  <- match(df$tid, unique(df$tid))                  # integer track codes (fast sort/group)
-    ord <- order(tf, df$tim, method = "radix")
-    df  <- df[ord, , drop = FALSE]
-    sp  <- split(seq_len(nrow(df)), tf[ord])              # group by integer, not character
-    keep <- logical(nrow(df))
-    for (idx in sp) {
-      m <- length(idx)
-      if (m < 2L) { keep[idx] <- TRUE; next }
-      tim <- df$tim[idx]
-      d   <- diff(tim)                                   # d[j] = gap idx[j]→idx[j+1]
-      efo_thr <- if (use_efo) efo_frac * stats::median(df$efo[idx], na.rm = TRUE) else -Inf
-      efo_v   <- if (use_efo) df$efo[idx] else rep(Inf, m)
-      lo <- 1L
-      while (lo < m && (m - lo + 1L) > floor_len &&
-             ((use_efo && is.finite(efo_v[lo]) && efo_v[lo] < efo_thr) ||
-              (use_dark && d[lo]      >= dark_gap))) lo <- lo + 1L
-      hi <- m
-      while (hi > lo && (hi - lo + 1L) > floor_len &&
-             ((use_efo && is.finite(efo_v[hi]) && efo_v[hi] < efo_thr) ||
-              (use_dark && d[hi - 1L] >= dark_gap))) hi <- hi - 1L
-      if (hi >= lo) keep[idx[lo:hi]] <- TRUE
-    }
-    df[keep, , drop = FALSE]
+    trim_track_ends(df, tryCatch(isolate(trk_cycle_time()), error = function(e) NA_real_),
+                    use_dark    = isTRUE(isolate(input$trk_endtrim_dark)),
+                    dark_cycles = isolate(input$trk_endtrim_dark_cycles %||% 3L),
+                    use_efo     = isTRUE(isolate(input$trk_endtrim_efo)),
+                    efo_frac    = suppressWarnings(as.numeric(isolate(input$trk_endtrim_efo_frac %||% 0.5))),
+                    floor_len   = floor_len)                 # R/est_clean.R
   })
 
   # Stage 2.5: track-CONTINUITY gate (optional; pass-through when disabled).
@@ -1916,59 +1957,20 @@ tracking_server <- function(input, output, session) {
     df <- trk_end_trimmed()                # inherits the clean_trigger recompute
     if (!isTRUE(isolate(input$trk_quality_enable)) || nrow(df) == 0 || !"tim" %in% names(df))
       return(df)
-    t_c <- tryCatch(isolate(trk_cycle_time()), error = function(e) NA_real_)
-    if (!is.finite(t_c) || t_c <= 0) return(df)
-    thr <- max(0, min(1, suppressWarnings(as.numeric(isolate(input$trk_quality_min_integ) %||% 0.6))))
-    H   <- suppressWarnings(as.numeric(isolate(input$trk_quality_darktol) %||% 3))
-    sc  <- .continuity_scores(df, t_c, H)
-    if (is.null(sc)) return(df)
-    keep <- names(sc)[is.finite(sc) & sc >= thr]
-    keep <- union(keep, setdiff(unique(df$tid), names(sc)))  # keep unjudged single-loc tracks
-    df[df$tid %in% keep, , drop = FALSE]
+    gate_continuity(df, tryCatch(isolate(trk_cycle_time()), error = function(e) NA_real_),
+                    min_score = suppressWarnings(as.numeric(isolate(input$trk_quality_min_integ) %||% 0.6)),
+                    half_life = suppressWarnings(as.numeric(isolate(input$trk_quality_darktol) %||% 3)))
   })
 
   # Stage 5: trace ID length - localization count per TID, measured AFTER cleaning
   # (split/trim/quality) and the metadata filter.
   trk_len_filtered <- reactive({
-    df  <- trk_meta_filtered()
-    rng <- input$trk_tid_len
-    if (!is.null(rng) && nrow(df) > 0 && "tid" %in% names(df)) {
-      tl <- table(df$tid)
-      lv <- as.numeric(tl)
-      # Stale guard: pass through if range has no overlap with current lengths.
-      if (!(rng[1] > max(lv) || rng[2] < min(lv))) {
-        keep <- names(tl)[lv >= rng[1] & lv <= rng[2]]
-        df   <- df[df$tid %in% keep, , drop = FALSE]
-      }
-    }
-    df
+    filter_tid_length(trk_meta_filtered(), trk_filt$tid_len)   # R/est_clean.R
   })
 
   # Stage 4: trace duration - max(tim)-min(tim) per TID measured AFTER stages 1,2 and 3.
   trk_dur_filtered <- reactive({
-    df  <- trk_len_filtered()
-    # On upload the flag is TRUE: bypass duration filtering entirely so the stale
-    # input$trk_dur_filter value (from the previous dataset) is never applied to
-    # the new data. The flag is cleared by trk_dur_filter_ui after it re-renders
-    # with the new full range; from that point normal filtering resumes.
-    # Read with isolate() - Stage 3 must NOT take a reactive dep on the flag.
-    if (shiny::isolate(reset_dur_filter_flag())) return(df)
-    rng <- input$trk_dur_filter
-    if (!is.null(rng) && nrow(df) > 0 && "tim" %in% names(df)) {
-      lo <- rng[1]; hi <- rng[2]
-      dur_tbl <- df %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(dur = max(tim) - min(tim), .groups = "drop")
-      dv <- dur_tbl$dur
-      # Apply unless the range already covers the full extent (a no-op). An extreme
-      # bound (e.g. lower = 200 ms when most tracks are shorter) is HONOURED - it is
-      # not treated as "stale". Dataset switches are handled by the reset flag above.
-      if (length(dv) > 0 && !(lo <= min(dv) && hi >= max(dv))) {
-        keep_tids <- dur_tbl$tid[dv >= lo & dv <= hi]
-        df <- df[df$tid %in% keep_tids, , drop = FALSE]
-      }
-    }
-    df
+    filter_duration(trk_len_filtered(), trk_filt$dur)          # R/est_clean.R
   })
 
   # Stage 5: spatial crop - keeps TIDs where >= pct_thr fraction of their
@@ -2010,20 +2012,7 @@ tracking_server <- function(input, output, session) {
 
   # Half-sample mode (Robertson–Cryer / Bickel): a bin-free Δt mode
   # estimator.  Keeps the densest half-sample until ≤3 points remain.
-  half_sample_mode <- function(x) {
-    x <- sort(x[is.finite(x)]); n <- length(x)
-    if (n == 0L) return(NA_real_)
-    while (n > 3L) {
-      h <- (n + 1L) %/% 2L
-      w <- x[h:n] - x[1:(n - h + 1L)]
-      j <- which.min(w)
-      x <- x[j:(j + h - 1L)]; n <- length(x)
-    }
-    if (n == 1L) return(x[1])
-    if (n == 2L) return(mean(x))
-    d1 <- x[2] - x[1]; d2 <- x[3] - x[2]
-    if (d1 <= d2) mean(x[1:2]) else mean(x[2:3])
-  }
+  # half_sample_mode() lives in R/est_clean.R.
 
   # Typical Δt (ms) of the RAW data - the empirical acquisition interval, bin-free
   # via the half-sample mode. Computed on trk_raw_df (upstream of ALL cleaning) so
@@ -2052,32 +2041,7 @@ tracking_server <- function(input, output, session) {
   trk_cluster_cycle <- reactive({
     df <- tryCatch(trk_raw_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df) || !all(c("tid", "tim") %in% names(df))) return(NULL)
-    df  <- df[order(df$tid, df$tim), ]
-    dts <- unlist(tapply(df$tim, df$tid, function(t) diff(sort(t))), use.names = FALSE)
-    dts <- dts[is.finite(dts) & dts > 0]
-    if (length(dts) < 50L) return(NULL)
-    dts <- sort(dts)
-    modal <- half_sample_mode(dts)
-    rough <- as.numeric(quantile(dts, 0.02))          # rough smallest-cycle scale
-    if (!is.finite(rough) || rough <= 0) return(NULL)
-    thr  <- 0.4 * rough                                # gap threshold for clustering
-    grp  <- cumsum(c(0, diff(dts) > thr))
-    cl   <- split(dts, grp)
-    centers <- vapply(cl, mean, numeric(1))
-    counts  <- vapply(cl, length, integer(1))
-    keep    <- counts >= max(5L, as.integer(0.005 * length(dts)))
-    centers <- sort(centers[keep])
-    if (length(centers) < 2L) {
-      cyc <- if (length(centers) == 1L) centers[1] else rough
-      return(list(cycle = cyc, sw = 0, n_clusters = length(centers),
-                  centers = centers, modal = modal, frac_one_cycle = NA_real_))
-    }
-    cyc <- stats::median(diff(centers))                # spacing = atomic cycle
-    sw  <- max(0, centers[1] - cyc)                    # intercept (one-time offset)
-    # fraction of intervals that are a single (atomic) cycle
-    n_cyc_each <- pmax(1L, as.integer(round((dts - sw) / cyc)))
-    list(cycle = cyc, sw = sw, n_clusters = length(centers), centers = centers,
-         modal = modal, frac_one_cycle = mean(n_cyc_each == 1L))
+    cycle_cluster(df$tid, df$tim)                     # R/est_clean.R
   })
 
   # Regression-based cycle/SW estimate - Bela's EOD/SW fit, reduced to a line fit.
@@ -2174,7 +2138,7 @@ tracking_server <- function(input, output, session) {
 
   # Status / cross-check line shown in the Acquisition Parameters panel
   output$trk_cycle_time_status <- renderUI({
-    req(input$trk_file)
+    req(trk_has_data())
     mdt <- trk_pipeline_modal_dt()
     hw  <- trk_hw_cycle_time()
     tc  <- trk_cycle_time()
@@ -2346,7 +2310,7 @@ tracking_server <- function(input, output, session) {
            NA_integer_)
   }
 
-  # .crlb_doughnut() (photon-budget σ, Vogler et al. 2025 Eq. 1) lives in est_cve.R.
+  # .crlb_doughnut() (photon-budget σ, pattern-aware) and .tcp_geom() live in est_cve.R.
 
   # TCP diameter of one iteration, in nm. Sequence files store the pattern size as
   # the dimensionless `patGeoFactor`; L = patGeoFactor x TCP_L_PER_GEOFACTOR_NM.
@@ -2521,6 +2485,12 @@ tracking_server <- function(input, output, session) {
     # scales as L^2, so this is the input that most needs to come from the file.
     if (is.finite(sp$L_tcp_nm) && sp$L_tcp_nm > 0)
       updateNumericInput(session, "trk_L_tcp", value = round(sp$L_tcp_nm, 1))
+    # TCP geometry for the photon-budget sigma (off-centre coefficient, axes
+    # spanned). Only the patterns with a modelled geometry are pre-selected; any
+    # other final pattern leaves the current choice alone.
+    fp <- tolower(sp$final_pattern %||% "")
+    if (fp %in% names(TCP_PATTERN_GEOM))
+      updateSelectInput(session, "trk_tcp_pattern", selected = fp)
   }, ignoreInit = TRUE)
 
   output$trk_seq_json_status <- renderUI({
@@ -2616,22 +2586,11 @@ tracking_server <- function(input, output, session) {
     if (nrow(df) == 0 || !is.finite(cyc) || cyc <= 0) return(integer(0))
     cc  <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
     sw  <- if (!is.null(cc) && is.finite(cc$sw)) cc$sw else 0
-    df  <- df[order(df$tid, df$tim), ]
-    # Bela computes suggest_split_thresholds AFTER filter_by_length(50), so the
-    # threshold is estimated only from tracks that meet the minimum length.
-    # Mirror that here when adaptive splitting is on, so our med+SD+1 matches his.
-    if (isTRUE(input$trk_split_adaptive)) {
-      min_len <- max(1L, as.integer(input$trk_split_min_len %||% 50L))
-      tl <- table(df$tid); keep_tid <- names(tl)[tl >= min_len]
-      df <- df[df$tid %in% keep_tid, , drop = FALSE]
-      if (nrow(df) == 0) return(integer(0))
-    }
-    dts <- unlist(lapply(split(df$tim, df$tid),
-                         function(t) if (length(t) > 1L) diff(t) else numeric(0)),
-                  use.names = FALSE)
-    tot <- round((dts - sw) / cyc)
-    tot <- tot[is.finite(tot) & tot >= 1]
-    as.integer(tot)
+    # Bela computes suggest_split_thresholds AFTER filter_by_length(50), so in
+    # adaptive mode only tracks meeting the minimum length count.
+    min_len <- if (isTRUE(input$trk_split_adaptive))
+                 max(1L, as.integer(input$trk_split_min_len %||% 50L)) else NULL
+    total_cycles(df$tid, df$tim, cyc, sw, min_len)    # R/est_clean.R
   })
 
   # Bela's adaptive split threshold (in cycles): med_th = floor(median + std + 1)
@@ -2639,17 +2598,10 @@ tracking_server <- function(input, output, session) {
   # high_th = round(maxOffTime / cycle).  maxOffTime comes from the uploaded
   # sequence JSON if present, else Bela's 3 ms default.
   trk_adaptive_gap_cycles <- reactive({
-    tot <- trk_tot_cycles()
-    if (length(tot) < 2L) return(NA_integer_)
-    med <- as.integer(stats::median(tot))
-    sdv <- stats::sd(tot); if (!is.finite(sdv)) sdv <- 0
-    med_th <- as.integer(floor(med + sdv + 1))
-    cyc <- trk_cycle_time()
     moff_ms <- tryCatch({ sp <- trk_seq_params(); if (!is.null(sp) && isTRUE(sp$ok) &&
                             is.finite(sp$maxOffTime_ms)) sp$maxOffTime_ms else 3.0 },
                         error = function(e) 3.0)
-    high_th <- if (is.finite(cyc) && cyc > 0) as.integer(round(moff_ms / cyc)) else NA_integer_
-    if (is.finite(high_th) && high_th >= 2L) min(med_th, high_th) else med_th
+    adaptive_gap_cycles(trk_tot_cycles(), trk_cycle_time(), moff_ms)   # R/est_clean.R
   })
 
   # (The filter pipeline stages 1.5–4 are defined together near Stage 1, under
@@ -2712,11 +2664,7 @@ tracking_server <- function(input, output, session) {
     }
     if (!length(dv)) return(NULL)
     bounds <- range(dv, na.rm = TRUE)
-    curr <- isolate(input$trk_dur_filter)
-    snap <- isTRUE(isolate(reset_dur_filter_flag())) || is.null(curr) ||
-            length(curr) != 2 || any(!is.finite(as.numeric(curr)))
-    val  <- if (snap) bounds
-            else c(max(bounds[1], min(as.numeric(curr))), min(bounds[2], max(as.numeric(curr))))
+    val <- .filt_value("dur", bounds)          # stored filter, clamped (full range if none)
     shiny::isolate(reset_dur_filter_flag(FALSE))
     numericRangeInput("trk_dur_filter", "Trace duration filter (ms)",
                       value = val, min = bounds[1], max = bounds[2])
@@ -2737,147 +2685,29 @@ tracking_server <- function(input, output, session) {
       man <- readr::read_csv(manf, show_col_types = FALSE)
       n_chunks <- nrow(man)
 
-      # Split parameters computed ONCE so every chunk uses the same threshold and
-      # they MATCH the live trk_gap_split (adaptive → median+SD+1 cap maxOffTime,
-      # else the manual cycle count; the same cycle time; and min-length drop in
-      # adaptive mode). Each TID lives wholly in one chunk, so per-chunk splitting
-      # with this shared threshold reproduces the live result exactly.
-      g_split_on  <- isolate(isTRUE(input$trk_split_gaps_enable))
-      g_adaptive  <- isolate(isTRUE(input$trk_split_adaptive))
-      g_cyc       <- if (g_adaptive) isolate(trk_adaptive_gap_cycles())
-                     else isolate(suppressWarnings(as.numeric(input$trk_split_gap_cycles)))
-      g_cycletime <- isolate(trk_cycle_time())
-      g_minlen    <- max(1L, isolate(as.integer(input$trk_split_min_len %||% 50L)))  # both modes now
-      g_thr       <- if (g_split_on && is.finite(g_cyc) && g_cyc > 0 &&
-                         is.finite(g_cycletime) && g_cycletime > 0) g_cyc * g_cycletime else NA_real_
-
-      # End-trim + quality-gate params (match live trk_end_trimmed / trk_quality_filtered).
-      et_on       <- isolate(isTRUE(input$trk_endtrim_enable))
-      et_dark     <- isolate(isTRUE(input$trk_endtrim_dark))
-      et_efo      <- isolate(isTRUE(input$trk_endtrim_efo))
-      et_dark_cyc <- max(2L, isolate(as.integer(input$trk_endtrim_dark_cycles %||% 3L)))
-      et_efo_frac <- isolate(suppressWarnings(as.numeric(input$trk_endtrim_efo_frac %||% 0.5)))
-      et_dark_gap <- if (et_dark && is.finite(g_cycletime) && g_cycletime > 0) et_dark_cyc * g_cycletime else Inf
-      q_on        <- isolate(isTRUE(input$trk_quality_enable))
-      q_thr       <- max(0, min(1, isolate(suppressWarnings(as.numeric(input$trk_quality_min_integ %||% 0.6)))))
-      q_H         <- isolate(suppressWarnings(as.numeric(input$trk_quality_darktol %||% 3)))
-      trim_ends_one <- function(tb) {   # kept row indices of one (time-sorted) track
-        m <- nrow(tb); if (m < 2L) return(seq_len(m))
-        d <- diff(tb$tim)
-        efo_thr <- if (et_efo && "efo" %in% names(tb)) et_efo_frac * stats::median(tb$efo, na.rm = TRUE) else -Inf
-        efo_v   <- if (et_efo && "efo" %in% names(tb)) tb$efo else rep(Inf, m)
-        lo <- 1L
-        while (lo < m && ((et_efo && is.finite(efo_v[lo]) && efo_v[lo] < efo_thr) ||
-                          (et_dark && d[lo]      >= et_dark_gap))) lo <- lo + 1L
-        hi <- m
-        while (hi > lo && ((et_efo && is.finite(efo_v[hi]) && efo_v[hi] < efo_thr) ||
-                           (et_dark && d[hi - 1L] >= et_dark_gap))) hi <- hi - 1L
-        if (hi >= lo) lo:hi else integer(0)
-      }
-
-      # --- Pass 1: per chunk, in the LIVE pipeline order:
-      #     split → end-trim → quality gate → metadata → length ---
-      all_dfs <- vector("list", n_chunks)
-      for (i in seq_len(n_chunks)) {
-        incProgress(i / (n_chunks * 2), detail = paste("Reading chunk", i))
-        f <- man$file[i]
-        ch <- read_chunk_file(f)
-        if (is.null(ch) || !nrow(ch)) next
-        # Same post-processing as trk_raw_df
-        ch$tid <- as.character(ch$tid)
-        ch$x   <- as.numeric(ch$x)
-        ch$y   <- as.numeric(ch$y)
-        ch$tim <- as.numeric(ch$tim) * 1000  # seconds -> ms
-
-        # Stage 1: gap splitting - shared threshold/min-length (matches live).
-        if (g_split_on && is.finite(g_thr) && g_thr > 0 && nrow(ch) > 0) {
-          ch  <- ch[order(ch$tid, ch$tim), ]
-          spc <- split(ch, ch$tid)
-          new_segs <- vector("list", length(spc) * 2L)
-          ks <- 0L
-          for (snm in names(spc)) {
-            tb2 <- spc[[snm]]
-            if (nrow(tb2) < 2L) {
-              if (nrow(tb2) >= g_minlen) { ks <- ks+1L; new_segs[[ks]] <- tb2 }
-              next
-            }
-            gp <- which(diff(tb2$tim) > g_thr)
-            if (!length(gp)) {
-              if (nrow(tb2) >= g_minlen) { ks <- ks+1L; new_segs[[ks]] <- tb2 }
-              next
-            }
-            st2 <- c(1L, gp+1L); en2 <- c(gp, nrow(tb2))
-            for (ii in seq_along(st2)) {
-              seg2 <- tb2[st2[ii]:en2[ii], , drop=FALSE]
-              if (nrow(seg2) < g_minlen) next
-              seg2$tid <- paste0(snm, "_s", ii)
-              ks <- ks+1L; new_segs[[ks]] <- seg2
-            }
-          }
-          ch <- if (ks > 0L) dplyr::bind_rows(new_segs[seq_len(ks)]) else ch[0, , drop = FALSE]
-        }
-        # Stage 2: end-trim (peel degraded track ends).
-        if (et_on && (et_dark || et_efo) && nrow(ch) > 0) {
-          ch <- ch[order(ch$tid, ch$tim), ]
-          spt <- split(seq_len(nrow(ch)), ch$tid)
-          keep_et <- logical(nrow(ch))
-          for (idx in spt) {
-            k <- trim_ends_one(ch[idx, , drop = FALSE])
-            if (length(k)) keep_et[idx[k]] <- TRUE
-          }
-          ch <- ch[keep_et, , drop = FALSE]
-        }
-        # Stage 3: continuity gate (drop dark-cycle-heavy tracks) - same score as live.
-        if (q_on && is.finite(g_cycletime) && g_cycletime > 0 && nrow(ch) > 0) {
-          sc <- .continuity_scores(ch, g_cycletime, q_H)
-          if (!is.null(sc)) {
-            keep_q <- names(sc)[is.finite(sc) & sc >= q_thr]
-            keep_q <- union(keep_q, setdiff(unique(ch$tid), names(sc)))
-            ch <- ch[ch$tid %in% keep_q, , drop = FALSE]
-          }
-        }
-        # Stage 4: metadata filters (AFTER cleaning, matching the live order).
-        for (nm in c("efo","cfr","dcr","tim","eco","dwell","fluo")) {
-          rng_m <- isolate(input[[paste0(nm, "_rng")]])
-          if (!is.null(rng_m) && nm %in% names(ch) && nrow(ch) > 0) {
-            v <- ch[[nm]]; v <- v[is.finite(v)]
-            if (length(v) && !(rng_m[1] > max(v) || rng_m[2] < min(v))) {
-              ch <- ch[is.na(ch[[nm]]) | (ch[[nm]] >= rng_m[1] & ch[[nm]] <= rng_m[2]), , drop = FALSE]
-            }
-          }
-        }
-        # Stage 5: TID length filter.
-        rng_len <- isolate(input$trk_tid_len)
-        if (!is.null(rng_len) && "tid" %in% names(ch) && nrow(ch) > 0) {
-          tl <- table(ch$tid); tl_v <- as.numeric(tl)
-          if (!(rng_len[1] <= min(tl_v) && rng_len[2] >= max(tl_v))) {  # apply unless it covers all
-            keep <- names(tl)[tl_v >= rng_len[1] & tl_v <= rng_len[2]]
-            ch <- ch[ch$tid %in% keep, , drop = FALSE]
-          }
-        }
-        if (nrow(ch) > 0) all_dfs[[i]] <- ch
-      }
-
-      df_all <- dplyr::bind_rows(Filter(Negate(is.null), all_dfs))
-      if (nrow(df_all) == 0) {
-        showNotification("No data survived the filters  -  rechunk aborted.", type = "error", duration = 8)
+      # The SAME pipeline the live view runs (filter_pipeline, R/est_clean.R), on all
+      # of the original data at once and with the stored filters, so what Plot Data
+      # bakes into the new chunks cannot drift from what the analyses read. (This
+      # used to be a second, hand-written copy of every stage, which had drifted.)
+      incProgress(0.1, detail = "Reading chunks")
+      df_all <- dplyr::bind_rows(Filter(Negate(is.null), lapply(man$file, read_chunk_file)))
+      if (!nrow(df_all)) {
+        showNotification("No data to filter  -  rechunk aborted.", type = "error", duration = 8)
         return(invisible(NULL))
       }
-
-      # Duration filter on combined data
-      rng_dur <- isolate(input$trk_dur_filter)
-      if (!is.null(rng_dur)) {
-        tdur <- df_all %>%
-          dplyr::group_by(tid) %>%
-          dplyr::summarise(duration_ms = max(tim) - min(tim), .groups = "drop")
-        dv <- tdur$duration_ms
-        if (length(dv) > 0 && !(rng_dur[1] <= min(dv) && rng_dur[2] >= max(dv))) {  # apply unless covers all
-          keep_tids <- tdur$tid[dv >= rng_dur[1] & dv <= rng_dur[2]]
-          df_all <- df_all[df_all$tid %in% keep_tids, , drop = FALSE]
-        }
-      }
+      # Same post-processing as trk_raw_df
+      df_all$tid <- as.character(df_all$tid)
+      df_all$x   <- as.numeric(df_all$x)
+      df_all$y   <- as.numeric(df_all$y)
+      df_all$tim <- as.numeric(df_all$tim) * 1000           # seconds -> ms
+      fp <- trk_filter_params()
+      fp$t_c <- isolate(trk_cycle_time())
+      cc_r   <- tryCatch(isolate(trk_cluster_cycle()), error = function(e) NULL)
+      fp$sw  <- if (!is.null(cc_r) && is.finite(cc_r$sw)) cc_r$sw else 0
+      incProgress(0.3, detail = "Applying filters")
+      df_all <- filter_pipeline(df_all, fp)
       if (nrow(df_all) == 0) {
-        showNotification("No TIDs survived the duration filter  -  rechunk aborted.", type = "error", duration = 8)
+        showNotification("No data survived the filters  -  rechunk aborted.", type = "error", duration = 8)
         return(invisible(NULL))
       }
 
@@ -3134,19 +2964,20 @@ tracking_server <- function(input, output, session) {
   # ---- Filter settings save/load ----
   output$trk_download_filter_settings <- downloadHandler(
     filename = function() {
-      base <- if (!is.null(input$trk_file$name)) tools::file_path_sans_ext(input$trk_file$name[1]) else "tracking"
+      base <- trk_view_base()
       paste0(base, "_filter_settings_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".json")
     },
     content = function(file) {
       sf <- trk_spatial_filter()
       s <- list(
         # ── Metadata (per-localization) ranges ──────────────────────────────
-        efo_rng   = unname(input$efo_rng),   cfr_rng  = unname(input$cfr_rng),
-        dcr_rng   = unname(input$dcr_rng),   tim_rng  = unname(input$tim_rng),
-        eco_rng   = unname(input$eco_rng),   dwell_rng = unname(input$dwell_rng),
-        fluo_rng  = unname(input$fluo_rng),
-        trk_tid_len    = unname(input$trk_tid_len),
-        trk_dur_filter = unname(input$trk_dur_filter),
+        # The stored filters (null = no filter), not the widgets' clamped display.
+        efo_rng   = trk_filt$efo %||% NA,   cfr_rng   = trk_filt$cfr %||% NA,
+        dcr_rng   = trk_filt$dcr %||% NA,   tim_rng   = trk_filt$tim %||% NA,
+        eco_rng   = trk_filt$eco %||% NA,   dwell_rng = trk_filt$dwell %||% NA,
+        fluo_rng  = trk_filt$fluo %||% NA,
+        trk_tid_len    = trk_filt$tid_len %||% NA,
+        trk_dur_filter = trk_filt$dur %||% NA,
 
         # ── Track CLEANING - these change the tracks themselves ─────────────
         # Cleaning runs before every metadata filter (split → trim → gate), so
@@ -3206,9 +3037,15 @@ tracking_server <- function(input, output, session) {
     }
     upd_chk <- function(id) if (!is.null(s[[id]])) updateCheckboxInput(session, id, value = isTRUE(s[[id]]))
 
-    for (id in c("efo_rng","cfr_rng","dcr_rng","tim_rng","eco_rng","dwell_rng","fluo_rng",
-                 "trk_tid_len","trk_dur_filter"))
-      upd_rng(id)
+    # Range filters go straight into the store (a missing key leaves a filter as it
+    # is, null clears it); the widgets then re-render from it.
+    for (k in names(.FILT_IDS)) {
+      id <- .FILT_IDS[[k]]
+      if (!id %in% names(s)) next
+      v <- num(s[[id]])
+      trk_filt[[k]] <- if (length(v) == 2L && all(is.finite(v))) sort(v) else NULL
+    }
+    reset_ranges_trigger(isolate(reset_ranges_trigger()) + 1L)
 
     # cleaning: enables first, then their parameters
     for (id in c("trk_split_gaps_enable","trk_split_adaptive",
@@ -3247,7 +3084,7 @@ tracking_server <- function(input, output, session) {
   # ---- Playback settings save/load ----
   output$trk_download_playback_settings <- downloadHandler(
     filename = function() {
-      base <- if (!is.null(input$trk_file$name)) tools::file_path_sans_ext(input$trk_file$name[1]) else "tracking"
+      base <- trk_view_base()
       paste0(base, "_playback_settings_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".json")
     },
     content = function(file) {
@@ -3348,7 +3185,7 @@ tracking_server <- function(input, output, session) {
 
   output$trk_download_overlay_settings <- downloadHandler(
     filename = function() {
-      base <- if (!is.null(input$trk_file$name)) tools::file_path_sans_ext(input$trk_file$name[1]) else "tracking"
+      base <- trk_view_base()
       paste0(base, "_image_alignment_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".json")
     },
     content  = function(file) {
@@ -3400,8 +3237,7 @@ tracking_server <- function(input, output, session) {
 
   output$trk_download_filtered_csv <- downloadHandler(
     filename = function() {
-      base <- if (!is.null(input$trk_file$name))
-        tools::file_path_sans_ext(input$trk_file$name[1]) else "tracking"
+      base <- trk_view_base()
       paste0(base, "_filtered_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
     },
     content = function(file) {
@@ -9893,10 +9729,11 @@ tracking_server <- function(input, output, session) {
         if (!is.finite(L0) || L0 <= 0) L0 <- DMAX_L_TCP_DEFAULT
         n0 <- suppressWarnings(as.numeric(input$trk_beam_fwhm %||% TCP_BEAM_FWHM_NM))
         if (!is.finite(n0) || n0 <= 0) n0 <- TCP_BEAM_FWHM_NM
-        a0 <- suppressWarnings(as.numeric(input$trk_crlb_pref %||% TCP_CRLB_PREFACTOR))
-        if (!is.finite(a0) || a0 <= 0) a0 <- TCP_CRLB_PREFACTOR
+        a0 <- .a_in_use()
         ok0 <- is.finite(df$eco) & df$eco > 0
-        sig_eff <- stats::median(.crlb_doughnut(L0, n0, df$eco[ok0], 0, a0), na.rm = TRUE)
+        sig_eff <- stats::median(.crlb_doughnut(L0, n0, df$eco[ok0], pref = a0,
+                                                pattern = input$trk_tcp_pattern %||% TCP_PATTERN_DEFAULT),
+                                 na.rm = TRUE)
         src <- "photon budget"
       }
     }
@@ -9932,12 +9769,13 @@ tracking_server <- function(input, output, session) {
       if (!is.finite(L_tcp) || L_tcp <= 0) L_tcp <- DMAX_L_TCP_DEFAULT
       nu     <- suppressWarnings(as.numeric(input$trk_beam_fwhm %||% TCP_BEAM_FWHM_NM))
       if (!is.finite(nu) || nu <= 0) nu <- TCP_BEAM_FWHM_NM
-      a_pref <- suppressWarnings(as.numeric(input$trk_crlb_pref %||% TCP_CRLB_PREFACTOR))
-      if (!is.finite(a_pref) || a_pref <= 0) a_pref <- TCP_CRLB_PREFACTOR
-      x_off  <- if (!is.null(cve) && is.finite(cve$D_cve) && cve$D_cve > 0) sqrt(2 * cve$D_cve * t_c) else 0
+      a_pref <- .a_in_use()
+      D_off  <- if (!is.null(cve) && is.finite(cve$D_cve) && cve$D_cve > 0) cve$D_cve else 0
       okc    <- is.finite(d_in$eco) & d_in$eco > 0
       d_in$sig <- NA_real_                               # rows without eco fall back to sig_eff
-      if (any(okc)) d_in$sig[okc] <- .crlb_doughnut(L_tcp, nu, d_in$eco[okc], x_off, a_pref)
+      if (any(okc)) d_in$sig[okc] <- .crlb_doughnut(L_tcp, nu, d_in$eco[okc], D = D_off, t_loc = t_c,
+                                                    pref = a_pref,
+                                                    pattern = input$trk_tcp_pattern %||% TCP_PATTERN_DEFAULT)
       sigma_mode <- "per localization, from its photon count"
     }
 
@@ -11273,6 +11111,471 @@ tracking_server <- function(input, output, session) {
                     input$trk_scale_bar_thickness, input$trk_scale_font_size,
                     input$trk_dark_mode),
     { trk_push_scale_bar() }, ignoreInit = TRUE)
+
+
+  # ============================================================================
+  # INSTRUMENT CALIBRATION - a and D_w from an immobile sample, kept as profiles
+  # ============================================================================
+  # GOAL: measure the photon-budget prefactor a and the wander floor D_w for one
+  # acquisition sequence (calib_cell, R/est_calib.R), keep the result as a named
+  # profile that records the sequence it belongs to, and let profiles be saved,
+  # loaded and applied, globally or per file in Compare Cells. A profile is the
+  # unit a lab measures once per sequence and reuses; without one, a falls back to
+  # the ideal-estimator value of the pattern and the readout says "uncalibrated".
+  trk_cal_profiles <- reactiveVal(list())   # name -> profile (list)
+  trk_cal_result   <- reactiveVal(NULL)     # per-cell table of the last measurement
+
+  # Loaded files to choose the immobile ones from.
+  observe({
+    fs  <- names(trk_store())
+    sel <- isolate(input$trk_cal_files)
+    updateSelectInput(session, "trk_cal_files", choices = fs, selected = intersect(sel, fs))
+  })
+
+  # A loaded sequence file fills in the descriptors the profile records.
+  observeEvent(input$trk_seq_json, {
+    sp <- tryCatch(trk_seq_params(), error = function(e) NULL)
+    if (is.null(sp) || !isTRUE(sp$ok)) return(invisible(NULL))
+    if (is.finite(sp$patDwellTime_ms %||% NA)) updateNumericInput(session, "trk_cal_dwell", value = round(sp$patDwellTime_ms * 1000))
+    if (is.finite(sp$phtLimit %||% NA))        updateNumericInput(session, "trk_cal_pl", value = sp$phtLimit)
+    if (is.finite(sp$damping %||% NA))         updateNumericInput(session, "trk_cal_damping", value = sp$damping)
+  }, ignoreInit = TRUE, priority = -1)
+
+  observeEvent(input$trk_cal_run, {
+    files <- input$trk_cal_files
+    if (!length(files)) {
+      showNotification("Choose the immobile-sample files first.", type = "warning", duration = 5)
+      return(invisible(NULL))
+    }
+    L   <- suppressWarnings(as.numeric(input$trk_L_tcp %||% DMAX_L_TCP_DEFAULT))
+    if (!is.finite(L) || L <= 0) L <- DMAX_L_TCP_DEFAULT
+    pat  <- .tcp_pattern_name(input$trk_tcp_pattern %||% TCP_PATTERN_DEFAULT)
+    if (is.na(pat) || !nzchar(pat)) pat <- TCP_PATTERN_DEFAULT
+    filt <- trk_filter_params()
+    rows <- withProgress(message = "Measuring each immobile cell...", value = 0, {
+      lapply(files, function(f) {
+        incProgress(1 / length(files), detail = f)
+        d <- .cmp_read_file(f)
+        if (is.null(d)) d <- data.frame(tid = character(0), x = numeric(0), y = numeric(0),
+                                        tim = numeric(0), eco = numeric(0))
+        tryCatch(calib_cell(d, f, L, filt), error = function(e) {
+          r <- calib_cell(d[0, , drop = FALSE], f, L); r$note <- conditionMessage(e); r })
+      })
+    })
+    tab <- do.call(rbind, rows)
+    attr(tab, "L") <- L; attr(tab, "pattern") <- pat
+    trk_cal_result(tab)
+  })
+
+  output$trk_cal_summary <- renderUI({
+    tab <- trk_cal_result(); req(!is.null(tab))
+    sm  <- calib_summary(tab)
+    AMB <- "#B8860B"
+    ideal <- .tcp_geom(attr(tab, "pattern"))$a_ideal
+    tagList(
+      tags$p(style = "margin:4px 0;",
+        tags$b(sprintf("a = %.2f", sm$a)),
+        sprintf("  (quartiles %.2f–%.2f, %d cell%s)  ·  ", sm$a_q25, sm$a_q75, sm$n_cells,
+                if (sm$n_cells == 1L) "" else "s"),
+        tags$b(sprintf("D_w = %.0f nm²/ms", sm$D_w)),
+        sprintf("  (%.0f–%.0f)", sm$Dw_q25, sm$Dw_q75)),
+      helpText(style = "font-size:0.82em; color:#666; margin-top:0;",
+        sprintf("L %.1f nm, %s. The ideal-estimator value for this pattern is %.2f.",
+                attr(tab, "L"), attr(tab, "pattern"), ideal)),
+      if (sm$n_cells < 3L) helpText(style = sprintf("color:%s; font-size:0.82em;", AMB),
+        "Fewer than 3 cells: the quartiles say little about how well a is known."),
+      if (any(nzchar(tab$note))) helpText(style = sprintf("color:%s; font-size:0.82em;", AMB),
+        sprintf("%d file(s) gave no value; see the note column.", sum(nzchar(tab$note)))))
+  })
+
+  output$trk_cal_results <- DT::renderDT({
+    tab <- trk_cal_result(); req(!is.null(tab))
+    show <- tab[, c("file", "n_tracks", "t_c_ms", "eco_med", "msd1", "sigma_nm", "a", "D_w", "note")]
+    num  <- vapply(show, is.numeric, logical(1))
+    show[num] <- lapply(show[num], function(v) signif(v, 3))
+    DT::datatable(show, rownames = FALSE, selection = "none",
+                  options = list(dom = "t", paging = FALSE, scrollX = TRUE))
+  })
+
+  observeEvent(input$trk_cal_save, {
+    tab <- trk_cal_result()
+    nm  <- trimws(input$trk_cal_name %||% "")
+    if (is.null(tab)) { showNotification("Measure first.", type = "warning", duration = 5); return(invisible(NULL)) }
+    if (!nzchar(nm))  { showNotification("Give the profile a name.", type = "warning", duration = 5); return(invisible(NULL)) }
+    sm <- calib_summary(tab)
+    if (!sm$n_cells) { showNotification("No cell gave a value of a; nothing to save.", type = "error", duration = 6); return(invisible(NULL)) }
+    num <- function(x) { v <- suppressWarnings(as.numeric(x)); if (length(v) && is.finite(v[1])) v[1] else NA_real_ }
+    profs <- trk_cal_profiles()
+    profs[[nm]] <- list(name = nm, a = sm$a, a_q25 = sm$a_q25, a_q75 = sm$a_q75,
+                        D_w = sm$D_w, Dw_q25 = sm$Dw_q25, Dw_q75 = sm$Dw_q75, n_cells = sm$n_cells,
+                        pattern = attr(tab, "pattern"), L_nm = attr(tab, "L"),
+                        dwell_us = num(input$trk_cal_dwell), photon_limit = num(input$trk_cal_pl),
+                        damping = num(input$trk_cal_damping), note = trimws(input$trk_cal_note %||% ""),
+                        date = format(Sys.Date()), files = tab$file[is.finite(tab$a)])
+    trk_cal_profiles(profs)
+    showNotification(sprintf("Profile '%s' saved (a = %.2f, D_w = %.0f nm²/ms).", nm, sm$a, sm$D_w),
+                     type = "message", duration = 6)
+  })
+
+  # Keep the Acquisition Parameters selector in step with the profiles.
+  observeEvent(trk_cal_profiles(), {
+    nms <- names(trk_cal_profiles())
+    sel <- isolate(input$trk_cal_profile %||% "")
+    updateSelectInput(session, "trk_cal_profile",
+                      choices = c("None (uncalibrated)" = "", stats::setNames(nms, nms)),
+                      selected = if (sel %in% nms) sel else "")
+  }, ignoreInit = TRUE)
+
+  output$trk_cal_profiles_tab <- DT::renderDT({
+    profs <- trk_cal_profiles(); req(length(profs) > 0)
+    f <- function(x, d = 2) if (is.null(x) || !is.finite(x)) "" else formatC(x, digits = d, format = "f")
+    tab <- do.call(rbind, lapply(profs, function(p) data.frame(
+      profile = p$name, a = sprintf("%s (%s–%s)", f(p$a), f(p$a_q25), f(p$a_q75)),
+      D_w = f(p$D_w, 0), cells = p$n_cells %||% NA, pattern = p$pattern %||% "", L_nm = f(p$L_nm, 1),
+      dwell_us = f(p$dwell_us, 0), photon_limit = f(p$photon_limit, 0), damping = f(p$damping, 0),
+      note = p$note %||% "", date = p$date %||% "", stringsAsFactors = FALSE)))
+    DT::datatable(tab, rownames = FALSE, selection = "none",
+                  options = list(dom = "t", paging = FALSE, scrollX = TRUE))
+  })
+
+  output$trk_cal_profiles_dl <- downloadHandler(
+    filename = function() paste0("calibration_profiles_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".json"),
+    content  = function(file) writeLines(jsonlite::toJSON(unname(trk_cal_profiles()), pretty = TRUE,
+                                                          auto_unbox = TRUE, na = "null", digits = NA), file))
+
+  observeEvent(input$trk_cal_profiles_ul, {
+    up <- tryCatch(jsonlite::fromJSON(input$trk_cal_profiles_ul$datapath, simplifyVector = FALSE),
+                   error = function(e) NULL)
+    if (!is.null(up) && !is.null(up$name)) up <- list(up)          # a single profile
+    ok <- Filter(function(p) is.list(p) && is.character(p$name) && nzchar(p$name) &&
+                   is.numeric(p$a) && is.finite(p$a) && p$a > 0, up %||% list())
+    if (!length(ok)) {
+      showNotification("No valid calibration profile in that file.", type = "error", duration = 6)
+      return(invisible(NULL))
+    }
+    num <- function(x) if (is.null(x)) NA_real_ else suppressWarnings(as.numeric(x))
+    profs <- trk_cal_profiles()
+    for (p in ok) {
+      for (k in c("a", "a_q25", "a_q75", "D_w", "Dw_q25", "Dw_q75", "L_nm", "dwell_us", "photon_limit", "damping"))
+        p[[k]] <- num(p[[k]])
+      p$files <- unlist(p$files)
+      profs[[p$name]] <- p
+    }
+    trk_cal_profiles(profs)
+    showNotification(sprintf("%d profile(s) loaded.", length(ok)), type = "message", duration = 5)
+  })
+
+  # Applying a profile sets a, D_w, the pattern and L; "None" returns to uncalibrated.
+  observeEvent(input$trk_cal_profile, {
+    nm <- input$trk_cal_profile %||% ""
+    if (!nzchar(nm)) {
+      updateNumericInput(session, "trk_crlb_pref", value = NA)
+      updateNumericInput(session, "trk_dw_floor", value = 0)
+      return(invisible(NULL))
+    }
+    p <- trk_cal_profiles()[[nm]]; if (is.null(p)) return(invisible(NULL))
+    updateNumericInput(session, "trk_crlb_pref", value = round(p$a, 3))
+    if (is.finite(p$D_w %||% NA)) updateNumericInput(session, "trk_dw_floor", value = round(max(0, p$D_w)))
+    pat <- .tcp_pattern_name(p$pattern %||% "")
+    if (!is.na(pat) && nzchar(pat)) updateSelectInput(session, "trk_tcp_pattern", selected = pat)
+    if (is.finite(p$L_nm %||% NA)) updateNumericInput(session, "trk_L_tcp", value = p$L_nm)
+  }, ignoreInit = TRUE)
+
+  # ============================================================================
+  # COMPARE CELLS - one value per file (= one cell), conditions compared across cells
+  # ============================================================================
+  # GOAL: label every loaded file with its condition and the settings of the
+  # sequence it was acquired with, analyse each file on its own (percell_summary,
+  # R/est_percell.R: own cycle time, own gap split, own L / pattern / a / D_w), and
+  # compare conditions with the cell as the unit of replication. Pooling tracks
+  # across cells would treat correlated tracks as independent and let one busy
+  # cell dominate a condition.
+
+  # Every loaded file, whichever view is active.
+  cmp_file_names <- reactive(names(trk_store()))
+
+  # One stored file, prepared the way trk_raw_loaded() / trk_raw_df() prepare the
+  # active view: character track ids, times in ms, the axial factor applied.
+  .cmp_read_file <- function(name) {
+    st <- isolate(trk_store())[[name]]
+    d  <- if (is.null(st)) NULL else read_chunk_file(st$path)
+    if (is.null(d) || !nrow(d)) return(NULL)
+    d$tid <- as.character(d$tid)
+    for (cc in intersect(c("x", "y", "tim"), names(d))) d[[cc]] <- as.numeric(d[[cc]])
+    d$tim <- d$tim * 1000                                   # s -> ms
+    zf <- isolate(trk_z_applied())
+    if (is.finite(zf) && zf > 0 && zf != 1 && "z" %in% names(d) && any(is.finite(d$z))) d$z <- d$z * zf
+    d
+  }
+
+  cmp_tab     <- reactiveVal(NULL)   # per-file settings: file, condition, L_nm, pattern, a, D_w
+  cmp_results <- reactiveVal(NULL)   # per-cell numbers from the last run, with the settings used
+
+  # New upload: one row per file. Sequence settings start BLANK, and a blank means
+  # "the current Acquisition Parameters value", so a dataset acquired with one
+  # sequence follows the sequence file whenever it is loaded, and only settings
+  # that differ between files need entering. Adding or removing a file keeps the
+  # other rows.
+  observeEvent(cmp_file_names(), {
+    nm  <- cmp_file_names()
+    old <- isolate(cmp_tab())
+    if (!length(nm)) { cmp_tab(NULL); cmp_results(NULL); return(invisible(NULL)) }
+    tb <- data.frame(file = nm, condition = "", calibration = "", L_nm = NA_real_, pattern = "",
+                     a = NA_real_, D_w = NA_real_, stringsAsFactors = FALSE)
+    if (!is.null(old)) {                                    # adding/removing keeps other rows
+      m <- match(tb$file, old$file); k <- which(!is.na(m))
+      if (length(k)) tb[k, -1] <- old[m[k], -1]
+    }
+    cmp_tab(tb)
+    r <- isolate(cmp_results())                             # drop results of removed files
+    if (!is.null(r)) cmp_results(if (any(r$file %in% nm)) r[r$file %in% nm, , drop = FALSE] else NULL)
+  }, ignoreNULL = FALSE)
+
+  # The table with every blank filled from the current Acquisition Parameters:
+  # the values a run actually uses.
+  cmp_resolved <- reactive({
+    tb <- cmp_tab(); if (is.null(tb)) return(NULL)
+    num <- function(x, d) { v <- suppressWarnings(as.numeric(x)); if (length(v) && is.finite(v[1])) v[1] else d }
+    pat <- tolower(input$trk_tcp_pattern %||% TCP_PATTERN_DEFAULT)
+    if (!pat %in% names(TCP_PATTERN_GEOM)) pat <- TCP_PATTERN_DEFAULT
+    # A named calibration profile fills its row's blanks first (it belongs to one
+    # sequence), then the Acquisition Parameters fill what is still blank.
+    profs <- trk_cal_profiles()
+    for (i in seq_len(nrow(tb))) {
+      pr <- profs[[tb$calibration[i]]]
+      if (is.null(pr)) next
+      if (!is.finite(tb$L_nm[i]) && is.finite(pr$L_nm %||% NA)) tb$L_nm[i] <- pr$L_nm
+      if (!nzchar(tb$pattern[i])) { pp <- .tcp_pattern_name(pr$pattern %||% ""); if (!is.na(pp)) tb$pattern[i] <- pp }
+      if (!is.finite(tb$a[i])   && is.finite(pr$a %||% NA))   tb$a[i]   <- pr$a
+      if (!is.finite(tb$D_w[i]) && is.finite(pr$D_w %||% NA)) tb$D_w[i] <- max(0, pr$D_w)
+    }
+    tb$L_nm[!is.finite(tb$L_nm)] <- num(input$trk_L_tcp, DMAX_L_TCP_DEFAULT)
+    tb$pattern[!nzchar(tb$pattern)] <- pat
+    a_in <- suppressWarnings(as.numeric(input$trk_crlb_pref))
+    for (i in which(!is.finite(tb$a)))                       # entered a, else the pattern's ideal
+      tb$a[i] <- if (length(a_in) && is.finite(a_in[1]) && a_in[1] > 0) a_in[1]
+                 else .tcp_geom(tb$pattern[i])$a_ideal
+    tb$D_w[!is.finite(tb$D_w)]   <- num(input$trk_dw_floor, 0)
+    tb
+  })
+
+  # One value typed for its column, or NULL when it does not fit (the caller then
+  # leaves the table unchanged and says so).
+  # An empty value clears a setting back to blank (= Acquisition Parameters).
+  .cmp_coerce <- function(col, val) {
+    if (is.null(val) || (length(val) == 1L && is.na(val))) val <- ""
+    if (col %in% c("L_nm", "a", "D_w")) {
+      if (!nzchar(trimws(as.character(val)))) return(NA_real_)
+      v <- suppressWarnings(as.numeric(val))
+      if (!length(v) || !is.finite(v) || v < 0 || (col != "D_w" && v == 0)) return(NULL)
+      v
+    } else if (col == "pattern") {
+      v <- .tcp_pattern_name(val)                      # names, short forms, or 3 / 4 / 6
+      if (is.na(v)) return(NULL)
+      v
+    } else trimws(as.character(val))
+  }
+
+  output$trk_cmp_table <- DT::renderDT({
+    tb <- cmp_tab(); req(!is.null(tb))
+    DT::datatable(tb, rownames = FALSE, selection = "none",
+                  editable = list(target = "cell", disable = list(columns = 0)),
+                  options = list(dom = "t", paging = FALSE, scrollY = "260px",
+                                 scrollCollapse = TRUE, ordering = FALSE))
+  })
+
+  # Cell edits from the table. DT reports 0-based columns without row names.
+  observeEvent(input$trk_cmp_table_cell_edit, {
+    tb <- cmp_tab(); info <- input$trk_cmp_table_cell_edit
+    req(!is.null(tb), NROW(info) > 0)
+    for (k in seq_len(nrow(info))) {
+      col <- names(tb)[info$col[k] + 1L]
+      v   <- .cmp_coerce(col, info$value[k])
+      if (is.null(v)) {
+        showNotification(sprintf("'%s' is not a valid value for %s.", info$value[k], col),
+                         type = "warning", duration = 5)
+        next
+      }
+      tb[info$row[k], col] <- v
+    }
+    cmp_tab(tb)
+  })
+
+  # Bulk fill: one column, every file whose name contains the text.
+  observeEvent(input$trk_cmp_fill_apply, {
+    tb <- cmp_tab(); req(!is.null(tb))
+    col <- input$trk_cmp_fill_col %||% "condition"
+    v   <- .cmp_coerce(col, input$trk_cmp_fill_value %||% "")
+    if (is.null(v)) {
+      ok <- if (col == "pattern") paste0(paste(names(TCP_PATTERN_GEOM), collapse = ", "),
+                                         ", or 3 / 4 / 6 vertices") else "a positive number"
+      showNotification(sprintf("%s needs %s.", col, ok), type = "warning", duration = 5)
+      return(invisible(NULL))
+    }
+    pat <- tolower(trimws(input$trk_cmp_fill_match %||% ""))
+    hit <- if (nzchar(pat)) grepl(pat, tolower(tb$file), fixed = TRUE) else rep(TRUE, nrow(tb))
+    if (!any(hit)) {
+      showNotification("No file name contains that text.", type = "warning", duration = 5)
+      return(invisible(NULL))
+    }
+    tb[hit, col] <- v
+    cmp_tab(tb)
+    showNotification(sprintf("%s set for %d file(s).", col, sum(hit)), type = "message", duration = 4)
+  })
+
+  # Save / load the settings table, so a dataset's conditions are entered once and
+  # travel with the analysis.
+  output$trk_cmp_table_dl <- downloadHandler(
+    filename = function() paste0("cell_conditions_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) utils::write.csv(cmp_tab(), file, row.names = FALSE, na = ""))
+
+  observeEvent(input$trk_cmp_table_ul, {
+    tb <- cmp_tab(); req(!is.null(tb))
+    up <- tryCatch(utils::read.csv(input$trk_cmp_table_ul$datapath, stringsAsFactors = FALSE,
+                                   check.names = FALSE, colClasses = "character"),
+                   error = function(e) NULL)
+    if (is.null(up) || !"file" %in% names(up)) {
+      showNotification("The table needs a 'file' column.", type = "error", duration = 6)
+      return(invisible(NULL))
+    }
+    m <- match(tb$file, up$file); n_bad <- 0L
+    for (col in intersect(c("condition", "calibration", "L_nm", "pattern", "a", "D_w"), names(up)))
+      for (i in which(!is.na(m))) {
+        v <- .cmp_coerce(col, up[[col]][m[i]])
+        if (is.null(v)) n_bad <- n_bad + 1L else tb[i, col] <- v
+      }
+    cmp_tab(tb)
+    showNotification(sprintf("Settings loaded for %d of %d file(s)%s.", sum(!is.na(m)), nrow(tb),
+                             if (n_bad) sprintf("; %d invalid value(s) skipped", n_bad) else ""),
+                     type = if (any(!is.na(m))) "message" else "warning", duration = 6)
+  })
+
+  # Run: analyse every loaded file on its own, straight from the store, so the
+  # comparison does not depend on which view is active.
+  observeEvent(input$trk_cmp_run, {
+    tb <- cmp_resolved(); req(!is.null(tb), nrow(tb) > 0)
+    filt <- trk_filter_params()                             # the Display tab's filters
+    nu <- suppressWarnings(as.numeric(input$trk_beam_fwhm %||% TCP_BEAM_FWHM_NM))
+    if (!is.finite(nu) || nu < 0) nu <- 0
+    rows <- withProgress(message = "Analysing each cell...", value = 0, {
+      lapply(seq_len(nrow(tb)), function(i) {
+        incProgress(1 / nrow(tb), detail = tb$file[i])
+        di <- .cmp_read_file(tb$file[i])
+        if (is.null(di)) di <- data.frame(tid = character(0), x = numeric(0), y = numeric(0), tim = numeric(0))
+        r  <- tryCatch(percell_summary(di, tb$file[i], L = tb$L_nm[i], pattern = tb$pattern[i],
+                                       a = tb$a[i], D_w = tb$D_w[i], nu = nu, filters = filt),
+                       error = function(e) {
+                         x <- percell_summary(di[0, , drop = FALSE], tb$file[i], tb$L_nm[i])
+                         x$note <- conditionMessage(e); x })
+        if (nzchar(tb$calibration[i]) && is.null(trk_cal_profiles()[[tb$calibration[i]]]))
+          r$note <- trimws(paste(r$note, sprintf("calibration '%s' is not loaded", tb$calibration[i])))
+        cbind(r, calibration = tb$calibration[i], L_nm = tb$L_nm[i], pattern = tb$pattern[i],
+              a = tb$a[i], D_w = tb$D_w[i], stringsAsFactors = FALSE)
+      })
+    })
+    cmp_results(do.call(rbind, rows))
+  })
+
+  # Results joined to the CURRENT conditions, so relabelling needs no re-run; flags
+  # results whose sequence settings were edited after the run.
+  cmp_view <- reactive({
+    r <- cmp_results(); tb <- cmp_resolved()
+    if (is.null(r) || is.null(tb)) return(NULL)
+    m <- match(r$file, tb$file)
+    r$condition <- ifelse(is.na(m), "", tb$condition[m])
+    stale <- any(!is.na(m) & (abs(r$L_nm - tb$L_nm[m]) > 1e-9 | r$pattern != tb$pattern[m] |
+                                abs(r$a - tb$a[m]) > 1e-9 | abs(r$D_w - tb$D_w[m]) > 1e-9))
+    attr(r, "stale") <- isTRUE(stale)
+    r
+  })
+
+  output$trk_cmp_plot <- renderPlotly({
+    r <- cmp_view(); req(!is.null(r))
+    met <- input$trk_cmp_metric %||% "D_um2_s"
+    d   <- r[nzchar(trimws(r$condition)) & is.finite(r[[met]]), , drop = FALSE]
+    shiny::validate(shiny::need(nrow(d) > 0,
+      "Give the files a condition in the table above to compare them."))
+    st <- percell_condition_stats(d, met)
+    xi <- match(d$condition, st$condition)
+    set.seed(1L); jit <- (stats::runif(nrow(d)) - 0.5) * 0.3     # horizontal spread only
+    dark   <- isTRUE(isolate(input$trk_dark_mode))
+    bg_col <- if (dark) "#000000" else "#FFFFFF"
+    fg_col <- if (dark) "#FFFFFF" else "#333333"
+    ci_up  <- ifelse(is.finite(st$ci_hi), st$ci_hi - st$mean, 0)
+    ci_dn  <- ifelse(is.finite(st$ci_lo), st$mean - st$ci_lo, 0)
+    plot_ly() %>%
+      add_trace(x = xi + jit, y = d[[met]], type = "scatter", mode = "markers",
+                marker = list(size = 9, color = "rgba(70,130,200,0.75)",
+                              line = list(color = "rgba(40,90,160,0.9)", width = 1)),
+                text = d$file, name = "one cell",
+                hovertemplate = "%{text}<br>%{y:.4g}<extra></extra>") %>%
+      add_trace(x = seq_len(nrow(st)), y = st$mean, type = "scatter", mode = "markers",
+                marker = list(symbol = "line-ew-open", size = 34, color = fg_col,
+                              line = list(width = 3, color = fg_col)),
+                error_y = list(type = "data", symmetric = FALSE, array = ci_up, arrayminus = ci_dn,
+                               color = fg_col, thickness = 1.5, width = 10),
+                name = "mean ± 95% CI across cells",
+                hovertemplate = "mean %{y:.4g}<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "", tickmode = "array", tickvals = seq_len(nrow(st)),
+                     ticktext = sprintf("%s<br>(%d cell%s)", st$condition, st$n_cells,
+                                        ifelse(st$n_cells == 1L, "", "s")),
+                     range = c(0.4, nrow(st) + 0.6), color = fg_col, zeroline = FALSE),
+        yaxis = list(title = PERCELL_METRICS[[met]], color = fg_col,
+                     rangemode = if (met == "r1_excess") "normal" else "tozero"),
+        paper_bgcolor = bg_col, plot_bgcolor = bg_col, font = list(color = fg_col),
+        legend = list(orientation = "h", y = -0.22), uirevision = "trk_cmp")
+  })
+
+  # Condition table for the chosen metric, plus the flags that change how the
+  # numbers should be read.
+  output$trk_cmp_stats <- renderUI({
+    r <- cmp_view(); req(!is.null(r))
+    met <- input$trk_cmp_metric %||% "D_um2_s"
+    st  <- percell_condition_stats(r, met)
+    fmt <- function(x) ifelse(is.finite(x), formatC(x, digits = 3, format = "g"), "-")
+    AMB <- "#B8860B"
+    asg <- nzchar(trimws(r$condition))
+    n_smooth <- sum(asg & is.finite(r$r1_excess) & r$r1_excess > 0.01)
+    n_dw     <- sum(asg & is.finite(r$Dw_frac) & r$Dw_frac > 0.5)
+    tagList(
+      if (isTRUE(attr(r, "stale"))) helpText(style = sprintf("color:%s; font-size:0.85em;", AMB),
+        "Sequence settings were edited after the last run: press Analyse each cell again."),
+      if (nrow(st)) tags$table(class = "table table-condensed",
+        style = "font-size:0.85em; margin:6px 0; width:auto;",
+        tags$thead(tags$tr(lapply(c("condition", "cells", "mean", "SD", "95% CI"), tags$th))),
+        tags$tbody(lapply(seq_len(nrow(st)), function(i) tags$tr(
+          tags$td(st$condition[i]), tags$td(st$n_cells[i]), tags$td(fmt(st$mean[i])),
+          tags$td(fmt(st$sd[i])), tags$td(sprintf("%s to %s", fmt(st$ci_lo[i]), fmt(st$ci_hi[i]))))))),
+      if (nrow(st) && any(st$n_cells < 3L)) helpText(style = "font-size:0.82em; color:#666;",
+        "A condition needs at least 3 cells for a meaningful CI."),
+      if (n_smooth) helpText(style = sprintf("color:%s; font-size:0.82em;", AMB), sprintf(
+        "%d cell(s) have increments correlated beyond any motion model (r₁ above the bound). Galvo damping causes this, and so does the tracking loop when motion is small, so compare D and σ only between cells acquired with the same damping setting.",
+        n_smooth)),
+      if (n_dw) helpText(style = sprintf("color:%s; font-size:0.82em;", AMB), sprintf(
+        "In %d cell(s) the wander floor is more than half of the measured D.", n_dw)),
+      if (sum(!asg)) helpText(style = "font-size:0.82em; color:#666;", sprintf(
+        "%d file(s) without a condition are listed below and left out of the comparison.", sum(!asg))))
+  })
+
+  output$trk_cmp_results <- DT::renderDT({
+    r <- cmp_view(); req(!is.null(r))
+    cols <- c("condition", "file", "calibration", "n_tracks", "len_med", "t_c_ms", "frac_single", "eco_med",
+              "sigma_nm", "a", "D_um2_s", "D_corr_um2_s", "Dw_frac", "alpha_short", "r1_excess", "note")
+    show <- r[, cols, drop = FALSE]
+    num  <- vapply(show, is.numeric, logical(1))
+    show[num] <- lapply(show[num], function(v) signif(v, 3))
+    DT::datatable(show, rownames = FALSE, selection = "none",
+                  options = list(dom = "t", paging = FALSE, scrollX = TRUE,
+                                 scrollY = "300px", scrollCollapse = TRUE))
+  })
+
+  output$trk_cmp_results_dl <- downloadHandler(
+    filename = function() paste0("per_cell_results_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+    content  = function(file) {
+      r <- cmp_view(); if (is.null(r)) r <- data.frame()
+      utils::write.csv(r, file, row.names = FALSE)
+    })
 } # end tracking_server
 
 

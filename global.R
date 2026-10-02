@@ -16,6 +16,7 @@ source("helpers_tracking.R")
 # R/ holds the estimators as plain functions, outside the Shiny server closures, so
 # they can be called (and tested) without a running app. The server panels gather
 # the inputs and call these; see tests/ for the recovery tests that use them.
+source("R/est_clean.R")      # cycle time from the data, gap splitting
 source("R/est_blur.R")       # motion-blur coefficient R from the sequence timing
 source("R/est_cve.R")        # CVE: D and sigma_loc from step covariance, photon-budget sigma
 source("R/est_msd.R")        # MSD fits: OLSF (linear) + confined / directed / anomalous
@@ -23,6 +24,8 @@ source("R/est_cpd.R")        # change-point segmentation of a track + per-segmen
 source("R/est_jdd.R")        # jump-distance distribution mixture fit
 source("R/est_dmap.R")       # spatially resolved D-map
 source("R/est_hmm.R")        # continuous-time diffusive-state HMM
+source("R/est_percell.R")    # per-cell (per-file) summaries for comparing conditions
+source("R/est_calib.R")      # instrument calibration (prefactor a, wander floor) from an immobile sample
 source("ui_smlm.R")
 source("ui_tracking.R")
 source("sim_ui.R")

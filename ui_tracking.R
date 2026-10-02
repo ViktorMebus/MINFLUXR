@@ -64,7 +64,12 @@ tracking_ui <- fluidPage(
                     accept = c(".csv", ".csv.gz", ".rds", ".fst", ".qs", ".json", ".npy"),
                     multiple = TRUE),
           helpText(style = "font-size:0.82em; color:#666; margin-top:-6px;",
-            "Multiple files merge into one dataset; track IDs are prefixed F1_, F2_, … so they cannot collide."),
+            "Each upload adds to the loaded datasets."),
+          selectInput("trk_active", "Active dataset", choices = character(0), width = "100%"),
+          helpText(style = "font-size:0.82em; color:#666; margin-top:-6px;",
+            "One file at a time, or all loaded files merged into one dataset (track IDs prefixed F1_, F2_, …)."),
+          actionButton("trk_remove", "Remove selected dataset", icon = icon("trash"),
+                       class = "btn-warning btn-sm", style = "margin-bottom:8px;"),
           # Chunking splits the dataset into blocks of whole TIDs so a modest machine
           # renders one block at a time. Shown in both view modes: the chunk size
           # applies at upload, and "Limit Full tracks" below makes the selected chunk
@@ -527,8 +532,8 @@ tracking_ui <- fluidPage(
             tagList(tags$b("D"), " from the covariance-based estimator, CVE (Vestergaard, Blainey & ",
                     "Flyvbjerg 2014). ", sigloc(), " from the MINFLUX photon budget, L", tags$sub("TCP"),
                     "/(a\u221AN) per localization (Vogler et\u00a0al. 2025)."),
-            HTML("The CVE uses only consecutive single-cycle steps, so dark-cycle intervals stay out of the covariance, and D is unaffected by motion blur. &sigma;<sub>loc</sub> is computed per localization from its photon count, so the way the molecule moves cannot bias it. With a = 4, the ideal value, &sigma;<sub>loc</sub> is a lower bound."),
-            HTML("The tracker wanders even on an immobile target, which puts an instrumental floor under D: measure it and enter it as the wander floor D<sub>w</sub>. The CVE &sigma; shown alongside is a cross-check, not a measurement.")),
+            HTML("The CVE uses only consecutive single-cycle steps, so dark-cycle intervals stay out of the covariance, and D is unaffected by motion blur. &sigma;<sub>loc</sub> is computed per localization from its photon count; motion enters only through the drift of the emitter off the pattern centre during the exposure, scaled for the TCP pattern. The prefactor a is measured on an immobile sample under Instrument Calibration; without a calibration the pattern's ideal-estimator value is used and &sigma; is uncalibrated. Exported positions come out tighter than the ideal unbiased bound (a = &radic;8 for a 2D pattern), so a cannot be derived and has to be measured."),
+            HTML("The tracker wanders even on an immobile target, which puts an instrumental floor under D: measure it and enter it as the wander floor D<sub>w</sub>. The CVE &sigma; shown alongside is a diagnostic only.")),
           actionButton("trk_cve_run", HTML("Estimate &sigma;<sub>loc</sub> &amp; quality"),
                        icon = icon("ruler-combined"),
                        class = "btn-primary", style = "margin-bottom:6px; width:100%;"),
@@ -555,12 +560,24 @@ tracking_ui <- fluidPage(
           helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
             "The iteration repeated during tracking; sets ", sigloc(), " and D", tags$sub("max"),
             ". A sequence file loaded under TSA fills it in."),
+          selectInput("trk_tcp_pattern", "TCP pattern, final iteration",
+                      choices = c("Hexagon (2D)" = "hexagon", "Square (2D)" = "square",
+                                  "Triangle (2D)" = "triangle", "Octahedron (3D)" = "octahedron"),
+                      selected = TCP_PATTERN_DEFAULT),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "Sets how fast ", sigloc(), " degrades as a moving emitter drifts off the pattern centre. ",
+            "A sequence file loaded under TSA fills it in."),
+          selectInput("trk_cal_profile", "Calibration profile",
+                      choices = c("None (uncalibrated)" = ""), width = "100%"),
+          helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
+            "Sets a and D", tags$sub("w"), " from a calibration measured under Instrument Calibration, ",
+            "or loaded from a saved profile."),
           numericInput("trk_crlb_pref",
                        HTML("&sigma;<sub>loc</sub> prefactor a, in &sigma; = L/(a&middot;&radic;N)"),
-                       value = TCP_CRLB_PREFACTOR, min = 0.5, max = 4, step = 0.1),
+                       value = NA, min = 0.5, max = 10, step = 0.1),
           helpText(style = "font-size:0.8em; color:#666; margin-top:-6px;",
-            "4 is the ideal value, so ", sigloc(), " is a lower bound. A value measured on an ",
-            "immobile sample brackets it from the other side."),
+            "An instrument constant, measured per acquisition sequence on an immobile sample. ",
+            "Blank uses the ideal-estimator value for the TCP pattern (√8 in 2D), which is uncalibrated."),
           numericInput("trk_geofactor_base",
                        HTML("patGeoFactor base (nm), L = patGeoFactor &times; base"),
                        value = TCP_L_PER_GEOFACTOR_NM, min = 50, max = 2000, step = 10),
@@ -638,10 +655,62 @@ tracking_ui <- fluidPage(
           .detail(label = "\u2139 Setup for your MINFLUX system (what to measure)",
             HTML("Three values under <b>Acquisition Parameters</b> belong to your microscope, and the defaults may not fit it:"),
             tags$ul(style = "margin:4px 0; padding-left:18px;",
-              tags$li(HTML("<b>&sigma;<sub>loc</sub> prefactor a</b>: track an immobile sample at two or more TCP diameters.")),
+              tags$li(HTML("<b>&sigma;<sub>loc</sub> prefactor a</b>: track an immobile sample with the same sequence (pattern, L, photon limit) used on the live sample.")),
               tags$li(HTML("<b>patGeoFactor base</b>: check one diameter against your vendor.")),
               tags$li(HTML("<b>Wander floor D<sub>w</sub></b>: the MSD slope of the same immobile sample."))),
             HTML("The user guide gives the procedure and what to report in a methods section."))
+        )
+      ),
+
+      tags$hr(),
+
+      # ── Instrument Calibration (immobile sample) ──────────────────────────────
+      # Measures a and the wander floor D_w for one acquisition sequence on this
+      # instrument, and keeps the result as a named, portable profile (est_calib.R).
+      fluidRow(
+        column(4,
+          h4("Instrument Calibration"),
+          .method_box("green",
+            HTML("The photon-budget model &sigma; = L/(a&radic;N) and the wander floor D<sub>w</sub>, measured on an immobile sample acquired with one sequence."),
+            HTML("On an immobile sample every apparent motion is instrumental. For each file the short-lag MSD (1–5 single-cycle steps, after the filters set under Display) is fitted as MSD = 4&sigma;² + 4D<sub>w</sub>&tau;: the intercept gives &sigma;, the slope D<sub>w</sub>, and a = L&radic;&lang;1/N&rang; / &sigma;. The profile takes the median across cells and keeps the quartiles."),
+            "a and D_w belong to one sequence (pattern, L, dwell, photon limit, damping) on one instrument. Fixed cells labelled like the live sample are a better calibrant than beads, which are extended and bright."),
+          checkboxInput("trk_show_cal", "Enable instrument calibration", FALSE),
+          conditionalPanel(
+            condition = "input.trk_show_cal == true",
+            selectInput("trk_cal_files", "Immobile-sample files", choices = character(0),
+                        multiple = TRUE, width = "100%"),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Loaded files acquired with ONE sequence. L and the pattern come from Acquisition Parameters."),
+            actionButton("trk_cal_run", "Measure", icon = icon("ruler-combined"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            tags$hr(style = "margin:8px 0;"),
+            tags$b("Save as a profile", style = "font-size:0.9em;"),
+            textInput("trk_cal_name", "Profile name", "", placeholder = "e.g. Hex100_L101_PL20"),
+            fluidRow(
+              column(6, numericInput("trk_cal_dwell", "Dwell (µs)", value = NA, min = 0)),
+              column(6, numericInput("trk_cal_pl", "Photon limit", value = NA, min = 0))),
+            fluidRow(
+              column(6, numericInput("trk_cal_damping", "Damping", value = NA, min = 0)),
+              column(6, textInput("trk_cal_note", "Instrument / note", ""))),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Recorded with the profile. A loaded sequence file fills in dwell, photon limit and damping."),
+            actionButton("trk_cal_save", "Save profile", icon = icon("floppy-disk"),
+                         class = "btn-sm", style = "margin:4px 0; width:100%;"),
+            fluidRow(
+              column(6, downloadButton("trk_cal_profiles_dl", "Download profiles", class = "btn-sm")),
+              column(6, fileInput("trk_cal_profiles_ul", NULL, accept = ".json",
+                                  buttonLabel = "Load profiles", placeholder = "JSON")))
+          )
+        ),
+        column(8,
+          conditionalPanel(
+            condition = "input.trk_show_cal == true",
+            uiOutput("trk_cal_summary"),
+            DT::DTOutput("trk_cal_results"),
+            tags$hr(style = "margin:8px 0;"),
+            h5("Saved profiles"),
+            DT::DTOutput("trk_cal_profiles_tab")
+          )
         )
       ),
 
@@ -1406,6 +1475,64 @@ tracking_ui <- fluidPage(
             helpText(style = "font-size:0.82em; color:#666;",
               "Local D in nm\u00b2/ms, cool for slow and warm for fast. Blank: too few steps."),
             uiOutput("trk_dmap_summary")
+          )
+        )
+      ),
+
+      tags$hr(),
+
+      # ── Compare cells (one file = one cell) ───────────────────────────────────
+      # Conditions are compared on one value per cell. Each file is analysed alone
+      # with its own cycle time and its own sequence settings (est_percell.R).
+      fluidRow(
+        column(4,
+          h4("Compare Cells"),
+          .method_box("green",
+            HTML("One file is one field of view, i.e. one cell, and the cell is the unit of replication."),
+            HTML("Each file is analysed on its own, the way the Data Quality panel analyses a single loaded file: its own cycle time from the data, every filter set under Display except the spatial crop, D from the CVE, &sigma;<sub>loc</sub> from the photon budget with that file's L, pattern and a, and the damping check. Conditions are compared on one value per cell, as the mean with a t-based 95% CI across cells."),
+            "Descriptive, with no significance test. Tracks within one cell are correlated, so the number of cells sets how precisely a condition is known."),
+          checkboxInput("trk_show_cmp", "Enable cell comparison", FALSE),
+          conditionalPanel(
+            condition = "input.trk_show_cmp == true",
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Every loaded file is listed, whichever dataset is active. Give each one its condition and the settings of the sequence it was acquired with."),
+            tags$b("Fill rows", style = "font-size:0.9em;"),
+            fluidRow(
+              column(6, textInput("trk_cmp_fill_match", "File name contains", "")),
+              column(6, selectInput("trk_cmp_fill_col", "Column",
+                                    choices = c("condition", "calibration", "L_nm", "pattern", "a", "D_w")))),
+            fluidRow(
+              column(8, textInput("trk_cmp_fill_value", "Value", "")),
+              column(4, actionButton("trk_cmp_fill_apply", "Apply", class = "btn-sm",
+                                     style = "margin-top:25px; width:100%;"))),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:-4px;",
+              "Sets the column for every file whose name contains the text, ignoring case. Empty text matches every file."),
+            fluidRow(
+              column(6, downloadButton("trk_cmp_table_dl", "Save table", class = "btn-sm")),
+              column(6, fileInput("trk_cmp_table_ul", NULL, accept = ".csv",
+                                  buttonLabel = "Load table", placeholder = "CSV"))),
+            tags$hr(style = "margin:8px 0;"),
+            actionButton("trk_cmp_run", "Analyse each cell", icon = icon("play"),
+                         class = "btn-primary btn-sm", style = "margin:4px 0; width:100%;"),
+            selectInput("trk_cmp_metric", "Metric to compare",
+                        choices = stats::setNames(names(PERCELL_METRICS), PERCELL_METRICS),
+                        selected = "D_um2_s"),
+            downloadButton("trk_cmp_results_dl", "Download per-cell results (CSV)", class = "btn-sm")
+          )
+        ),
+        column(8,
+          conditionalPanel(
+            condition = "input.trk_show_cmp == true",
+            h5("Files and their sequence settings"),
+            DT::DTOutput("trk_cmp_table"),
+            helpText(style = "font-size:0.82em; color:#666; margin-top:2px;",
+              "Double-click a value to edit it. A calibration names a saved profile, which supplies a, D_w, L and the pattern; a blank setting uses the profile, else the Acquisition Parameters value. Pattern: hexagon, square, triangle or octahedron (3, 4 or 6 also work for the 2D ones). D_w in nm\u00b2/ms, 0 = not measured. Files without a condition are analysed and listed, and left out of the comparison."),
+            tags$hr(style = "margin:8px 0;"),
+            plotlyOutput("trk_cmp_plot", height = "380px"),
+            uiOutput("trk_cmp_stats"),
+            tags$hr(style = "margin:8px 0;"),
+            h5("Per-cell results"),
+            DT::DTOutput("trk_cmp_results")
           )
         )
       ),

@@ -787,8 +787,21 @@ Sidebar groups appear in this order.
 ### Data Upload
 
 Accepts `.npy`, `.json`, `.csv` (pyMINFLUX or this app's export), and the fast cache formats
-`.qs` / `.fst` / `.rds`. Multiple files merge into one dataset with track IDs prefixed `F1_`, `F2_`
-so IDs from different files never collide.
+`.qs` / `.fst` / `.rds`. **Each upload adds to the loaded datasets**, and *Active dataset* chooses
+what is shown and analysed: one file at a time (the default), or all loaded files merged into one
+dataset, with track IDs prefixed `F1_`, `F2_` so IDs from different files never collide. *Remove
+selected dataset* drops a file loaded by mistake.
+
+**Filters apply to every loaded dataset alike.** A range you set (EFO, length, duration, ...) is
+stored as you entered it and applied to whichever dataset is active; the sliders show it clamped to
+that dataset's range, and switching datasets never changes it. Cleaning settings (gap split,
+end-trim, continuity gate) likewise apply to all. *Reset Ranges* clears the range filters. The
+spatial crop is the exception: it belongs to one field of view and is cleared on switching. Every
+analysis reads the active dataset after filtering.
+
+Merging pools tracks from different cells, which suits exploring them together but treats them as one
+population. To compare conditions with the cell as the replicate, use *Compare Cells* (Analysis tab),
+which analyses every loaded file on its own whichever dataset is active.
 
 Large files are **chunked** on upload - split into blocks of whole TIDs written to a manifest
 directory - so rendering stays responsive on modest hardware. Chunk size is set by *TIDs per chunk*.
@@ -950,6 +963,34 @@ exposes candidate directed segments with per-event corroboration.
 
 Bins the field of view and estimates D per bin, showing where in the sample diffusion differs.
 Subtracts the σ_loc noise floor so slow regions are not reported as diffusing.
+
+### Compare Cells
+
+For experiments where **each file is one field of view, i.e. one cell**, and conditions are compared
+between cells. Every loaded file is listed, whichever dataset is active under *Display*; give each
+one its condition in the table
+(the **Fill rows** tool sets a column for every file whose name contains a given text, and the table
+can be saved and reloaded as CSV).
+
+Each file is then analysed on its own, the way the Data Quality panel analyses a single loaded file:
+
+- its **own cycle time**, estimated from its intervals, so sequences with different dwell times or CFR
+  settings can be loaded together;
+- every filter set under *Display* (gap split, end-trim, continuity gate, range, length and
+  duration filters), applied with that cycle time; the spatial crop is not, since it belongs to one
+  field of view;
+- D from the CVE, $D - D_w$, and σ_loc from the photon budget with that file's **L, pattern, a and
+  D_w**. A blank setting uses the value under *Acquisition Parameters*, so only settings that differ
+  between files need entering;
+- the correlated-error check (r₁ against the motion bound), which reads high with galvo damping and
+  also on near-immobile samples, where the tracking loop's own correlated error dominates.
+
+Conditions are compared on **one value per cell**: the plot shows every cell as a point with the
+condition mean and a t-based 95% CI across cells. Tracks from one cell share the cell, the focus and
+the instrument's state, so pooling them across cells would treat correlated tracks as independent and
+let the busiest cell dominate its condition. The number of cells sets how precisely a condition is
+known; three is the minimum for a meaningful CI. The panel is descriptive and runs no significance
+test. The per-cell table downloads as CSV for whatever test the experimental design calls for.
 
 ### Inspect a single track
 
@@ -1533,22 +1574,57 @@ same place, so MSD-intercept and MLE fits inherit the same degeneracy.
 So σ comes from the photon budget instead:
 
 ```math
-\sigma_i = \frac{L_\text{TCP}}{a\sqrt{N_i}}\left[1 + 2\left(\frac{x}{L}\right)^2\right],
-\qquad x = \sqrt{2 D\, t_\text{loc}}
+\sigma_i = \frac{L_\text{TCP}}{a\sqrt{N_i}}\,\sqrt{1 + c\,\frac{\langle r^2\rangle}{L^2}},
+\qquad \langle r^2\rangle = d\,D\,t_\text{loc}
 ```
 
 per localization, with $N$ = ECO and $L_\text{TCP}$ from *Acquisition Parameters* (auto-filled from the
-sequence's `patGeoFactor`). This is a direct instrument model, evaluated per localization and free of any assumption about the
-motion. The bracketed term is the one place motion enters. It is the
-distance the emitter covers during one localization, so precision degrades for fast molecules and
-tightens under confinement.
+sequence's `patGeoFactor`). This is a direct instrument model, evaluated per localization and free of
+any assumption about the motion. The square-root term is the one place motion enters: the emitter
+drifts off the pattern center while photons arrive, by $\langle r^2\rangle$ on average over the
+exposure ($d$ = axes the pattern spans). Precision therefore degrades for fast molecules and tightens
+under confinement.
+
+How fast it degrades depends on the pattern, set by **TCP pattern** (read from the sequence file when
+one is loaded):
+
+| pattern | ideal unbiased $a$ | off-center coefficient $c$ |
+|---|---|---|
+| hexagon (2D) | $\sqrt{8} = 2.83$ | 8.6 |
+| square (2D) | 2.83 | 9.0 |
+| triangle (2D) | 2.83 | 13.7 |
+| octahedron (3D, idealised) | $\sqrt{16/3} = 2.31$ | 9.0 |
+
+**The prefactor $a$ is measured, not derived.** The ideal values above hold for an unbiased estimator.
+The instrument's estimator pulls positions toward the pattern center and the tracking loop correlates
+successive errors, so exported positions can scatter less than the ideal allows, and immobile-sample
+calibrations of 2D hexagonal sequences do come out above $\sqrt{8}$. The effective value therefore
+belongs to one instrument and one acquisition sequence (pattern, L, dwell, photon limit, damping), and
+is measured under *Instrument Calibration*. Without a calibration the app uses the ideal-estimator
+value of the pattern and labels σ **uncalibrated**. The derivation is in
+[sigma_loc_model.md](sigma_loc_model.md).
+
+#### Instrument Calibration
+
+Load the files of an **immobile sample** acquired with one sequence (fixed cells labelled like the live
+sample work better than beads), select them under *Instrument Calibration* and press *Measure*. For
+each file, after the filters set under *Display*, the short-lag MSD (1 to 5 single-cycle steps) is
+fitted as $\text{MSD} = 4\sigma^2 + 4D_w\tau$: the intercept gives σ, the slope the wander floor
+$D_w$, and $a = L\sqrt{\langle 1/N\rangle}/\sigma$. The result is the median across cells, with the
+quartiles showing how well the cells agree.
+
+*Save profile* keeps the result under a name, together with the sequence it belongs to (pattern, L,
+dwell, photon limit, damping, a note on the instrument). Profiles download and load as a JSON file, so
+a lab measures each sequence once and reuses the profile. Selecting a profile under *Acquisition
+Parameters* sets $a$, $D_w$, the pattern and L; in *Compare Cells* the `calibration` column names the
+profile for each file, so files acquired with different sequences each use their own.
 
 The blur-aware CVE σ is still shown beside it as a sanity read on the covariance. It is not the
 app-wide value and nothing downstream consumes it.
 
-> **σ ∝ L, or steeper?** The full doughnut CRLB carries a denominator
-> $\left|1 + \ln 2\,(L/\nu)^2\left((2x/L)^2 - 1\right)\right|$, with ν the excitation-doughnut FWHM,
-> which makes σ rise faster than $L$ as $L$ approaches ν. It is reached through the **ν** field and is
+> **σ ∝ L, or steeper?** The full doughnut CRLB carries a beam-size factor
+> $1/\left|1 - \ln 2\,(L/\nu)^2\right|$ at the pattern center, with ν the excitation-doughnut FWHM, which
+> makes σ rise faster than $L$ as $L$ approaches ν. It is reached through the **ν** field and is
 > **off by default**, since $\sigma \propto L$ holds unless an L-series on the instrument shows
 > otherwise.
 
@@ -1560,15 +1636,16 @@ defaults were used.
 
 | field | what it is | how to measure |
 |---|---|---|
-| **σ prefactor a** | absorbs background and estimator losses on top of the ideal Cramér-Rao bound | immobile sample, damping off, two or more TCP diameters; fit $\text{MSD}(\tau) = 4\sigma^2 + 4D_w\tau$ on short lags, then $a = L\sqrt{\bar{N}}\,/\,\sigma$ |
+| **σ prefactor a** | the effective photon-budget prefactor of exported positions, for one sequence | *Instrument Calibration*, on an immobile sample tracked with the live-sample sequence; it fits $\text{MSD}(\tau) = 4\sigma^2 + 4D_w\tau$ on short lags, then $a = L\sqrt{\langle 1/N\rangle}\,/\,\sigma$ |
 | **patGeoFactor base** | converts the sequence's pattern factor to a diameter, $L = \text{patGeoFactor} \times \text{base}$ | check one diameter against a figure the vendor quotes |
 | **wander floor $D_w$** | apparent diffusion the tracking loop produces on a stationary target | the slope of the same MSD fit |
 
-Fixed cells labelled as usual are a better calibration sample than dye on glass, because $a$ should
-absorb the background of the real optical environment. Tracker wander is sub-diffusive, so a straight
-line fitted to short lags lands above the true intercept and inflates σ: the measured $a$ is a lower
-bound, and the true value lies between it and 4. Two or more diameters also test whether σ ∝ L holds,
-which is what the beam FWHM ν field is for if it does not.
+Fixed cells labelled as usual are a better calibration sample than dye on glass or beads, because $a$
+should absorb the background of the real optical environment. The fitted $a$ is an effective value
+rather than a bound: the sub-diffusive tracker wander pushes a straight-line intercept up, while the
+correlation the loop puts between successive errors pulls the lag-1 MSD down. It reproduces the noise
+as it enters short-lag displacements, which is what the downstream estimators subtract. Two or more
+diameters also test whether σ ∝ L holds, which is what the beam FWHM ν field is for if it does not.
 
 #### The wander floor
 
