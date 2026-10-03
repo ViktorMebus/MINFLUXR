@@ -1,6 +1,6 @@
 # Per-cell comparison (R/est_percell.R) and the timing / cleaning functions it shares
 # with the main Tracking pipeline (R/est_clean.R).
-for (f in c("R/est_clean.R", "R/est_blur.R", "R/est_cve.R", "R/est_percell.R")) source(file.path(.repo_root, f))
+for (f in c("R/est_clean.R", "R/est_blur.R", "R/est_cve.R", "R/est_msd.R", "R/est_percell.R")) source(file.path(.repo_root, f))
 
 # Free 2D Brownian tracks sampled the MINFLUX way: each interval spans k cycles,
 # dt = k * t_c + sw exactly, with k drawn from k_p. D in nm^2/ms, sigma in nm.

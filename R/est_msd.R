@@ -325,3 +325,99 @@ msd_fit_olsf_iterative <- function(tau, msd, ndim = 2L, R = 0, coef_override = N
          tau_fit = tseq, msd_fit = coef_v * D * tseq^a + C, ndim = ndim, method = "anomalous")
   } else NULL
 }
+
+# ── msd_track_sums() ──────────────────────────────────────────────────────────
+# GOAL: the per-track sums behind the cycle-binned MSD. The lag of a pair is the
+# difference of the two localizations' cumulative cycle index (Vogler's TOT),
+# round((dt - SW) / t_c) summed along the track, so dark cycles count as elapsed
+# cycles. Vectorised over index offsets: a pair m localizations apart spans at
+# least m cycles, so offsets 1..max_lag find every pair with lag <= max_lag.
+# df      : localizations (tid, x, y, tim in ms, optional z)
+# min_pts : tracks with fewer localizations contribute nothing (zero columns)
+# RETURNS list(tk_names, dr2, np, dt) - max_lag x n_tracks matrices of summed
+#   squared displacement (nm^2), pair counts and summed real dt (ms) per cycle lag;
+#   columns follow the sorted track ids, as split() orders them.
+msd_track_sums <- function(df, t_c, sw = 0, max_lag = 50L, min_pts = 5L, has_z = FALSE) {
+  df <- df[order(df$tid, df$tim), ]
+  tk_names <- levels(factor(df$tid))
+  nt  <- length(tk_names)
+  dr2 <- matrix(0, max_lag, nt); np <- matrix(0L, max_lag, nt); dts <- matrix(0, max_lag, nt)
+  out <- list(tk_names = tk_names, dr2 = dr2, np = np, dt = dts)
+  if (!nt || !is.finite(t_c) || t_c <= 0) return(out)
+  tf   <- match(df$tid, tk_names)
+  keep <- (tabulate(tf, nt) >= min_pts)[tf]               # short tracks contribute nothing
+  d <- df[keep, , drop = FALSE]; tfd <- tf[keep]; n <- nrow(d)
+  if (n < 2L) return(out)
+  newtrk <- c(TRUE, tfd[-1] != tfd[-n])
+  dcyc <- pmax(1L, as.integer(round((c(0, diff(d$tim)) - sw) / t_c)))
+  dcyc[newtrk] <- 0L
+  cyc  <- cumsum(dcyc); cyc <- cyc - cyc[newtrk][cumsum(newtrk)]   # cycle index within track
+  nb   <- max_lag * nt
+  for (m in seq_len(min(max_lag, n - 1L))) {
+    i  <- seq_len(n - m); j <- i + m
+    ok <- tfd[i] == tfd[j]
+    if (!any(ok)) next
+    i <- i[ok]; j <- j[ok]
+    lag <- cyc[j] - cyc[i]
+    ok  <- lag >= 1L & lag <= max_lag
+    if (!any(ok)) next
+    i <- i[ok]; j <- j[ok]; lag <- lag[ok]
+    v <- (d$x[j] - d$x[i])^2 + (d$y[j] - d$y[i])^2
+    if (has_z) v <- v + (d$z[j] - d$z[i])^2
+    key <- lag + (tfd[i] - 1L) * max_lag                   # column-major cell of (lag, track)
+    s <- rowsum(v, key); ix <- as.integer(rownames(s))
+    dr2[ix] <- dr2[ix] + s[, 1L]
+    s <- rowsum(d$tim[j] - d$tim[i], key); ix <- as.integer(rownames(s))
+    dts[ix] <- dts[ix] + s[, 1L]
+    np <- np + tabulate(key, nbins = nb)
+  }
+  list(tk_names = tk_names, dr2 = dr2, np = np, dt = dts)
+}
+
+# ── msd_ensemble() ────────────────────────────────────────────────────────────
+# GOAL: the ensemble MSD curve from msd_track_sums(): track-weighted (the mean of
+# per-track TAMSDs, Vogler's eMSD) or pair-weighted, with the real mean dt per lag,
+# the linearised axis k * t_c + SW, and which lags enough tracks reach.
+msd_ensemble <- function(sums, t_c, sw = 0, track_weight = TRUE) {
+  L <- nrow(sums$dr2)
+  track_msd <- ifelse(sums$np > 0L, sums$dr2 / sums$np, NA_real_)
+  np_lag <- rowSums(sums$np)
+  msd <- if (track_weight) rowMeans(track_msd, na.rm = TRUE)
+         else ifelse(np_lag > 0, rowSums(sums$dr2) / np_lag, NA_real_)
+  msd[!is.finite(msd)] <- NA_real_
+  n_trk_lag <- rowSums(!is.na(track_msd))
+  keep_lag  <- n_trk_lag >= max(2L, floor(0.10 * max(c(0, n_trk_lag))))
+  list(lag = seq_len(L), msd = msd, npairs = np_lag, n_trk_lag = n_trk_lag, keep_lag = keep_lag,
+       tau = ifelse(np_lag > 0, rowSums(sums$dt) / np_lag, seq_len(L) * t_c),
+       tau_lin = seq_len(L) * t_c + sw, track_msd = track_msd)
+}
+
+# ── msd_headline() ────────────────────────────────────────────────────────────
+# GOAL: D from the upper lag regime of the ensemble MSD, the estimator Vogler et
+# al. 2025 validated against TIRF, with the same fit the MSD panel runs (OLSF over
+# the fit window, iterative or anchored). Short lags are left out because they carry
+# non-diffusive motion on top of noise (probe wobble, tracker wander).
+# window : c(lower, upper) fit window in cycles
+# R      : motion-blur coefficient per step; coef : 2 x effective dimensionality
+# RETURNS list(D (nm^2/ms), sigma (nm), n_points, window) or NULL.
+msd_headline <- function(df, t_c, sw = 0, window = c(5L, 50L), track_weight = TRUE,
+                         iterative = TRUE, linear_tau = TRUE, R = 0, coef = 4,
+                         min_pts = 50L, has_z = FALSE) {
+  lo <- max(1L, as.integer(window[1])); hi <- max(lo + 2L, as.integer(window[2]))
+  df <- df[is.finite(df$x) & is.finite(df$y) & is.finite(df$tim) &
+             (if (has_z) is.finite(df$z) else TRUE), , drop = FALSE]
+  sums <- msd_track_sums(df, t_c, sw, max(60L, min(5000L, hi)), min_pts, has_z)
+  ens  <- msd_ensemble(sums, t_c, sw, track_weight)
+  tau  <- if (linear_tau) ens$tau_lin else ens$tau
+  ok   <- is.finite(tau) & is.finite(ens$msd) & ens$keep_lag & ens$lag >= lo & ens$lag <= hi
+  if (sum(ok) < 3L) return(NULL)
+  ndim <- if (has_z) 3L else 2L
+  fr <- if (iterative)
+    msd_fit_olsf_iterative(tau[ok], ens$msd[ok], ndim = ndim, R = R, dt_cycle = t_c,
+                           N = sum(ok), coef_override = coef)
+  else
+    msd_fit_olsf(tau[ok], ens$msd[ok], ens$npairs[ok], k = sum(ok), ndim = ndim,
+                 auto_pmin = TRUE, R = R, Npts = 1e4, dt_cycle = t_c, coef_override = coef)
+  if (is.null(fr) || !is.finite(fr$D)) return(NULL)
+  list(D = fr$D, sigma = fr$sigma_loc, n_points = fr$n_points %||% NA_integer_, window = c(lo, hi))
+}

@@ -1,5 +1,5 @@
 # Instrument calibration from an immobile sample (R/est_calib.R).
-for (f in c("R/est_clean.R", "R/est_calib.R")) source(file.path(.repo_root, f))
+for (f in c("R/est_clean.R", "R/est_msd.R", "R/est_calib.R")) source(file.path(.repo_root, f))
 
 # Immobile emitters: the reported position is a slow random walk (the wander,
 # D_w in nm^2/ms) plus white noise with sigma_i = L / (a sqrt(N_i)). Intervals are

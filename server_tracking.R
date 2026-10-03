@@ -396,7 +396,6 @@ tracking_server <- function(input, output, session) {
   #   frac_integ, cont_raw, cont_filt ... data-quality scores
   #   pertrack_sigma .... per-track table (tid, sigma, n_integ, phot_med, var_step)
   #   r1_norm / noise_frac ... how much of the step variance is localization noise
-  #   phot_mob_rho ... ρ[photons, step variance]: negative = photons track MOBILITY
   #   n_implaus, n_suspect, ...
   #
   # WHEN IT FAILS: strong directed motion makes consecutive steps POSITIVELY
@@ -404,8 +403,9 @@ tracking_server <- function(input, output, session) {
   # reported as `degenerate` - enter σ_loc manually in that case.
   # ============================================================================
   trk_cve_bundle <- eventReactive(input$trk_cve_run, {
-    # The filtered data of the active dataset, as every other analysis reads it.
-    df <- tryCatch(trk_spatial_filtered(), error = function(e) NULL)
+    # The plotted data of the active dataset (filtered, applied with Plot Data), as
+    # every other analysis reads it, so all panels describe the same tracks.
+    df <- tryCatch(trk(), error = function(e) NULL)
     req(!is.null(df), nrow(df) > 0, all(c("x","y","tid","tim") %in% names(df)))
     t_c   <- tryCatch(trk_cycle_time(), error = function(e) NA_real_)
     # Real axial data only - a placeholder all-zero z column would dilute both σ_loc
@@ -500,7 +500,7 @@ tracking_server <- function(input, output, session) {
                 else NA_character_
     # Per-track σ carries the same blur correction. Note what it can and cannot
     # say: at R ≈ 1/6 the R*⟨Δx²⟩ term is ~90% of σ², so per-track differences here
-    # track the per-track STEP SIZE (mobility) far more than the photon budget.
+    # track the per-track STEP SIZE far more than the photon budget.
     # Kept for the outlier/degenerate QC below, not as a precision measurement -
     # the per-localization photon estimate is what the panel plots.
     sq_x_pt <- dx^2; sq_y_pt <- dy^2; sq_z_pt <- if (has_z) dz^2 else rep(NA_real_, n)
@@ -528,8 +528,7 @@ tracking_server <- function(input, output, session) {
                    kl <- post & is.finite(df[[phot_col]]) & df[[phot_col]] > 0
                    tapply(df[[phot_col]][kl], df$tid[kl], stats::median)[names(s2_by)]
                  } else stats::setNames(rep(NA_real_, length(s2_by)), names(s2_by))
-      # Per-track step variance - used to test whether the photon channel is really a
-      # MOBILITY proxy (bright = slow), which would make photon weighting bias D.
+      # Per-track step variance, reported with the per-track table.
       v_by <- tapply(dx[integ_post]^2 + dy[integ_post]^2,
                      df$tid[integ_post], mean, na.rm = TRUE)[names(s2_by)]
       data.frame(tid = names(s2_by), sigma = sqrt(pmax(0, as.numeric(s2_by))),
@@ -578,22 +577,11 @@ tracking_server <- function(input, output, session) {
 
     # ── Photon channel: DIAGNOSTIC ONLY (photon weighting has been REMOVED) ─────
     # There used to be an inverse-variance "photon-weighted" CVE here (fit σ ∝ photons^p,
-    # then weight steps by the predicted σ). It is gone, because on MINFLUX TRACKING data
-    # the photon channel is structurally coupled to MOBILITY, not just brightness: a fast
-    # molecule leaves the beam pattern sooner, so it collects FEWER photons per
-    # localization. Weighting by photons therefore up-weights slow molecules and biases D
-    # downward - the estimator was measuring the thing it was supposed to correct.
-    # We keep the two quantities that revealed it, as reported diagnostics:
-    #   noise_frac  - how much of the step variance is localization noise (−2·r₁). Small
-    #                 ⇒ per-track σ differences are motion, not photons.
-    #   phot_mob_rho - Spearman ρ[per-track photons, per-track step variance]. Strongly
-    #                 negative ⇒ the photon channel is a mobility proxy.
-    # The pooled σ_loc / D_cve above are unaffected: they never used the photon model.
-    phot_mob_rho <- if (!is.null(pertrack_sigma) &&
-                        sum(is.finite(pertrack_sigma$phot_med) &
-                            is.finite(pertrack_sigma$var_step)) >= 8L)
-      suppressWarnings(stats::cor(pertrack_sigma$phot_med, pertrack_sigma$var_step,
-                                  method = "spearman", use = "complete.obs")) else NA_real_
+    # then weight steps by the predicted σ). It is gone: photon counts differ between
+    # tracks for several reasons besides precision (mobility, bleaching, emitter
+    # brightness, background), so weighting by them would weight the tracks by
+    # whatever drives those differences. The CVE weights every step equally.
+    #   noise_frac - how much of the step variance is localization noise (−2·r₁).
 
     # ── σ_loc from the photon budget - the value the app actually uses ─────────
     # σ_i = L_TCP / (a*sqrt(N_i)) per localization, N = eco, a the measured effective
@@ -632,9 +620,15 @@ tracking_server <- function(input, output, session) {
     sig_phot_iqr <- if (length(sig_phot_i) >= 5L)
                       as.numeric(diff(stats::quantile(sig_phot_i, c(.25, .75)))) else NA_real_
     eco_med      <- if (length(ecov)) stats::median(ecov) else NA_real_
-    # Invert the blur-aware CVE for L and compare against the sequence's L. The two
-    # routes share no assumptions, so agreement is a real check on the prefactor.
-    # The prefactor itself is calibrated on an immobile sample; see docs/sigma_loc_model.md.
+    # Headline D: the upper lag regime of the ensemble MSD, with the MSD panel's fit
+    # settings (Vogler et al. 2025 validated this estimator against TIRF). The CVE
+    # above uses single-cycle steps, the lower regime, and is kept as a check.
+    ms  <- .msd_settings(df)
+    cch <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
+    hd  <- tryCatch(msd_headline(df, t_c, if (!is.null(cch) && is.finite(cch$sw)) cch$sw else 0,
+                                 ms$window, ms$track_weight, ms$iterative, ms$linear_tau, ms$R,
+                                 if (ms$has_z) ms$coef[["d3"]] else ms$coef[["d2"]], ms$min_pts, ms$has_z),
+                    error = function(e) NULL)
 
     list(sigma = sigma, sigma2 = sigma2, cov1 = cov1, n_pairs = length(vals),
          R_blur = R_blur, msq = msq, n_vert = n_vert, t_coll = t_coll,
@@ -655,7 +649,8 @@ tracking_server <- function(input, output, session) {
          n_implaus = n_implaus, frac_implaus = frac_implaus,
          n_suspect = n_suspect, n_tracks_pt = n_tracks_pt,
          phot_col = phot_col,   # photon column used for the diagnostics
-         r1_norm = r1_norm, noise_frac = noise_frac, phot_mob_rho = phot_mob_rho)
+         r1_norm = r1_norm, noise_frac = noise_frac,
+         D_msd = if (!is.null(hd)) hd$D else NA_real_, msd_window = ms$window)
   })
 
   # Publish the calibration result as the app-wide σ_loc.
@@ -769,12 +764,6 @@ tracking_server <- function(input, output, session) {
                                           " spread is dominated by motion, so read it as indicative only") else NULL)
     else NULL
 
-    # ── photon channel = mobility proxy, so an ECO/EFO filter is a mobility filter ──
-    eco_line <- if (is.finite(b$phot_mob_rho) && b$phot_mob_rho <= -0.35)
-      row(warn(htmltools::HTML(sprintf(
-        "&#9888; %s correlates with mobility (&rho; = %.2f), so filtering on %s removes the faster molecules and lowers D",
-        toupper(b$phot_col %||% "photon"), b$phot_mob_rho, toupper(b$phot_col %||% "photon")))))
-    else NULL
 
     # ── data quality: same integrated-fraction metric as TSA / cycle-time status ──
     fi_raw  <- b$frac_integ %||% NA_real_;      fi_filt <- b$frac_integ_filt %||% NA_real_
@@ -817,8 +806,15 @@ tracking_server <- function(input, output, session) {
                          a_used, ideal, "\u03c3", b$sig_phot_med * a_used / ideal)))
     } else NULL
 
+    headline_line <- if (is.finite(b$D_msd %||% NA_real_))
+      row(htmltools::tags$b(sprintf("D %.3g \u00b5m\u00b2/s", b$D_msd / 1e3)),
+          dim_(sprintf("  upper-regime MSD, cycles %d\u2013%d  \u00b7  lag-1 check (CVE) %.3g%s",
+                       as.integer(b$msd_window[1]), as.integer(b$msd_window[2]), d_use / 1e3,
+                       if (is.finite(d_use) && b$D_msd > 0) sprintf(" (\u00d7%.2f)", d_use / b$D_msd) else "")))
+    else row(warn("D: too few lags with data in the MSD fit window; only the lag-1 CVE value is available"))
+
     calib_line <- row(dim_(sprintf(
-      "cycle %s  \u00b7  D %s \u00b5m\u00b2/s%s  \u00b7  %s steps",
+      "cycle %s  \u00b7  CVE D %s \u00b5m\u00b2/s%s  \u00b7  %s steps",
       num(b$t_cycle, "%.4g ms", "unknown"), num(d_use / 1e3, "%.3g"),
       if (d_mot != d_obs) sprintf(" (%d/%d for %s)", d_obs, d_mot, input$trk_motion %||% "volume") else "",
       format(b$n_steps, big.mark = ","))))
@@ -828,10 +824,16 @@ tracking_server <- function(input, output, session) {
     # photon budget, so a single constant would over-correct dim tracks.
     dw_line <- {
       dw <- suppressWarnings(as.numeric(input$trk_dw_floor %||% 0))
-      if (!is.finite(dw) || dw <= 0 || !is.finite(d_use)) NULL else {
-        frac <- dw / d_use
-        row(dim_(sprintf("wander floor %.3g µm²/s  →  D − Dw = %.3g",
-                         dw / 1e3, max(0, d_use - dw) / 1e3)),
+      d_head <- if (is.finite(b$D_msd %||% NA_real_)) b$D_msd else d_use   # the headline D
+      prof <- trk_cal_profiles()[[input$trk_cal_profile %||% ""]]
+      win_note <- if (!is.null(prof) && length(prof$window) == 2L &&
+                      !isTRUE(all(as.integer(prof$window) == as.integer(b$msd_window))))
+        sprintf(" (floor measured over cycles %d\u2013%d, D over %d\u2013%d)", as.integer(prof$window[1]),
+                as.integer(prof$window[2]), as.integer(b$msd_window[1]), as.integer(b$msd_window[2])) else ""
+      if (!is.finite(dw) || dw <= 0 || !is.finite(d_head)) NULL else {
+        frac <- dw / d_head
+        row(dim_(sprintf("wander floor %.3g µm²/s  →  D − Dw = %.3g%s",
+                         dw / 1e3, max(0, d_head - dw) / 1e3, win_note)),
             if (frac > 0.5) warn(htmltools::HTML(sprintf(
               "  &#9888; floor is %.0f%% of D (not resolved above the tracker)", 100 * frac)))
             else if (frac > 0.2) warn(sprintf("  (%.0f%% of D)", 100 * frac))
@@ -852,7 +854,7 @@ tracking_server <- function(input, output, session) {
     } else NULL
 
     htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
-      sigma_line, prof_line, smooth_line, blur_line, cve_line, aniso_line, noise_line, eco_line, qual_line, calib_line,
+      headline_line, sigma_line, prof_line, smooth_line, blur_line, cve_line, aniso_line, noise_line, qual_line, calib_line,
       dw_line, qc_line)
   })
 
@@ -1549,15 +1551,16 @@ tracking_server <- function(input, output, session) {
     req(trk_has_data())
     required <- c("tid","x","y","tim")
     
-    # Source for the WHOLE filter pipeline. The filters and gap-splitting must
-    # operate on ALL TIDs, never a single chunk, so we always load every chunk of
-    # the CURRENT manifest (rv$manifest_dir) - the chunk selector does not restrict
-    # the data. After Filter & Rechunk the current manifest is the rechunked set;
-    # use Reset Ranges (which restores rv$original_manifest_dir) to return to the
-    # full original, un-split data before re-splitting.
+    # Source for the WHOLE filter pipeline: every chunk of the ORIGINAL upload of the
+    # active dataset (rv$original_manifest_dir), never a single chunk. Plot Data
+    # rechunks the filtered survivors into rv$manifest_dir for the playback chunk
+    # selector; the pipeline must not read that set, or it runs a second time on
+    # already-filtered data (removed localizations leave holes that the gap split
+    # then cuts at), and results would depend on whether Plot Data was pressed.
     df <- NULL
-    if (!is.null(rv$manifest_dir)) {
-      manf <- file.path(rv$manifest_dir, "manifest.csv")
+    src_dir <- rv$original_manifest_dir %||% rv$manifest_dir
+    if (!is.null(src_dir)) {
+      manf <- file.path(src_dir, "manifest.csv")
       if (file.exists(manf)) {
         man <- tryCatch(readr::read_csv(manf, show_col_types = FALSE), error = function(e) NULL)
         if (!is.null(man) && nrow(man) > 0 && "file" %in% names(man)) {
@@ -2019,7 +2022,7 @@ tracking_server <- function(input, output, session) {
   # gap-split / end-trim / quality can use the cycle time with no circular
   # dependency, and so metadata-removed localizations don't distort the Δt.
   trk_pipeline_modal_dt <- reactive({
-    df <- tryCatch(trk_raw_df(), error = function(e) NULL)
+    df <- .trk_timing_df()
     if (is.null(df) || !nrow(df) || !all(c("tid", "tim") %in% names(df))) return(NA_real_)
     df  <- df[order(df$tid, df$tim), ]
     dts <- unlist(tapply(df$tim, df$tid, function(t) diff(sort(t))), use.names = FALSE)
@@ -2038,8 +2041,16 @@ tracking_server <- function(input, output, session) {
   # Returns list(cycle, sw, n_clusters, centers, modal, frac_one_cycle).
   # Reads trk_raw_df (upstream of all cleaning → no circular dependency; raw Δt is
   # the true acquisition timing).
+  # The acquisition timing comes from the ORIGINAL upload of the active dataset, so
+  # Plot Data (which rechunks the filtered survivors) cannot shift the cycle time.
+  .trk_timing_df <- function() {
+    df <- tryCatch(trk_raw_original(), error = function(e) NULL)
+    if (is.null(df) || !nrow(df)) df <- tryCatch(trk_raw_df(), error = function(e) NULL)
+    df
+  }
+
   trk_cluster_cycle <- reactive({
-    df <- tryCatch(trk_raw_df(), error = function(e) NULL)
+    df <- .trk_timing_df()
     if (is.null(df) || !nrow(df) || !all(c("tid", "tim") %in% names(df))) return(NULL)
     cycle_cluster(df$tid, df$tim)                     # R/est_clean.R
   })
@@ -2581,7 +2592,8 @@ tracking_server <- function(input, output, session) {
   # TOT_i = round((Δt_i − SW_overhead) / cycle_time).  This is Bela's "TOT" signal
   # (integrated + dark cycles spanned by each consecutive step).
   trk_tot_cycles <- reactive({
-    df  <- trk_raw_df()   # split operates on raw → estimate its threshold on raw
+    df  <- .trk_timing_df()   # split operates on raw → estimate its threshold on raw
+    if (is.null(df)) return(integer(0))
     cyc <- trk_cycle_time()
     if (nrow(df) == 0 || !is.finite(cyc) || cyc <= 0) return(integer(0))
     cc  <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
@@ -6511,41 +6523,15 @@ tracking_server <- function(input, output, session) {
              else has_z_auto
     df <- df[is.finite(df$x) & is.finite(df$y) & is.finite(df$tim) &
                if (has_z) is.finite(df$z) else TRUE, ]
-    df <- df[order(df$tid, df$tim), ]
-    sp <- split(df, df$tid)
-    n_tracks <- length(sp)
-    tk_names <- names(sp)                      # per-track TIDs (column order)
-
-    tk_dr2 <- matrix(0,  max_lag, n_tracks)   # per-track Σ dr²
-    tk_np  <- matrix(0L, max_lag, n_tracks)   # per-track pair counts
-    tk_dt  <- matrix(0,  max_lag, n_tracks)   # per-track Σ Δt (for mean-Δt-per-bin)
-
-    withProgress(message = "Computing MSD…", value = 0, {
-      for (k in seq_along(sp)) {
-        incProgress(1 / n_tracks)
-        tb <- sp[[k]]; n <- nrow(tb)
-        if (n < min_pts) next
-        # Cumulative cycle index (Bela's TOT) for the integer lag - robust to
-        # cycle-time error, removing the round(total/t_c) aliasing / sawtooth.
-        # The real Δt (dt_v) is still kept for the mean-Δt-per-bin x-axis.
-        dcyc   <- pmax(1L, as.integer(round((diff(tb$tim) - cc_sw) / t_c)))
-        cycidx <- c(0L, cumsum(dcyc))
-        for (i in seq_len(n - 1L)) {
-          dt_v <- tb$tim[seq.int(i + 1L, n)] - tb$tim[i]
-          lag  <- cycidx[seq.int(i + 1L, n)] - cycidx[i]
-          ok   <- lag >= 1L & lag <= max_lag
-          if (!any(ok)) next
-          js   <- seq.int(i + 1L, n)[ok]; b <- lag[ok]; dtk <- dt_v[ok]
-          dr2  <- (tb$x[js] - tb$x[i])^2 + (tb$y[js] - tb$y[i])^2
-          if (has_z) dr2 <- dr2 + (tb$z[js] - tb$z[i])^2
-          rs <- rowsum(dr2, b, reorder = FALSE); ix <- as.integer(rownames(rs))
-          tk_dr2[ix, k] <- tk_dr2[ix, k] + rs[, 1L]
-          rt <- rowsum(dtk, b, reorder = FALSE); it <- as.integer(rownames(rt))
-          tk_dt[it, k]  <- tk_dt[it, k] + rt[, 1L]
-          tk_np[, k]    <- tk_np[, k] + tabulate(b, nbins = max_lag)
-        }
-      }
-    })
+    # Per-track sums at every cycle lag (msd_track_sums, est_msd.R): the lag is the
+    # difference in cumulative cycle index (Bela's TOT), robust to cycle-time error,
+    # and the real dt is kept for the mean-dt-per-bin axis. Vectorised over index
+    # offsets; it replaced a loop over every localization that took about a minute
+    # on a single cell.
+    sums <- withProgress(message = "Computing MSD…", value = 0.5,
+                         msd_track_sums(df, t_c, cc_sw, max_lag, min_pts, has_z))
+    tk_names <- sums$tk_names
+    tk_dr2 <- sums$dr2; tk_np <- sums$np; tk_dt <- sums$dt
 
     track_msd <- ifelse(tk_np > 0L, tk_dr2 / tk_np, NA_real_)   # per-track TAMSD (nm²)
 
@@ -6664,6 +6650,23 @@ tracking_server <- function(input, output, session) {
   })
 
   # Fit helper shared by the unified plot + estimates (OLSF + Michalet p_min)
+  # The MSD panel's fit settings, for computing the same upper-regime D anywhere
+  # (msd_headline, est_msd.R): Data Quality's headline D and Compare Cells.
+  .msd_settings <- function(df) {
+    ndim_sel <- input$trk_msd_ndim %||% "auto"
+    has_z <- if (identical(ndim_sel, "2")) FALSE
+             else if (identical(ndim_sel, "3")) ("z" %in% names(df))
+             else .has_real_z(df)
+    lo <- max(1L, as.integer(input$trk_uni_min_lag %||% 5L))
+    hi <- max(lo + 2L, as.integer(input$trk_uni_max_lag %||% 50L))
+    list(window = c(lo, hi), track_weight = isTRUE(input$trk_uni_track_weight %||% TRUE),
+         iterative = isTRUE(input$trk_uni_iterative %||% TRUE),
+         linear_tau = isTRUE(input$trk_uni_linear_tau %||% TRUE),
+         min_pts = max(5L, as.integer(input$trk_msd_min_pts %||% 50L)),
+         R = tryCatch(trk_blur()$R_msd, error = function(e) 0),
+         coef = c(d2 = 2 * .msd_d_eff(2L), d3 = 2 * .msd_d_eff(3L)), has_z = has_z)
+  }
+
   msd_unified_fit <- function(ub) {
     min_lag <- max(1L, as.integer(isolate(input$trk_uni_min_lag) %||% 4L))
     # Upper fit limit (Vogler fit_limits, default 50). Read WITHOUT isolate so the
@@ -7644,18 +7647,19 @@ tracking_server <- function(input, output, session) {
   })
 
   # Per-track cycle progression (plot_cycle_progression_for_ID rewrite to R)
-  output$trk_cycle_prog_tid_ui <- renderUI({
+  # Track IDs are served on demand (server-side selectize): a dataset can hold
+  # thousands of tracks, and sending them all to the browser makes the selector slow.
+  observe({
     req(isTRUE(input$trk_show_tsa))
     df <- tryCatch(trk(), error = function(e) NULL)
     req(!is.null(df), nrow(df) > 0)
     counts <- table(df$tid)
     tids   <- names(counts[counts >= 5L])
     req(length(tids) > 0)
-    # Offer longest tracks first
-    tids <- tids[order(as.numeric(counts[tids]), decreasing = TRUE)]
-    selectizeInput("trk_cycle_prog_tid", "Track ID:",
-                   choices = tids, selected = tids[1],
-                   options = list(maxOptions = 5000))
+    tids <- tids[order(as.numeric(counts[tids]), decreasing = TRUE)]   # longest tracks first
+    cur  <- isolate(input$trk_cycle_prog_tid)
+    updateSelectizeInput(session, "trk_cycle_prog_tid", choices = tids,
+                         selected = if (isTRUE(cur %in% tids)) cur else tids[1], server = TRUE)
   })
 
   output$trk_cycle_prog_plot <- renderPlotly({
@@ -11152,18 +11156,23 @@ tracking_server <- function(input, output, session) {
     pat  <- .tcp_pattern_name(input$trk_tcp_pattern %||% TCP_PATTERN_DEFAULT)
     if (is.na(pat) || !nzchar(pat)) pat <- TCP_PATTERN_DEFAULT
     filt <- trk_filter_params()
+    ms   <- .msd_settings(data.frame())                  # the MSD panel's window and weighting
+    mopt <- list(window = ms$window, track_weight = ms$track_weight, min_pts = ms$min_pts)
     rows <- withProgress(message = "Measuring each immobile cell...", value = 0, {
       lapply(files, function(f) {
         incProgress(1 / length(files), detail = f)
         d <- .cmp_read_file(f)
         if (is.null(d)) d <- data.frame(tid = character(0), x = numeric(0), y = numeric(0),
                                         tim = numeric(0), eco = numeric(0))
-        tryCatch(calib_cell(d, f, L, filt), error = function(e) {
+        tryCatch(calib_cell(d, f, L, filt, msd = mopt), error = function(e) {
           r <- calib_cell(d[0, , drop = FALSE], f, L); r$note <- conditionMessage(e); r })
       })
     })
-    tab <- do.call(rbind, rows)
-    attr(tab, "L") <- L; attr(tab, "pattern") <- pat
+    curves <- lapply(rows, attr, "curve")
+    tab <- do.call(rbind, lapply(rows, function(r) { attr(r, "curve") <- NULL; r }))
+    attr(tab, "L") <- L; attr(tab, "pattern") <- pat; attr(tab, "window") <- ms$window
+    attr(tab, "curves") <- stats::setNames(curves, tab$file)
+    attr(tab, "cutoff") <- calib_cutoff(curves)
     trk_cal_result(tab)
   })
 
@@ -11177,8 +11186,14 @@ tracking_server <- function(input, output, session) {
         tags$b(sprintf("a = %.2f", sm$a)),
         sprintf("  (quartiles %.2f–%.2f, %d cell%s)  ·  ", sm$a_q25, sm$a_q75, sm$n_cells,
                 if (sm$n_cells == 1L) "" else "s"),
-        tags$b(sprintf("D_w = %.0f nm²/ms", sm$D_w)),
-        sprintf("  (%.0f–%.0f)", sm$Dw_q25, sm$Dw_q75)),
+        tags$b(sprintf("D_w = %.0f nm\u00b2/ms", sm$D_w)),
+        sprintf("  (%.0f\u2013%.0f) over cycles %d\u2013%d, the MSD fit window", sm$Dw_q25, sm$Dw_q75,
+                as.integer(attr(tab, "window")[1]), as.integer(attr(tab, "window")[2]))),
+      helpText(style = "font-size:0.82em; color:#666; margin-top:0;",
+        sprintf("Over the first steps the immobile MSD rises at %.0f nm\u00b2/ms; ", sm$D_w_short %||% NA_real_),
+        { ct <- attr(tab, "cutoff")$lag
+          if (is.finite(ct %||% NA)) sprintf("it has largely flattened by about %d cycles (suggested lower cutoff for the MSD fit window).", ct)
+          else "it does not flatten within the lags computed, so the floor rises across the fit window." }),
       helpText(style = "font-size:0.82em; color:#666; margin-top:0;",
         sprintf("L %.1f nm, %s. The ideal-estimator value for this pattern is %.2f.",
                 attr(tab, "L"), attr(tab, "pattern"), ideal)),
@@ -11188,9 +11203,61 @@ tracking_server <- function(input, output, session) {
         sprintf("%d file(s) gave no value; see the note column.", sum(nzchar(tab$note)))))
   })
 
+  # The immobile MSD: every cell, their mean, the localization-noise level 4 sigma^2,
+  # the MSD fit window and the suggested cutoff, on log-log axes.
+  output$trk_cal_msd_plot <- renderPlotly({
+    tab <- trk_cal_result(); req(!is.null(tab))
+    curves <- attr(tab, "curves"); ct <- attr(tab, "cutoff"); win <- attr(tab, "window")
+    req(length(Filter(Negate(is.null), curves)) > 0)
+    dark   <- isTRUE(isolate(input$trk_dark_mode))
+    bg_col <- if (dark) "#000000" else "#FFFFFF"
+    fg_col <- if (dark) "#FFFFFF" else "#333333"
+    fig <- plot_ly()
+    for (nm in names(curves)) {
+      cv <- curves[[nm]]; if (is.null(cv)) next
+      ok <- cv$keep & is.finite(cv$msd) & cv$msd > 0
+      fig <- fig %>% add_trace(x = cv$lag[ok], y = cv$msd[ok], type = "scatter", mode = "lines",
+                               line = list(color = "rgba(140,140,140,0.45)", width = 1),
+                               name = nm, legendgroup = "cells", showlegend = FALSE,
+                               hovertemplate = paste0(nm, "<br>cycle %{x}<br>MSD %{y:.0f} nm\u00b2<extra></extra>"))
+    }
+    pl <- ct$pooled
+    if (!is.null(pl)) {
+      okp <- is.finite(pl$msd) & pl$msd > 0
+      fig <- fig %>% add_trace(x = pl$lag[okp], y = pl$msd[okp], type = "scatter", mode = "lines",
+                               line = list(color = "#2c6fbb", width = 3), name = "mean of cells",
+                               hovertemplate = "cycle %{x}<br>MSD %{y:.0f} nm\u00b2<extra>mean</extra>")
+    }
+    s2 <- stats::median(tab$sigma_nm, na.rm = TRUE)
+    xr <- range(unlist(lapply(curves, function(c) if (is.null(c)) NULL else c$lag)), na.rm = TRUE)
+    if (is.finite(s2))
+      fig <- fig %>% add_trace(x = xr, y = rep(4 * s2^2, 2), type = "scatter", mode = "lines",
+                               line = list(color = "#c03030", width = 1.5, dash = "dash"),
+                               name = "4\u03c3\u00b2 (localization noise)", hoverinfo = "skip")
+    shapes <- list(list(type = "rect", xref = "x", yref = "paper", x0 = log10(win[1]), x1 = log10(win[2]),
+                        y0 = 0, y1 = 1, fillcolor = "rgba(44,111,187,0.08)", line = list(width = 0),
+                        layer = "below"))
+    if (is.finite(ct$lag %||% NA))
+      shapes[[2]] <- list(type = "line", xref = "x", yref = "paper", x0 = log10(ct$lag), x1 = log10(ct$lag),
+                          y0 = 0, y1 = 1, line = list(color = "#1a8a1a", width = 1.5, dash = "dot"))
+    fig %>% layout(
+      xaxis = list(title = "lag (cycles)", type = "log", color = fg_col),
+      yaxis = list(title = "immobile MSD (nm\u00b2)", type = "log", color = fg_col),
+      shapes = shapes, paper_bgcolor = bg_col, plot_bgcolor = bg_col, font = list(color = fg_col),
+      legend = list(orientation = "h", y = -0.25),
+      annotations = list(
+        list(x = log10(sqrt(win[1] * win[2])), y = 1, xref = "x", yref = "paper", yanchor = "bottom",
+             text = "MSD fit window", showarrow = FALSE, font = list(size = 11, color = "#2c6fbb")),
+        if (is.finite(ct$lag %||% NA))
+          list(x = log10(ct$lag), y = 0.02, xref = "x", yref = "paper", xanchor = "left",
+               text = sprintf(" flattened by ~%d", ct$lag), showarrow = FALSE,
+               font = list(size = 11, color = "#1a8a1a")) else NULL),
+      uirevision = "trk_cal_msd")
+  })
+
   output$trk_cal_results <- DT::renderDT({
     tab <- trk_cal_result(); req(!is.null(tab))
-    show <- tab[, c("file", "n_tracks", "t_c_ms", "eco_med", "msd1", "sigma_nm", "a", "D_w", "note")]
+    show <- tab[, c("file", "n_tracks", "t_c_ms", "eco_med", "msd1", "sigma_nm", "a", "D_w", "D_w_short", "note")]
     num  <- vapply(show, is.numeric, logical(1))
     show[num] <- lapply(show[num], function(v) signif(v, 3))
     DT::datatable(show, rownames = FALSE, selection = "none",
@@ -11208,6 +11275,8 @@ tracking_server <- function(input, output, session) {
     profs <- trk_cal_profiles()
     profs[[nm]] <- list(name = nm, a = sm$a, a_q25 = sm$a_q25, a_q75 = sm$a_q75,
                         D_w = sm$D_w, Dw_q25 = sm$Dw_q25, Dw_q75 = sm$Dw_q75, n_cells = sm$n_cells,
+                        D_w_short = sm$D_w_short, window = as.integer(attr(tab, "window")),
+                        cutoff = attr(tab, "cutoff")$lag %||% NA_integer_,
                         pattern = attr(tab, "pattern"), L_nm = attr(tab, "L"),
                         dwell_us = num(input$trk_cal_dwell), photon_limit = num(input$trk_cal_pl),
                         damping = num(input$trk_cal_damping), note = trimws(input$trk_cal_note %||% ""),
@@ -11231,7 +11300,9 @@ tracking_server <- function(input, output, session) {
     f <- function(x, d = 2) if (is.null(x) || !is.finite(x)) "" else formatC(x, digits = d, format = "f")
     tab <- do.call(rbind, lapply(profs, function(p) data.frame(
       profile = p$name, a = sprintf("%s (%s–%s)", f(p$a), f(p$a_q25), f(p$a_q75)),
-      D_w = f(p$D_w, 0), cells = p$n_cells %||% NA, pattern = p$pattern %||% "", L_nm = f(p$L_nm, 1),
+      D_w = f(p$D_w, 0),
+      window = if (length(p$window) == 2L) sprintf("%d\u2013%d", as.integer(p$window[1]), as.integer(p$window[2])) else "",
+      cutoff = f(p$cutoff, 0), cells = p$n_cells %||% NA, pattern = p$pattern %||% "", L_nm = f(p$L_nm, 1),
       dwell_us = f(p$dwell_us, 0), photon_limit = f(p$photon_limit, 0), damping = f(p$damping, 0),
       note = p$note %||% "", date = p$date %||% "", stringsAsFactors = FALSE)))
     DT::datatable(tab, rownames = FALSE, selection = "none",
@@ -11256,8 +11327,10 @@ tracking_server <- function(input, output, session) {
     num <- function(x) if (is.null(x)) NA_real_ else suppressWarnings(as.numeric(x))
     profs <- trk_cal_profiles()
     for (p in ok) {
-      for (k in c("a", "a_q25", "a_q75", "D_w", "Dw_q25", "Dw_q75", "L_nm", "dwell_us", "photon_limit", "damping"))
+      for (k in c("a", "a_q25", "a_q75", "D_w", "Dw_q25", "Dw_q75", "D_w_short", "cutoff", "L_nm",
+                  "dwell_us", "photon_limit", "damping"))
         p[[k]] <- num(p[[k]])
+      p$window <- suppressWarnings(as.integer(unlist(p$window)))
       p$files <- unlist(p$files)
       profs[[p$name]] <- p
     }
@@ -11463,7 +11536,8 @@ tracking_server <- function(input, output, session) {
         di <- .cmp_read_file(tb$file[i])
         if (is.null(di)) di <- data.frame(tid = character(0), x = numeric(0), y = numeric(0), tim = numeric(0))
         r  <- tryCatch(percell_summary(di, tb$file[i], L = tb$L_nm[i], pattern = tb$pattern[i],
-                                       a = tb$a[i], D_w = tb$D_w[i], nu = nu, filters = filt),
+                                       a = tb$a[i], D_w = tb$D_w[i], nu = nu, filters = filt,
+                                       msd = .msd_settings(di)),
                        error = function(e) {
                          x <- percell_summary(di[0, , drop = FALSE], tb$file[i], tb$L_nm[i])
                          x$note <- conditionMessage(e); x })
@@ -11561,7 +11635,7 @@ tracking_server <- function(input, output, session) {
   output$trk_cmp_results <- DT::renderDT({
     r <- cmp_view(); req(!is.null(r))
     cols <- c("condition", "file", "calibration", "n_tracks", "len_med", "t_c_ms", "frac_single", "eco_med",
-              "sigma_nm", "a", "D_um2_s", "D_corr_um2_s", "Dw_frac", "alpha_short", "r1_excess", "note")
+              "sigma_nm", "a", "D_msd_um2_s", "D_um2_s", "D_corr_um2_s", "Dw_frac", "alpha_short", "r1_excess", "note")
     show <- r[, cols, drop = FALSE]
     num  <- vapply(show, is.numeric, logical(1))
     show[num] <- lapply(show[num], function(v) signif(v, 3))

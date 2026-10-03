@@ -740,14 +740,11 @@ heterogeneity and drift.
 - **Per-track σ heterogeneity:** one CVE σ per track (≥ `n_min` integrated steps, skipping the first
   ~5 locs of lock-on transient); the median, IQR, CV and a **σ–EFO Spearman ρ** (precision should improve
   with photons ⇒ negative ρ validates the model) plus a bootstrap 95% CI on the median σ.
-- **No photon weighting of D or σ.** In tracking data the photon channel is coupled to **mobility**: a
-  fast molecule leaves the beam pattern sooner and collects fewer photons per localization, so weighting
-  by photons would up-weight slow molecules and bias D downward. Two diagnostics are reported instead:
+- **No photon weighting of D or σ.** Photon counts differ between tracks for several reasons besides
+  precision (mobility, bleaching, emitter brightness, background), so weighting steps by them would
+  weight tracks by whatever drives those differences. Every step counts equally. Reported instead:
   - **`noise_frac` = −2·r₁** (r₁ = cov₁/⟨Δ²⟩), the share of step variance that is localization noise.
     Small ⇒ per-track σ differences are motion, not photons.
-  - **`phot_mob_rho`** = Spearman ρ[per-track photons, per-track step variance]. Strongly negative ⇒ the
-    photon channel is a mobility proxy, which also means **any ECO/EFO filter is a mobility filter**,
-    surfaced as a UI warning at ρ ≤ −0.35.
 - **Real z only.** A z column counts as real only with more than 10 finite values **and** sd > 1 nm
   (`.has_real_z(df, min_sd = 1)`), because 2D MINFLUX exports often carry an all-zero z column. The same
   predicate decides the dimensionality of the 3D toggle, CVE, MSD, JDD, confinement and
@@ -1246,11 +1243,9 @@ ways that matter for every downstream estimator:
   constant-Δt
   sub-runs — precisely the mitigation the literature prescribes. ✅ Statistically valid on MINFLUX at
   the cost of discarding dark-gap-adjacent steps.
-- **No photon weighting.** In **tracking** the photon channel is a **mobility** proxy: a fast molecule
-  leaves the beam pattern sooner and collects fewer photons, so photon weighting would up-weight slow
-  molecules and bias D **downward**. The diagnostics `noise_frac` and `phot_mob_rho` are reported
-  instead, and the same coupling means **any ECO/EFO quality filter is also a mobility filter**, which
-  the panel warns about.
+- **No photon weighting.** Photon counts differ between tracks for several reasons besides precision
+  (mobility, bleaching, emitter brightness, background), so photon weighting would weight tracks by
+  whatever drives those differences. Every step counts equally; `noise_frac` is reported.
 - **The dominant caveat is D, not σ.** The tracking loop's own wander adds an apparent D on an immobile
   target, and it grows steeply with the TCP diameter. The panel reports this floor beside D when it is
   entered; a published D needs the matching per-sequence measurement. This is why the in-app rating is 🟡.

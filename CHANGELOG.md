@@ -5,6 +5,27 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 
 ## Unreleased
 
+### Tracking: headline D and the immobile MSD
+
+- **The headline D is now the upper-regime MSD** (the MSD panel's fit window and settings) in Data
+  Quality and Compare Cells, the estimator Vogler et al. 2025 validated against TIRF. The CVE stays
+  beside it as the lag-1 check. D − D_w is taken against the headline D.
+- **Instrument Calibration plots the immobile MSD** per cell over many cycles, with the noise level 4σ²,
+  the fit window and a suggested lower cutoff where the wander has flattened. The wander floor in a
+  profile is now the immobile slope **over the MSD fit window**, which matches the headline D; the
+  steeper short-lag rise is reported beside it. On fixed cells at L 100.8 nm the two differ about
+  tenfold, because the wander saturates within ~20 cycles.
+- **The MSD is computed about 25 times faster** (vectorised over index offsets); results are identical,
+  checked against the previous code and against a pair-by-pair count.
+- **The filter pipeline always starts from the original upload.** After Plot Data it read the rechunked,
+  already-filtered data and ran a second time: localizations removed by a range filter left holes that
+  the gap split then cut at, so results depended on whether Plot Data had been pressed. The rechunked
+  set now only serves the playback chunk selector. Data Quality reads the plotted data like every other
+  panel, and the cycle time comes from the original upload.
+- **Acquisition Parameters regrouped**: the sequence file (moved here from TSA), calibration, and a
+  collapsed *Advanced* group for values that need measurements a first analysis does not have.
+- The TSA track selector loads its track IDs on demand (server-side selectize).
+
 ### Tracking: datasets
 
 - **Uploads now add to a list of loaded datasets** instead of replacing them. *Active dataset* shows
@@ -21,8 +42,11 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
   view are unchanged, verified stage by stage on real data.
 - **The Data Quality CVE now reads the filtered data**, like every other analysis. It read the data
   after the gap split only, so its D and the MSD's D were computed on different data. With the default
-  settings (no cleaning) nothing changes; range filters on ECO / EFO select on mobility and now move
-  the CVE D as they already moved the other panels.
+  settings (no cleaning) nothing changes; ECO / EFO range filters now move the CVE D as they already
+  moved the other panels.
+- **Removed the photon–mobility warning.** It read a negative correlation between per-track photons and
+  step size as "an ECO/EFO filter removes fast molecules". Low photon counts have several causes
+  (bleaching, dim emitters, background, mobility), and one correlation does not identify which.
 - **Fixed: 3D CSV re-imports had their axial factor applied twice.** The upload path never returned a
   CSV's z to raw before the session's calibration was applied; only an unused fallback reader did.
 

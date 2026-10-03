@@ -822,9 +822,21 @@ Greyed out when the dataset has no axial variation.
 
 ### Acquisition Parameters
 
-Optional hardware model for cycle time, a manual cycle-time override, and a manual σ_loc override.
-Cycle time drives gap-splitting and the MSD lag axis, so getting it right matters more here than
-almost anywhere else - the status line shows the value in use and where it came from.
+Grouped by where each value comes from (Analysis tab, under Data Quality & Calibration):
+
+1. **Sequence file.** Load the `.json` sequence the data were acquired with. It sets L, the TCP
+   pattern, the gap-split threshold (maxOffTime) and the motion-blur timing (dwell, CFR, damping). This
+   is all a first analysis needs.
+2. **Calibration.** A calibration profile sets the prefactor $a$ and the wander floor $D_w$ for one
+   sequence (see *Instrument Calibration*). Without one, σ uses the pattern's ideal-estimator value and
+   is marked uncalibrated, and no floor is reported.
+3. **Advanced (rarely needed).** Cycle-time overrides, the patGeoFactor base, the doughnut FWHM ν and a
+   manual σ. None can be read from the data or the sequence file on a first round, and the defaults
+   suit standard data. ν needs calibrations at two or more TCP diameters; a manual σ is for data
+   without photon counts.
+
+The cycle time is always measured from the original upload of the active dataset, so Plot Data does
+not shift it; the status line shows the value in use and where it came from.
 
 ### Track Cleaning & Filtering
 
@@ -882,14 +894,16 @@ first.
 
 ### Data Quality & Calibration
 
-The foundation panel. Estimates **D** by the CVE method (Vestergaard 2014), using only single-cycle
-steps, so no MSD fit is needed. It reads two moments of the displacement series, ⟨|Δr|²⟩ and the
-covariance of consecutive steps, and the covariance is negative for localization noise, which is what
-separates motion from noise. The panel also sets the app-wide **σ_loc**, which comes from the photon
-budget rather than from the covariance, and holds the instrument constants everything else reads.
+The foundation panel. Its **headline D** comes from the upper lag regime of the ensemble MSD, fitted
+with the MSD panel's settings (window, weighting, OLSF). This is the estimator Vogler et al. 2025
+validated against TIRF; short lags are left out because they carry non-diffusive motion on top of
+noise (probe wobble, the tracker's own wander). Beside it, the **CVE** (Vestergaard 2014) gives D from
+consecutive single-cycle steps, the lower regime, as a check; a large ratio between the two means the
+short lags carry something the upper regime does not. The panel also sets the app-wide **σ_loc** from
+the photon budget and reports D − D_w when a wander floor is set.
 
-Reports cycle time, free D, σ_loc and the step count. The D shown is corrected for the **motion
-degrees of freedom** set below, and says so when the correction is active.
+Every analysis, this panel included, reads the active dataset as plotted: the filters, applied with
+Plot Data, run once on the original upload.
 
 ### Time Signature Analysis (TSA)
 
@@ -1607,9 +1621,13 @@ value of the pattern and labels σ **uncalibrated**. The derivation is in
 #### Instrument Calibration
 
 Load the files of an **immobile sample** acquired with one sequence (fixed cells labelled like the live
-sample work better than beads), select them under *Instrument Calibration* and press *Measure*. For
-each file, after the filters set under *Display*, the short-lag MSD (1 to 5 single-cycle steps) is
-fitted as $\text{MSD} = 4\sigma^2 + 4D_w\tau$: the intercept gives σ, the slope the wander floor
+sample work better than beads), select them under *Instrument Calibration* and press *Measure*. The
+plot shows each cell's immobile MSD over many cycles on log axes, their mean, the localization-noise
+level 4σ², and the MSD fit window. Two floors are reported: $D_w$, the immobile slope **over the MSD fit
+window**, which is the floor under the headline D, and the steeper short-lag rise. Where the mean curve
+has largely flattened, a suggested lower cutoff for the fit window is marked; if it does not flatten,
+the floor rises across the whole window. For each file, after the filters set under *Display*, the
+short-lag MSD (1 to 5 single-cycle steps) is also fitted as $\text{MSD} = 4\sigma^2 + 4D_w\tau$: the intercept gives σ, the slope the wander floor
 $D_w$, and $a = L\sqrt{\langle 1/N\rangle}/\sigma$. The result is the median across cells, with the
 quartiles showing how well the cells agree.
 
@@ -1727,11 +1745,6 @@ and under-subtract it when z is tighter. The app-wide default stays pooled.
 
 #### Diagnostics and QC flags
 
-- **Photon–mobility coupling** $\rho$ = Spearman correlation between per-track photons and per-track
-  step variance. On MINFLUX *tracking* data a fast molecule leaves the beam pattern sooner and collects
-  *fewer* photons, so the photon channel is a mobility proxy rather than a pure brightness channel.
-  Strongly negative ρ therefore means **any ECO/EFO filter is silently a mobility filter** - surfaced
-  as a warning at $\rho \leq -0.35$.
 - **Implausible jumps**: flagged where $|\Delta r|^2 > 25 \cdot E[|\Delta r|^2]$, using
   $E[|\Delta r|^2] = 2dD_\text{CVE}\Delta t + 2d\sigma_\text{loc}^2$ so that long dark gaps are not
   falsely flagged.
@@ -1916,8 +1929,7 @@ the photons per localization and $t_\text{hw}$ the hardware overhead. In the app
 $t_\text{loc} = \text{ECO}/\text{EFO}$ feeds the simpler $L^2/(16\,t_\text{loc})$ fallback used when
 either column is missing. Surfaced as a green/amber/red flag.
 
-**Which $L$ to enter (and how to avoid entering it).** Upload the acquisition sequence `.json` under *Time
-Signature Analysis* and $L_\text{TCP}$ is read from it directly. Sequence files do not store the pattern
+**Which $L$ to enter (and how to avoid entering it).** Load the acquisition sequence `.json` under *Acquisition Parameters* and $L_\text{TCP}$ is read from it directly. Sequence files do not store the pattern
 diameter; they store `patGeoFactor`, a dimensionless multiplier, and
 
 ```math

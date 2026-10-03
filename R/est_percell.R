@@ -15,7 +15,8 @@
 # Reported per-cell columns: name -> axis label. Shared by the server's metric
 # picker and plot so the two cannot disagree.
 PERCELL_METRICS <- c(
-  D_um2_s      = "D (CVE, µm²/s)",
+  D_msd_um2_s  = "D (upper-regime MSD, µm²/s)",
+  D_um2_s      = "D (CVE, lag 1, µm²/s)",
   D_corr_um2_s = "D − D_w (µm²/s)",
   Dw_frac      = "D_w / D",
   sigma_nm     = "σ_loc, photon budget (nm)",
@@ -42,18 +43,20 @@ PERCELL_METRICS <- c(
 # a       : photon-budget prefactor for this sequence
 # D_w     : wander floor for this sequence (nm^2/ms), 0 = not measured
 # nu      : doughnut FWHM (nm), 0 = beam term off
+# msd     : the MSD panel's fit settings (window, track_weight, iterative, linear_tau,
+#           R, coef = c(d2, d3), min_pts) for the headline upper-regime D; NULL skips it
 # filters : the main tab's filter settings, as filter_pipeline() takes them without
 #           t_c / sw (list(split, trim, gate, ranges, tid_len, dur)). The spatial crop
 #           is not applied: it belongs to one field of view.
 # RETURNS one-row data.frame with the PERCELL_METRICS columns plus file, n_locs,
 #   r1_obs, r1_bound and a `note` for anything that could not be computed.
 percell_summary <- function(df, file, L, pattern = TCP_PATTERN_DEFAULT, a = TCP_CRLB_PREFACTOR,
-                            D_w = 0, nu = 0,
+                            D_w = 0, nu = 0, msd = NULL,
                             filters = list(split = list(enable = TRUE, adaptive = FALSE,
                                                         gap_cycles = 7, min_len = 50L, maxoff_ms = 3.0))) {
   row <- data.frame(file = file, n_locs = nrow(df), n_tracks = NA_integer_, len_med = NA_real_,
                     t_c_ms = NA_real_, frac_single = NA_real_, eco_med = NA_real_,
-                    sigma_nm = NA_real_, D_um2_s = NA_real_, D_corr_um2_s = NA_real_,
+                    sigma_nm = NA_real_, D_msd_um2_s = NA_real_, D_um2_s = NA_real_, D_corr_um2_s = NA_real_,
                     Dw_frac = NA_real_, alpha_short = NA_real_, r1_obs = NA_real_,
                     r1_bound = NA_real_, r1_excess = NA_real_, note = "",
                     stringsAsFactors = FALSE)
@@ -82,9 +85,19 @@ percell_summary <- function(df, file, L, pattern = TCP_PATTERN_DEFAULT, a = TCP_
   if (is.null(cv)) { row$note <- "fewer than 20 single-cycle step pairs"; return(row) }
   D_cve <- cv$D_cve                                      # nm^2/ms
   row$D_um2_s <- D_cve / 1e3                             # 1 nm^2/ms = 1e-3 um^2/s
-  if (is.finite(D_w) && D_w > 0) {
-    row$D_corr_um2_s <- (D_cve - D_w) / 1e3
-    row$Dw_frac      <- if (D_cve > 0) D_w / D_cve else NA_real_
+
+  # headline D: the upper lag regime of the ensemble MSD (msd_headline, est_msd.R)
+  if (!is.null(msd)) {
+    hd <- tryCatch(msd_headline(df, t_c, cc$sw, msd$window, msd$track_weight %||% TRUE,
+                                msd$iterative %||% TRUE, msd$linear_tau %||% TRUE, msd$R %||% 0,
+                                if (has_z) msd$coef[["d3"]] else msd$coef[["d2"]],
+                                msd$min_pts %||% 50L, has_z), error = function(e) NULL)
+    if (!is.null(hd)) row$D_msd_um2_s <- hd$D / 1e3
+  }
+  D_head <- if (is.finite(row$D_msd_um2_s)) row$D_msd_um2_s * 1e3 else D_cve
+  if (is.finite(D_w) && D_w > 0) {                       # the floor against the headline D
+    row$D_corr_um2_s <- (D_head - D_w) / 1e3
+    row$Dw_frac      <- if (D_head > 0) D_w / D_head else NA_real_
   }
 
   # 4. photon-budget sigma with THIS cell's sequence settings
