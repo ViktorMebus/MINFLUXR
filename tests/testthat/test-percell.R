@@ -41,20 +41,6 @@ test_that("adaptive_gap_cycles is median + SD + 1, capped by maxOffTime", {
   expect_equal(adaptive_gap_cycles(c(rep(1L, 10), rep(40L, 10)), cyc = 0.2, maxoff_ms = 1), 5L)
 })
 
-# REGRESSION: lag-8 pairs span 8 single-cycle STEPS = 8 * (t_c + sw). At a fast cycle
-# 8 * sw exceeds half a cycle, and testing against 8 * t_c found no pairs at all.
-test_that("smoothing_check uses the step duration, so fast cycles still report", {
-  d  <- .cell(t_c = 0.128, sw = 0.011, k_p = 1)                  # every step single-cycle
-  st <- cve_steps(d, 0.128)
-  expect_true(is.na(smoothing_check(st$df, 0.128)$alpha_short))   # the old behaviour
-  sm <- smoothing_check(st$df, 0.128, dt1 = 0.128 + 0.011)
-  expect_true(is.finite(sm$alpha_short))
-  # free diffusion with noise: alpha = log[(4D 8dt + 4s^2) / (4D dt + 4s^2)] / log 8
-  dt1 <- 0.128 + 0.011
-  expect_equal(sm$alpha_short, log((4 * 200 * 8 * dt1 + 4 * 25) / (4 * 200 * dt1 + 4 * 25)) / log(8),
-               tolerance = 0.03)
-})
-
 test_that("each cell gets its own cycle time, D and sequence-specific sigma", {
   filt <- list(split = list(enable = TRUE, adaptive = FALSE, gap_cycles = 7, min_len = 20L, maxoff_ms = 3))
   slow <- percell_summary(.cell(t_c = 0.166, seed = 2), "slow", L = 100.8, a = 3.6, filters = filt)

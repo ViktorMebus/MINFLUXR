@@ -21,7 +21,7 @@ should not be:
 | | what it is | where it belongs |
 |---|---|---|
 | **σ_loc** | shot-noise-limited error of one position estimate | this document |
-| **motion blur** | the estimate is a time-average of the path over the cycle, so it is a *shrunken* position, not a noisier one | the D estimator (CVE, `R = t_c/6Δt`) |
+| **motion blur** | the estimate is a time-average of the path over the cycle, so it is a *shrunken* (smoothed) position | the D estimator (CVE, with R from the sequence timing) |
 | **tracker wander** | the feedback loop repositions the TCP using its own noisy estimate, so the reported coordinate drifts even for a stationary emitter | §5, reported separately as $D_w$ |
 
 Conflating the third with the first is the specific failure mode of every trajectory-based
@@ -61,27 +61,27 @@ For a binomial with $N$ trials and success probability $p(x)$,
 I_F(x) \;=\; N\,\frac{\left(p'\right)^2}{p\,(1-p)}
 ```
 
-Write $u = (x - L/2)^2$, $v = (x + L/2)^2$, $D = u + v = 2x^2 + L^2/2$. Then
+Write $u = (x - L/2)^2$, $v = (x + L/2)^2$, $S = u + v = 2x^2 + L^2/2$. Then
 
 ```math
-p' = \frac{u'v - uv'}{D^2}
-   = \frac{(2x-L)\left(2x^2 + \tfrac{L^2}{2}\right) - 4x\left(x^2 - xL + \tfrac{L^2}{4}\right)}{D^2}
-   = \frac{L\left(2x^2 - \tfrac{L^2}{2}\right)}{D^2}
-   = \frac{L\left(4x^2 - L^2\right)}{2D^2}
+p' = \frac{u'v - uv'}{S^2}
+   = \frac{(2x-L)\left(2x^2 + \tfrac{L^2}{2}\right) - 4x\left(x^2 - xL + \tfrac{L^2}{4}\right)}{S^2}
+   = \frac{L\left(2x^2 - \tfrac{L^2}{2}\right)}{S^2}
+   = \frac{L\left(4x^2 - L^2\right)}{2S^2}
 ```
 
 and, using $\left(x^2 + \tfrac{L^2}{4}\right)^2 - x^2L^2 = \left(x - \tfrac{L}{2}\right)^2\left(x + \tfrac{L}{2}\right)^2$,
 
 ```math
-p(1-p) = \frac{\left(x-\tfrac{L}{2}\right)^2\left(x+\tfrac{L}{2}\right)^2}{D^2}
+p(1-p) = \frac{\left(x-\tfrac{L}{2}\right)^2\left(x+\tfrac{L}{2}\right)^2}{S^2}
 ```
 
 Since $\left(4x^2 - L^2\right)^2 = 16\left(x-\tfrac{L}{2}\right)^2\left(x+\tfrac{L}{2}\right)^2$, the
 emitter-position factors cancel exactly:
 
 ```math
-I_F(x) = N \cdot \frac{L^2\left(4x^2-L^2\right)^2}{4D^4} \cdot \frac{D^2}{\left(x-\tfrac{L}{2}\right)^2\left(x+\tfrac{L}{2}\right)^2}
-       = \frac{4NL^2}{D^2}
+I_F(x) = N \cdot \frac{L^2\left(4x^2-L^2\right)^2}{4S^4} \cdot \frac{S^2}{\left(x-\tfrac{L}{2}\right)^2\left(x+\tfrac{L}{2}\right)^2}
+       = \frac{4NL^2}{S^2}
        = \frac{16N}{L^2\left(1 + 4x^2/L^2\right)^2}
 ```
 
@@ -135,6 +135,8 @@ the direction of the offset gives, for small offsets,
 \sigma^2(r) \;\approx\; \sigma_0^2\left(1 + c\,\frac{r^2}{L^2}\right)
 ```
 
+with $\sigma_0$ the precision at the center and $r$ the emitter's offset from the center.
+
 | pattern | axes | ideal $a$ | off-center coefficient $c$ |
 |---|---|---|---|
 | triangle | 2 | $\sqrt{8} = 2.83$ | 13.7 |
@@ -168,9 +170,9 @@ pre-computed coefficients and reports positions that are pulled toward the TCP c
 tracking loop centers each pattern on the previous estimate, which correlates successive errors. Both
 let the exported positions scatter less than an unbiased estimate would.
 
-Immobile-sample calibrations bear this out: fixed cells tracked with a 2D hexagonal sequence at
-$L = 100.8$ nm give $a$ of about 3.5 to 4.2, above the ideal $\sqrt{8}$. So **no Cramér-Rao value bounds $a$ in either direction for exported data**,
-and $a$ is an instrument constant to be measured, per sequence, rather than a derived number:
+An immobile-sample calibration can therefore return $a$ above the ideal value. **No Cramér-Rao value
+bounds $a$ in either direction for exported data**, so $a$ is an instrument constant, measured per
+sequence:
 
 ```math
 \boxed{\;\sigma_i \;=\; \frac{L_\text{TCP}}{a\sqrt{N_i}}\,\sqrt{1 + c\,\frac{\langle r^2\rangle}{L^2}}\,,
@@ -195,13 +197,14 @@ $-\sigma^2$. That identity holds **only** for instantaneous exposure. With a fin
 general result is
 
 ```math
-\sigma^2 = R\,\langle \Delta x^2\rangle + (2R-1)\,\text{cov}_1, \qquad R = \frac{t_c}{6\Delta t}
+\sigma^2 = R\,\langle \Delta x^2\rangle + (2R-1)\,\text{cov}_1
 ```
 
-At $R \approx 1/6$ roughly 90% of the answer is the first term, which is just
+with $R$ the motion-blur coefficient of the step, set by the photon-collection window and at most
+$t_c/(6\Delta t)$ for a window that spans the whole cycle. Near that ceiling roughly 90% of the answer is the first term, which is just
 $\sqrt{R} \times$ rms step. Blur and precision enter the covariance in the same place, so no estimator
-built on the increment covariance can separate them from a single trajectory. This is an
-identifiability limit, not a choice of estimator. MLE inherits it.
+built on the increment covariance can separate them from a single trajectory. This identifiability
+limit applies to every estimator, MLE included.
 
 ### 3.2 What an immobile sample shows
 
@@ -218,8 +221,7 @@ observed. The residual motion is the localization noise itself, filtered through
 Two consequences:
 
 1. **The immobile MSD has power at every reachable lag**, so there is no lag short enough for the
-   noise to stand alone. The wander and the noise are one physical quantity, not two independent
-   processes to be separated.
+   noise to stand alone. The wander and the noise are one physical quantity.
 2. **Fitting `MSD(k) = 4σ² + 4D_w·k·t_c` over short lags overestimates σ.** The curve is concave, so a
    straight-line fit extrapolated back to zero returns an intercept above the true value.
 
@@ -255,9 +257,9 @@ value that reproduces the noise as it enters short-lag displacements, which is t
 downstream estimators subtract, and that is the sense in which it is the right calibration. Record it
 per sequence: pattern, $L$ and photon limit all change it.
 
-**Calibrate on fixed cells labelled as the live sample, not on beads.** A bead is an extended, bright,
-coverslip-mounted object: it is not a point emitter, it sits at a different axial position relative to
-the doughnut, and its brightness drives the tracker harder, so it brackets $a$ only loosely.
+**Calibrate on fixed cells labelled as the live sample.** A bead is extended, bright and mounted on the
+coverslip: it sits at a different axial position relative to the doughnut, and its brightness drives the
+tracker harder, so it brackets $a$ only loosely.
 
 **The beam-size term needs more than two diameters.** A prefactor that falls as $L$ grows suggests the
 beam-size denominator, but two $L$ values cannot distinguish it from an L-dependent background
@@ -273,10 +275,9 @@ through the loop, it scales the way $\sigma^2$ does: it falls with photon count 
 with $L$. It is therefore **not a constant of the instrument** and must never be subtracted silently:
 report $D - D_w$ beside $D$, and flag when the floor is a large fraction of the measurement.
 
-$D_w$ from a straight-line short-lag fit is a *rate over those lags*, not a diffusion coefficient: the
-underlying process relaxes rather than diffuses. Treat it as the apparent diffusivity of a stationary
-target over the lags you fit your data on, which is the comparison that matters, and quote the lag
-range with it.
+$D_w$ from a straight-line short-lag fit is an apparent rate over those lags, because the underlying
+process relaxes. Read it as the apparent diffusivity of a stationary target over the lags you fit your
+data on, and quote the lag range with it.
 
 ---
 
@@ -290,7 +291,7 @@ range with it.
 | `itr` | required | select the final (reiterated) iteration. |
 | `vld` | required | drop invalid records. |
 | **EFO** | **not needed for σ** | $= \text{ECO}/t$; adds nothing the pair (ECO, $t_c$) lacks. Useful for QC (fiducial detection). |
-| **cfr** | **not needed for σ** | it also reflects how well the emitter is centered, so it is not a clean background measure. |
+| **cfr** | **not needed for σ** | it also reflects how well the emitter is centered, so it is a poor background measure. |
 | `dcr` | not needed for σ | axial/color discrimination. |
 
 **ECO and L_TCP are sufficient:** one photon count, one pattern diameter, one prefactor.

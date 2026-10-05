@@ -24,9 +24,7 @@ PERCELL_METRICS <- c(
   t_c_ms       = "cycle time (ms)",
   frac_single  = "fraction of single-cycle steps",
   n_tracks     = "tracks after filtering",
-  len_med      = "median track length (localizations)",
-  alpha_short  = "short-lag α (MSD lags 1-8)",
-  r1_excess    = "r₁ above the motion bound (>0: correlated error)"
+  len_med      = "median track length (localizations)"
 )
 
 # ── percell_summary() ─────────────────────────────────────────────────────────
@@ -49,7 +47,7 @@ PERCELL_METRICS <- c(
 #           t_c / sw (list(split, trim, gate, ranges, tid_len, dur)). The spatial crop
 #           is not applied: it belongs to one field of view.
 # RETURNS one-row data.frame with the PERCELL_METRICS columns plus file, n_locs,
-#   r1_obs, r1_bound and a `note` for anything that could not be computed.
+#   and a `note` for anything that could not be computed.
 percell_summary <- function(df, file, L, pattern = TCP_PATTERN_DEFAULT, a = TCP_CRLB_PREFACTOR,
                             D_w = 0, nu = 0, msd = NULL,
                             filters = list(split = list(enable = TRUE, adaptive = FALSE,
@@ -57,8 +55,7 @@ percell_summary <- function(df, file, L, pattern = TCP_PATTERN_DEFAULT, a = TCP_
   row <- data.frame(file = file, n_locs = nrow(df), n_tracks = NA_integer_, len_med = NA_real_,
                     t_c_ms = NA_real_, frac_single = NA_real_, eco_med = NA_real_,
                     sigma_nm = NA_real_, D_msd_um2_s = NA_real_, D_um2_s = NA_real_, D_corr_um2_s = NA_real_,
-                    Dw_frac = NA_real_, alpha_short = NA_real_, r1_obs = NA_real_,
-                    r1_bound = NA_real_, r1_excess = NA_real_, note = "",
+                    Dw_frac = NA_real_, note = "",
                     stringsAsFactors = FALSE)
   if (!nrow(df) || !all(c("tid", "x", "y", "tim") %in% names(df))) {
     row$note <- "no localizations"; return(row)
@@ -110,12 +107,6 @@ percell_summary <- function(df, file, L, pattern = TCP_PATTERN_DEFAULT, a = TCP_
     }
   }
 
-  # 5. smoothing check: r1 above the fGn bound means damped / smoothed positions
-  sm <- smoothing_check(st$df, t_c, cv$dt_int)
-  row$alpha_short <- sm$alpha_short
-  row$r1_obs      <- cv$r1_norm
-  row$r1_bound    <- sm$r1_fgn
-  row$r1_excess   <- cv$r1_norm - sm$r1_fgn
   row
 }
 

@@ -46,7 +46,7 @@ It parses the sourced files and reports anything referenced as `pkg::` or `libra
 `qs` is **optional**. It needs a C++ toolchain plus `RcppParallel` and `stringfish` and often fails to
 install; the app therefore writes its tracking chunks with `fst`, which is a hard dependency and needs
 no special toolchain. `qs` is only used to *read* a chunk set produced on a machine that had it, and
-its absence is reported rather than thrown.
+the app reports when it is missing.
 
 > **macOS note:** `fst` uses C++/OpenMP. If it fails to compile, install Xcode Command Line Tools
 > (`xcode-select --install`) and retry.

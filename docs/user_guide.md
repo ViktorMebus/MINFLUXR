@@ -29,7 +29,7 @@ The importer handles four sources and normalises them to one internal form:
 | **`.npy`** | Abberior's **tabular** binary export. The primary format: 5–10× smaller than the equivalent JSON and much faster to read. |
 | **`.json`** | Imspector export. Same content, much larger. |
 | `.csv` (pyMINFLUX) | Already axially corrected by pyMINFLUX; the app detects and removes that factor on read. |
-| `.csv` (this app) | Our own export. Carries `z_scale_applied` and `dataset_tag`, so its axial factor is known **exactly** rather than assumed. |
+| `.csv` (this app) | Our own export. Carries `z_scale_applied` and `dataset_tag`, so its axial factor is known **exactly**. |
 
 ### About the `.npy` reader
 
@@ -158,7 +158,7 @@ moving emitters).
   edges and one count axis so they can be read against each other and used as a figure set. When
   enabled, *Shared σ axis range (nm)* sets the displayed span (default 0–30); clearing it falls back
   to the full data range. This is a display range only and filters nothing - values outside it are
-  omitted from the plot rather than piled into the edge bin, and a note reports how many.
+  left out of the plot, and a note reports how many.
 - *Set spread ranges to the 95th percentile* seeds the σ filter ranges from the data.
 - **TID spread filter**: per-axis x/y/z bounds. Setting the upper bound low retains only spatially
   tight traces - useful for removing gold beads or freely diffusing molecules. An empty box means no
@@ -197,8 +197,7 @@ moving emitters).
 
 Combats the instrument artifact where one fluorophore that blinks several times produces several trace
 IDs stacked on top of each other, overcounting the number of molecules. De-blinking merges them back
-into one **de-blinked ID** with a shared centroid, so downstream analyses count molecules rather than
-blinking events.
+into one **de-blinked ID** with a shared centroid, so downstream analyses count molecules.
 
 Works at **trace level** - a whole trace joins a molecule or it does not, so a trace is never split.
 
@@ -211,8 +210,8 @@ threshold in nm (`Centroid distance threshold`) or as **k × the measured trace 
 rewrites the distance.
 
 - *Advantages* - the criterion is a single distance in nanometres, which is easy to state, to compare
-  between datasets and to report in a methods section. Because grouping is complete rather than
-  chained, a stray pair of nearby traces cannot pull a long string of molecules into one group.
+  between datasets and to report in a methods section. Because grouping uses complete linkage, a
+  stray pair of nearby traces cannot pull a long string of molecules into one group.
 - *Disadvantages* - it needs a distance, so it depends on the measured trace spread being
   representative of the whole file. Heterogeneous data (mixed labels, widely varying photon counts)
   is served less well by one global number. The result is sensitive to the value chosen: too low
@@ -246,7 +245,7 @@ visible and reversible.
 *Measure threshold from data* sets it from your own file: it measures the per-axis trace spread and
 returns **k × that spread**, with *k* defaulting to 2.8. Grouping accuracy is flat between about
 k = 2.6 and 3.1, and because a molecule can never be wider than the threshold, overshooting costs less
-than undershooting - so the default sits in that plateau rather than at its edge.
+than undershooting - so the default sits inside that plateau.
 
 The threshold is the trace spread times *k*, and nothing else. Sample drift is measured, but it is
 reported in the [Localization Precision Cloud](#panels) QC panel and deliberately kept out of this
@@ -295,7 +294,7 @@ Three grouping methods:
 | **OPTICS (Xi)** | `Xi` (0–1, default 0.05), `MinPts` | Adaptive density that keeps small structures; lower Xi = more, smaller clusters |
 
 `MinPts` (default 15) applies to all three. Set it near the smallest number of traces you would call a
-real structure - often 3–6, not higher.
+real structure, often 3–6.
 
 Optional cleanup steps, applied in this order:
 
@@ -490,7 +489,7 @@ merge. Channels feed both the plot and the Analysis tab.
 ### Estimate Ground-Truth Positions
 
 > **Exploratory.** This inverts an assumed labelling model - read it as a hypothesis about the
-> labelling, not a measurement.
+> labelling.
 
 Reverses the labelling model to propose where the underlying epitopes were. You choose a **labelling
 preset** (the same presets as the Simulator: linker length, valency, dye spread, footprint, extra
@@ -524,8 +523,7 @@ subunit spacing divides a filament's contour length into an estimated subunit co
 ### Global Reference Plane and Surface
 
 *(3D only.)* Fits a reference plane or curved surface through the dataset, giving heights relative to
-that surface rather than to the instrument axes. Useful when the sample is tilted or curved and raw z
-is not the biologically meaningful coordinate.
+that surface. Useful when the sample is tilted or curved.
 
 - **Overlay XY Reference Plane (PCA based)** with a z offset and a downloadable per-point
   plane-distance table. It can be fitted from unclustered points only.
@@ -544,12 +542,12 @@ The Analysis tab is organised into sections: Labelling Density and the observati
 Groups, Quality Control, Nearest-Neighbour & Spatial Statistics (including Local Density & Hotspots),
 Multi-Panel View, Median Cluster Analyses and Cross-Channel Analysis. Each panel produces an interactive plot and, where
 a table makes sense, an exportable CSV. Panels marked ⚠ carry an *exploratory* badge in the app -
-they are research tools whose interpretation is not yet settled, not validated readouts.
+they are research tools whose interpretation is not settled.
 
 **Dataset Groups** sits above everything: analyse **by individual file** (default) or **by named
 group**. In group mode you define up to 6 groups (name, colour, member files) and the distribution
 analyses relabel and pool by group so you can compare conditions. Files left unassigned are ignored.
-Spatial statistics (Ripley / PCF) average per-file curves within a group rather than pooling
+Spatial statistics (Ripley / PCF) average per-file curves within a group instead of pooling
 coordinates - pooling would mix observation windows and invent structure.
 
 **The cell (file) is the unit of replication.** A group-mode histogram pools distances or clusters from
@@ -594,18 +592,17 @@ Two things to know:
 
 - The settings are **not independent**. Correcting the edge of a bounding box that contains a lot of
   empty space is worse than not correcting it at all, because it amplifies a deficit that was partly
-  cancelling the area error. On a concave cell, use both together rather than the first alone. When the
+  cancelling the area error. On a concave cell, use both together. When the
   footprint window is off, the window readout reports how much of the bounding box the sample covers and
   asks you to turn the footprint window on when that is below 70%.
-- The window is the **outline of the cell**, not the region where the sample happens to be densest. A
+- The window is the **outline of the cell**. A
   window drawn tightly around your structures would erase the clustering it is meant to measure, so the
   footprint is estimated independently of the Labelling Density panel, and if it comes out in
   disconnected pieces the bounding box is used instead and you are told.
 
-The co-localization null also randomises within this window rather than within the bounding box, which is
-what makes it trustworthy for a cell that does not fill its frame. It is now conservative rather than
-exactly calibrated: safe to quote as "not significant", but for a positive claim prefer g12(r) read
-against its envelope. The two-colour statistics get the window and the edge correction; the support map
+The KDE co-localization null also randomises within this window, so it holds for a cell that does not
+fill its frame. It is conservative: "not significant" can be quoted, but take a positive claim from
+g12(r) against its envelope. The two-colour statistics get the window and the edge correction; the support map
 in the Labelling Density panel shows which region is in use.
 
 ### What a Ripley L(r)-r curve should look like
@@ -615,13 +612,12 @@ in the Labelling Density panel shows which region is in use.
   back toward 0 as larger radii average over the whole field.
 - **Regular / dispersed:** dips below 0 at short range.
 
-A curve that heads **straight down into the negative in a near-straight line** is not a biological result.
+A curve that heads **straight down into the negative in a near-straight line** is a window artefact.
 K scales with the window area, so if the area being divided by is much too small the whole curve is
 pulled down proportionally, which looks like a line. The usual cause is a window drawn around the
 structures instead of around the cell - see the decision rule above.
 
-Note also that L(r)-r **does not return to zero** once clustering stops, and that is expected rather than
-a sign of structure at larger scales. K counts every pair closer than r, so an excess at short range stays
+L(r)-r **does not return to zero** once clustering stops, and this is expected. K counts every pair closer than r, so an excess at short range stays
 counted at every larger radius; the curve decays only slowly from there. That is also why the position of
 the L(r)-r peak is *not* the cluster size - read the size from g(r) instead, at the radius where it comes
 back down to 1.
@@ -629,8 +625,7 @@ back down to 1.
 ### How filtering works on this tab
 
 Every analysis on the Analysis tab applies the **Display-tab filter ranges** - EFO, CFR, DCR, ECO,
-dwell, fluo, trace-ID length, trace spread and outlier trimming - identically to *all* loaded files,
-not only the active one. There is no separate per-file filtering to set up.
+dwell, fluo, trace-ID length, trace spread and outlier trimming - identically to *all* loaded files.
 
 The one thing to watch: the sliders' *limits* are auto-detected from the **active file**, so if another
 dataset runs higher on a metric, check that a range which looks like "no filter" still means that
@@ -653,7 +648,7 @@ its organisation has changed.
 - **Unit** is a de-blinked molecule when de-blinking is on, and a trace ID otherwise. This matters: a
   trace ID is a single blink, so trace-ID density mixes expression level together with photophysics and
   laser power, and is not comparable between runs.
-- **Area** is the region the sample actually occupies, not the bounding box. A MINFLUX field routinely
+- **Area** is the region the sample occupies. A MINFLUX field routinely
   contains the edge of a cell and interior dark regions, and a bounding box counts all of that as sample,
   so a cell imaged half in frame reads at half its true density purely from framing. Four estimators are
   offered; the default smooths the localizations into a density map and keeps the smallest region holding
@@ -738,7 +733,7 @@ with the same L-transform as the univariate case. The plotted L̂₁₂(r) − r
 more than two independent CSR processes, ≈ 0 = spatial independence, < 0 = exclusion.
 
 When Median Clustering is active, L̂₁₂ is computed **per cluster** and averaged, giving a
-within-structure measure rather than a global one. The 2000-point subsampling limit applies per group.
+within-structure measure. The 2000-point subsampling limit applies per group.
 
 #### Pair Cross-Correlation g₁₂(r)
 
@@ -768,7 +763,7 @@ channels share a grid. Co-localization is the Pearson *r* between the two densit
 
 > **Caveat**: the Pearson *r* between KDE surfaces is strongly bandwidth-dependent. A large bandwidth
 > smooths both channels and inflates the correlation even for spatially distinct populations. Use it
-> for relative comparisons across conditions, not as an absolute co-localization measure.
+> for relative comparisons across conditions only.
 
 ### Export
 
@@ -810,8 +805,8 @@ to scope the static view as well (off by default, where Full tracks draws every 
 pipeline and every analysis always read **all** TIDs, so nothing is ever restricted to the chunk you
 are viewing.
 
-**No filter is applied automatically on upload** - CFR in particular is left alone, since it is not a
-strong artefact discriminator for tracking data. Filter it yourself via the CFR range below if you
+**No filter is applied automatically on upload** - CFR in particular is left alone, since it discriminates
+artefacts poorly in tracking data. Filter it yourself via the CFR range below if you
 want to.
 
 ### Axial (z) calibration
@@ -922,10 +917,10 @@ membrane work or every D and confinement call below inherits the bias.
 
 ### MSD (diffusion)
 
-Mean-squared displacement, binned by **integer cycle-count lag** rather than wall-clock time
+Mean-squared displacement, binned by **integer cycle-count lag**
 (MINFLUX cycle-skipping makes Δt non-uniform), following the cycle-based workflow of Vogler et al.
 2025. Fits free, confined and anomalous models. The linear fit uses Michalet & Berglund optimal-point
-selection rather than a fixed lag range; the confined and anomalous fits deliberately use the whole
+selection; the confined and anomalous fits deliberately use the whole
 window, because that optimality theory is derived for free diffusion only. A **cycle-binning
 diagnostic** shows how steps distribute across cycle counts.
 
@@ -995,9 +990,7 @@ Each file is then analysed on its own, the way the Data Quality panel analyses a
   field of view;
 - D from the CVE, $D - D_w$, and σ_loc from the photon budget with that file's **L, pattern, a and
   D_w**. A blank setting uses the value under *Acquisition Parameters*, so only settings that differ
-  between files need entering;
-- the correlated-error check (r₁ against the motion bound), which reads high with galvo damping and
-  also on near-immobile samples, where the tracking loop's own correlated error dominates.
+  between files need entering.
 
 Conditions are compared on **one value per cell**: the plot shows every cell as a point with the
 condition mean and a t-based 95% CI across cells. Tracks from one cell share the cell, the focus and
@@ -1016,7 +1009,7 @@ selected track. The first place to look when an aggregate result seems wrong.
 Panels on this tab print **numbers and short verdicts only**. Every method's rationale - what it
 assumes, how it is adapted to MINFLUX, and where it fails - is in the collapsed
 **ℹ Method & MINFLUX adaptation** box at the head of each panel, with the maths in *Key Calculations*
-below. Warnings still appear inline, but as one line each rather than a paragraph, so a result that
+below. Warnings still appear inline, but as one line each, so a result that
 needs attention is visible instead of buried.
 
 ---
@@ -1094,8 +1087,7 @@ Free Brownian motion on a cell shape, sampled the MINFLUX way - cycle clock, dar
 heteroscedastic σ_loc and photobleaching - producing MINFLUX-format tracks with a ground-truth D.
 Download the tracks and load them in the Tracking tab to check CVE / MSD / confinement.
 
-- **Cell geometry**: sphere (coccus), rod / spherocylinder (E. coli, with a choice of long axis),
-  ellipsoid (ovoid / coccobacillus), membrane plane (a tilted flat sheet in 3D, no curvature → no
+- **Cell geometry**: sphere, rod / spherocylinder (with a choice of long axis), ellipsoid, membrane plane (a tilted flat sheet in 3D, no curvature → no
   projection bias), or free (unbounded 3D - the simplest null).
 - **Diffusion**: surface (2 DOF, membrane/wall protein) or volume (3 DOF, reflecting off the wall).
 - **Motion type**: free, confined (OU tether → MSD plateau at ~2·L_c²), directed (drift velocity along
@@ -1103,7 +1095,7 @@ Download the tracks and load them in the Tracking tab to check CVE / MSD / confi
 - **Survivorship** - optionally lose the molecule when the *true* displacement across a dark gap
   exceeds a re-acquisition radius. This is the dark-cycle bias that manufactures apparent confinement.
 - **Sampling model**: cycle time, dark-cycle probability, mean photons per localization, and the
-  final-iteration TCP diameter L, from which σ_loc = L / (4·√N_photons).
+  final-iteration TCP diameter L, from which σ_loc = L / (√8·√N_photons).
 - **Calibrate from real MINFLUX data** - load a real file to auto-fill cycle time, photons, dark-cycle
   probability and median track length. Tip: apply your filters in the Tracking tab first, export the
   filtered CSV, and calibrate on that, so the model matches exactly the tracks you analyse.
@@ -1122,7 +1114,7 @@ Abberior files store coordinates in **meters**. On load, the app converts to nan
 x_\text{nm} = x_\text{m} \times 10^9
 ```
 
-**Z-axis scaling** is a user-set calibration, not a fixed constant. Files are read with **raw z**;
+**Z-axis scaling** is a user-set calibration. Files are read with **raw z**;
 the factor you set (SMLM sidebar *Axial (z) calibration*, Tracking sidebar *Axial (z) scaling factor*,
 both defaulting to 0.7) is applied once afterwards, on Plot Data. CSVs are first returned to raw z -
 the app detects what factor they already carry, exactly when the file was exported from here (a
@@ -1186,7 +1178,7 @@ lines beside it. This matches pyMINFLUX convention summarizing the same distribu
 its median line with median ± MAD and marks the interquartile range alongside it.
 
 nMAD and the interquartile range both describe how σ̃ varies **between traces**. Axes are reported
-separately rather than pooled into one isotropic figure, because axial and lateral precision differ.
+separately, because axial and lateral precision differ.
 σ̃ is a per-localization spread and an upper bound on the instrument's precision.
 
 ---
@@ -1336,8 +1328,7 @@ The plotted quantity is $\hat{L}(r) - r$:
 
 > There is no analytic edge correction: near the top of the *r* range, points close to the boundary
 > lose neighbours and L−r bends downward. Read significance as the observed curve **leaving the
-> envelope**, not as departure from the flat zero line. Without the envelope, read shape and peak
-> position rather than magnitude.
+> envelope**. Without the envelope, read shape and peak position.
 
 ---
 
@@ -1345,7 +1336,7 @@ The plotted quantity is $\hat{L}(r) - r$:
 
 The radius of gyration quantifies the spatial compactness of a Median Cluster. **RoG is computed from
 representative point positions** (per-TID medians, or de-blinked molecule medians when de-blinking is
-on) rather than from individual localizations, so each molecule contributes one point and localization
+on), so each molecule contributes one point and localization
 noise is suppressed.
 
 For a cluster of $m$ points at $(\tilde{x}_k, \tilde{y}_k, \tilde{z}_k)$, the centroid is the mean of
@@ -1395,15 +1386,15 @@ In priority order: (1) the hardware model $t_c = N_\text{iter} \cdot t_\text{dwe
 $t_c = \mathrm{median}(\mathrm{diff}(\text{cluster centres}))$ and
 $\text{SW} = \text{centre}_1 - t_c$; (4) a regression from the Δt-vs-index slope.
 
-Method (3) deliberately uses the **spacing between clusters**, not the mode. This is the trap:
+Method (3) uses the **spacing between clusters**, because:
 
 > ⚠ **The modal Δt is not the cycle time** - it is $1 \cdot t_c + \text{SW}$. Mistaking one for the
 > other biases every D by about **−5.5%**.
 
 #### What the interval structure looks like
 
-The comb is essentially exact: each cycle-count peak is a near-delta spike rather than a broadened
-distribution, with a within-cycle spread of a few hundredths of a percent. Two properties of the panel follow from that:
+The comb is essentially exact: each cycle-count peak is a near-delta spike, with a within-cycle
+spread of a few hundredths of a percent. Two properties of the panel follow from that:
 
 - **Binning is one bar per cycle count**, with edges on the classification boundaries
   $\text{SW} + (k \pm \tfrac{1}{2}) t_c$. Fixed-width bins alias against the comb and put bar centres
@@ -1413,17 +1404,17 @@ distribution, with a within-cycle spread of a few hundredths of a percent. Two p
   the dark tail.
 - **The Δt distribution is shown as a discrete distribution over cycle counts**, via the histogram plus
   optional cycle-multiple markers. There is no kernel-density overlay: with near-delta peaks its width
-  would be pure bandwidth rather than timing jitter.
+  would be pure kernel bandwidth.
 
 Because intervals are exact integer cycles plus a constant offset, cumulative-cycle-index binning is
 not an approximation to noisy timing - it recovers the true elapsed time. This is what the cycle-index
 design elsewhere in the tab rests on.
 
-> Full measurement, on 650k within-track steps: `docs/MINFLUX_analysis_methods.md` §I-B.0.
+> Details: `docs/MINFLUX_analysis_methods.md` §I-B.0.
 
 #### Continuity score
 
-A tolerance-weighted measure of how much of a track is genuinely observed rather than inferred across
+A tolerance-weighted measure of how much of a track is observed directly, across
 darkness, using the same weighting as the continuity gate:
 
 ```math
@@ -1466,7 +1457,7 @@ Bins where fewer than a user-specified fraction of tracks contribute are masked 
 D > 0 filter drops tracks whose MSD has a negative OLS slope.
 
 The MINFLUX adaptation here follows **Vogler 2025** [7] and its MinSpt reference implementation: pairs
-are grouped by **cumulative cycle index** rather than wall-clock lag,
+are grouped by **cumulative cycle index**,
 
 ```math
 d_\text{cyc} = \mathrm{round}\!\left(\frac{\Delta t - \text{SW}}{t_c}\right), \qquad \text{cycidx} = \mathrm{cumsum}(d_\text{cyc})
@@ -1483,20 +1474,19 @@ track-unweighted ensemble and the D > 0 filter are that work's conventions too.
 **Brownian diffusion** model:
 
 ```math
-\text{MSD}(\tau) = 2n D \tau + 2n \sigma_\text{loc}^2
+\text{MSD}(\tau) = 2d\,D \tau + 2d\,\sigma_\text{loc}^2
 ```
 
-where $n$ is the number of dimensions, $D$ the diffusion coefficient (nm²/ms = µm²/s × 10⁻³), and
-$\sigma_\text{loc}$ the localization precision (nm). The intercept $2n\sigma_\text{loc}^2$ arises from
-localization noise and does not reflect true motion. Note that $n$ here is the **motion degrees of
-freedom** set in *Sample geometry*, not the number of recorded axes.
+where $d$ is the number of **motion degrees of freedom** set in *Sample geometry* (can be fewer than the
+recorded axes), $D$ the diffusion coefficient (nm²/ms; 1 nm²/ms = 1 µm²/s), and $\sigma_\text{loc}$
+the localization precision (nm). The intercept $2d\,\sigma_\text{loc}^2$ comes from localization noise.
 
 Fitting is two-pass weighted least squares:
 1. Unweighted linear regression for initial estimates $D_0$, $\sigma_0$
 2. Weighted regression with $w_k \propto N_{\tau,k} / \widehat{\text{MSD}}(\tau_k)^2$, which minimizes
    variance for Poisson-like pair-count noise
 
-The linear fit range comes from **Michalet & Berglund optimal-point selection** (OLSF) rather than a
+The linear fit range comes from **Michalet & Berglund optimal-point selection** (OLSF) instead of a
 fixed percentage of the curve, with separate optimal point counts for the slope (→ D) and the intercept
 (→ σ²). Its adaptation to MINFLUX cycle lags - the iterative variant that converges onto the lowest,
 least-noisy lags, and the default 5–50 cycle fit window - follows **Vogler 2025** [7].
@@ -1504,10 +1494,11 @@ least-noisy lags, and the default 5–50 cycle fit window - follows **Vogler 202
 **Anomalous diffusion** model:
 
 ```math
-\text{MSD}(\tau) = 2n D_\alpha \tau^\alpha + 2n \sigma_\text{loc}^2
+\text{MSD}(\tau) = 2d\,D_\alpha \tau^\alpha + 2d\,\sigma_\text{loc}^2
 ```
 
-fitted by non-linear least squares (Levenberg–Marquardt via `minpack.lm`). The anomalous exponent:
+with $D_\alpha$ the generalised diffusion coefficient (nm²/ms^α), fitted by non-linear least squares
+(Levenberg–Marquardt via `minpack.lm`). The anomalous exponent:
 - $\alpha < 1$: subdiffusion (confined or obstructed)
 - $\alpha = 1$: normal Brownian diffusion
 - $\alpha > 1$: superdiffusion (directed transport)
@@ -1522,7 +1513,7 @@ for free diffusion only. Reported units: $D$ in µm²/s, $\sigma_\text{loc}$ in 
 The Data Quality panel estimates $D$ **without fitting an MSD curve** (Vestergaard et al. 2014), and
 this is the app's primary free-D readout, with the MSD panel serving as its cross-check.
 
-$\sigma_\text{loc}$ is **not** taken from the CVE. It comes from the photon budget,
+$\sigma_\text{loc}$ comes from the photon budget,
 $\sigma_i = L_\text{TCP}/(a\sqrt{N_i})$ with $N$ = ECO and $a$ an adjustable
 instrument constant, and that is what becomes the app-wide noise floor consumed by the D-map, JDD, confinement, HMM, directionality and speed tools. The reasons are
 below, under *Why σ does not come from the CVE*.
@@ -1563,19 +1554,23 @@ what "integrated" means.
 #### Why σ does not come from the CVE
 
 The identity $\sigma^2 = -\text{cov}_1$ is the **instantaneous-exposure** case, $R = 0$ in
-Vestergaard's notation. A MINFLUX localization is not a snapshot: photons are collected across the TCP
+Vestergaard's notation. A MINFLUX localization averages over time: photons are collected across the TCP
 cycle, so the reported position is a time-average of the path over that window and the blur term does
 not vanish. The general form is
 
 ```math
-\sigma_\text{loc}^2 = R\,\langle \Delta x^2 \rangle + (2R - 1)\,\text{cov}_1,
-\qquad R = \frac{t_c}{6\,\Delta t}
+\sigma_\text{loc}^2 = R\,\langle \Delta x^2 \rangle + (2R - 1)\,\text{cov}_1
 ```
 
-with $R \to 1/6$ for a full-cycle window. Reading MINFLUX data at $R = 0$ under-reports σ roughly
+with $R$ the motion-blur coefficient from the sequence timing, at most $t_c/(6\,\Delta t)$ when the
+photon-collection window spans the whole cycle. Reading MINFLUX data at $R = 0$ under-reports σ roughly
 threefold.
 
-Correcting R is necessary but not sufficient. At $R \approx 1/6$ roughly **90% of $\sigma^2$ comes
+In time units the blur shortens every step's effective diffusion time by $2R_\text{abs}$, with
+$R_\text{abs} = R\,(t_c + \text{SW})$ in ms. JDD, the D-map, change-point detection and the HMM
+subtract this offset.
+
+Correcting R is necessary but not sufficient. Near that ceiling roughly **90% of $\sigma^2$ comes
 from the $R\langle\Delta x^2\rangle$ term**, so the estimate is close to
 $\sqrt{R} \times \text{rms step}$, a function of the assumed R and of the step-size distribution,
 which population heterogeneity and any residual drift both inflate. What the data contributes
@@ -1609,10 +1604,10 @@ one is loaded):
 | triangle (2D) | 2.83 | 13.7 |
 | octahedron (3D, idealised) | $\sqrt{16/3} = 2.31$ | 9.0 |
 
-**The prefactor $a$ is measured, not derived.** The ideal values above hold for an unbiased estimator.
+**The prefactor $a$ is measured per sequence.** The ideal values above hold for an unbiased estimator.
 The instrument's estimator pulls positions toward the pattern center and the tracking loop correlates
-successive errors, so exported positions can scatter less than the ideal allows, and immobile-sample
-calibrations of 2D hexagonal sequences do come out above $\sqrt{8}$. The effective value therefore
+successive errors, so exported positions can scatter less than the ideal allows, and an immobile-sample
+calibration can return a value above $\sqrt{8}$. The effective value therefore
 belongs to one instrument and one acquisition sequence (pattern, L, dwell, photon limit, damping), and
 is measured under *Instrument Calibration*. Without a calibration the app uses the ideal-estimator
 value of the pattern and labels σ **uncalibrated**. The derivation is in
@@ -1624,12 +1619,19 @@ Load the files of an **immobile sample** acquired with one sequence (fixed cells
 sample work better than beads), select them under *Instrument Calibration* and press *Measure*. The
 plot shows each cell's immobile MSD over many cycles on log axes, their mean, the localization-noise
 level 4σ², and the MSD fit window. Two floors are reported: $D_w$, the immobile slope **over the MSD fit
-window**, which is the floor under the headline D, and the steeper short-lag rise. Where the mean curve
-has largely flattened, a suggested lower cutoff for the fit window is marked; if it does not flatten,
-the floor rises across the whole window. For each file, after the filters set under *Display*, the
-short-lag MSD (1 to 5 single-cycle steps) is also fitted as $\text{MSD} = 4\sigma^2 + 4D_w\tau$: the intercept gives σ, the slope the wander floor
-$D_w$, and $a = L\sqrt{\langle 1/N\rangle}/\sigma$. The result is the median across cells, with the
-quartiles showing how well the cells agree.
+window**, which is the floor under the headline D, and the steeper short-lag rise. The plot shows
+where the immobile MSD keeps rising, which is worth checking before choosing the lower end of the fit
+window. For each file, after the filters set under *Display*, the short-lag MSD (1 to 5 single-cycle
+steps) is fitted as $\text{MSD} = 4\sigma^2 + 4D_w(k - 2R)\,\Delta t$, with R the motion-blur coefficient
+from the file's photon collection window: residual motion is averaged over each localization, which
+lowers the intercept by $8RD_w\Delta t$, so leaving R out reads σ low. The intercept then gives σ, and
+$a = L\sqrt{\langle 1/N\rangle}/\sigma$. The result is the median across cells, with the quartiles showing
+how well the cells agree, and the summary shows how far $a$ would move if R were 30% off. On typical
+sequences that is a few percent, smaller than the spread between cells.
+
+$a$ changes with the photon limit as well as with the pattern, L and dwell, so one profile describes
+one sequence. The cleaning and filters matter too: the floor in particular depends on which tracks
+survive, so calibrate with the same Display settings used for the live data.
 
 *Save profile* keeps the result under a name, together with the sequence it belongs to (pattern, L,
 dwell, photon limit, damping, a note on the instrument). Profiles download and load as a JSON file, so
@@ -1637,8 +1639,7 @@ a lab measures each sequence once and reuses the profile. Selecting a profile un
 Parameters* sets $a$, $D_w$, the pattern and L; in *Compare Cells* the `calibration` column names the
 profile for each file, so files acquired with different sequences each use their own.
 
-The blur-aware CVE σ is still shown beside it as a sanity read on the covariance. It is not the
-app-wide value and nothing downstream consumes it.
+The blur-aware CVE σ is shown beside it as a cross-check on the covariance; nothing downstream uses it.
 
 > **σ ∝ L, or steeper?** The full doughnut CRLB carries a beam-size factor
 > $1/\left|1 - \ln 2\,(L/\nu)^2\right|$ at the pattern center, with ν the excitation-doughnut FWHM, which
@@ -1718,22 +1719,6 @@ Read a σ_loc round-trip as a unit test on the estimator arithmetic under ideal 
 round-trip as the validation of the D path it has always been. Adding a recentring loop to the
 simulator would close the gap, and is the change that would make the σ half informative again.
 
-#### How well is σ actually resolved?
-
-The normalized lag-1 correlation $r_1 = \text{cov}_1 / \langle \Delta^2 \rangle$ has, for Brownian
-motion plus noise, the closed form
-
-```math
-r_1 = \frac{-\sigma_\text{loc}^2}{2D\Delta t + 2\sigma_\text{loc}^2}, \qquad \text{noise fraction} = -2 r_1
-```
-
-- $r_1 \to -0.5$: noise dominates the step variance, σ is cleanly resolved
-- $r_1 \to 0$: σ is a marginal residual on top of motion, which is the normal regime for MINFLUX
-  tracking - per-track σ differences then mostly track mobility, not precision
-- $r_1 > 0$: correlated or directed motion dominates and σ is not resolvable there
-
-The panel reports this as a percentage and warns below 15%.
-
 #### Lateral vs axial precision
 
 The pooled σ averages x, y **and** z, and in MINFLUX the axial precision differs from the lateral one,
@@ -1805,13 +1790,14 @@ $\sigma_k$ is the **per-axis** spread in both cases. Fitted by MLE (Nelder–Mea
 log-likelihood). Per component:
 
 ```math
-D = \frac{\sigma^2}{2} \quad \text{(dimension-independent)}, \qquad \sigma^2 \leftarrow \sigma^2 - \frac{2\sigma_\text{loc}^2}{\Delta t_0} \ \ (\text{clamped} \geq 0)
+D = \frac{\sigma_k^2 - 2\sigma_\text{loc}^2\,\langle 1/\Delta t\rangle}{2\,\bigl(1 - 2R_\text{abs}\,\langle 1/\Delta t\rangle\bigr)}
 ```
 
-$D = \sigma^2/2$ carries no $d$ because $E[r^2] = d\sigma^2$ while $\text{MSD} = 2dD\Delta t$ - the $d$
-cancels. Steps are pooled as $r/\sqrt{\Delta t}$ by default so different cycle counts are comparable.
-A noise-floor jump distance $\sqrt{2d} \sigma_\text{loc}/\sqrt{\Delta t_0}$ marks where peaks are
-noise-dominated.
+with $w_k$ the weight of component $k$, $\Gamma$ the gamma function, $\langle 1/\Delta t\rangle$ the
+mean inverse step interval and $R_\text{abs}$ the motion-blur offset in ms (see *Why σ does not come from the CVE*). Steps are
+pooled as $r/\sqrt{\Delta t}$ by default so different cycle counts are comparable. The formula carries
+no $d$ because $E[r^2] = d\sigma^2$ while $\text{MSD} = 2dD\Delta t$. A noise-floor jump distance
+$\sqrt{2d}\,\sigma_\text{loc}\sqrt{\langle 1/\Delta t\rangle}$ marks where peaks are noise-dominated.
 
 > The dimension $d$ must match the data: fitting the 2D Rayleigh shape to 3D distances inflates the
 > fitted σ, so the σ_loc term subtracts only part of the true noise floor and the PDF shape is wrong.
@@ -1821,23 +1807,20 @@ noise-dominated.
 
 ### Diffusive-State HMM
 
-Per-step displacement $r$ (√Δt-normalised) with a **Rayleigh emission** over $K = 2$–4 states:
+$K = 2$–4 hidden diffusive states, switching as a continuous-time Markov chain with rate matrix $Q$
+(per ms). A step of any length $\Delta t$ has transition matrix $\exp(Q\,\Delta t)$, so dark cycles are
+handled exactly. The squared step length over x and y follows a gamma law with per-axis variance
 
 ```math
-\log p(r \mid k) = \log r - 2\log\sigma_k - \frac{r^2}{2\sigma_k^2}, \qquad \sigma_k = \sqrt{\frac{\sum \gamma \, r^2}{2\sum \gamma}}
+v = 2D_s\,(\Delta t - 2R_\text{abs}) + \sigma_j^2 + \sigma_{j+1}^2,
+\qquad \tau_a = -\frac{1}{q_{aa}}
 ```
 
-fitted by **Baum–Welch EM** entirely in log-space, then decoded for all tracks with **Viterbi**.
-
-The fitted per-step transition matrix $A$ is *not* a rate: a 3-dark-cycle step counts as one transition
-opportunity just like a 1-cycle step. So the **generator** $Q$ is estimated separately from the decoded
-path using real elapsed time, giving dark-cycle-invariant dwell times:
-
-```math
-q_{ab} = \frac{N_{ab}}{T_a} \ (b \neq a), \qquad q_{aa} = -\sum_{b \neq a} q_{ab}, \qquad \tau_a = -\frac{1}{q_{aa}}
-```
-
-where $N_{ab}$ counts decoded $a \to b$ jumps and $T_a$ is time spent in state $a$.
+with $D_s$ the diffusion coefficient of state $s$, $\sigma_j$ and $\sigma_{j+1}$ the precision of the
+step's two localizations, $q_{aa}$ the diagonal entry of $Q$ for state $a$, and $\tau_a$ the mean dwell
+time in that state. $D_s$ and $Q$ are fitted together by maximum likelihood over all tracks, so D is
+noise- and blur-corrected and the rates come from the likelihood. A Viterbi path under the fitted model
+colours the tracks. Intervals for D, rates and dwell times come from a bootstrap over tracks.
 
 ---
 
@@ -1848,12 +1831,12 @@ free-diffusion expectation. It depends only on the two endpoints and the true el
 is **inherently robust to irregular Δt** - no cycle binning needed:
 
 ```math
-R_\text{net}^2 = 2 D_\text{mot} \, T \cdot \chi^2(d_\text{mot}), \qquad R_\text{net}^2 \leftarrow R_\text{net}^2 - 2 d \sigma_\text{loc}^2
+\frac{R_\text{net}^2}{2 D\, T} \sim \chi^2(d_\text{mot}), \qquad R_\text{net}^2 \leftarrow R_\text{net}^2 - 2 d \sigma_\text{loc}^2
 ```
 
-$d_\text{mot}$ is the degrees of freedom of the **motion**, not the number of recorded coordinates - a
-membrane protein tracked in 3D has $d_\text{mot} = 2$ on $d_\text{obs} = 3$ axes. This is what *Sample
-geometry* sets.
+with $D$ the track's diffusion coefficient, $d$ the number of recorded axes and $d_\text{mot}$ the
+degrees of freedom of the motion, set in *Sample geometry*. Motion on a membrane recorded in 3D has
+$d_\text{mot} = 2$ with $d = 3$.
 
 ---
 
@@ -1867,7 +1850,7 @@ step vectors:
 ```
 
 Both use only steps spanning at most a few dark cycles - a long-gap step has an unreliable direction.
-The autocorrelation lag is **elapsed time** (cycle lag × $t_c$), not step index. A noise floor at RMS
+The autocorrelation lag is **elapsed time** (cycle lag × $t_c$). A noise floor at RMS
 step $= 2\sigma_\text{loc}$ quantifies how much of any backward peak is localization noise rather than
 real anti-persistence.
 
@@ -1884,7 +1867,7 @@ v_\text{drift}(t) = \frac{|\text{net displacement over window } W|}{W}, \qquad \
 
 Diffusion's net displacement grows only as $\sqrt{t}$, so its apparent $v \sim \sqrt{4D/W}$ *shrinks*
 as the window $W$ grows, while directed transport sustains $v_\text{drift}$. Windows are defined in
-**time (ms)**, not step count, for robustness to irregular Δt. The local anomalous exponent $\alpha$ is
+**time (ms)**, so irregular Δt does not distort them. The local anomalous exponent $\alpha$ is
 a rolling log-log slope with the static-noise offset $2d\sigma^2$ subtracted per lag: $\alpha \approx 1$
 Brownian, $\alpha \to 2$ ballistic.
 
@@ -1894,7 +1877,8 @@ A window is called directed when $v_\text{drift}$ exceeds the larger of two thre
 v_\text{drift} > \max\!\left(\text{fold} \times \text{diffusive baseline},\ \frac{\sqrt{2}\,\sigma}{W}\right)
 ```
 
-- measured against the track's own baseline and floored at the localization-noise velocity.
+where fold is the user-set multiplier, the diffusive baseline is the track's own $v_\text{drift}$
+expected for diffusion, and $\sqrt{2}\,\sigma/W$ is the localization-noise velocity.
 
 ---
 
@@ -1903,14 +1887,17 @@ v_\text{drift} > \max\!\left(\text{fold} \times \text{diffusive baseline},\ \fra
 A single-lag estimator per step, midpoint-binned on an $n \times n$ grid:
 
 ```math
-D_\text{raw} = \frac{r^2}{4\,\Delta t} \quad \text{(2D)}, \qquad D_\text{cell} = \max\!\Big(0,\ \langle D_\text{raw} \rangle - \sigma_\text{loc}^2 \big\langle \tfrac{1}{\Delta t} \big\rangle\Big)
+D_\text{raw} = \frac{r^2}{4\,\Delta t} \quad \text{(2D)}, \qquad D_\text{cell} = \frac{\max\!\Big(0,\ \langle D_\text{raw} \rangle - \sigma_\text{loc}^2 \big\langle \tfrac{1}{\Delta t} \big\rangle\Big)}{1 - 2R_\text{abs}\big\langle \tfrac{1}{\Delta t} \big\rangle}
 ```
+
+with $r$ the step length, averages taken over the steps whose midpoint falls in the cell, and
+$R_\text{abs}$ the motion-blur offset.
 
 Each cell reports the mean with its standard error, because $\langle r^2 \rangle = 4D\Delta t + 4\sigma^2$
 holds for the mean only; the median of single-step $r^2$ sits at ln 2 of the mean. Cells with too few
 steps are left NA. The noise subtraction removes the spurious diffusion floor that would otherwise make
 immobile regions look mobile. This is the **short-lag limit of CVE**, far more robust than a per-cell
-MSD fit in small cells such as a bacterium.
+MSD fit in small cells.
 
 ---
 
@@ -1953,7 +1940,7 @@ Typical ladders, for orientation:
 
 Without a sequence file the app falls back to 100 nm. Vogler quote 150 nm because their sequence stops
 one iteration earlier; an imaging sequence's 39.6 nm is a different regime entirely. Since the ceiling
-scales as $L^2$, this is the input that most rewards being read from the file rather than assumed.
+scales as $L^2$, this is the input that most rewards being read from the sequence file.
 $t_\text{hw}$ defaults to 0.05 ms, Vogler's $t_{\text{hw},\eta=1} \approx 52\ \mu\text{s}$ for a
 hexagonal TCP.
 
@@ -1981,8 +1968,8 @@ MINFLUXR/
 ## Notes & Tips
 
 - **No automatic quality filter**: nothing is removed on load except invalid records (`vld = FALSE`).
-  In particular there is **no automatic CFR cutoff** in either tab - CFR is not a reliable artefact
-  discriminator for tracking data, and in SMLM it is your call. Set the CFR range yourself if you want
+  In particular there is **no automatic CFR cutoff** in either tab - CFR discriminates artefacts poorly
+  in tracking data, and in SMLM it is your call. Set the CFR range yourself if you want
   one.
 - **Z-axis scaling**: the default of 0.7 corrects for the refractive-index mismatch between water
   (n ≈ 1.33) and glass (n ≈ 1.52) in a typical sample. Adjust it if your mounting medium differs, and

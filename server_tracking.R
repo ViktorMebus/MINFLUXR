@@ -589,17 +589,6 @@ tracking_server <- function(input, output, session) {
     # per-localization rather than pooled, and does not inherit the step-size
     # inflation that population heterogeneity and drift push into the CVE's ⟨Δx²⟩
     # term. The CVE σ above is kept as a diagnostic only.
-    # ── Are the increments consistent with ANY motion model? ───────────────────
-    # A subdiffusive walk already has anti-correlated increments before any noise:
-    # for fBm with Hurst H = alpha/2, fGn gives cov1/var = 2^(alpha-1) - 1.
-    # Localization noise and blur can only push r1 MORE negative, so
-    #     r1_observed <= 2^(alpha-1) - 1
-    # must hold. A violation means something is adding POSITIVE increment
-    # correlation, i.e. the trajectory was smoothed before it was written - galvo
-    # damping (DMP > 0) being the obvious candidate. No estimator can recover
-    # sigma from filtered increments, so this is a data-quality flag, not a knob.
-    sm <- smoothing_check(df, t_c, dt_int)              # R/est_cve.R
-    alpha_short <- sm$alpha_short; r1_fgn <- sm$r1_fgn
 
     L_tcp <- suppressWarnings(as.numeric(input$trk_L_tcp %||% DMAX_L_TCP_DEFAULT))
     if (!is.finite(L_tcp) || L_tcp <= 0) L_tcp <- DMAX_L_TCP_DEFAULT
@@ -637,7 +626,6 @@ tracking_server <- function(input, output, session) {
          nu_beam = nu_beam, r_off = r_off, tcp_pattern = tcp_pat,
          sig_simple = if (length(ecov)) stats::median(L_tcp / (a_pref * sqrt(ecov))) else NA_real_,
          a_pref = a_pref,
-         alpha_short = alpha_short, r1_fgn = r1_fgn,
          sigma_xy = sigma_xy, sigma_z = sigma_z, sig_aniso = sig_aniso,
          D_cve = D_cve, dt_int = dt_int, t_cycle = t_c, has_z = has_z,
          frac_integ = frac_integ_raw, frac_integ_filt = frac_integ_filt,
@@ -701,19 +689,6 @@ tracking_server <- function(input, output, session) {
       row(warn(htmltools::HTML("&#9888; "), "no ECO column, so ", sigloc(),
                " cannot come from the photon budget; the CVE value below is used instead."))
 
-    # Consistency of the increments with ANY motion model. Subdiffusion alone gives
-    # r\u2081 = 2^(\u03b1\u22121) \u2212 1; noise and blur only push r\u2081 further negative. If the observed
-    # r\u2081 sits ABOVE that, the trajectory was smoothed before it was written (galvo
-    # damping), and no estimator can recover \u03c3 from it.
-    smooth_line <- if (is.finite(b$r1_fgn %||% NA_real_) && is.finite(b$r1_norm %||% NA_real_)) {
-      viol <- b$r1_norm > b$r1_fgn + 0.01
-      row(htmltools::span(style = sprintf("color:%s;", if (viol) AMB else DIM),
-        sprintf("increments: \u03b1 = %.2f \u2192 r\u2081 should be \u2264 %+.3f, observed %+.3f",
-                b$alpha_short %||% NA_real_, b$r1_fgn, b$r1_norm),
-        if (viol) htmltools::HTML(sprintf(
-          "  &#9888; %.1f\u00d7 too weak: the positions carry correlated error (galvo damping, or the tracking loop when motion is small)",
-          b$r1_fgn / b$r1_norm)) else "  \u2713 consistent"))
-    } else NULL
 
     # Motion blur used by every estimator (trk_blur(), est_blur.R), and where it came
     # from. Damping in the sequence smooths positions ACROSS steps, which no blur model
@@ -726,19 +701,15 @@ tracking_server <- function(input, output, session) {
         warn(htmltools::HTML(sprintf(
           "  &#9888; sequence damping = %g: positions are smoothed across steps, so no blur model applies and D from single steps is approximate",
           bl$damping))) else NULL) else NULL
-    # evidence that the photon prefactor is right; a large gap means one is wrong.
-    # CVE sigma, kept only as a sanity read on the covariance. It is NOT a precision
-    # measurement: ~90% of it is the assumed blur term, and on immobile samples the
-    # increments come out positively correlated so it fails outright. The prefactor
-    # it used to cross-check is now measured directly on a fixed sample, so the old
-    # implied-L / R-range readout was retired.
+    # CVE sigma, a sanity read on the covariance only: most of it is the assumed blur
+    # term, and where blur outweighs the noise it has no solution.
+    # The covariance-based sigma is a diagnostic only (nothing downstream uses it),
+    # so an unresolvable value is reported plainly rather than as a data problem.
     cve_line <- if (isTRUE(b$degenerate))
-      row(dim_("CVE σ: "), warn("unresolvable (consecutive steps are positively correlated)"))
+      row(dim_("CVE σ: no solution (blur outweighs the noise in the step covariance); diagnostic only"))
     else if (is.finite(b$sigma))
-      row(dim_(sprintf("CVE σ %.2f nm (blur-aware, R = %.3f), %s",
-                       b$sigma, b$R_blur %||% NA_real_,
-                       if (is.finite(b$noise_frac) && b$noise_frac < 0.15)
-                         "the covariance carries little of it" else "not the app-wide value")))
+      row(dim_(sprintf("CVE σ %.2f nm (blur-aware, R = %.3f), diagnostic only",
+                       b$sigma, b$R_blur %||% NA_real_)))
     else NULL
 
     # ── lateral vs axial (3D only) - the pooled sigma averages x, y and z, so when
@@ -757,22 +728,11 @@ tracking_server <- function(input, output, session) {
               b$sigma_xy))) else NULL)
     else NULL
 
-    # ── how well sigma is resolved (r1 -> 0 means the per-track spread is motion) ──
-    noise_line <- if (is.finite(b$noise_frac))
-      row(dim_(sprintf("noise %.0f%% of step variance (r\u2081 = %.3f)", 100 * max(0, b$noise_frac), b$r1_norm)),
-          if (b$noise_frac < 0.15) warn(htmltools::HTML("  &#9888; "), sigloc(),
-                                          " spread is dominated by motion, so read it as indicative only") else NULL)
-    else NULL
 
 
     # ── data quality: same integrated-fraction metric as TSA / cycle-time status ──
     fi_raw  <- b$frac_integ %||% NA_real_;      fi_filt <- b$frac_integ_filt %||% NA_real_
     c_raw   <- b$cont_raw   %||% NA_real_;      c_filt  <- b$cont_filt      %||% NA_real_
-    q_use   <- if (is.finite(fi_filt)) fi_filt else fi_raw
-    q_verd  <- if (!is.finite(q_use)) c("UNKNOWN", DIM)
-               else if (q_use >= 0.7) c("GOOD", "#1a8a1a")
-               else if (q_use >= 0.5) c("MODERATE", "#b26a00")
-               else c("POOR", RED)
     pair_txt <- function(a, z, fmt) if (is.finite(a) && is.finite(z)) sprintf(paste0(fmt, "\u2192", fmt), a, z)
                                     else if (is.finite(a)) sprintf(fmt, a) else "-"
     # D in the MOTION's degrees of freedom: a per-axis CVE spreads 2-DOF motion over
@@ -781,10 +741,10 @@ tracking_server <- function(input, output, session) {
     d_mot <- { mo <- input$trk_motion %||% "volume"
                if (identical(mo, "filament")) 1L else if (identical(mo, "surface")) min(2L, d_obs) else d_obs }
     d_use <- b$D_cve * d_obs / d_mot
+    # Descriptive only: the single-cycle fraction mostly reflects the sequence (photon
+    # limit against photons per pass) and the dye's brightness, so it carries no verdict.
     qual_line <- row(
-      htmltools::tags$b("Quality "),
-      htmltools::span(style = sprintf("color:%s; font-weight:bold;", q_verd[2]), q_verd[1]),
-      dim_(sprintf("  \u00b7  integrated %s  \u00b7  continuity %s%s",
+      dim_(sprintf("single-cycle steps %s  \u00b7  continuity %s%s",
                    pair_txt(100 * fi_raw, 100 * fi_filt, "%.0f%%"),
                    pair_txt(c_raw, c_filt, "%.2f"),
                    if (is.finite(c_raw) && is.finite(c_filt) && (c_filt - c_raw) > 0.01) " \u25b2" else "")))
@@ -799,7 +759,7 @@ tracking_server <- function(input, output, session) {
                          prof$name, prof$a, prof$a_q25 %||% NA_real_, prof$a_q75 %||% NA_real_,
                          as.integer(prof$n_cells %||% NA))))
       else if (isTRUE(abs(a_used - ideal) < 1e-9))
-        row(warn(sprintf(paste0("uncalibrated: a = %.2f is the ideal-estimator value for this pattern; ",
+        row(dim_(sprintf(paste0("uncalibrated: a = %.2f is the ideal-estimator value for this pattern; ",
                                 "measure it for this sequence under Instrument Calibration"), a_used)))
       else
         row(dim_(sprintf("a = %.2f entered by hand  \u00b7  at the ideal-estimator value %.2f, %s would be %.2f nm",
@@ -854,7 +814,7 @@ tracking_server <- function(input, output, session) {
     } else NULL
 
     htmltools::div(style = "font-size:0.92em; margin:4px 0; line-height:1.45;",
-      headline_line, sigma_line, prof_line, smooth_line, blur_line, cve_line, aniso_line, noise_line, qual_line, calib_line,
+      headline_line, sigma_line, prof_line, blur_line, cve_line, aniso_line, qual_line, calib_line,
       dw_line, qc_line)
   })
 
@@ -2190,35 +2150,18 @@ tracking_server <- function(input, output, session) {
       rows <- c(rows, list(tags$p(style = "font-size:0.82em; color:#888; margin:2px 0;",
              sprintf("Empirical modal Δt = %.4g ms.", mdt))))
     }
-    # Data-driven cluster cycle + data-quality verdict (a light TSA). The verdict
-    # uses the SINGLE-CYCLE (integrated) fraction with the SAME thresholds as the
-    # TSA / Data Quality panels (≥80% GOOD, ≥50% MODERATE), so all three agree. The
-    # modal/cluster ratio is shown alongside only as a cycle-cadence diagnostic.
-    # This is the RAW fraction (cluster_cycle reads raw data).
+    # Data-driven cluster cycle and the RAW single-cycle fraction (cluster_cycle
+    # reads raw data). Descriptive only, no verdict.
     cc <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
     if (!is.null(cc) && is.finite(cc$cycle) && cc$cycle > 0 && is.finite(cc$modal)) {
-      ratio <- cc$modal / cc$cycle                # typical interval / atomic cycle (diagnostic)
-      fo    <- cc$frac_one_cycle
-      verdict <- if (is.finite(fo)) {
-          if (fo >= 0.7)
-            sprintf("data quality (raw): GOOD, %.0f%% single-cycle (integrated) steps.", fo * 100)
-          else if (fo >= 0.5)
-            sprintf("data quality (raw): MODERATE, %.0f%% single-cycle steps; some dark-cycle dropouts.", fo * 100)
-          else
-            sprintf("data quality (raw): POOR, %.0f%% single-cycle steps; frequent dark cycles.", fo * 100)
-        } else if (is.finite(ratio)) {
-          if (ratio < 1.4) "data quality (raw): GOOD (typical interval ≈ 1 cycle)."
-          else if (ratio < 2.3) sprintf("data quality (raw): MODERATE (typical interval ≈ %.1f cycles).", ratio)
-          else sprintf("data quality (raw): POOR (typical interval ≈ %.1f cycles).", ratio)
-        } else ""
-      good <- if (is.finite(fo)) fo >= 0.8 else is.finite(ratio) && ratio < 1.4
-      mod  <- if (is.finite(fo)) fo >= 0.5 else is.finite(ratio) && ratio < 2.3
-      qcol <- if (good) "#2a8a3e" else if (mod) "#b07000" else "#c0392b"
+      fo <- cc$frac_one_cycle
       rows <- c(rows, list(
         tags$p(style = "font-size:0.82em; color:#555; margin:2px 0;",
                sprintf("Cluster (atomic) cycle = %.4g ms  |  typical interval (HSM) = %.4g ms  |  %d cycle-clusters detected",
                        cc$cycle, cc$modal, cc$n_clusters)),
-        tags$p(style = sprintf("font-size:0.82em; color:%s; margin:2px 0;", qcol), verdict)))
+        if (is.finite(fo))
+          tags$p(style = "font-size:0.82em; color:#555; margin:2px 0;",
+                 sprintf("Single-cycle (integrated) steps, raw: %.0f%%", fo * 100))))
     }
     # Regression (EOD/SW) cycle - Bela-style line fit, shown for side-by-side
     # comparison with the cluster median (and used as the source when toggled on).
@@ -2532,10 +2475,11 @@ tracking_server <- function(input, output, session) {
                                                                sp$phtLimit, sp$patRepeat)) )
   })
 
-  # ── TSA: top-line data-quality verdict ──────────────────────────────────────
-  # Compares the misleading modal Δt against the robust cluster cycle. A large
-  # ratio means dense regions are over-populated with multi-cycle gaps, biasing
-  # any naive cycle estimate - a direct read on whether the data are clean.
+  # ── TSA: timing summary ─────────────────────────────────────────────────────
+  # The robust cluster cycle against the modal Δt, and the single-cycle fraction
+  # before and after the filters. Descriptive only: the single-cycle fraction
+  # mostly reflects the sequence (photon limit against photons per pass) and the
+  # dye's brightness, so it carries no verdict.
   output$trk_tsa_quality <- renderUI({
     req(isTRUE(input$trk_show_tsa), tsa_ran())
     cc <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
@@ -2544,28 +2488,13 @@ tracking_server <- function(input, output, session) {
     modal <- cc$modal
     ratio <- if (is.finite(modal) && cc$cycle > 0) modal / cc$cycle else NA_real_
     frac1 <- cc$frac_one_cycle                       # RAW (metadata-filtered)
-    # Verdict on the POST-FILTERED single-cycle fraction - the SAME data the
-    # Integrated/Dark charts below use (dt_vectors → trk(), i.e. after the quality
-    # gate / end-trim / length / duration / spatial filters). frac1 (raw) is kept as
-    # a diagnostic row so the filter improvement is visible here too. Same metric
-    # and thresholds as the Calibration panel, so every verdict agrees.
+    # Filtered fraction from the same data the Integrated/Dark charts below use
+    # (dt_vectors -> trk(), after gate / end-trim / length / duration / spatial filters).
     ccb       <- tryCatch(cycle_class_bundle(), error = function(e) NULL)
     frac_filt <- if (!is.null(ccb) && is.finite(ccb$frac_integ)) ccb$frac_integ else NA_real_
-    frac_use  <- if (is.finite(frac_filt)) frac_filt else frac1
-    verdict <- if (is.finite(frac_use)) {
-                 if (frac_use >= 0.7) c("GOOD", "#1a8a1a")
-                 else if (frac_use >= 0.5) c("MODERATE", "#c08000")
-                 else c("POOR", "#b00")
-               } else if (is.finite(ratio)) {
-                 if (ratio < 1.4) c("GOOD", "#1a8a1a")
-                 else if (ratio < 3.0) c("MODERATE", "#c08000")
-                 else c("POOR", "#b00")
-               } else c("UNKNOWN", "#888")
     cyc_in_use <- trk_cycle_time()
-    tags$div(style = sprintf("border-left:5px solid %s; padding:6px 10px; background:#fafafa;", verdict[2]),
-      tags$div(style = sprintf("font-size:1.05em; font-weight:bold; color:%s;", verdict[2]),
-               sprintf("Data quality (%s): %s",
-                       if (is.finite(frac_filt)) "filtered" else "raw", verdict[1])),
+    tags$div(style = "border-left:5px solid #2c6fbb; padding:6px 10px; background:#fafafa;",
+      tags$div(style = "font-size:1.05em; font-weight:bold; color:#2c6fbb;", "Timing summary"),
       tags$table(style = "font-size:0.86em; margin-top:4px;",
         tags$tr(tags$td(style="padding-right:12px;", "Atomic cycle (cluster)"),
                 tags$td(tags$b(sprintf("%.4g ms", cc$cycle)))),
@@ -2578,14 +2507,7 @@ tracking_server <- function(input, output, session) {
         if (is.finite(frac1)) tags$tr(tags$td("Single-cycle fraction (raw)"),
                 tags$td(sprintf("%.0f%%", 100 * frac1))),
         tags$tr(tags$td("Cycle time used downstream"),
-                tags$td(tags$b(sprintf("%.4g ms", cyc_in_use))))),
-      tags$p(style = "font-size:0.8em; color:#666; margin:5px 0 0 0;",
-        if (identical(verdict[1], "GOOD")) "Mostly single-cycle steps."
-        else if (identical(verdict[1], "MODERATE"))
-          "Many steps span 2+ cycles - try the continuity gate / end-trim (Display tab)."
-        else if (identical(verdict[1], "POOR"))
-          "Frequent dropouts - filter dark-heavy tracks and ends before trusting D."
-        else "Too little structure to judge; falling back on the modal/cluster ratio."))
+                tags$td(tags$b(sprintf("%.4g ms", cyc_in_use))))))
   })
 
   # Per-interval TOTAL acquisition-cycle counts across all meta-filtered tracks:
@@ -7973,7 +7895,7 @@ tracking_server <- function(input, output, session) {
     show_D    <- isTRUE(bd$norm_dt)
     # \u03C3 is the per-axis spread in both 2D and 3D (chi-d PDF), so the /2 is dimension-
     # independent; only the fitted PDF shape changes (Rayleigh 2D / Maxwell 3D).
-    d_formula <- sprintf("D = (\u03C3\u00B2 \u2212 2\u03C3\u1D38\u1D52\u1D9C\u00B2\u27E81/\u0394t\u27E9) / (2(1 \u2212 2R\u00B7t\u1D9C\u27E81/\u0394t\u27E9))   [%s]",
+    d_formula <- sprintf("D = (\u03C3\u00B2 \u2212 2\u03C3\u1D38\u1D52\u1D9C\u00B2\u27E81/\u0394t\u27E9) / (2(1 \u2212 2R_abs\u27E81/\u0394t\u27E9))   [%s]",
                          if (isTRUE(bd$use_z)) "3D, Maxwell" else "2D, Rayleigh")
     dt0_str   <- if (is.finite(bd$dt0)) sprintf("%.2g ms", bd$dt0) else "n/a"
     max_dt_str <- if (is.finite(bd$max_dt_used)) sprintf("%.4g ms", bd$max_dt_used) else "none"
@@ -11164,7 +11086,9 @@ tracking_server <- function(input, output, session) {
         d <- .cmp_read_file(f)
         if (is.null(d)) d <- data.frame(tid = character(0), x = numeric(0), y = numeric(0),
                                         tim = numeric(0), eco = numeric(0))
-        tryCatch(calib_cell(d, f, L, filt, msd = mopt), error = function(e) {
+        tryCatch(calib_cell(d, f, L, filt, msd = mopt,
+                            n_vert = if (identical(pat, "triangle")) 3L else if (identical(pat, "square")) 4L else 6L),
+                 error = function(e) {
           r <- calib_cell(d[0, , drop = FALSE], f, L); r$note <- conditionMessage(e); r })
       })
     })
@@ -11172,7 +11096,6 @@ tracking_server <- function(input, output, session) {
     tab <- do.call(rbind, lapply(rows, function(r) { attr(r, "curve") <- NULL; r }))
     attr(tab, "L") <- L; attr(tab, "pattern") <- pat; attr(tab, "window") <- ms$window
     attr(tab, "curves") <- stats::setNames(curves, tab$file)
-    attr(tab, "cutoff") <- calib_cutoff(curves)
     trk_cal_result(tab)
   })
 
@@ -11190,10 +11113,10 @@ tracking_server <- function(input, output, session) {
         sprintf("  (%.0f\u2013%.0f) over cycles %d\u2013%d, the MSD fit window", sm$Dw_q25, sm$Dw_q75,
                 as.integer(attr(tab, "window")[1]), as.integer(attr(tab, "window")[2]))),
       helpText(style = "font-size:0.82em; color:#666; margin-top:0;",
-        sprintf("Over the first steps the immobile MSD rises at %.0f nm\u00b2/ms; ", sm$D_w_short %||% NA_real_),
-        { ct <- attr(tab, "cutoff")$lag
-          if (is.finite(ct %||% NA)) sprintf("it has largely flattened by about %d cycles (suggested lower cutoff for the MSD fit window).", ct)
-          else "it does not flatten within the lags computed, so the floor rises across the fit window." }),
+        sprintf(paste0("\u03c3 includes the motion-blur term (R = %.3f per step, from the photon collection ",
+                       "window); a would be %.2f\u2013%.2f if R were 30%% lower or higher. Over the first steps ",
+                       "the immobile MSD rises at %.0f nm\u00b2/ms."),
+                sm$R %||% NA_real_, sm$a_R_hi %||% NA_real_, sm$a_R_lo %||% NA_real_, sm$D_w_short %||% NA_real_)),
       helpText(style = "font-size:0.82em; color:#666; margin-top:0;",
         sprintf("L %.1f nm, %s. The ideal-estimator value for this pattern is %.2f.",
                 attr(tab, "L"), attr(tab, "pattern"), ideal)),
@@ -11203,11 +11126,11 @@ tracking_server <- function(input, output, session) {
         sprintf("%d file(s) gave no value; see the note column.", sum(nzchar(tab$note)))))
   })
 
-  # The immobile MSD: every cell, their mean, the localization-noise level 4 sigma^2,
-  # the MSD fit window and the suggested cutoff, on log-log axes.
+  # The immobile MSD: every cell, their mean, the localization-noise level 4 sigma^2
+  # and the MSD fit window, on log-log axes.
   output$trk_cal_msd_plot <- renderPlotly({
     tab <- trk_cal_result(); req(!is.null(tab))
-    curves <- attr(tab, "curves"); ct <- attr(tab, "cutoff"); win <- attr(tab, "window")
+    curves <- attr(tab, "curves"); win <- attr(tab, "window")
     req(length(Filter(Negate(is.null), curves)) > 0)
     dark   <- isTRUE(isolate(input$trk_dark_mode))
     bg_col <- if (dark) "#000000" else "#FFFFFF"
@@ -11221,8 +11144,13 @@ tracking_server <- function(input, output, session) {
                                name = nm, legendgroup = "cells", showlegend = FALSE,
                                hovertemplate = paste0(nm, "<br>cycle %{x}<br>MSD %{y:.0f} nm\u00b2<extra></extra>"))
     }
-    pl <- ct$pooled
-    if (!is.null(pl)) {
+    # mean of the cells' curves, each cell counting once
+    cl <- Filter(function(c) !is.null(c) && nrow(c) > 0, curves)
+    Lm <- max(vapply(cl, nrow, integer(1)))
+    mm <- matrix(vapply(cl, function(c) { v <- rep(NA_real_, Lm); ok <- c$keep & is.finite(c$msd)
+                                          v[c$lag[ok]] <- c$msd[ok]; v }, numeric(Lm)), nrow = Lm)
+    pl <- data.frame(lag = seq_len(Lm), msd = rowMeans(mm, na.rm = TRUE))
+    if (nrow(pl)) {
       okp <- is.finite(pl$msd) & pl$msd > 0
       fig <- fig %>% add_trace(x = pl$lag[okp], y = pl$msd[okp], type = "scatter", mode = "lines",
                                line = list(color = "#2c6fbb", width = 3), name = "mean of cells",
@@ -11237,9 +11165,6 @@ tracking_server <- function(input, output, session) {
     shapes <- list(list(type = "rect", xref = "x", yref = "paper", x0 = log10(win[1]), x1 = log10(win[2]),
                         y0 = 0, y1 = 1, fillcolor = "rgba(44,111,187,0.08)", line = list(width = 0),
                         layer = "below"))
-    if (is.finite(ct$lag %||% NA))
-      shapes[[2]] <- list(type = "line", xref = "x", yref = "paper", x0 = log10(ct$lag), x1 = log10(ct$lag),
-                          y0 = 0, y1 = 1, line = list(color = "#1a8a1a", width = 1.5, dash = "dot"))
     fig %>% layout(
       xaxis = list(title = "lag (cycles)", type = "log", color = fg_col),
       yaxis = list(title = "immobile MSD (nm\u00b2)", type = "log", color = fg_col),
@@ -11247,17 +11172,13 @@ tracking_server <- function(input, output, session) {
       legend = list(orientation = "h", y = -0.25),
       annotations = list(
         list(x = log10(sqrt(win[1] * win[2])), y = 1, xref = "x", yref = "paper", yanchor = "bottom",
-             text = "MSD fit window", showarrow = FALSE, font = list(size = 11, color = "#2c6fbb")),
-        if (is.finite(ct$lag %||% NA))
-          list(x = log10(ct$lag), y = 0.02, xref = "x", yref = "paper", xanchor = "left",
-               text = sprintf(" flattened by ~%d", ct$lag), showarrow = FALSE,
-               font = list(size = 11, color = "#1a8a1a")) else NULL),
+             text = "MSD fit window", showarrow = FALSE, font = list(size = 11, color = "#2c6fbb"))),
       uirevision = "trk_cal_msd")
   })
 
   output$trk_cal_results <- DT::renderDT({
     tab <- trk_cal_result(); req(!is.null(tab))
-    show <- tab[, c("file", "n_tracks", "t_c_ms", "eco_med", "msd1", "sigma_nm", "a", "D_w", "D_w_short", "note")]
+    show <- tab[, c("file", "n_tracks", "t_c_ms", "eco_med", "R", "msd1", "sigma_nm", "a", "D_w", "D_w_short", "note")]
     num  <- vapply(show, is.numeric, logical(1))
     show[num] <- lapply(show[num], function(v) signif(v, 3))
     DT::datatable(show, rownames = FALSE, selection = "none",
@@ -11276,7 +11197,7 @@ tracking_server <- function(input, output, session) {
     profs[[nm]] <- list(name = nm, a = sm$a, a_q25 = sm$a_q25, a_q75 = sm$a_q75,
                         D_w = sm$D_w, Dw_q25 = sm$Dw_q25, Dw_q75 = sm$Dw_q75, n_cells = sm$n_cells,
                         D_w_short = sm$D_w_short, window = as.integer(attr(tab, "window")),
-                        cutoff = attr(tab, "cutoff")$lag %||% NA_integer_,
+                        R = sm$R, a_blur_lo = sm$a_R_hi, a_blur_hi = sm$a_R_lo,
                         pattern = attr(tab, "pattern"), L_nm = attr(tab, "L"),
                         dwell_us = num(input$trk_cal_dwell), photon_limit = num(input$trk_cal_pl),
                         damping = num(input$trk_cal_damping), note = trimws(input$trk_cal_note %||% ""),
@@ -11302,7 +11223,7 @@ tracking_server <- function(input, output, session) {
       profile = p$name, a = sprintf("%s (%s–%s)", f(p$a), f(p$a_q25), f(p$a_q75)),
       D_w = f(p$D_w, 0),
       window = if (length(p$window) == 2L) sprintf("%d\u2013%d", as.integer(p$window[1]), as.integer(p$window[2])) else "",
-      cutoff = f(p$cutoff, 0), cells = p$n_cells %||% NA, pattern = p$pattern %||% "", L_nm = f(p$L_nm, 1),
+      R = f(p$R, 3), cells = p$n_cells %||% NA, pattern = p$pattern %||% "", L_nm = f(p$L_nm, 1),
       dwell_us = f(p$dwell_us, 0), photon_limit = f(p$photon_limit, 0), damping = f(p$damping, 0),
       note = p$note %||% "", date = p$date %||% "", stringsAsFactors = FALSE)))
     DT::datatable(tab, rownames = FALSE, selection = "none",
@@ -11327,7 +11248,7 @@ tracking_server <- function(input, output, session) {
     num <- function(x) if (is.null(x)) NA_real_ else suppressWarnings(as.numeric(x))
     profs <- trk_cal_profiles()
     for (p in ok) {
-      for (k in c("a", "a_q25", "a_q75", "D_w", "Dw_q25", "Dw_q75", "D_w_short", "cutoff", "L_nm",
+      for (k in c("a", "a_q25", "a_q75", "D_w", "Dw_q25", "Dw_q75", "D_w_short", "R", "a_blur_lo", "a_blur_hi", "L_nm",
                   "dwell_us", "photon_limit", "damping"))
         p[[k]] <- num(p[[k]])
       p$window <- suppressWarnings(as.integer(unlist(p$window)))
@@ -11596,7 +11517,7 @@ tracking_server <- function(input, output, session) {
                                         ifelse(st$n_cells == 1L, "", "s")),
                      range = c(0.4, nrow(st) + 0.6), color = fg_col, zeroline = FALSE),
         yaxis = list(title = PERCELL_METRICS[[met]], color = fg_col,
-                     rangemode = if (met == "r1_excess") "normal" else "tozero"),
+                     rangemode = "tozero"),
         paper_bgcolor = bg_col, plot_bgcolor = bg_col, font = list(color = fg_col),
         legend = list(orientation = "h", y = -0.22), uirevision = "trk_cmp")
   })
@@ -11610,7 +11531,6 @@ tracking_server <- function(input, output, session) {
     fmt <- function(x) ifelse(is.finite(x), formatC(x, digits = 3, format = "g"), "-")
     AMB <- "#B8860B"
     asg <- nzchar(trimws(r$condition))
-    n_smooth <- sum(asg & is.finite(r$r1_excess) & r$r1_excess > 0.01)
     n_dw     <- sum(asg & is.finite(r$Dw_frac) & r$Dw_frac > 0.5)
     tagList(
       if (isTRUE(attr(r, "stale"))) helpText(style = sprintf("color:%s; font-size:0.85em;", AMB),
@@ -11623,9 +11543,6 @@ tracking_server <- function(input, output, session) {
           tags$td(fmt(st$sd[i])), tags$td(sprintf("%s to %s", fmt(st$ci_lo[i]), fmt(st$ci_hi[i]))))))),
       if (nrow(st) && any(st$n_cells < 3L)) helpText(style = "font-size:0.82em; color:#666;",
         "A condition needs at least 3 cells for a meaningful CI."),
-      if (n_smooth) helpText(style = sprintf("color:%s; font-size:0.82em;", AMB), sprintf(
-        "%d cell(s) have increments correlated beyond any motion model (r₁ above the bound). Galvo damping causes this, and so does the tracking loop when motion is small, so compare D and σ only between cells acquired with the same damping setting.",
-        n_smooth)),
       if (n_dw) helpText(style = sprintf("color:%s; font-size:0.82em;", AMB), sprintf(
         "In %d cell(s) the wander floor is more than half of the measured D.", n_dw)),
       if (sum(!asg)) helpText(style = "font-size:0.82em; color:#666;", sprintf(
@@ -11635,7 +11552,7 @@ tracking_server <- function(input, output, session) {
   output$trk_cmp_results <- DT::renderDT({
     r <- cmp_view(); req(!is.null(r))
     cols <- c("condition", "file", "calibration", "n_tracks", "len_med", "t_c_ms", "frac_single", "eco_med",
-              "sigma_nm", "a", "D_msd_um2_s", "D_um2_s", "D_corr_um2_s", "Dw_frac", "alpha_short", "r1_excess", "note")
+              "sigma_nm", "a", "D_msd_um2_s", "D_um2_s", "D_corr_um2_s", "Dw_frac", "note")
     show <- r[, cols, drop = FALSE]
     num  <- vapply(show, is.numeric, logical(1))
     show[num] <- lapply(show[num], function(v) signif(v, 3))

@@ -141,46 +141,6 @@ cve_core <- function(dx, dy, dz, dt, integ_step, has_z = FALSE, t_c = NA_real_,
        sig_aniso = sig_aniso, D_cve = D_cve, r1_norm = r1_norm, noise_frac = noise_frac)
 }
 
-# ── smoothing_check() ─────────────────────────────────────────────────────────
-# GOAL: test whether the increments are consistent with ANY motion model. A
-# subdiffusive walk already has anti-correlated increments before any noise: for
-# fBm with exponent alpha, fGn gives cov1/var = 2^(alpha-1) - 1. Noise and blur can
-# only push r1 more negative, so an observed r1 ABOVE that bound means the reported
-# positions carry correlated error: galvo damping (DMP > 0) smooths them, and the
-# tracking loop, which centres each pattern on the previous estimate, correlates
-# successive errors on its own. The loop term dominates when true motion is small
-# (immobile samples exceed the bound with damping off), so the check flags
-# correlated error rather than identifying its source.
-# df  : localizations sorted by (tid, tim), as cve_steps() returns them
-# t_c : cycle time (ms)
-# dt1 : duration of one single-cycle STEP (ms), t_c + SW, i.e. cve_core()'s dt_int.
-#       Every step carries the switching overhead SW, so k consecutive single-cycle
-#       steps span k * dt1, not k * t_c; at fast cycles 8 * SW exceeds half a cycle.
-#       NA falls back to t_c.
-# RETURNS list(alpha_short = log(MSD(8)/MSD(1))/log 8 over runs of consecutive
-#   single-cycle steps, r1_fgn = the fGn bound 2^(alpha-1) - 1); NA where there are
-#   too few pairs.
-smoothing_check <- function(df, t_c, dt1 = NA_real_) {
-  n <- nrow(df)
-  step <- if (is.finite(dt1) && dt1 > 0) dt1 else t_c
-  msd_at <- function(kk) {
-    m <- n - kk
-    if (m < 10L) return(NA_real_)
-    sm2 <- df$tid[(kk + 1):n] == df$tid[1:m]          # same track
-    gp  <- df$tim[(kk + 1):n] - df$tim[1:m]
-    okg <- sm2 & is.finite(gp) & abs(gp - kk * step) < 0.5 * t_c  # kk single-cycle steps apart
-    if (sum(okg, na.rm = TRUE) < 20L) return(NA_real_)
-    v <- (df$x[(kk + 1):n][okg] - df$x[1:m][okg])^2 +
-         (df$y[(kk + 1):n][okg] - df$y[1:m][okg])^2
-    mean(v, na.rm = TRUE)
-  }
-  alpha_short <- if (!is.finite(t_c) || t_c <= 0) NA_real_ else {
-    m1 <- msd_at(1L); m8 <- msd_at(8L)
-    if (is.finite(m1) && is.finite(m8) && m1 > 0 && m8 > 0) log(m8 / m1) / log(8) else NA_real_
-  }
-  list(alpha_short = alpha_short,
-       r1_fgn = if (is.finite(alpha_short)) 2^(alpha_short - 1) - 1 else NA_real_)
-}
 
 # ── cve_estimate() ────────────────────────────────────────────────────────────
 # GOAL: CVE from a data.frame in one call (tests and scripts). Returns cve_core()'s

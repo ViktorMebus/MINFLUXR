@@ -24,7 +24,7 @@ same analysis pipeline**. The loop:
 mixed dark cycles, heteroscedastic σ_loc, short tracks, and re-acquisition survivorship — otherwise it
 validates nothing useful.
 
-## 1a. Workflow — is a membrane protein confined, or diffusing freely on a curved cell?
+## 1a. Workflow — is a molecule confined, or diffusing freely on a curved cell?
 
 The comparison lives in a **round-trip**: the simulator makes ground-truth data in the *same format*
 as real MINFLUX, so you push **both** real and simulated data through the **same Tracking-tab
@@ -52,7 +52,7 @@ analysis** and overlay the results. The simulator does not plot the comparison �
    **resolvability** read-out warns when τ_c = L_c²/D exceeds the track duration (below which free and
    confined are indistinguishable).
 
-**Key caveat:** at typical bacterial membrane-protein values (D ≈ 0.1–0.2 µm²/s, ~20–100 ms tracks) a ~100 nm extent
+**Key caveat:** at D ≈ 0.1–0.2 µm²/s and ~20–100 ms tracks, a ~100 nm extent
 is exactly what free diffusion produces, so step 6 is the whole point — do not read confinement off the
 raw extent/MSD alone.
 
@@ -60,7 +60,7 @@ raw extent/MSD alone.
 
 - New tab **"Diffusion / Tracking"** in `sim_ui.R` (alongside MINFLUX / Confocal / Acquisition /
   Compare strategies), driven from `sim_server.R`.
-- **Reuse** the existing MINFLUX precision model: σ_loc = L_TCP / (4·√N_photons) (`TCP_CRLB_PREFACTOR`,
+- **Reuse** the existing MINFLUX precision model: σ_loc = L_TCP / (a·√N_photons), a = √8 (`TCP_CRLB_PREFACTOR`,
   shared with the Tracking tab). Photon count N per localization ties to EFO·t_dwell; σ_loc is therefore
   **heteroscedastic** (varies per localization), like reality.
 - **Output** the canonical frame `data.frame(tid, tim[s], x, y[, z] nm, efo, eco[, itr])` — identical
@@ -75,14 +75,14 @@ One parametric **ellipsoid** + one **spherocylinder** cover all the requested sh
 
 | Shape | Parameters | Notes |
 |---|---|---|
-| **Sphere** (coccus) | radius R | ellipsoid with a=b=c=R |
-| **Ovoid / coccobacillus** | semi-axes a=b, c | prolate ellipsoid |
-| **Rod / bacillus** (*E. coli*) | cylinder radius r, cylinder length ℓ; caps radius r | spherocylinder; total length ℓ+2r |
+| **Sphere** | radius R | ellipsoid with a=b=c=R |
+| **Ovoid** | semi-axes a=b, c | prolate ellipsoid |
+| **Rod** | cylinder radius r, cylinder length ℓ; caps radius r | spherocylinder; total length ℓ+2r |
 
 ### Partial (ROI < cell) — other systems
 | Shape | Parameters | Notes |
 |---|---|---|
-| **Membrane plane** | Lx × Ly patch, orientation (nx,ny,nz), z-offset | a membrane protein imaged over a patch |
+| **Membrane plane** | Lx × Ly patch, orientation (nx,ny,nz), z-offset | a flat membrane imaged over a patch |
 | **Free** | none | unbounded 3D diffusion |
 
 ## 4. What diffuses, and how
@@ -123,7 +123,7 @@ Subsample the fine ground-truth path the MINFLUX way:
 
 1. **Cycle clock + SW offset** — base cycle time t_cyc, plus a fixed per-localization overhead SW
    (settling / window). Real files obey **Δt = k·t_cyc + SW exactly**, so the *modal* Δt is
-   t_cyc + SW, not t_cyc. The generator gives every cycle a duration of t_cyc and adds SW once for
+   t_cyc + SW, one SW above the cycle time. The generator gives every cycle a duration of t_cyc and adds SW once for
    each *recorded* cycle, which reproduces that quantisation. The molecule diffuses through the SW
    too — putting SW on the clock but not in the step duration under-recovers D by t_cyc/(t_cyc+SW).
 2. **Dark cycles → irregular Δt** — each attempted cycle is **integrated** (recorded) with probability
@@ -131,7 +131,7 @@ Subsample the fine ground-truth path the MINFLUX way:
    k·t_cyc + SW, with k geometric (or empirically-calibrated). This is
    what produces the mixed dark-cycle structure across tracks.
 3. **σ_loc (heteroscedastic)** — per recorded localization draw N_photons (∼ Poisson around the mean
-   `eco`), σ_loc = **L_TCP/(4·√N)**; add Gaussian noise N(0, σ_loc²) per axis. Record `eco=N`, `efo`.
+   `eco`), σ_loc = **L_TCP/(√8·√N)**; add Gaussian noise N(0, σ_loc²) per axis. Record `eco=N`, `efo`.
    L_TCP is the final-iteration TCP diameter, read off a sequence .json as `patGeoFactor × 360 nm`
    (see `TCP_L_PER_GEOFACTOR_NM`); the stock tracking sequences end at 0.28 → **100.8 nm**.
 4. **Motion blur** — implemented, on by default. A localization is the *time-average* of the path over
@@ -147,8 +147,8 @@ Subsample the fine ground-truth path the MINFLUX way:
 5. **Photobleaching → finite length** — end the track after a photon-budget-limited number of
    localizations (geometric/exponential), so track lengths are short and realistic.
 4b. **Anomalous motion** — optional fractional Brownian motion (`.sim_fgn`, Davies-Harte circulant
-   embedding) with MSD ∝ t^α. Increments are correlated, so they are drawn up-front for the whole
-   track rather than step by step. D keeps its meaning at the single-cycle lag.
+   embedding) with MSD ∝ t^α. Increments are correlated, so they are drawn for the whole track at
+   once. D keeps its meaning at the single-cycle lag.
 4c. **Brightness** — per-molecule lognormal offset, exponential fade over the molecule's lifetime, and
    an AR(1) wobble within the track. Drives eco, σ_loc, efo and (under the photon budget) the gaps.
 4d. **Photon budget** — the pattern repeats until phtLimit photons are collected, each repeat costing
@@ -190,7 +190,8 @@ is the same integrated-pair restriction the real CVE applies — mixing multi-cy
 D. Then, per Vestergaard et al. 2014:
 
 > D = ( ⟨|Δr|²⟩ + 2·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / (2·d_mot·Δt),  Δt = t_c + SW
-> σ_loc² = ( R·⟨|Δr|²⟩ + (2R−1)·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / n_cart,  R = 1/6 with blur, 0 without
+> σ_loc² = ( R·⟨|Δr|²⟩ + (2R−1)·⟨Δrᵢ·Δrᵢ₊₁⟩ ) / n_cart,  R = f·t_c/(6·Δt) with blur (f the collecting
+> fraction of the cycle), 0 without
 
 D is blur-independent. σ_loc is not, and reading a blurred acquisition with R = 0 (σ² = −cov₁)
 under-reports it roughly threefold.
@@ -214,9 +215,8 @@ Tracking tab corrects for this through its **Sample geometry** setting, and the 
 the correction: without it the recovered ratio is 2/3.
 
 **How to read it.** A round-trip ratio near 1.0 means the estimator is unbiased for that geometry,
-sampling rate and σ_loc. A systematic departure is the *geometric bias* §7 asks about — and
-it is a property of the estimator-plus-geometry, not of the data, so it transfers to real acquisitions
-with the same shape and cycle time.
+sampling rate and σ_loc. A systematic departure is the *geometric bias* of §7. It belongs to the
+estimator and the geometry, so it transfers to real acquisitions with the same shape and cycle time.
 
 **Caveat.** The round-trip validates the estimator against the *simulator's* motion model. It cannot
 detect a mismatch between that model and real biology — if a real protein hops between domains and
@@ -238,8 +238,7 @@ The simulator is a validation tool: it never alters the standard analysis path.
 
 ## 8. Default parameters
 
-The Diffusion / Tracking defaults describe a 2D tracking acquisition of a bacterial membrane protein
-with the stock 2D tracking sequence.
+The Diffusion / Tracking defaults describe a 2D tracking acquisition with the stock 2D tracking sequence.
 
 | Field | Default | Derived from |
 |---|---|---|
@@ -252,7 +251,7 @@ with the stock 2D tracking sequence.
 | # tracks | 300 | |
 | D | 0.3 µm²/s | per-track CVE median |
 
-σ_loc is not an input: it follows from L and N, as L/(4·√N).
+σ_loc follows from L and N as L/(√8·√N), the ideal value for a planar pattern.
 
 ## 9. Calibrate from a file
 
@@ -272,12 +271,12 @@ with the stock 2D tracking sequence.
 | D–lifetime correlation | Spearman(log length, log per-track D), de-attenuated ×2 |
 | D | CVE on single-cycle steps |
 
-Fading is pooled over localizations rather than averaged over tracks, because short tracks mostly end
-by being lost rather than by bleaching and would otherwise dilute it. The D–lifetime correlation is
+Fading is pooled over localizations: short tracks mostly end by being lost, so averaging over tracks
+would dilute it. The D–lifetime correlation is
 filled de-attenuated, because both quantities are noisy and a simulation set to ρ reproduces a weaker
 correlation; the report shows the measured and the set value side by side.
 
-Calibrate cannot fill the **TCP diameter L**, which lives in the sequence .json rather than the data.
+Calibrate cannot fill the **TCP diameter L**, which is stored in the sequence .json.
 
 ## 10. Limitations
 

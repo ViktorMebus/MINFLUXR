@@ -1,5 +1,5 @@
 # The cycle-binned MSD (msd_track_sums / msd_ensemble), the headline upper-regime D
-# (msd_headline) and the immobile-MSD cutoff (calib_cutoff).
+# (msd_headline).
 TCP_CRLB_PREFACTOR <- if (exists("TCP_CRLB_PREFACTOR")) TCP_CRLB_PREFACTOR else sqrt(8)
 for (f in c("R/est_clean.R", "R/est_blur.R", "R/est_cve.R", "R/est_msd.R", "R/est_calib.R"))
   source(file.path(.repo_root, f))
@@ -47,13 +47,4 @@ test_that("the headline D recovers D from the upper regime", {
   hd <- msd_headline(d, t_c = 0.2, sw = 0.01, window = c(5L, 50L), R = 0, coef = 4, min_pts = 50L)
   expect_equal(hd$D, 200, tolerance = 0.1)
   expect_equal(hd$window, c(5L, 50L))
-})
-
-test_that("calib_cutoff finds where a bounded wander flattens, and none for a straight rise", {
-  lag <- 1:200
-  bounded  <- data.frame(lag = lag, tau = lag * 0.2, msd = 100 + 800 * (1 - exp(-lag / 6)), keep = TRUE)
-  straight <- data.frame(lag = lag, tau = lag * 0.2, msd = 100 + 50 * lag, keep = TRUE)
-  ct <- calib_cutoff(list(bounded))
-  expect_true(is.finite(ct$lag) && ct$lag >= 8 && ct$lag <= 20)   # 20% of the initial rate
-  expect_true(is.na(calib_cutoff(list(straight))$lag))
 })

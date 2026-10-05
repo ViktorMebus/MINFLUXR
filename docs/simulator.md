@@ -11,8 +11,7 @@ Companions: [simulation_module.md](simulation_module.md) (the diffusion simulato
 
 MINFLUX localizes with an **excitation doughnut**: the molecule is found by minimising fluorescence at
 the doughnut zero, and each *trace* (`tid`) is one molecule held and re-localized many times. A trace
-therefore comes out as a **point cloud**, not a single point, and the cloud width — not any optical
-PSF — is what sets the achievable resolution.
+therefore comes out as a **point cloud**, and the cloud width sets the achievable resolution.
 
 The simulator exists to answer, forward:
 
@@ -107,9 +106,9 @@ seen if at least one of its dyes is:
 P(molecule seen) = 1 − (1 − p)^{K_m}
 ```
 
-Because `K_m` is itself random, the honest quantity is `E[1 − (1−p)^{K_m}]`, **not**
-`1 − (1−p)^{n_fluor}` — Jensen's inequality makes the naive form optimistic (at `n_fluor` = 3, 80 %
-rather than 88 %). The table below reports the correctly averaged values.
+Because `K_m` is itself random, the detection probability is `E[1 − (1−p)^{K_m}]`. The plug-in form
+`1 − (1−p)^{n_fluor}` is optimistic by Jensen's inequality: at `n_fluor` = 3 it gives 88 %
+where the true value is 80 %. The table below reports the averaged values.
 
 At p = 0.5 a single-dye tag finds half your molecules, but a 9-dye polyclonal finds **98.9 %**. This
 is why multi-dye labels are so forgiving of poor efficiency — and simultaneously why they wreck
@@ -151,8 +150,8 @@ over-counting factor the SMLM tab's de-blinking and clustering then have to undo
 
 #### 1.2.4 The presets, and what they imply
 
-Derived from `minflux_label_presets()` (`helpers_shared.R:105`), all values **measured by simulating
-the actual draw** (4×10⁵ molecules) rather than read off the nominal parameters. `E[K]` is the true
+Derived from `minflux_label_presets()` (`helpers_shared.R:105`), all values **computed by simulating
+the actual draw** (4×10⁵ molecules). `E[K]` is the true
 mean dye count after the `max(1, ·)` truncation; "TIDs/mol" is `E[K]·(1+λ)` at full efficiency;
 "floor" is the irreducible label error `√(π/2)·link_nm`; "min spacing" is the closest two molecules
 can sit and still satisfy the existing 2× criterion.
@@ -194,7 +193,7 @@ Only the terms drawn **per localization** or **per dye** shrink with sampling:
 ```
 
 Levels 0 and 1 are drawn **once per molecule** and shared by every dye and every localization on it,
-so they are a bias, not a noise, and time-to-resolve has a hard floor (§7).
+so averaging over localizations cannot remove them, and time-to-resolve has a hard floor (§7).
 
 A **steric check** compares the label footprint + protein diameter against the mean GT
 nearest-neighbour distance and warns when stoichiometric labeling is physically impossible at that
@@ -411,9 +410,8 @@ user push short traces into the median, so each trace's SD is divided by its own
 The textbook constant `c₄(n) = E[s]/σ` is **the wrong one here**: it un-biases the *mean* of the
 sampling distribution, while this aggregates with a *median*, and `median(s) < E[s]` at small *n*.
 The matching constant is the median of the same chi distribution,
-`m(n) = √(qchisq(0.5, n−1)/(n−1))` — at *n* = 3, `c₄ = 0.886` but `m = 0.833`. Measured on a
-short-trace-heavy population (truth σ = 10): raw median **−7.6 %**, c₄-corrected **−2.5 %**,
-m-corrected **−0.05 %** (200 realizations, MC se 0.05 %). Either constant **cancels exactly** in the
+`m(n) = √(qchisq(0.5, n−1)/(n−1))`; at *n* = 3, `c₄ = 0.886` and `m = 0.833`. On simulated short traces
+the m-corrected median recovers σ, where the raw median reads several percent low. Either constant **cancels exactly** in the
 axis ratios, since both axes share the same *n*.
 
 The ratios are taken as the **median of per-trace ratios**, not the ratio of medians: within one
@@ -441,15 +439,14 @@ Genuinely a *detection* PSF model, unlike the MINFLUX view — the word "PSF" is
 
 with Airy encircled-energy collection efficiency `1 − J₀(v)² − J₁(v)²`, `v = 3.8317·AU`, which
 reproduces the real pinhole trade-off (closing it sharpens and sections but costs photons). Rendered
-from the **unique fluorophore pool**, not the over-counted detection list, so a re-detected molecule
-is not drawn brighter than it physically is. Poisson shot noise on top.
+from the **unique fluorophore pool**, so a re-detected molecule is drawn at its physical brightness. Poisson shot noise on top.
 
 ## 6. Phase 2 — Diffusion / Tracking, in one paragraph
 
 Brownian motion on a sphere / rod / ellipsoid / membrane plane / unbounded volume, surface (2 DOF) or
 volume (3 DOF), with free / OU-confined / directed / two-state motion, sampled through a MINFLUX
 overlay: cycle clock, geometric dark cycles → irregular Δt, **per-localization** `N ~ Poisson(photons)`
-→ `σ = L/(2√N)`, photobleaching-limited length, optional re-acquisition survivorship. Emits
+→ `σ = L/(√8·√N)`, photobleaching-limited length, optional re-acquisition survivorship. Emits
 `tid, tim, x, y, z, efo, eco` plus a ground-truth sidecar, and scores itself with a built-in CVE
 round-trip. Full spec: [simulation_module.md](simulation_module.md).
 

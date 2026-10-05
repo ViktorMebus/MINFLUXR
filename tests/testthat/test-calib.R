@@ -1,5 +1,5 @@
 # Instrument calibration from an immobile sample (R/est_calib.R).
-for (f in c("R/est_clean.R", "R/est_msd.R", "R/est_calib.R")) source(file.path(.repo_root, f))
+for (f in c("R/est_clean.R", "R/est_blur.R", "R/est_msd.R", "R/est_calib.R")) source(file.path(.repo_root, f))
 
 # Immobile emitters: the reported position is a slow random walk (the wander,
 # D_w in nm^2/ms) plus white noise with sigma_i = L / (a sqrt(N_i)). Intervals are
@@ -20,20 +20,20 @@ for (f in c("R/est_clean.R", "R/est_msd.R", "R/est_calib.R")) source(file.path(.
 }
 
 test_that("calib_cell recovers a from white localization noise", {
-  r <- calib_cell(.immobile(a = 3.9), "sim", L = 100.8)
+  r <- calib_cell(.immobile(a = 3.9), "sim", L = 100.8, R = 0)
   expect_equal(r$note, "")
   expect_equal(r$a, 3.9, tolerance = 0.05)
   expect_lt(abs(r$D_w), 5)                                        # no wander simulated
 })
 
 test_that("calib_cell separates a from a diffusive wander floor", {
-  r <- calib_cell(.immobile(a = 3.9, D_w = 150, seed = 2), "sim", L = 100.8)
+  r <- calib_cell(.immobile(a = 3.9, D_w = 150, seed = 2), "sim", L = 100.8, R = 0)
   expect_equal(r$a, 3.9, tolerance = 0.08)
   expect_equal(r$D_w, 150, tolerance = 0.15)
 })
 
 test_that("calib_cell scales with L, and reports why it cannot measure", {
-  r <- calib_cell(.immobile(a = 3.0, L = 151.2, seed = 3), "sim", L = 151.2)
+  r <- calib_cell(.immobile(a = 3.0, L = 151.2, seed = 3), "sim", L = 151.2, R = 0)
   expect_equal(r$a, 3.0, tolerance = 0.05)
   bad <- calib_cell(data.frame(tid = "1", tim = 1:3, x = 0, y = 0), "x", L = 100)
   expect_match(bad$note, "eco")
@@ -44,4 +44,23 @@ test_that("calib_summary takes the median and quartiles across cells", {
   expect_equal(sm$n_cells, 3L)
   expect_equal(c(sm$a_q25, sm$a, sm$a_q75), c(3.5, 4, 4.5))
   expect_equal(sm$D_w, 250)
+})
+
+# Residual motion that is BLURRED: each reported position averages the moving path over
+# the last fraction f of its step (R = f / 6), plus white noise. Without the blur term the
+# short-lag intercept reads sigma low and a high; with the true R it recovers a.
+test_that("the blur term in the intercept recovers a when the residual motion is blurred", {
+  set.seed(4); a <- 3.9; L <- 100.8; D_w <- 150; t_c <- 0.166; sw <- 0.011; f <- 0.8; sub <- 20
+  dd <- do.call(rbind, lapply(seq_len(80), function(j) {
+    n <- 300; step <- t_c + sw; h <- step / sub
+    path <- function() matrix(cumsum(rnorm(n * sub, 0, sqrt(2 * D_w * h))), nrow = sub)
+    k <- round(f * sub); px <- colMeans(path()[(sub - k + 1):sub, ]); py <- colMeans(path()[(sub - k + 1):sub, ])
+    eco <- stats::rpois(n, 30) + 5; sig <- L / (a * sqrt(eco))
+    data.frame(tid = as.character(j), tim = (seq_len(n) - 1) * step, eco = eco,
+               x = px + rnorm(n, 0, sig), y = py + rnorm(n, 0, sig))
+  }))
+  with_R    <- calib_cell(dd, "sim", L = L, R = f / 6)
+  without_R <- calib_cell(dd, "sim", L = L, R = 0)
+  expect_equal(with_R$a, a, tolerance = 0.08)
+  expect_gt(without_R$a, with_R$a * 1.1)                       # ignoring blur reads a high
 })

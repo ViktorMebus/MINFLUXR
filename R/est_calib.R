@@ -15,8 +15,7 @@
 ##
 ##   calib_cell() ....... one immobile file -> sigma, a, D_w (one row) + its MSD curve
 ##   calib_summary() .... median and quartiles across cells -> the profile values
-##   calib_cutoff() ..... where the pooled immobile MSD has flattened (suggested
-##                        lower cutoff for the MSD fit window)
+##   calib_a_at() ....... a recomputed for another blur coefficient (sensitivity)
 ##
 ## Two wander floors are reported. D_w is the slope of the immobile MSD over the
 ## MSD fit window, the floor that matches the headline (upper-regime) D. D_w_short
@@ -35,10 +34,11 @@
 #   a, D_w, note). sigma and a are NA when the fitted intercept is not positive.
 calib_cell <- function(df, file, L, filters = list(), lags = 1:5,
                        msd = list(window = c(5L, 50L), track_weight = TRUE, min_pts = 50L),
-                       curve_max = 200L) {
+                       curve_max = 200L, R = NULL, n_vert = 6L) {
   row <- data.frame(file = file, n_locs = nrow(df), n_tracks = NA_integer_, t_c_ms = NA_real_,
                     eco_med = NA_real_, msd1 = NA_real_, sigma_nm = NA_real_, a = NA_real_,
-                    D_w = NA_real_, D_w_short = NA_real_, note = "", stringsAsFactors = FALSE)
+                    D_w = NA_real_, D_w_short = NA_real_, R = NA_real_, msd0 = NA_real_,
+                    slope1 = NA_real_, inv_N = NA_real_, note = "", stringsAsFactors = FALSE)
   if (!nrow(df) || !all(c("tid", "x", "y", "tim", "eco") %in% names(df))) {
     row$note <- "needs tid, x, y, tim and eco"; return(row)
   }
@@ -82,11 +82,32 @@ calib_cell <- function(df, file, L, filters = list(), lags = 1:5,
   if (sum(okl) < 3L) { row$note <- "too few single-cycle runs for the short-lag fit"; return(row) }
   cf <- unname(stats::coef(stats::lm(msd_s[okl] ~ lags[okl])))
   row$D_w_short <- cf[2] / (4 * step)                    # nm^2/ms
-  if (!is.finite(cf[1]) || cf[1] <= 0) { row$note <- "fitted intercept not positive"; return(row) }
-  sigma <- sqrt(cf[1] / 4)                               # per-axis, lateral
-  row$sigma_nm <- sigma
-  row$a <- L * sqrt(mean(1 / eco)) / sigma
+
+  # Motion blur. A position is averaged over its photon collection, so for any
+  # residual motion the short-lag MSD is 4 sigma^2 + 4 D (k - 2R) step (Berglund 2010):
+  # the intercept sits 2R x slope BELOW 4 sigma^2. Immobile samples still move at
+  # this scale (the step correlation comes out positive, the blur signature), so
+  # leaving it out reads sigma low and a high. R per step from this file's photon
+  # collection window eco/efo, as the main tab does without a sequence file.
+  if (is.null(R)) {
+    t_coll <- if ("efo" %in% names(df)) stats::median(df$eco / df$efo, na.rm = TRUE) * 1000 else NA_real_
+    br <- if (is.finite(t_coll) && t_coll > 0) blur_R_step(step, t_coll, n_vert = n_vert) else NULL
+    R  <- if (!is.null(br) && is.finite(br$R)) br$R else BLUR_R_STEP_FALLBACK
+  }
+  row$R <- R; row$msd0 <- cf[1]; row$slope1 <- cf[2]; row$inv_N <- mean(1 / eco)
+  s2 <- (cf[1] + 2 * R * cf[2]) / 4                      # per-axis sigma^2, lateral
+  if (!is.finite(s2) || s2 <= 0) { row$note <- "fitted intercept not positive"; return(row) }
+  row$sigma_nm <- sqrt(s2)
+  row$a <- L * sqrt(row$inv_N) / row$sigma_nm
   row
+}
+
+# ── calib_a_at() ──────────────────────────────────────────────────────────────
+# GOAL: recompute each cell's a for another blur coefficient (R x f), from the
+# stored short-lag fit, to show how much the result leans on R.
+calib_a_at <- function(tab, f) {
+  s2 <- (tab$msd0 + 2 * tab$R * f * tab$slope1) / 4
+  ifelse(is.finite(s2) & s2 > 0, tab$a * tab$sigma_nm / sqrt(s2), NA_real_)
 }
 
 # ── calib_summary() ───────────────────────────────────────────────────────────
@@ -98,34 +119,11 @@ calib_summary <- function(tab) {
     if (!length(v)) c(NA_real_, NA_real_, NA_real_)
     else unname(stats::quantile(v, c(0.25, 0.5, 0.75), names = FALSE)) }
   qa <- q(tab$a); qd <- q(tab$D_w); qs <- q(tab$D_w_short)
+  med <- function(v) { v <- v[is.finite(v)]; if (length(v)) stats::median(v) else NA_real_ }
+  has_fit <- all(c("msd0", "slope1", "R") %in% names(tab))
   list(n_cells = sum(is.finite(tab$a)), a = qa[2], a_q25 = qa[1], a_q75 = qa[3],
-       D_w = qd[2], Dw_q25 = qd[1], Dw_q75 = qd[3], D_w_short = qs[2])
-}
-
-# ── calib_cutoff() ────────────────────────────────────────────────────────────
-# GOAL: suggest where the MSD fit window should start for this sequence: the lag
-# after which the immobile MSD has largely stopped rising, so the wander adds
-# little slope to a fit that starts there. The cells' curves are averaged (each
-# cell counts once); the rise per cycle is smoothed over 5 lags and compared with
-# its rate over the first three lags. A heuristic, shown on the plot to be judged.
-# curves : list of calib_cell() curves; frac : the fraction of the initial rate
-# RETURNS list(lag = suggested cutoff, or NA when the curve does not flatten in its
-#   first half, pooled = data.frame(lag, msd))
-calib_cutoff <- function(curves, frac = 0.2) {
-  curves <- Filter(function(c) !is.null(c) && nrow(c) > 0, curves)
-  if (!length(curves)) return(list(lag = NA_integer_, pooled = NULL))
-  L <- max(vapply(curves, nrow, integer(1)))
-  m <- vapply(curves, function(c) { v <- rep(NA_real_, L); ok <- c$keep & is.finite(c$msd)
-                                    v[c$lag[ok]] <- c$msd[ok]; v }, numeric(L))
-  m <- matrix(m, nrow = L)
-  pooled <- rowMeans(m, na.rm = TRUE); pooled[!is.finite(pooled)] <- NA_real_
-  rise <- diff(c(NA_real_, pooled))                      # rise per cycle at each lag
-  r0   <- mean(rise[2:4], na.rm = TRUE)                  # initial rate (lags 1 -> 4)
-  sm   <- stats::filter(rise, rep(1 / 5, 5), sides = 2)  # 5-lag running mean
-  cut  <- if (is.finite(r0) && r0 > 0) which(is.finite(sm) & seq_len(L) >= 3L & sm < frac * r0)[1] else NA_integer_
-  # A "flattening" found only in the second half of the curve is a noise dip in a
-  # curve that keeps rising; report none rather than a misleading cutoff.
-  if (length(cut) && is.finite(cut) && cut > L / 2) cut <- NA_integer_
-  list(lag = if (length(cut) && is.finite(cut)) as.integer(cut) else NA_integer_,
-       pooled = data.frame(lag = seq_len(L), msd = pooled))
+       D_w = qd[2], Dw_q25 = qd[1], Dw_q75 = qd[3], D_w_short = qs[2],
+       R = if (has_fit) med(tab$R) else NA_real_,
+       a_R_lo = if (has_fit) med(calib_a_at(tab, 0.7)) else NA_real_,   # R 30% lower
+       a_R_hi = if (has_fit) med(calib_a_at(tab, 1.3)) else NA_real_)   # R 30% higher
 }
