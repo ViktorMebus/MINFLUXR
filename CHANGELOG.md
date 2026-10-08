@@ -110,6 +110,45 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - A sequence file that does not fit the data, or whose final pattern is axial-only, is not used for the
   blur; the panel says why and takes the value from the data.
 
+### SMLM: ground-truth estimator
+
+- **The trace count per molecule follows the Simulator's labelling model exactly** (`gt_tid_model`):
+  multiplicity, variance and detection probability. The multiplicity and η change slightly for
+  multivalent presets.
+- **New consistency test** between the spatial count and the trace total, reported as *under-resolved*
+  or *over-split*. Under-resolved now sets the crowding flag; the previous flags missed molecules that
+  de-blinking had already merged. Replaces the fixed "counts differ by more than 2×" rule.
+- **The count range includes each count's sampling error** (binomial detection for the spatial count,
+  the trace-count variance for the stoichiometric one).
+- Candidates that hold more traces than one molecule plausibly gives are marked in the hover text.
+
+### SMLM: one set of default settings
+
+- **Every setting that changes SMLM results now has one default** (`R/smlm_settings.R`). The widgets,
+  the helper functions and the reset buttons all read it. They previously disagreed:
+  - Median clustering MinPts was 15 in the UI, 3 in the helper functions, 8 after *Reset* and 5 in
+    the kNN-distance plot.
+  - The majority-vote de-blink settings were 0.3 / 3.0 in the UI and 0.2 / 1.2 in the helpers.
+  - *Reset* on the Median Cluster settings set eps to 150 nm; a new session shows 200 nm.
+- *Reset* now restores the values a new session shows: eps 200 nm, MinPts 15.
+- `smlm_settings()` builds the same settings from a script, with checked types and limits:
+  `apply_clustering_pipeline(df, smlm_settings(enable_clustering = TRUE))`.
+- The two-colour reset restores channel A's colour to the UI default (#1f77b4; it was #1f77a4).
+- The filter, channel, de-blink and median-clustering functions take a `settings` argument
+  (`smlm_settings()` from a script, or the app's input). Small helpers take plain arguments:
+  `channels_in_scope(df, scope)`, `deblink_minpts(tid_length_range)`, `build_center_args(X, mode, lambda)`.
+  Results are unchanged.
+- The per-file cache of filtered and clustered data is keyed on the settings object that the
+  clustering actually runs with, plus the data version, thinning and fiducial exclusions. A setting
+  can no longer be left out of the key.
+- Removed three unused helper functions.
+
+### Tests
+
+- SMLM test files for de-blinking, median clustering, density normalisation, Ripley's L and g(r),
+  local enhancement, two-channel co-localization, colour separation and the ground-truth estimator,
+  each against simulated data with a known answer.
+
 ### Documentation
 
 - README and docs/ shortened and made sample-neutral. A notation table opens the methods document, and

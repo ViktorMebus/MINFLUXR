@@ -1280,7 +1280,7 @@ smlm_server <- function(input, output, session) {
                           paste0("Only ", ct$label))
     selectInput("cluster_group_scope", "Channel scope",
                 choices  = c("Within each channel (recommended)" = "within", ch),
-                selected = input$cluster_group_scope %||% "within")
+                selected = input$cluster_group_scope %||% SMLM_DEFAULTS$cluster_group_scope)
   })
 
   # Channel pair (A, B) for the pairwise cross-channel analyses, or NULL. When
@@ -1765,18 +1765,13 @@ smlm_server <- function(input, output, session) {
          heatmap_clip=0.99, heatmap_gamma=1, heatmap_log=FALSE, heatmap_showlegend=FALSE)
   })
   cluster2_defaults <- function() {
+    # Data-affecting values come from SMLM_DEFAULTS (R/smlm_settings.R), the same
+    # values a fresh session shows, so Reset cannot disagree with a new session.
+    c(SMLM_DEFAULTS[c("cluster2_method", "cluster2_xi", "cluster2_prefilter",
+                      "cluster2_prefilter_r", "cluster2_prefilter_min", "cluster2_prune",
+                      "cluster2_prune_tol", "cluster2_core_only", "cluster2_min_members",
+                      "eps2", "minpts2")],
     list(
-      cluster2_method = "dbscan",
-      cluster2_xi = 0.05,
-      cluster2_prefilter = FALSE,
-      cluster2_prefilter_r = 200,
-      cluster2_prefilter_min = 3,
-      cluster2_prune = FALSE,
-      cluster2_prune_tol = 2,
-      cluster2_core_only = FALSE,
-      cluster2_min_members = 0,
-      eps2 = 150,
-      minpts2 = 8,
       
       # 3D wrappers
       show_cluster2_shape = FALSE,
@@ -1827,15 +1822,15 @@ smlm_server <- function(input, output, session) {
       show_cluster2_nn_lines = FALSE,
       nn_k_cluster2 = 3,
       distance_range_cluster2 = c(0, 1250)
-    )
+    ))
   }
   two_color_defaults <- function() {
     list(
-      color_by_fluo = FALSE,
-      dcr_group1 = c(0, 0.369),
-      dcr_group2 = c(0.3691, 1),
+      color_by_fluo = SMLM_DEFAULTS$color_by_fluo,
+      dcr_group1 = SMLM_DEFAULTS$dcr_group1,
+      dcr_group2 = SMLM_DEFAULTS$dcr_group2,
       
-      color_group1 = "#1f77a4",
+      color_group1 = "#1f77b4",
       color_group2 = "#d62728",
       
       
@@ -2319,8 +2314,8 @@ smlm_server <- function(input, output, session) {
     if (!isTRUE(input$trim_outliers) || !is.data.frame(df) || !nrow(df))
       return(NULL)
     tryCatch(
-      trace_point_outliers(df, k = input$trim_k %||% 4,
-                           keep_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT),
+      trace_point_outliers(df, k = input$trim_k %||% SMLM_DEFAULTS$trim_k,
+                           keep_n = input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs),
       error = function(e) NULL)
   })
 
@@ -2529,7 +2524,7 @@ smlm_server <- function(input, output, session) {
         enable_cluster2 = isTRUE(input$enable_cluster2),
         show_cluster2_knn = isTRUE(input$show_cluster2_knn),
 
-        cluster2_method = input$cluster2_method %||% "dbscan",
+        cluster2_method = input$cluster2_method %||% SMLM_DEFAULTS$cluster2_method,
         cluster2_xi = input$cluster2_xi,
         cluster2_prefilter = isTRUE(input$cluster2_prefilter),
         cluster2_prefilter_r = input$cluster2_prefilter_r,
@@ -2634,7 +2629,7 @@ smlm_server <- function(input, output, session) {
     pts <- pts[stats::complete.cases(pts), , drop = FALSE]
     validate(need(nrow(pts) >= 3, "Not enough centroids for a kNN-distance plot."))
 
-    k <- max(1L, as.integer(input$minpts2 %||% 5L) - 1L)
+    k <- max(1L, as.integer(input$minpts2 %||% SMLM_DEFAULTS$minpts2) - 1L)
     k <- min(k, nrow(pts) - 1L)
     dbscan::kNNdistplot(pts, k = k)
     graphics::title(main = sprintf("kNN-distance (k = %d, n = %d centroids)", k, nrow(pts)))
@@ -2657,11 +2652,11 @@ smlm_server <- function(input, output, session) {
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
     w <- if (isTRUE(input$deblink_anisotropic))
-      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs)$w
       else NULL
     r <- suggest_centroid_threshold(
       df,
-      min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
+      min_n = input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs,
       use_z = TRUE,          # decided from the data, never from the plot mode
       w     = w,
       k     = { kk <- suppressWarnings(as.numeric(input$centroid_k))
@@ -2678,7 +2673,7 @@ smlm_server <- function(input, output, session) {
   centroid_k_d <- debounce(reactive(input$centroid_k), 600)
   observeEvent(centroid_k_d(), {
     req(isTRUE(input$enable_clustering),
-        identical(input$deblink_method %||% "centroid", "centroid"))
+        identical(input$deblink_method %||% SMLM_DEFAULTS$deblink_method, "centroid"))
     kk <- suppressWarnings(as.numeric(centroid_k_d()))
     if (!length(kk) || !is.finite(kk) || kk <= 0) return()
     sg <- centroid_sigma_rv()
@@ -2702,12 +2697,12 @@ smlm_server <- function(input, output, session) {
     }
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     w  <- if (isTRUE(input$deblink_anisotropic))
-      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs)$w
       else NULL
     # Raw per-axis spread, UNWHITENED. The whitened numbers are identical on
     # every axis by construction, so quoting them three times says nothing.
     r$sigma_ax_raw <- tryCatch(
-      suggest_centroid_threshold(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
+      suggest_centroid_threshold(df, min_n = input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs,
                                  use_z = TRUE, w = NULL, k = r$k)$sigma_ax,
       error = function(e) NULL)
     r$axis_w <- w
@@ -2932,19 +2927,19 @@ smlm_server <- function(input, output, session) {
     req(!is.null(df), nrow(df) > 0)
     # Same metric the clustering uses, or the radii on the x-axis mean nothing.
     w <- if (isTRUE(input$deblink_anisotropic))
-      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+      deblink_axis_weights(df, min_n = input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs)$w
       else NULL
     # Sweep whatever criterion is ACTIVE - a curve over raw-point eps says
     # nothing about a centroid threshold, and vice versa.
     # Sweep range follows the DATA, not a hard-coded 40 nm: on the centroid
     # criterion the interesting structure runs well past that.
     # Centroid criterion only - see deblink_count_curve().
-    req(identical(input$deblink_method %||% "centroid", "centroid"))
+    req(identical(input$deblink_method %||% SMLM_DEFAULTS$deblink_method, "centroid"))
     cs  <- tryCatch(compute_centroid_suggestion(), error = function(e) NULL)
     top <- if (!is.null(cs))
       max(40, ceiling(stats::quantile(cs$between, 0.75, names = FALSE)), 4 * cs$suggested)
       else 40
-    deblink_count_curve(df, minpts = deblink_minpts(input),
+    deblink_count_curve(df, minpts = deblink_minpts(input$tid_length_range),
                         eps_seq = seq(1, min(top, 400), length.out = 60),
                         w = w, method = "centroid")
   })
@@ -2954,7 +2949,7 @@ smlm_server <- function(input, output, session) {
     validate(need(!is.null(r), "Not enough data to sweep the radius."))
     cv <- r$curve
     graphics::plot(cv$eps, cv$n_molecules, type = "l", lwd = 2.5, col = "#1f78b4",
-                   xlab = if (identical(input$deblink_method %||% "centroid", "vote"))
+                   xlab = if (identical(input$deblink_method %||% SMLM_DEFAULTS$deblink_method, "vote"))
                             "vote fraction f" else "centroid distance threshold (nm)",
                    ylab = "de-blinked molecules",
                    main = "Molecule count vs merge threshold")
@@ -2962,7 +2957,7 @@ smlm_server <- function(input, output, session) {
     graphics::abline(h = r$n_traces, col = "#969696", lty = 3, lwd = 2)   # no merging at all
     if (is.finite(r$knee)) graphics::abline(v = r$knee, col = "#e08214", lwd = 2, lty = 4)
     e_cur <- suppressWarnings(as.numeric(
-      if (identical(input$deblink_method %||% "centroid", "vote")) input$vote_frac
+      if (identical(input$deblink_method %||% SMLM_DEFAULTS$deblink_method, "vote")) input$vote_frac
       else input$eps_centroid))
     if (length(e_cur) == 1 && is.finite(e_cur))
       graphics::abline(v = e_cur, col = "#d7191c", lwd = 2.5, lty = 2)
@@ -2978,7 +2973,7 @@ smlm_server <- function(input, output, session) {
     cv <- r$curve
     at <- function(e) { i <- which.min(abs(cv$eps - e)); cv$n_molecules[i] }
     e_cur <- suppressWarnings(as.numeric(
-      if (identical(input$deblink_method %||% "centroid", "vote")) input$vote_frac
+      if (identical(input$deblink_method %||% SMLM_DEFAULTS$deblink_method, "vote")) input$vote_frac
       else input$eps_centroid))
     tagList(
       helpText(sprintf("%s traces → %s molecules at the knee (%.0f nm)%s.",
@@ -2996,7 +2991,7 @@ smlm_server <- function(input, output, session) {
       # declines - so the curvature maximum lands mid-slope and reads far too
       # low (synthetic: knee 5 nm -> 422 molecules, against 360 truth and 360 at
       # the σ-based suggestion). Do not tune the centroid threshold from it.
-      if (identical(input$deblink_method %||% "centroid", "centroid"))
+      if (identical(input$deblink_method %||% SMLM_DEFAULTS$deblink_method, "centroid"))
         helpText(tags$b("Unreliable for this criterion: "),
                  "the knee is calibrated for the raw-point curve shape and reads too low ",
                  "on centroid distances. Use 'Suggest threshold from trace spread' instead; ",
@@ -3471,7 +3466,7 @@ smlm_server <- function(input, output, session) {
     if (length(els) && is.finite(med$n_traces %||% NA_real_))
       els <- append(els, list(helpText(sprintf("Across %d traces with ≥ %d localizations.",
                                                as.integer(med$n_traces),
-                                               as.integer(input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)))))
+                                               as.integer(input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs)))))
     do.call(tagList, els)
     })
   output$sd_ranges_ui <- renderUI({
@@ -4183,7 +4178,7 @@ smlm_server <- function(input, output, session) {
     if (!is.null(df) && "dcr_pooled" %in% names(df)) {
       checkboxInput("use_pooled_dcr",
                     "Use Pooled DCR for color splitting",
-                    value = FALSE)
+                    value = SMLM_DEFAULTS$use_pooled_dcr)
     }
   })
 
@@ -5265,7 +5260,7 @@ smlm_server <- function(input, output, session) {
     sz  <- suppressWarnings(as.numeric(input$gt_circle_size)); if (!is.finite(sz) || sz <= 0) sz <- 15
     struct_lbl <- ifelse(pts$cluster2 > 0, paste0("Structure ", pts$cluster2), "ungrouped")
     txt <- sprintf("<b>%s</b><br>GT candidate · ± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
-                   struct_lbl, pts$pos_sd_nm, ifelse(pts$fused, " (fused: multiple GTs)", ""),
+                   struct_lbl, pts$pos_sd_nm, ifelse(pts$fused, " (fused: multiple GTs)", ifelse(pts$count_fused %||% FALSE, " (more TIDs than one molecule)", "")),
                    pts$n_units, pts$n_tid, pts$n_loc)
 
     # Contribution fan-out lines: each member unit centroid -> its GT centroid.
@@ -5315,8 +5310,9 @@ smlm_server <- function(input, output, session) {
         span(style = "color:#e67e22;font-weight:600;", " ⚠ crowded / under-resolved") else ""
       mm <- if (isTRUE(r$stoich_mismatch))
         span(style = "color:#c0392b;font-weight:600;",
-             sprintf(" ⚠ spatial vs stoichiometry disagree (%.0f obs TIDs/GT vs %.0f expected)",
-                     r$tids_per_gt, m$m_tid)) else ""
+             sprintf(" ⚠ %s: %.1f TIDs per GT, %.1f expected",
+                     if (identical(r$count_verdict, "over-split")) "over-split" else "under-resolved",
+                     r$tids_per_gt, m$tids_per_mol %||% m$m_tid)) else ""
       tags$li(HTML(sprintf(
         "<b>%s</b>: <b>%.0f</b> GT (spatial) vs <b>%.0f</b> (stoichiometry) · CI %.0f–%.0f · %d TID / %d unit%s%s%s%s",
         lab, r$n_gt_est, r$n_stoich, r$n_gt_lo, r$n_gt_hi, r$n_tid_total, r$n_units,
@@ -5331,7 +5327,7 @@ smlm_server <- function(input, output, session) {
                   tot_gt, tot_stoich, tot_lo, tot_hi))),
       tags$ul(style = "margin:4px 0 8px 0;padding-left:18px;", rows),
       if (any_mm) div(style = "font-size:12px;color:#c0392b;margin-bottom:6px;",
-          HTML("The two independent counts disagree in ≥1 structure - the merge radius or the labeling assumption is off. Try the stoichiometry-guided merge, adjust the merge radius, or re-check the preset/efficiency.")),
+          HTML("The trace total does not fit the spatial count in ≥1 structure. Under-resolved: candidates hold several molecules, so the spatial count is a lower bound. Over-split: re-blinks or dyes of one molecule were kept apart; raise the merge radius or check de-blinking. Either can also mean the preset or efficiency is off.")),
       div(style = "font-size:12px;color:#7f8c8d;line-height:1.45;",
           HTML(sprintf(
             "Modeled from %s. Units pooled within <b>%.0f nm</b> (label-complex radius)%s into one molecule%s. Position floor <b>±%.0f nm</b> (linker, irreducible) · <b>%.1f TIDs/molecule (%s)</b> · detection η=%.0f%% · σ<sub>loc</sub>≈%.1f nm.<br>Marker colour = position uncertainty, combining the linker floor, localization sampling (σ<sub>loc</sub>/√n<sub>loc</sub>), a <b>support penalty</b> (fewer TIDs → less certain), inward-displacement direction error, and a fusion penalty.<br><i>Counts are conditional on the labeling calibration; positions cannot be resolved below the linker floor. The two counts bracket the honest range.%s</i>",
@@ -6146,7 +6142,7 @@ smlm_server <- function(input, output, session) {
   assign_analysis_group_local <- function(df, input) {
     # guard columns
     if (!("tid" %in% names(df))) stop("Missing 'tid' column in data.")
-    .dcr_col <- if (isTRUE(input$use_pooled_dcr %||% FALSE) && "dcr_pooled" %in% names(df))
+    .dcr_col <- if (isTRUE(input$use_pooled_dcr %||% SMLM_DEFAULTS$use_pooled_dcr) && "dcr_pooled" %in% names(df))
       "dcr_pooled" else if ("dcr" %in% names(df)) "dcr" else NULL
     med_tbl <- df %>%
       dplyr::group_by(tid) %>%
@@ -6275,7 +6271,7 @@ smlm_server <- function(input, output, session) {
         df,
         rule   = input$rogue_rule %||% "factor_median",
         factor = input$rogue_factor %||% 2.5,
-        min_n  = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT,
+        min_n  = input$sd_min_locs %||% SMLM_DEFAULTS$sd_min_locs,
       )
       df <- rr$df
       #log text
@@ -6319,15 +6315,20 @@ smlm_server <- function(input, output, session) {
     # the change in offset. Anything else (a crop that now selects other points,
     # a changed setting, another dataset) misses the key and re-clusters.
     mp_key <- NULL
+    # The pipeline reads `input` lazily (as_smlm_settings), so this reactive depends
+    # only on the settings the current branch uses. Only the multiplex memo needs
+    # every setting at once, for its key; there the one object serves key AND run.
+    mp_set  <- input
     mp_act  <- isolate(uploaded_df_rv())
     mp_spec <- attr(mp_act, "mplex_spec")
     mp_off  <- .mplex_store_off(attr(mp_act, "mplex_store_name"))
     if ("mplex_channel" %in% names(df) && !is.null(mp_spec)) {
+      mp_set <- smlm_settings_from_input(input)
       mp_key <- digest::digest(list(
         df$tid, df$tim, df$mplex_channel,                      # which rows
         if (".dataset_tag" %in% names(df)) df$.dataset_tag[1], # which build
         isolate(z_scale_applied()),
-        lapply(.PREP_KEY_INPUTS, function(k) input[[k]]),      # every clustering input
+        smlm_settings_key(mp_set),                             # every clustering setting
         input$remove_rogues, input$rogue_rule, input$rogue_factor
       ), algo = "xxhash64")
     }
@@ -6345,7 +6346,7 @@ smlm_server <- function(input, output, session) {
       }
       df <- cl
     } else {
-      df <- apply_clustering_pipeline(df, input)
+      df <- apply_clustering_pipeline(df, mp_set)
     }
     if (!is.null(mp_key)) {
       memo$key <- mp_key; memo$df <- df; memo$off <- mp_off
@@ -7801,7 +7802,7 @@ smlm_server <- function(input, output, session) {
 
         } else {
           # --------- MLE path with center handling ---------
-          center_args <- build_center_args(X, input)
+          center_args <- build_center_args(X, input$mle_center_mode, input$mle_center_lambda)
           
           if (input$fit_type == "sphere") {
             f <- do.call(mle_fit_sphere, c(list(X = X, w = w), center_args))
@@ -8068,7 +8069,7 @@ smlm_server <- function(input, output, session) {
           # Falls back to refitting only if the cache is missing (e.g. show_fit_distances
           # was enabled on a render where the shape loop was skipped).
           cl_key      <- as.character(unique(cluster_data$cluster2))
-          center_args <- build_center_args(X, input)
+          center_args <- build_center_args(X, input$mle_center_mode, input$mle_center_lambda)
 
           if (input$fit_type == "sphere") {
             f <- mle_fit_cache[[cl_key]] %||%
@@ -8245,7 +8246,7 @@ smlm_server <- function(input, output, session) {
       sz3  <- if (!is.finite(sz3) || sz3 <= 0) 7 else max(3, sz3 * 0.5)
       struct3 <- ifelse(gpts$cluster2 > 0, paste0("Structure ", gpts$cluster2), "ungrouped")
       txt3 <- sprintf("<b>%s</b><br>GT candidate · ± %.0f nm%s<br>%d contributing unit(s) · %d TID / %d loc",
-                      struct3, gpts$pos_sd_nm, ifelse(gpts$fused, " (fused: multiple GTs)", ""),
+                      struct3, gpts$pos_sd_nm, ifelse(gpts$fused, " (fused: multiple GTs)", ifelse(gpts$count_fused %||% FALSE, " (more TIDs than one molecule)", "")),
                       gpts$n_units, gpts$n_tid, gpts$n_loc)
 
       # Contribution fan-out lines in 3D.
@@ -8483,7 +8484,7 @@ smlm_server <- function(input, output, session) {
   # mixes expression level with photophysics and laser power and is not
   # comparable between runs.
   density_unit <- reactive({
-    u <- input$dens_norm_unit %||% "auto"
+    u <- input$dens_norm_unit %||% SMLM_DEFAULTS$dens_norm_unit
     if (u != "auto") return(u)
     if (isTRUE(input$enable_clustering)) "cluster" else "tid"
   })
@@ -8657,7 +8658,9 @@ smlm_server <- function(input, output, session) {
   # The seed is per-file and fixed, so a given file always thins to the same subset
   # (results are reproducible across re-runs), and thin_units_to_p saves/restores
   # the global RNG stream so no other randomised analysis is perturbed.
-  apply_density_thinning <- function(df, fname) {
+  # `settings`: the settings object the caller's chain runs with (prepared_df
+  # passes its own), so a molecule-level thinning de-blinks with the same values.
+  apply_density_thinning <- function(df, fname, settings = input) {
     if (!density_thin_on() || is.null(df) || !nrow(df)) return(df)
     pm <- density_p_map()
     if (is.null(pm) || !fname %in% names(pm)) return(df)
@@ -8668,7 +8671,7 @@ smlm_server <- function(input, output, session) {
     # deterministic DBSCAN, so deriving it here and again downstream on the
     # surviving points gives the same molecule assignment.
     if (unit == "cluster" && !"cluster" %in% names(df)) {
-      df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) df)
+      df <- tryCatch(apply_clustering_pipeline(df, settings), error = function(e) df)
     }
     seed <- as.integer(sum(utf8ToInt(fname)) %% 100000L) + 1L
     thin_units_to_p(df, unit = unit, p = p, seed = seed)
@@ -9507,43 +9510,24 @@ smlm_server <- function(input, output, session) {
   ## (trace detection 1.1 s, fiducial 0.8 s, precision cloud 4.0 s) were fast - so
   ## roughly 5 s of every clustering panel was re-deriving identical clusters.
   ##
-  ## KEY DESIGN, and the thing to preserve if you touch this: the cache key is built
-  ## from the FULL SET of inputs the chain consumes, enumerated in .PREP_KEY_INPUTS
-  ## below. That list was derived by scanning apply_meta_filters_batch,
-  ## apply_clustering_pipeline and resolve_channels for `input$` reads - it is not
-  ## from memory. Under-keying is the dangerous failure (stale clusters served
-  ## silently), so the list includes everything that DEFINES a channel as well as
-  ## everything that clusters one, and `.prep_key_selftest()` re-scans those
-  ## functions at runtime and warns if any input is consumed but missing.
-  .PREP_KEY_INPUTS <- c(
-    # apply_meta_filters_batch
-    "efo_range", "cfr_range", "dcr_range", "eco_range", "tim_range", "dwell_range",
-    "fluo_range", "tid_length_range", "trim_outliers", "trim_k", "sd_min_locs",
-    "view_SD", "target_sd_x", "target_sd_y",
-    # apply_clustering_pipeline (+ assign_analysis_group)
-    "enable_clustering", "deblink_method", "eps_centroid", "deblink_anisotropic",
-    "vote_frac", "vote_rho", "vote_link",
-    "enable_cluster2", "eps2", "minpts2", "cluster2_method", "cluster2_xi",
-    "cluster2_prefilter", "cluster2_prefilter_r", "cluster2_prefilter_min",
-    "cluster2_prune", "cluster2_prune_tol", "cluster2_core_only",
-    "cluster2_min_members", "cluster_group_scope", "centroid_k",
-    "deblink_shared_spread",
-    # resolve_channels - what DEFINES a channel. Getting one of these wrong
-    # repartitions the data, so they are as important as the eps values.
-    "enable_two_color", "color_by_fluo", "dcr_group1", "dcr_group2",
-    "use_pooled_dcr",
-    # the two opt-in gates that rewrite the data before clustering
-    "fid_exclude", "dens_norm_enable", "dens_thin_enable", "dens_norm_unit"
-  )
-
+  ## KEY DESIGN, and the thing to preserve if you touch this: prepared_df() builds
+  ## ONE settings object per call (smlm_settings_from_input, R/smlm_settings.R),
+  ## hashes it into the key, and passes THAT SAME OBJECT down the chain. The key
+  ## therefore describes exactly the values the chain ran with. Under-keying (stale
+  ## clusters served silently) cannot come from the settings: a chain function that
+  ## asks for a name outside SMLM_SETTINGS_SPEC gets an error, not a value the key
+  ## never saw. This replaces a hand-kept list of 45 input names and a runtime
+  ## regex scan that checked it.
+  ##
+  ## What the settings do not cover is derived state, added to the key here: the
+  ## data version, the density-thinning keep-probabilities and the fiducial
+  ## exclusion list.
   prep_cache_rv <- reactiveVal(list())   # key -> prepared data.frame
 
-  # Everything the prepared data depends on, collapsed to one comparable object.
-  # Includes the thinning keep-probabilities and the fiducial exclusion list, which
-  # are derived state rather than raw inputs and would otherwise be missed.
-  .prep_key <- function(fname, needs_cluster, two_color) {
-    vals <- lapply(.PREP_KEY_INPUTS, function(k) input[[k]])
-    names(vals) <- .PREP_KEY_INPUTS
+  # Everything the prepared data depends on, collapsed to one comparable string.
+  # `s` is the settings object the chain will run with; build it once and pass it
+  # to both this and the chain.
+  .prep_key <- function(fname, needs_cluster, two_color, s = smlm_settings_from_input(input)) {
     # density_p_map() is NULL until the density panel has been run; signif() on NULL
     # errors, which silently made every prepared_df() call fail and every panel
     # return no data.
@@ -9561,9 +9545,7 @@ smlm_server <- function(input, output, session) {
     ver <- paste(if (is.data.frame(sdf) && ".dataset_tag" %in% names(sdf)) sdf$.dataset_tag[1],
                  z_scale_applied(),
                  paste(utils::capture.output(utils::str(attr(sdf, "mplex_off"))), collapse = ""))
-    paste(fname, needs_cluster, two_color, ver,
-          paste(utils::capture.output(utils::str(vals, max.level = 2)), collapse = "|"),
-          pm_txt,
+    paste(fname, needs_cluster, two_color, ver, smlm_settings_key(s), pm_txt,
           paste(ex, collapse = ","), sep = "##")
   }
 
@@ -9574,22 +9556,23 @@ smlm_server <- function(input, output, session) {
   prepared_df <- function(fname, needs_cluster = TRUE, two_color = NULL) {
     store <- smlm_file_store()
     if (!fname %in% names(store)) return(NULL)
-    if (is.null(two_color)) two_color <- isTRUE(input$enable_two_color)
-    key <- .prep_key(fname, needs_cluster, two_color)
+    s <- smlm_settings_from_input(input)                 # one object: key AND chain
+    if (is.null(two_color)) two_color <- isTRUE(s$enable_two_color)
+    key <- .prep_key(fname, needs_cluster, two_color, s)
     cache <- prep_cache_rv()
     if (!is.null(cache[[key]])) return(cache[[key]])
 
     df <- qc_exclude_from(store[[fname]], fname)
     if (!is.data.frame(df) || !nrow(df)) return(NULL)
-    df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+    df <- tryCatch(apply_meta_filters_batch(df, s), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    df <- apply_density_thinning(df, fname)
+    df <- apply_density_thinning(df, fname, s)
     if (is.null(df) || !nrow(df)) return(NULL)
     if (isTRUE(needs_cluster)) {
       # ONE pipeline. `two_color` survives only as part of the cache key, because
       # enabling the 2-colour split repartitions the data and so must invalidate
       # a cached frame - it no longer selects between two implementations.
-      df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
+      df <- tryCatch(apply_clustering_pipeline(df, s), error = function(e) NULL)
       if (is.null(df) || !nrow(df)) return(NULL)
     }
     # Bounded: one entry per (file x settings). Settings churn would otherwise grow
@@ -9599,29 +9582,6 @@ smlm_server <- function(input, output, session) {
     prep_cache_rv(cache)
     df
   }
-
-  # Warn (once) if the chain reads an input the cache key does not cover - the
-  # under-keying failure mode, which would serve stale clusters silently.
-  .prep_key_selftest <- function() {
-    # attach_channel_colors() is deliberately NOT scanned: it is applied at
-    # render time, outside the cached chain, precisely so its inputs (the colour
-    # pickers) do not have to be in the key.
-    fns <- c("apply_meta_filters_batch", "apply_clustering_pipeline",
-             "resolve_channels", "deblink_threshold_for_channel")
-    used <- unique(unlist(lapply(fns, function(f) {
-      if (!exists(f)) return(character(0))
-      txt <- paste(deparse(get(f)), collapse = "
-")
-      m <- gregexpr("input[$][A-Za-z0-9_.]+", txt)
-      sub("^input[$]", "", unlist(regmatches(txt, m)))
-    })))
-    miss <- setdiff(used, .PREP_KEY_INPUTS)
-    if (length(miss))
-      warning("prepared_df cache key is missing inputs the clustering chain reads: ",
-              paste(miss, collapse = ", "), call. = FALSE)
-    invisible(miss)
-  }
-  observe({ .prep_key_selftest() })
 
   ## ── "Results are stale" indicator ───────────────────────────────────────────
   ## Compute controls deliberately take effect only on Run, which is what stops an
@@ -12218,8 +12178,7 @@ smlm_server <- function(input, output, session) {
     if (nrow(X) < 4) return(NULL)
     turns <- input$helix_turns %||% 3
     cargs <- tryCatch(build_center_args(
-      X, list(mle_center_mode   = input$mle_center_mode   %||% "free",
-              mle_center_lambda = input$mle_center_lambda %||% 0.1)),
+      X, mode = input$mle_center_mode %||% "free", lambda = input$mle_center_lambda %||% 0.1),
       error = function(e) list())
 
     # Inverse-variance (photon) weighting. The default iid-isotropic assumption is

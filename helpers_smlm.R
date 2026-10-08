@@ -38,13 +38,13 @@
 ##
 ##   2. TWO-COLOUR / MULTIPLEX
 ##      assign_two_color_group, auto_detect_dcr_split ... split channels on DCR
-##      assign_analysis_group(_from_mplex/_legacy), format_tc_id, wrap_groups
+##      assign_analysis_group(_from_mplex), format_tc_id, wrap_groups
 ##      mplex_default_colors
 ##
 ##   3. POINT BUILDING & SUMMARISING
 ##      build_pts_2d, build_pts_3d ..... collapse a level to plottable points
 ##      median_points_df, medianize_coords, compute_spatial_density
-##      remove_unstable_traces, flag_rogue_tids, remove_rogue_traces
+##      flag_rogue_tids, remove_rogue_traces
 ##      trace_spread_table(_legacy), sd_* family ... per-trace spread / SD filter
 ##
 ##   4. CLUSTERING
@@ -132,14 +132,14 @@ get_equal_limits_2d <- function(x, y, padding = 0.05) {
   
   list(x = x_lim, y = y_lim)
 }
-assign_two_color_group <- function(df, input) {
+assign_two_color_group <- function(df, settings) {
   # Thin wrapper. The DCR/fluo split itself lives in resolve_channels(), which
   # is the only place a channel is defined; this used to be a second copy of it
   # (and server_smlm had a third). Callers here want a per-TRACE map, so that is
   # what it returns - one row per tid with analysis_group and the medians.
   if (!is.data.frame(df) || !nrow(df)) return(df[0, , drop = FALSE])
   if (!"z" %in% names(df)) df$z <- 0
-  d <- resolve_channels(df, utils::modifyList(as.list(input), list(enable_two_color = TRUE)))
+  d <- resolve_channels(df, smlm_set(settings, enable_two_color = TRUE))
   if (!nrow(d)) return(d[0, c("tid"), drop = FALSE])
   d %>%
     dplyr::group_by(tid) %>%
@@ -356,10 +356,14 @@ dcr_split_confidence <- function(v, gmm, post_cut = NULL) {
   list(group = grp, post = post, edge = post < post_cut, log_odds = lo)
 }
 
-# Helper: parse TC label like "A-1" or "B_2" into integer group IDs
-# Helper: assign analysis groups based on DCR or FLUO medians
-assign_analysis_group <- function(df, input) {
-  .dcr_col <- if (isTRUE(input$use_pooled_dcr %||% FALSE) && "dcr_pooled" %in% names(df))
+# GOAL: tag each row with analysis_group 1/2 from its trace's median DCR or fluo.
+#   settings      : smlm_settings or Shiny input (reads use_pooled_dcr,
+#                   color_by_fluo, dcr_group1, dcr_group2)
+#   grouping_mode : "none", "dcr" or "fluo". The app has no control for it, so
+#                   it is "none" there; color_by_fluo switches to "fluo".
+assign_analysis_group <- function(df, settings, grouping_mode = "none") {
+  s <- as_smlm_settings(settings)
+  .dcr_col <- if (isTRUE(s$use_pooled_dcr) && "dcr_pooled" %in% names(df))
     "dcr_pooled" else if ("dcr" %in% names(df)) "dcr" else NULL
   med_tbl <- df %>%
     dplyr::group_by(tid) %>%
@@ -370,8 +374,8 @@ assign_analysis_group <- function(df, input) {
     )
   df <- dplyr::left_join(df, med_tbl, by = "tid")
   
-  mode <- if (is.null(input$grouping_mode)) "none" else input$grouping_mode
-  if (isTRUE(input$color_by_fluo %||% FALSE)) mode <- "fluo"
+  mode <- grouping_mode %||% "none"
+  if (isTRUE(s$color_by_fluo)) mode <- "fluo"
   if (mode == "fluo") {
     df$analysis_group <- dplyr::case_when(
       is.finite(df$fluo_med) & round(df$fluo_med) == 1 ~ 1L,
@@ -379,7 +383,7 @@ assign_analysis_group <- function(df, input) {
       TRUE ~ NA_integer_
     )
   } else if (mode == "dcr") {
-    g1 <- input$dcr_group1; g2 <- input$dcr_group2
+    g1 <- s$dcr_group1; g2 <- s$dcr_group2
     if (!is.null(g1) && !is.null(g2) && length(g1) == 2 && length(g2) == 2 && all(is.finite(c(g1, g2)))) {
       v <- df$dcr_med
       df$analysis_group <- dplyr::case_when(
@@ -451,11 +455,12 @@ assign_analysis_group <- function(df, input) {
 #   put them in some channel, and any choice of channel is a merge across a
 #   boundary the user asked us to respect.
 # =============================================================================
-resolve_channels <- function(df, input) {
+resolve_channels <- function(df, settings) {
   if (!is.data.frame(df) || !nrow(df)) return(df)
   if (!"z" %in% names(df)) df$z <- 0
+  s <- as_smlm_settings(settings)
 
-  two_color_on <- isTRUE(input$enable_two_color %||% FALSE)
+  two_color_on <- isTRUE(s$enable_two_color)
   mplex_on     <- "mplex_channel" %in% names(df) && any(!is.na(df$mplex_channel))
 
   # ── Colour split (per trace) ────────────────────────────────────────────
@@ -464,7 +469,7 @@ resolve_channels <- function(df, input) {
   # nothing left to decide.
   col_grp <- NULL
   if (two_color_on) {
-    .dcr_col <- if (isTRUE(input$use_pooled_dcr %||% FALSE) && "dcr_pooled" %in% names(df))
+    .dcr_col <- if (isTRUE(s$use_pooled_dcr) && "dcr_pooled" %in% names(df))
       "dcr_pooled" else if ("dcr" %in% names(df)) "dcr" else NULL
 
     med <- df %>%
@@ -475,7 +480,7 @@ resolve_channels <- function(df, input) {
         .groups = "drop"
       )
 
-    use_fluo <- isTRUE(input$color_by_fluo %||% FALSE) && "fluo" %in% names(df)
+    use_fluo <- isTRUE(s$color_by_fluo) && "fluo" %in% names(df)
     if (use_fluo) {
       med$col_grp <- dplyr::case_when(
         is.finite(med$fluo_med) & round(med$fluo_med) == 1L ~ 1L,
@@ -490,8 +495,8 @@ resolve_channels <- function(df, input) {
         sp <- gmm_res$split
         g1 <- c(0, sp); g2 <- c(sp + 1e-4, 1)
       } else {
-        g1 <- input$dcr_group1 %||% c(NA_real_, NA_real_)
-        g2 <- input$dcr_group2 %||% c(NA_real_, NA_real_)
+        g1 <- s$dcr_group1
+        g2 <- s$dcr_group2
       }
       if (length(g1) == 2 && length(g2) == 2 && all(is.finite(c(g1, g2)))) {
         med$col_grp <- dplyr::case_when(
@@ -672,10 +677,11 @@ attach_channel_colors <- function(df, input) {
 # There is deliberately NO pooled option: pooling across channels is the thing
 # the channel column exists to prevent. "within" runs each channel separately;
 # "only:<k>" restricts to one channel for inspection.
-channels_in_scope <- function(df, input) {
+#   scope : "within" or "only:<channel id>" (the cluster_group_scope setting)
+channels_in_scope <- function(df, scope = SMLM_DEFAULTS$cluster_group_scope) {
   if (!"channel" %in% names(df)) return(list(all = TRUE, ids = NA_integer_))
   ids <- sort(unique(df$channel[!is.na(df$channel)]))
-  scope <- input$cluster_group_scope %||% "within"
+  scope <- scope %||% SMLM_DEFAULTS$cluster_group_scope
   if (grepl("^only:", scope)) {
     k <- suppressWarnings(as.integer(sub("^only:", "", scope)))
     if (is.finite(k) && k %in% ids) ids <- k
@@ -808,62 +814,6 @@ map_value_to_scale_hex <- function(v, cmin, cmax, colorscale) {
   scale_hex_at(t01, colorscale)
 }
 
-# Determine hull color for a given group ID based on the provided cmap and pts table
-hull_color_for_gid <- function(gid, id_col, pts, input, cmap) {
-  # Fallback
-  if (is.null(pts) || !nrow(pts) || is.null(cmap)) return("#bdbdbd")
-  
-  # Find rows for this group in *pts* (the plotted table)
-  sel <- if (is.numeric(pts[[id_col]]) || is.integer(pts[[id_col]])) {
-    pts[[id_col]] == suppressWarnings(as.numeric(gid))
-  } else {
-    as.character(pts[[id_col]]) == as.character(gid)
-  }
-  sel <- which(sel)
-  if (!length(sel)) return("#bdbdbd")
-  
-  # ----- HEX mode: exact discrete mapping -----
-  if (identical(cmap$kind, "hex")) {
-    if (!is.null(cmap$hex) && length(cmap$hex) == nrow(pts)) {
-      hx <- cmap$hex[sel][1]
-      if (!is.null(hx) && nzchar(hx)) return(hx)
-    }
-    return("#bdbdbd")
-  }
-  
-  # ----- SCALE mode: choose a representative scalar for the group -----
-  if (identical(cmap$kind, "scale")) {
-    v <- cmap$colorvar
-    # In your code, cmap$colorvar is either a numeric vector OR a formula-like mapping.
-    # Normalize to a numeric vector:
-    if (is.function(v)) {
-      vv <- v(pts)
-    } else if (is.character(v) && length(v) == 1 && v %in% names(pts)) {
-      vv <- pts[[v]]
-    } else {
-      vv <- v
-    }
-    
-    vv <- suppressWarnings(as.numeric(vv))
-    if (length(vv) != nrow(pts)) return("#bdbdbd")
-    
-    gvals <- vv[sel]
-    gvals <- gvals[is.finite(gvals)]
-    if (!length(gvals)) return("#bdbdbd")
-    
-    g_rep <- stats::median(gvals)  # <-- key: representative value for the group
-    
-    # Convert representative scalar into a hex using the *same* colorscale/cmin/cmax
-    return(colorscale_to_hex(
-      value = g_rep,
-      colorscale = cmap$colorscale,
-      cmin = cmap$cmin,
-      cmax = cmap$cmax
-    ))
-  }
-  
-  "#bdbdbd"
-}
 # Map a numeric value to a hex color via a Plotly colorscale with interpolation
 colorscale_to_hex <- function(value, colorscale, cmin, cmax) {
   if (!is.finite(value) || !is.finite(cmin) || !is.finite(cmax) || cmax <= cmin) return("#bdbdbd")
@@ -1134,7 +1084,7 @@ build_pts_2d <- function(df, input) {
     dplyr::filter(is.finite(x), is.finite(y))
 
   # --- 2) spatial density of trace medians (2D) ---
-  r_nm <- input$dens_radius_nm %||% 150  # add UI input (see below)
+  r_nm <- input$dens_radius_nm %||% 500  # UI default (sliderInput "dens_radius_nm")
   tid_meds$dens <- compute_spatial_density(tid_meds$x, tid_meds$y, r = r_nm)
   
   if (isTRUE(input$show_medians)) {
@@ -1209,7 +1159,7 @@ build_pts_3d <- function(df, input) {
     ) %>%
     dplyr::filter(is.finite(x), is.finite(y), is.finite(z))
 
-  r_nm <- input$dens_radius_nm %||% 150
+  r_nm <- input$dens_radius_nm %||% 500
   tid_meds$dens <- compute_spatial_density(tid_meds$x, tid_meds$y, tid_meds$z, r = r_nm)
   
   if (isTRUE(input$show_medians)) {
@@ -1257,7 +1207,7 @@ build_pts_3d <- function(df, input) {
 # --- color_mapping_for_pts ---
 color_mapping_for_pts <- function(pts, input) {
   mode     <- (input$color_mode %||% "default")
-  pal_name <- input$numeric_palette %||% "Viridis"
+  pal_name <- input$numeric_palette %||% "Spectral"
   pal_rev  <- isTRUE(input$numeric_palette_reverse)
   
   # Helper: build a numeric colorscale mapping
@@ -2432,46 +2382,14 @@ plotly_colorscale <- function(name = "Viridis", reverse = FALSE, n = 11) {
 }
 
 
-# Helper: Remove unstable traces instead of correcting
-remove_unstable_traces <- function(df, input) {
-  min_n <- max(2L, as.integer(input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT))
-
-  # Per-trace spread is only defined for traces with >= min_n localizations;
-  # shorter traces get NA (undefined spread) so their noisy estimate never
-  # drives the filter - they are kept rather than judged on an unreliable
-  # spread. Same SD as the Stage-2 filter, on the same trimmed point set.
-  if (isTRUE(input$trim_outliers)) {
-    fl <- tryCatch(trace_point_outliers(df, k = input$trim_k %||% 4, keep_n = min_n),
-                   error = function(e) NULL)
-    if (!is.null(fl) && length(fl) == nrow(df)) df <- df[!fl, , drop = FALSE]
-  }
-  spread_df <- sd_by_tid(df, min_n = min_n)
-
-  # Compute fallback thresholds from traces with a defined spread only.
-  fallback <- spread_df %>%
-    dplyr::summarise(
-      x = stats::median(sd_x, na.rm = TRUE),
-      y = stats::median(sd_y, na.rm = TRUE)
-    )
-
-  target_x <- ifelse(is.na(input$target_sd_x), fallback$x, input$target_sd_x)
-  target_y <- ifelse(is.na(input$target_sd_y), fallback$y, input$target_sd_y)
-
-  # Keep traces within threshold; traces with undefined spread (NA) are kept.
-  valid_tids <- spread_df %>%
-    dplyr::filter(dplyr::coalesce(sd_x, 0) <= target_x,
-                  dplyr::coalesce(sd_y, 0) <= target_y) %>%
-    dplyr::pull(tid)
-
-  df %>% dplyr::filter(tid %in% valid_tids)
-}
-
 # ---- Batch NN helpers -------------------------------------------------------
 
-# Apply current metadata filter inputs to a raw stored df (no bypass logic -
-# the ranges are applied as-is so that the same thresholds work across all
-# loaded files in batch mode).
-apply_meta_filters_batch <- function(df, input) {
+# Apply the metadata, outlier, length and spread filters to a raw stored df (no
+# bypass logic - the ranges are applied as-is so that the same thresholds work
+# across all loaded files in batch mode).
+#   settings : smlm_settings or Shiny input (the "filter" settings)
+apply_meta_filters_batch <- function(df, settings) {
+  s <- as_smlm_settings(settings)
   hard_filter <- function(dat, nm, rng_val) {
     if (!nm %in% names(dat)) return(dat)
     if (is.null(rng_val) || length(rng_val) != 2 || any(!is.finite(as.numeric(rng_val)))) return(dat)
@@ -2479,35 +2397,33 @@ apply_meta_filters_batch <- function(df, input) {
     dplyr::filter(dat, is.na(.data[[nm]]) | (.data[[nm]] >= lo & .data[[nm]] <= hi))
   }
   df <- df %>%
-    hard_filter("efo",   input$efo_range)   %>%
-    hard_filter("cfr",   input$cfr_range)   %>%
-    hard_filter("dcr",   input$dcr_range)   %>%
-    hard_filter("eco",   input$eco_range)   %>%
-    hard_filter("tim",   input$tim_range)   %>%
-    hard_filter("dwell", input$dwell_range) %>%
-    hard_filter("fluo",  input$fluo_range)
+    hard_filter("efo",   s$efo_range)   %>%
+    hard_filter("cfr",   s$cfr_range)   %>%
+    hard_filter("dcr",   s$dcr_range)   %>%
+    hard_filter("eco",   s$eco_range)   %>%
+    hard_filter("tim",   s$tim_range)   %>%
+    hard_filter("dwell", s$dwell_range) %>%
+    hard_filter("fluo",  s$fluo_range)
   # Outlier localizations - Stage 1b, and it MUST come before the length filter
   # below, exactly as in the interactive pipeline: a trimmed point is not a
   # localization of that trace, so it must not count toward its length either.
-  if (isTRUE(input$trim_outliers) && "tid" %in% names(df) && nrow(df)) {
-    fl <- tryCatch(trace_point_outliers(
-            df, k = input$trim_k %||% 4,
-            keep_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT),
+  if (isTRUE(s$trim_outliers) && "tid" %in% names(df) && nrow(df)) {
+    fl <- tryCatch(trace_point_outliers(df, k = s$trim_k, keep_n = s$sd_min_locs),
           error = function(e) NULL)
     if (!is.null(fl) && length(fl) == nrow(df)) df <- df[!fl, , drop = FALSE]
   }
   # TID length filter
-  tlr <- input$tid_length_range
+  tlr <- s$tid_length_range
   if ("tid" %in% names(df) && !is.null(tlr) && length(tlr) == 2 && all(is.finite(tlr))) {
     tl   <- table(df$tid)
     keep <- names(tl)[tl >= tlr[1] & tl <= tlr[2]]
     df   <- dplyr::filter(df, tid %in% keep)
   }
-  # Trace spread (σ) filter - mirrors remove_unstable_traces() from Display tab
-  if (isTRUE(input$view_SD %||% FALSE) && "tid" %in% names(df)) {
-    tx <- input$target_sd_x; ty <- input$target_sd_y
+  # Trace spread (σ) filter, the batch form of the Display tab's spread filter
+  if (isTRUE(s$view_SD) && "tid" %in% names(df)) {
+    tx <- s$target_sd_x; ty <- s$target_sd_y
     if (!is.null(tx) && !is.null(ty) && is.finite(tx) && is.finite(ty) && tx > 0 && ty > 0) {
-      min_n <- max(2L, as.integer(input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT))
+      min_n <- max(2L, s$sd_min_locs)
       # Same estimator as the interactive Stage-2 filter, on the same trimmed
       # point set, or batch and interactive report different trace counts from
       # one setting. Trimming already happened above.
@@ -2682,52 +2598,6 @@ get_equal_limits <- function(x, y, z = NULL, padding = 0.05) {
 safe_which_max <- function(x) {
   if (all(is.na(x))) return(NA_integer_)
   which.max(replace(x, is.na(x), -Inf))
-}
-
-assign_analysis_group_legacy <- function(df, input) {
-  have_dcr  <- "dcr"  %in% names(df)
-  have_fluo <- "fluo" %in% names(df)
-  
-  med_tbl <- df %>%
-    dplyr::group_by(tid) %>%
-    dplyr::summarise(
-      dcr_med  = if (have_dcr)  stats::median(dcr,  na.rm = TRUE) else NA_real_,
-      fluo_med = if (have_fluo) stats::median(fluo, na.rm = TRUE) else NA_real_,
-      .groups = "drop"
-    )
-  
-  df <- dplyr::left_join(df, med_tbl, by = "tid")
-  mode <- input$grouping_mode %||% "none"
-  
-  if (mode == "fluo") {
-    if (!have_fluo) return(dplyr::mutate(df, analysis_group = NA_integer_))
-    fm <- suppressWarnings(as.integer(round(df$fluo_med)))
-    df$analysis_group <- dplyr::case_when(
-      is.finite(fm) & fm == 1L ~ 1L,
-      is.finite(fm) & fm == 2L ~ 2L,
-      TRUE                     ~ NA_integer_
-    )
-    
-  } else if (mode == "dcr") {
-    v <- df$dcr_med
-    v <- as.numeric(v)
-    
-    g1 <- input$dcr_group1; g2 <- input$dcr_group2
-    ok <- have_dcr && !is.null(g1) && !is.null(g2) &&
-      length(g1) == 2 && length(g2) == 2 && all(is.finite(c(g1, g2)))
-    
-    df$analysis_group <- if (ok) {
-      dplyr::case_when(
-        is.finite(v) & v >= g1[1] & v <  g1[2] ~ 1L,
-        is.finite(v) & v >= g2[1] & v <= g2[2] ~ 2L,
-        TRUE                                   ~ NA_integer_
-      )
-    } else NA_integer_
-    
-  } else {
-    df$analysis_group <- NA_integer_
-  }
-  df
 }
 
 trace_spread_table_legacy <- function(df) {
@@ -3020,13 +2890,17 @@ fit_color_for_subset <- function(subdf, fallback_hex = "#00BFFF") {
   co <- unique(na.omit(as.character(subdf$cluster2_color)))
   if (length(co) && nzchar(co[1])) co[1] else fallback_hex
 }
-build_center_args <- function(X, input) {
+# GOAL: the centre arguments for an MLE shape fit.
+#   mode   : "fixed" (centre held at the robust centre), "reg" (free, pulled toward
+#            it with strength `lambda`) or "free" (free, started there)
+#   lambda : regularisation strength, used by "reg" only
+build_center_args <- function(X, mode, lambda) {
   c_robust <- robust_center(X)
-  switch(input$mle_center_mode,
+  switch(mode,
          "fixed" = list(center_fixed = c_robust),
          "reg"   = list(center_init = c_robust,
                         center_prior = c_robust,
-                        lambda = input$mle_center_lambda),
+                        lambda = lambda),
          "free"  = list(center_init = c_robust)
   )
 }
@@ -4599,8 +4473,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     # MLE path: override with the MLE projection for the selected model only
     if (identical(selected_fit_method, "mle")) {
       center_args_act <- build_center_args(
-        X = coords_matrix,
-        input = list(mle_center_mode = mle_center_mode, mle_center_lambda = mle_center_lambda)
+        X = coords_matrix, mode = mle_center_mode, lambda = mle_center_lambda
       )
       mle_act <- tryCatch(
         switch(selected_fit_type,
@@ -4672,9 +4545,7 @@ add_cluster2_lines_and_angles <- function(fig, df, plane,
     # ---- MLE RMSD/SD (only when MLE is the selected method) ----
     if (identical(selected_fit_method, "mle")) {
       center_args <- build_center_args(
-        X = coords_matrix,
-        input = list(mle_center_mode = mle_center_mode,
-                     mle_center_lambda = mle_center_lambda)
+        X = coords_matrix, mode = mle_center_mode, lambda = mle_center_lambda
       )
 
       fS <- tryCatch(do.call(mle_fit_sphere, c(list(X = coords_matrix, w = w), center_args)), error = function(e) NULL)
@@ -7046,17 +6917,18 @@ suggest_centroid_threshold <- function(df, min_n = MIN_LOCS_FOR_SPREAD_DEFAULT,
 #   measured but is not.
 #
 # ARGUMENTS
-#   df    : data.frame carrying `channel` (from resolve_channels)
-#   input : Shiny input list. Reads eps_centroid, centroid_k, sd_min_locs,
-#           deblink_anisotropic, deblink_shared_spread.
+#   df       : data.frame carrying `channel` (from resolve_channels)
+#   settings : smlm_settings or Shiny input. Reads eps_centroid, centroid_k,
+#              sd_min_locs, deblink_anisotropic, deblink_shared_spread.
 #
 # RETURNS
 #   named list (names = as.character(channel)) of distances in nm, with
 #   attr "measured" (named logical) and attr "sigma" (named numeric).
 # =============================================================================
-deblink_threshold_for_channel <- function(df, input) {
-  shared <- suppressWarnings(as.numeric(input$eps_centroid %||% 10))
-  if (!length(shared) || !is.finite(shared) || shared <= 0) shared <- 10
+deblink_threshold_for_channel <- function(df, settings) {
+  s <- as_smlm_settings(settings)
+  shared <- s$eps_centroid
+  if (!is.finite(shared) || shared <= 0) shared <- SMLM_DEFAULTS$eps_centroid
 
   ids <- if ("channel" %in% names(df)) sort(unique(df$channel[!is.na(df$channel)])) else 1L
   out <- stats::setNames(as.list(rep(shared, length(ids))), as.character(ids))
@@ -7065,16 +6937,16 @@ deblink_threshold_for_channel <- function(df, input) {
 
   # One channel, or the user has asked for a single combined spread: nothing to
   # split, so the shared value stands.
-  if (length(ids) < 2L || isTRUE(input$deblink_shared_spread %||% FALSE))
+  if (length(ids) < 2L || isTRUE(s$deblink_shared_spread))
     return(structure(out, measured = meas, sigma = sig))
 
-  kk <- suppressWarnings(as.numeric(input$centroid_k))
-  if (!length(kk) || !is.finite(kk) || kk <= 0) kk <- 2.8
-  min_n <- input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT
+  kk <- s$centroid_k
+  if (!is.finite(kk) || kk <= 0) kk <- SMLM_DEFAULTS$centroid_k
+  min_n <- s$sd_min_locs
 
   for (ch in ids) {
     sub <- df[which(df$channel == ch), , drop = FALSE]
-    w <- if (isTRUE(input$deblink_anisotropic))
+    w <- if (isTRUE(s$deblink_anisotropic))
       tryCatch(deblink_axis_weights(sub, min_n = min_n)$w, error = function(e) NULL)
       else NULL
     r <- tryCatch(suggest_centroid_threshold(sub, min_n = min_n, use_z = TRUE,
@@ -7447,12 +7319,11 @@ deblink_merge_majority_vote <- function(sub_df, f = 0.3, rho = 3.0, mutual = TRU
 #   so the only thing that can still leave it unmerged is its own spread -
 #   which is exactly what the spread filter governs.
 #
-# ARGUMENTS  input : the Shiny input list (reads tid_length_range)
+# ARGUMENTS  tid_length_range : the trace-length filter, c(lo, hi), or NULL
 # RETURNS    integer >= 2 (DBSCAN needs at least 2)
 # =============================================================================
-deblink_minpts <- function(input) {
-  tlr <- input$tid_length_range
-  lo  <- suppressWarnings(as.numeric(tlr[1]))
+deblink_minpts <- function(tid_length_range) {
+  lo  <- suppressWarnings(as.numeric(tid_length_range[1]))
   if (!length(lo) || !is.finite(lo)) lo <- 4       # filter UI not rendered yet
   max(2L, as.integer(round(lo)))
 }
@@ -7682,11 +7553,10 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 #
 # ARGUMENTS
 #   df    : an ALREADY-FILTERED data.frame (x, y, z, tid [, mplex_channel])
-#   input : the Shiny input list - read directly so batch tools use exactly the
-#           settings the user sees. Relevant: enable_clustering, eps_centroid,
-#           centroid_k, deblink_method, deblink_anisotropic, deblink_shared_spread,
-#           tid_length_range (-> minPts), enable_cluster2, eps2/minpts2,
-#           cluster2_method, cluster_group_scope, enable_two_color (-> channels).
+#   settings : smlm_settings() for scripts, or the Shiny input (read through
+#              as_smlm_settings, so batch tools use exactly the settings the user
+#              sees). Uses the "channels", "deblink" and "cluster2" settings plus
+#              sd_min_locs; see R/smlm_settings.R.
 #
 # RETURNS
 #   the same df with `channel`/`channel_label`/`channel_color` (from
@@ -7696,14 +7566,15 @@ deblink_count_curve <- function(df, minpts = 4L, eps_seq = seq(1, 40, by = 1),
 #   `cluster != 0` filters downstream are harmless no-ops that now keep every
 #   trace which survived filtering.
 # =============================================================================
-apply_clustering_pipeline <- function(df, input) {
+apply_clustering_pipeline <- function(df, settings) {
   if (!nrow(df)) return(df)
+  s <- as_smlm_settings(settings)
 
   # One channel definition for the whole run. Everything below loops over it.
-  df <- resolve_channels(df, input)
+  df <- resolve_channels(df, s)
   if (!nrow(df)) return(df)
 
-  chans <- channels_in_scope(df, input)
+  chans <- channels_in_scope(df, s$cluster_group_scope)
 
   # Run `fn` once per channel, offsetting the returned IDs so they can never
   # collide across channels. Running-max, not a fixed constant: the 2-colour
@@ -7724,14 +7595,14 @@ apply_clustering_pipeline <- function(df, input) {
   }
 
   # ── De-blinking ─────────────────────────────────────────────────────
-  if (isTRUE(input$enable_clustering)) {
+  if (isTRUE(s$enable_clustering)) {
     df$cluster <- 0L
 
     # Per-axis metric, computed ONCE over the whole df so every channel subset
     # below is clustered in the same space (a per-subset metric would make
     # cluster IDs incomparable across channels).
-    aw1 <- if (isTRUE(input$deblink_anisotropic))
-      deblink_axis_weights(df, min_n = input$sd_min_locs %||% MIN_LOCS_FOR_SPREAD_DEFAULT)$w
+    aw1 <- if (isTRUE(s$deblink_anisotropic))
+      deblink_axis_weights(df, min_n = s$sd_min_locs)$w
       else NULL
 
     # Two merge criteria, both trace-level. "centroid" compares where the traces
@@ -7741,23 +7612,23 @@ apply_clustering_pipeline <- function(df, input) {
     # method's own best threshold: raw-point 35, vote 29, centroid 10.
     # (Centroid scores 11 at the k = 2.0 default and 10 at its optimum 1.54 -
     #  quote the basis, not a bare number.)
-    method1 <- input$deblink_method %||% "centroid"
+    method1 <- s$deblink_method
 
     # THE MERGE DISTANCE IS PER CHANNEL (see deblink_threshold_for_channel).
     # It is dictated by the trace spread, and trace spread is a property of the
     # dye: two fluorophores with different photon yields have different
     # localization precision, so one shared distance under-serves the tighter
     # channel. The shared value remains available as an explicit fallback.
-    thr_by_ch <- deblink_threshold_for_channel(df, input)
+    thr_by_ch <- deblink_threshold_for_channel(df, s)
 
     run_primary <- function(idx) {
       sub <- df[idx, , drop = FALSE]
       if (identical(method1, "vote"))
         return(deblink_merge_majority_vote(sub,
-                 f = input$vote_frac %||% 0.2, rho = input$vote_rho %||% 1.2,
-                 mutual = !identical(input$vote_link %||% "mutual", "either"), w = aw1))
+                 f = s$vote_frac, rho = s$vote_rho,
+                 mutual = !identical(s$vote_link, "either"), w = aw1))
       ch  <- sub$channel[1]
-      thr <- thr_by_ch[[as.character(ch)]] %||% (input$eps_centroid %||% 10)
+      thr <- thr_by_ch[[as.character(ch)]] %||% s$eps_centroid
       deblink_merge_centroids(sub, thr, aw1)
     }
 
@@ -7802,10 +7673,10 @@ apply_clustering_pipeline <- function(df, input) {
   }
 
   # ── Secondary clustering (structure) ──────────────────────────────────────
-  if (isTRUE(input$enable_cluster2)) {
-    eps2    <- input$eps2    %||% 200
-    minpts2 <- input$minpts2 %||% 3
-    use_primary <- isTRUE(input$enable_clustering) && "cluster" %in% names(df)
+  if (isTRUE(s$enable_cluster2)) {
+    eps2    <- s$eps2
+    minpts2 <- s$minpts2
+    use_primary <- isTRUE(s$enable_clustering) && "cluster" %in% names(df)
 
     # eps2 is SHARED across channels: it is set by the biology (how far apart
     # molecules in one structure sit), not by the dye. The clustering still runs
@@ -7856,17 +7727,17 @@ apply_clustering_pipeline <- function(df, input) {
       pts <- as.matrix(medians[idx, c("mx", "my", "mz")])
       run_cluster2_grouping(
         pts,
-        method        = input$cluster2_method %||% "dbscan",
+        method        = s$cluster2_method,
         eps           = eps2,
         minPts        = minpts2,
-        xi            = input$cluster2_xi %||% 0.05,
-        prefilter     = isTRUE(input$cluster2_prefilter),
-        prefilter_r   = input$cluster2_prefilter_r,
-        prefilter_min = input$cluster2_prefilter_min,
-        prune         = isTRUE(input$cluster2_prune),
-        prune_tol     = input$cluster2_prune_tol %||% 2,
-        core_only     = isTRUE(input$cluster2_core_only),
-        min_members   = input$cluster2_min_members %||% 0
+        xi            = s$cluster2_xi,
+        prefilter     = isTRUE(s$cluster2_prefilter),
+        prefilter_r   = s$cluster2_prefilter_r,
+        prefilter_min = s$cluster2_prefilter_min,
+        prune         = isTRUE(s$cluster2_prune),
+        prune_tol     = s$cluster2_prune_tol,
+        core_only     = isTRUE(s$cluster2_core_only),
+        min_members   = s$cluster2_min_members
       )
     }
 
@@ -7932,6 +7803,62 @@ measure_label_multiplicity <- function(df, k_per_structure = 1L, minpts = 3L) {
   out
 }
 
+# =============================================================================
+# gt_tid_model() - HOW MANY TRACE IDS ONE MOLECULE YIELDS UNDER A LABEL PRESET
+# =============================================================================
+#
+# GOAL
+#   The exact distribution of the trace-ID count T of one molecule under the same
+#   forward model the Simulator draws from (docs/simulator.md 1.2-1.4):
+#       K  ~ max(1, Poisson(n_fluor))     dyes on the molecule (K = 1 if n_fluor <= 1)
+#       K' ~ Binomial(K, eff)             dyes detected
+#       T  = sum over detected dyes of (1 + Poisson(blink_lambda))
+#   so the count estimator, its uncertainty and the crowding test all rest on one
+#   model instead of separate approximations.
+#
+# WHY TWO SETS OF MOMENTS
+#   "unconditional" moments count undetected molecules as T = 0. Dividing a
+#   structure's total trace count by mean_u estimates ALL molecules, detected or
+#   not (the stoichiometric count). "detected" moments condition on K' >= 1; they
+#   describe one molecule that produced at least one trace, which is what a spatial
+#   candidate is.
+#
+# ARGUMENTS  n_fluor, eff (fraction 0-1), blink_lambda : the preset values
+# RETURNS    list(eta, mean_u, var_u, mean_d, var_d, mean_dyes, p_ge)
+#   eta       P(K' >= 1), the molecule detection probability
+#   mean_dyes E[K'], detected dyes per molecule (unconditional)
+#   p_ge(t)   P(T >= t | detected), vectorised over t
+# =============================================================================
+gt_tid_model <- function(n_fluor, eff, blink_lambda) {
+  p   <- min(1, max(1e-6, eff))
+  lam <- max(0, blink_lambda)
+  if (!is.finite(n_fluor) || n_fluor <= 1) {
+    k <- 1L; pk <- 1
+  } else {
+    kmax <- max(2L, as.integer(stats::qpois(1 - 1e-12, n_fluor)) + 5L)
+    k  <- seq_len(kmax)
+    pk <- stats::dpois(k, n_fluor)
+    pk[1] <- pk[1] + stats::dpois(0, n_fluor)           # max(1, .) folds 0 into 1
+  }
+  # Detected-dye count: a mixture of binomials over the dye count.
+  kd  <- 0:max(k)
+  pkd <- vapply(kd, function(j) sum(pk * stats::dbinom(j, k, p)), numeric(1))
+  eta <- 1 - pkd[1]
+  # Given K' = j, T = j + Poisson(j * lam): mean j(1+lam), variance j*lam.
+  m_j  <- kd * (1 + lam)
+  e2_j <- kd * lam + m_j^2
+  mean_u <- sum(pkd * m_j)
+  var_u  <- sum(pkd * e2_j) - mean_u^2
+  pc <- pkd[-1] / max(eta, 1e-12); kc <- kd[-1]
+  mean_d <- sum(pc * m_j[-1])
+  var_d  <- sum(pc * e2_j[-1]) - mean_d^2
+  p_ge <- function(t) vapply(t, function(tt)
+    sum(pc * stats::ppois(tt - kc - 1, kc * lam, lower.tail = FALSE)), numeric(1))
+  list(eta = eta, mean_u = mean_u, var_u = max(0, var_u),
+       mean_d = mean_d, var_d = max(0, var_d),
+       mean_dyes = sum(pkd * kd), p_ge = p_ge)
+}
+
 ## ── Inverse GT-position estimator (labeling-aware) ────────────────────────────
 # Reverse-engineers the Simulator's forward labeling model to turn observed
 # traces/clusters back into CANDIDATE ground-truth molecule positions, an
@@ -7947,8 +7874,8 @@ measure_label_multiplicity <- function(df, k_per_structure = 1L, minpts = 3L) {
 #     --(sigma_loc)-->  each TID -> many localizations, precision sigma_loc
 #
 # So the labeling multiplicity at the RAW-TID level is
-#     m_tid = n_fluor * (eff/100) * (1 + blink_lambda)      (TIDs per molecule)
-# and the DE-BLINKING step (merge threshold ~ dye_spread) collapses re-blinks and
+#     m_tid = E[detected dyes] * (1 + blink_lambda)        (TIDs per molecule)
+# computed exactly by gt_tid_model(), together with its variance; and the DE-BLINKING step (merge threshold ~ dye_spread) collapses re-blinks and
 # the dyes of one molecule back into ~one object => ~one unit per molecule,
 # turning an unstable /m_tid calibration into a /~1 count. De-blinked molecules
 # are therefore the preferred unit when present ("auto").
@@ -7971,8 +7898,14 @@ measure_label_multiplicity <- function(df, k_per_structure = 1L, minpts = 3L) {
 #   sigma_loc_nm  per-localization precision; estimated from data when NULL
 #   scope_cluster2 restrict to points inside a secondary structure (cluster2>0)
 #
-# Returns list(points, summary, meta) - see field construction below. Empty
+# Returns list(points, links, summary, meta) - see field construction below. Empty
 # data.frames (never NULL) when nothing is estimable, so callers stay simple.
+#   points$count_fused      candidate holds more TIDs than one molecule gives (p < 0.01)
+#   summary$count_verdict   "consistent" / "under-resolved" / "over-split", from the
+#                           TID total given the spatial count (count_z); under-resolved
+#                           also sets `crowded`, any non-consistent verdict sets
+#                           `stoich_mismatch`
+#   summary$n_gt_lo / _hi   range spanning both count estimators with their errors
 estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
                                       level = c("auto", "primary", "tid"),
                                       fuse_k = 2.5, minpts = 3L,
@@ -8009,12 +7942,14 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   eff          <- min(1, max(0.01, eff_pct / 100))
   preset_note  <- if (!is.null(preset$note)) as.character(preset$note) else ""
 
-  # TIDs expected per molecule, and estimator detection efficiency eta =
-  # P(a molecule yields >=1 detected unit). For single-dye labels eta = eff;
-  # for multivalent labels the Poisson(n_fluor) count makes >=1 detection near-certain.
-  m_tid <- n_fluor * eff * (1 + blink_lambda)
-  eta   <- if (n_fluor <= 1) eff else 1 - exp(-n_fluor * eff)
-  eta   <- min(1, max(1e-3, eta))
+  # TIDs expected per molecule (m_tid) and the detection probability eta, both
+  # from the exact forward model (gt_tid_model). A measured multiplicity from a
+  # counting standard replaces the preset's mean further down; the model's blink
+  # rate is then re-solved so its mean matches, keeping the shape of the
+  # distribution for the uncertainty and crowding tests.
+  tid_mdl <- gt_tid_model(n_fluor, eff, blink_lambda)
+  m_tid   <- tid_mdl$mean_u
+  eta     <- min(1, max(1e-3, tid_mdl$eta))
 
   use_z <- "z" %in% names(df) && any(is.finite(df$z) & df$z != 0)
 
@@ -8114,6 +8049,12 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   # preset guess when supplied, so the count divides by a calibrated value.
   m_tid_measured <- !is.null(m_tid_override) && is.finite(m_tid_override) && m_tid_override > 0
   tids_per_mol <- if (m_tid_measured) as.numeric(m_tid_override) else max(1e-6, m_tid)
+  if (m_tid_measured && tid_mdl$mean_dyes > 0) {
+    # mean_u = E[K'] * (1 + lambda), so the blink rate that reproduces the measured
+    # multiplicity is m / E[K'] - 1 (floored at 0: a standard below one trace per
+    # detected dye means the efficiency, not the blinking, is off).
+    tid_mdl <- gt_tid_model(n_fluor, eff, max(0, tids_per_mol / tid_mdl$mean_dyes - 1))
+  }
 
   units$mol <- NA_integer_
   next_mol  <- 1L
@@ -8264,10 +8205,19 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
   s_fused   <- ifelse(mols$fused, mol_extent, 0)
   mols$pos_sd_nm <- sqrt(s_link^2 + s_sample^2 + s_support^2 + s_disp^2 + s_fused^2)
 
+  # ── per-candidate count check ──
+  # P(one detected molecule yields >= this many TIDs). A small value means the
+  # candidate carries more traces than one molecule plausibly gives, i.e. several
+  # unresolved molecules. This catches merges that the spread test cannot see:
+  # de-blinking caps a unit's width at its merge threshold, so a unit holding two
+  # molecules a few nm apart is no wider than a single one.
+  mols$count_p <- tid_mdl$p_ge(mols$n_tid)
+
   points <- data.frame(
     x = mols$x, y = mols$y, z = if (use_z) mols$z else 0,
     pos_sd_nm = mols$pos_sd_nm, n_loc = mols$n_loc, n_tid = mols$n_tid,
     n_units = mols$n_units, fused = mols$fused,
+    count_p = mols$count_p, count_fused = mols$count_p < 0.01,
     cluster2 = mols$cluster2, mol = mols$mol, level = unit_level,
     stringsAsFactors = FALSE
   )
@@ -8286,10 +8236,32 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
 
   # ── per-structure summary (grouped by cluster2; 0 = ungrouped/global) ─────
   # Two INDEPENDENT molecule-count estimators per structure:
-  #   spatial      = merged GT groups, efficiency-corrected (/eta)
+  #   spatial        = merged GT groups, efficiency-corrected (/eta)
   #   stoichiometric = total TIDs / m_tid  (already efficiency-aware via eff)
-  # When they disagree by >2x the merge radius / labeling assumption is off ->
-  # flagged. The reported count keeps the spatial value but the CI spans both.
+  #
+  # CONSISTENCY TEST. If the spatial candidates are the true detected molecules,
+  # the structure's total TID count is a sum of that many draws from the
+  # detected-molecule distribution: mean n_det * mean_d, variance n_det * var_d.
+  #   z >  z_crit  more traces than those molecules can carry -> under-resolved
+  #                (candidates hold several molecules; crowding)
+  #   z < -z_crit  fewer traces than expected -> over-split (re-blinks or dyes of
+  #                one molecule left as separate candidates)
+  # The variance is floored at the mean (Poisson): real blink counts are more
+  # variable than the model, and a test at the bare model variance would flag
+  # ordinary data. A ratio rule (the previous "outside 0.5-2x") ignores sample
+  # size: it misses a large structure that is off by 40% and flags a 3-molecule
+  # structure on noise.
+  #
+  # COUNT RANGE. Both estimators carry their own error and the range spans both:
+  # spatial +- 1.96 SE (binomial detection), stoichiometric +- 1.96 SE with
+  # SE = sqrt(n * var_u) / m_tid.
+  # Not included: the uncertainty of the preset itself (or of a measured standard).
+  z_crit <- 2.58                                    # two-sided 1%
+  v_d    <- max(tid_mdl$var_d, tid_mdl$mean_d)
+  v_u    <- max(tid_mdl$var_u, tid_mdl$mean_u)
+  # Stoichiometric SE in the units of the reported multiplicity (a measured
+  # standard rescales the mean; keep the model's variance-to-mean ratio).
+  disp_u <- v_u / max(tid_mdl$mean_u, 1e-9)
   struct_ids <- sort(unique(mols$cluster2))
   summ <- lapply(struct_ids, function(sid) {
     idx <- which(mols$cluster2 == sid)
@@ -8305,16 +8277,27 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
     n_tid_tot  <- sum(mols$n_tid[idx])
     n_stoich   <- n_tid_tot / tids_per_mol
     tids_per_gt <- n_tid_tot / max(1L, nu)
-    ratio      <- n_spatial / max(1e-6, n_stoich)
-    mismatch   <- is.finite(ratio) && (ratio > 2 || ratio < 0.5)
+    count_z    <- (n_tid_tot - sum_mol * tid_mdl$mean_d) / sqrt(max(1, sum_mol) * v_d)
+    verdict    <- if (!is.finite(count_z)) "consistent"
+                  else if (count_z >  z_crit) "under-resolved"
+                  else if (count_z < -z_crit) "over-split"
+                  else "consistent"
+    mismatch   <- verdict != "consistent"
     fused_frac <- mean(mols$fused[idx])
-    crowded <- (is.finite(mean_nn) && mean_nn < max(footprint, link_nm + dye_spread)) ||
-               fused_frac > 0.3
-    cnt_se  <- sqrt(pmax(1, sum_mol)) / eta
+    # Close or wide candidates suggest crowding, unless the trace count says the
+    # structure is over-split: then the close neighbours are copies of one molecule.
+    geom_crowd <- (is.finite(mean_nn) && mean_nn < max(footprint, link_nm + dye_spread)) ||
+                  fused_frac > 0.3
+    crowded <- verdict == "under-resolved" || (geom_crowd && verdict != "over-split")
+    # Spatial count error = detection error: the detected count is
+    # Binomial(N, eta), so SE(N_hat) = sqrt(n_det (1 - eta)) / eta. Resolution
+    # error is not in this SE; it is what the consistency test reports.
+    cnt_se  <- sqrt(max(1, sum_mol) * (1 - eta)) / eta
     if (crowded) cnt_se <- cnt_se * 1.5
-    # CI brackets BOTH estimators (honest: count is only known to ~this range)
-    lo <- min(n_spatial - 1.96 * cnt_se, n_stoich); lo <- max(1, lo)
-    hi <- max(n_spatial + 1.96 * cnt_se, n_stoich)
+    st_se   <- sqrt(max(1, n_stoich) * disp_u * tids_per_mol) / tids_per_mol
+    # The range brackets BOTH estimators, each with its own sampling error.
+    lo <- max(1, min(n_spatial - 1.96 * cnt_se, n_stoich - 1.96 * st_se))
+    hi <- max(n_spatial + 1.96 * cnt_se, n_stoich + 1.96 * st_se)
     data.frame(
       cluster2      = sid,
       n_units       = nu,                # rendered GT groups (spatial)
@@ -8325,6 +8308,9 @@ estimate_gt_from_labeling <- function(df, preset, eff_pct = 70,
       n_tid_total   = n_tid_tot,
       tids_per_gt   = tids_per_gt,
       stoich_mismatch = mismatch,
+      count_z       = count_z,
+      count_verdict = verdict,
+      n_count_fused = sum(mols$count_p[idx] < 0.01),
       n_gt_lo       = lo,
       n_gt_hi       = hi,
       eta           = eta,

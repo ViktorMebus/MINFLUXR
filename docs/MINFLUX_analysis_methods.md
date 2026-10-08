@@ -21,9 +21,9 @@ Every Part I entry names its Part II rating, and vice versa.
 
 Part II ratings:
 
-- 🟢 **GREEN** — well-suited; MINFLUX's properties are neutral or an advantage.
-- 🟡 **AMBER** — usable, but an assumption is strained; needs a MINFLUX-aware adaptation.
-- 🔴 **RED** — a core assumption is violated; results are biased unless mitigated.
+- 🟢 **GREEN** - well-suited; MINFLUX's properties are neutral or an advantage.
+- 🟡 **AMBER** - usable, but an assumption is strained; needs a MINFLUX-aware adaptation.
+- 🔴 **RED** - a core assumption is violated; results are biased unless mitigated.
 
 > A rating describes the *textbook method*. Where MINFLUXR adapts the method for MINFLUX, that is
 > described under **MINFLUXR's handling**, and several tools are more defensible than their textbook
@@ -36,7 +36,7 @@ Part II ratings:
 
 ---
 
-# Part I — Implementation & Mathematics
+# Part I - Implementation
 
 *What each tool computes, as coded. Formulas are transcribed from the source (`server_tracking.R`,
 `server_smlm.R`, `helpers_smlm.R`, `sim_server.R`); each entry names its Part II appropriateness rating.
@@ -619,19 +619,32 @@ It is a visualization.
 - **Label preset** parameters: `n_fluor` (mean dyes/molecule), `link_nm` (linker length), `dye_spread_nm`
   (dye scatter σ within the complex), `footprint_nm`, `blink_lambda` (extra re-appearances), `eff`
   (labelling efficiency).
-- **Forward model it inverts:** molecule → Poisson(`n_fluor`) fluorophores, each displaced by a
-  half-normal linker (mean ≈ `link_nm`) and scattered by `dye_spread_nm`, each blinking into
-  ~(1+`blink_lambda`) traces. Expected traces per molecule: **m_tid = n_fluor · eff · (1+blink_lambda)**;
-  detection efficiency **η = eff** (single dye) or **η = 1 − e^{−n_fluor·eff}** (multivalent).
+- **Forward model it inverts** (the Simulator's, `docs/simulator.md` §1.2–1.4): molecule → K =
+  max(1, Poisson(`n_fluor`)) fluorophores, K′ ~ Binomial(K, eff) of them detected, each displaced by a
+  half-normal linker (mean ≈ `link_nm`), scattered by `dye_spread_nm`, and yielding 1 + Poisson(`blink_lambda`)
+  traces. `gt_tid_model` gives the exact distribution of the per-molecule trace count T: the multiplicity
+  **m_tid = E[K′]·(1 + blink_lambda)**, its variance, the detection probability **η = P(K′ ≥ 1)**, and the
+  tail P(T ≥ t | detected).
 - **Inverse:** build candidate units (trace or de-blinked molecule medians, ≥`minpts` locs), then **merge**
   unit centroids within a **complex radius** `complex_r` (auto = max(footprint, 2.5·dye_spread)) via
   `dbscan(eps = complex_r, minPts = 1)` so several dyes/blinks of one molecule collapse to **one candidate
   GT position** (this produces the contribution fan-out lines). Optional **stoichiometry-guided merge**
   further collapses to k = round(ΣN_tid / m_tid) via hierarchical clustering — only ever *reduces* toward
   the labelling-predicted count, never splits.
-- **Output:** candidate GT positions coloured **green→red by positional uncertainty** (`pos_sd_nm`), a GT
-  **count range** [lo, hi], and a **crowding flag** when spacing < label
-  footprint (under-resolved). Checked against the simulator; quantitatively a heuristic.
+- **Two counts per structure:** spatial (candidates / η) and stoichiometric (total traces / m_tid).
+- **Consistency test:** given n spatial candidates, the trace total should be a sum of n draws from the
+  detected-molecule distribution, so **z = (N_tid − n·E[T|det]) / √(n·Var[T|det])**, with the variance
+  floored at the mean (real blink counts are more variable than Poisson). z > 2.58 = *under-resolved*
+  (candidates hold several molecules; sets the crowding flag), z < −2.58 = *over-split* (re-blinks or
+  dyes of one molecule kept apart). Each candidate also gets P(T ≥ its trace count | one molecule);
+  below 0.01 it is marked as holding more traces than one molecule gives. This catches merges the
+  spread test cannot: de-blinking caps a unit's width at its threshold, so two molecules a few nm apart
+  make a unit no wider than one.
+- **Output:** candidate GT positions coloured **green→red by positional uncertainty** (`pos_sd_nm`), and a
+  **count range** [lo, hi] spanning both counts, each ± 1.96 SE (spatial: binomial detection error;
+  stoichiometric: √(n·Var T)/m_tid). The range does not include uncertainty in the preset itself.
+  Checked against the simulator (`tests/testthat/test-smlm-gt-estimator.R`); the counts are only as good
+  as the labelling preset or the measured multiplicity.
 
 ### I-A.9 Detection-over-time / crowding / NN-vs-size — [Part II §6.7, 🟠 EXPLORATORY]
 Bespoke descriptive diagnostics (detection-rate vs time, crowding vs timing, NN distance vs cluster size).

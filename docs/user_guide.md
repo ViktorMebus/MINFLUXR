@@ -513,7 +513,20 @@ blinks) or supply custom values, plus a labelling/detection efficiency.
   uncertainty. 0 = off; 1 = default (a 1-TID GT ≈ √2× less certain than a well-supported one).
 
 Candidates are drawn as hollow circles coloured **green (low) → red (high) by position uncertainty**,
-with optional contribution lines from each unit to its GT, an approximate count, and a crowding flag.
+with optional contribution lines from each unit to its GT.
+
+Each structure gets two counts: **spatial** (candidates, corrected for detection) and
+**stoichiometric** (trace IDs divided by the traces one molecule yields under the preset). The readout
+checks whether the trace total fits the spatial count:
+
+- **under-resolved** - more traces than the candidates can carry, so some candidates hold several
+  molecules. The spatial count is then a lower bound, and the structure is flagged as crowded.
+- **over-split** - fewer traces than expected, so re-blinks or dyes of one molecule were kept apart.
+  Raise the merge radius or check de-blinking.
+
+Either verdict can also mean the preset or efficiency does not match the sample. Candidates holding
+more traces than one molecule plausibly gives are marked in the hover text. The count range covers
+both counts with their sampling error, but not uncertainty in the preset.
 
 **Structure shape & size** classifies each cluster's shape from the point distribution (filament /
 ring / punctum / sheet / diffuse) and reports neutral size descriptors: contour length, straight

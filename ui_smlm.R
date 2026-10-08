@@ -253,11 +253,11 @@ smlm_ui <- fluidPage(
 
                   # -- Outlier localization trimming --------------------------
                  checkboxInput("trim_outliers",
-                               "Trim outlier localizations within traces", value = FALSE),
+                               "Trim outlier localizations within traces", value = SMLM_DEFAULTS$trim_outliers),
                  conditionalPanel(
                    condition = "input.trim_outliers == true",
                    numericInput("trim_k", "Reject beyond k × σ of the trace",
-                                value = 4, min = 2, max = 10, step = 0.5),
+                                value = SMLM_DEFAULTS$trim_k, min = 2, max = 10, step = 0.5),
                    uiOutput("trim_summary_ui")
                  ),
                  helpText("Flags single localizations sitting far from the rest of their own trace ",
@@ -273,12 +273,12 @@ smlm_ui <- fluidPage(
                ),
 
                # Trace spread z control appears only in 3D
-               checkboxInput("view_SD", "Inspect trace spread (\u03C3\u0303)", value = FALSE),
+               checkboxInput("view_SD", "Inspect trace spread (\u03C3\u0303)", value = SMLM_DEFAULTS$view_SD),
                conditionalPanel(
                  condition = "input.view_SD == true",
                  numericInput("sd_min_locs",
                               "Min localizations per trace for spread (σ̃)",
-                              value = MIN_LOCS_FOR_SPREAD_DEFAULT, min = 2, step = 1),
+                              value = SMLM_DEFAULTS$sd_min_locs, min = 2, step = 1),
                  helpText("Traces shorter than this are excluded from the spread histogram, ",
                           "the median-spread labels, the allowable-spread ranges, and the σ filters. "),
                  uiOutput("sd_summary_ui"),
@@ -475,7 +475,7 @@ smlm_ui <- fluidPage(
             ### De-blink correction (shared) ===
       tags$details(class = "sim-group",
       tags$summary(tags$b("De-blink correction")),
-      checkboxInput("enable_clustering", "Enable de-blink correction", value = FALSE),
+      checkboxInput("enable_clustering", "Enable de-blink correction", value = SMLM_DEFAULTS$enable_clustering),
       helpText("Merges a fluorophore's repeated blinks (nearby localizations / trace IDs) into one",
                "de-blinked ID, so downstream analyses don't overcount on the same molecule."),
       conditionalPanel(
@@ -483,18 +483,18 @@ smlm_ui <- fluidPage(
         radioButtons("deblink_method", "Merge criterion",
                      choices = c("Trace centroid distance" = "centroid",
                                  "Majority vote of localizations" = "vote"),
-                     selected = "centroid"),
+                     selected = SMLM_DEFAULTS$deblink_method),
         helpText("Centroid: merge when two traces sit in the same place. Majority vote: merge when ",
                  "most of a trace's localizations are closer to a neighbouring trace than to their ",
                  "own. Centroid is more accurate; the vote needs no distance in nm."),
 
         conditionalPanel(
           condition = "input.deblink_method == 'centroid'",
-          numericInput("eps_centroid", "Centroid distance threshold (nm)", value = 10, min = 0.1),
+          numericInput("eps_centroid", "Centroid distance threshold (nm)", value = SMLM_DEFAULTS$eps_centroid, min = 0.1),
           helpText("Two traces merge when their median positions are closer than this. ",
                    "This is the value the merge actually uses; k below just rewrites it in ",
                    "units of the measured trace spread."),
-          numericInput("centroid_k", "Threshold in units of trace spread (k)", value = 2.8,
+          numericInput("centroid_k", "Threshold in units of trace spread (k)", value = SMLM_DEFAULTS$centroid_k,
                        min = 0.5, max = 6, step = 0.1),
           helpText("Changing k rewrites the distance above. Too low leaves re-blinks counted ",
                    "twice; too high fuses neighbouring molecules. Grouping accuracy is flat ",
@@ -524,16 +524,16 @@ smlm_ui <- fluidPage(
         conditionalPanel(
           condition = "input.deblink_method == 'vote'",
           numericInput("vote_frac", "Fraction of localizations that must agree (f)",
-                       value = 0.3, min = 0.02, max = 0.9, step = 0.05),
+                       value = SMLM_DEFAULTS$vote_frac, min = 0.02, max = 0.9, step = 0.05),
           helpText("Two traces of one fluorophore score about 0.5, so useful values are well ",
                    "below that. Scores fall to ~0.23 at 10 nm apart and ~0.07 at 20 nm. ",
                    "Below ~0.25 a single localization can decide a short trace."),
-          numericInput("vote_rho", "Distance tolerance (rho)", value = 3.0, min = 0.5, max = 8, step = 0.1),
+          numericInput("vote_rho", "Distance tolerance (rho)", value = SMLM_DEFAULTS$vote_rho, min = 0.5, max = 8, step = 0.1),
           helpText("1.0 = the neighbouring trace must be strictly closer; higher is more willing to merge. ",
                    "Grouping accuracy rises with rho and then flattens, so erring high costs little."),
           radioButtons("vote_link", "Agreement", inline = TRUE,
                        choices = c("Both traces must agree" = "mutual", "Either is enough" = "either"),
-                       selected = "mutual")
+                       selected = SMLM_DEFAULTS$vote_link)
         ),
 
         # -- CHANNELS ---------------------------------------------------------
@@ -547,7 +547,7 @@ smlm_ui <- fluidPage(
             helpText("Blinks are only ever merged inside one channel, so no de-blinked ",
                      "molecule can contain two colours or two multiplex rounds."),
             checkboxInput("deblink_shared_spread",
-                          "Use one combined trace spread for all channels", value = FALSE),
+                          "Use one combined trace spread for all channels", value = SMLM_DEFAULTS$deblink_shared_spread),
             helpText("Off (default): each channel is merged at its own measured spread, ",
                      "because localization precision is a property of the dye. On: one ",
                      "pooled spread, which is faster on very large files but under-serves ",
@@ -559,7 +559,7 @@ smlm_ui <- fluidPage(
 
         # -- anisotropic metric (see deblink_axis_weights in helpers_smlm.R) --
         checkboxInput("deblink_anisotropic",
-                      "Scale axes by their own spread (anisotropic radius)", value = FALSE),
+                      "Scale axes by their own spread (anisotropic radius)", value = SMLM_DEFAULTS$deblink_anisotropic),
         helpText("Weights x, y and z by their measured trace spread before merging, so one radius ",
                  "fits all three axes. Affects the merge decision only - reported distances, ",
                  "cluster sizes and Rg stay in true nm."),
@@ -617,48 +617,48 @@ smlm_ui <- fluidPage(
       ### DBSCAN Median Clustering (Cluster2 calls) ===
       tags$details(class = "sim-group",
       tags$summary(tags$b("Median Clustering")),
-      checkboxInput("enable_cluster2", "Enable Median-based Clustering", value = FALSE),
+      checkboxInput("enable_cluster2", "Enable Median-based Clustering", value = SMLM_DEFAULTS$enable_cluster2),
       helpText("Clusters trace medians into larger structures."),
       conditionalPanel(
         condition = "input.enable_cluster2 == true",
         radioButtons("cluster2_method", "Median Clustering grouping method",
                      choices = c("DBSCAN" = "dbscan", "HDBSCAN" = "hdbscan", "OPTICS (Xi)" = "optics"),
-                     selected = "dbscan", inline = TRUE),
+                     selected = SMLM_DEFAULTS$cluster2_method, inline = TRUE),
         helpText("DBSCAN: fixed radius (eps). HDBSCAN: adaptive, MinPts only (= min cluster size). OPTICS (Xi): adaptive density, keeps small structures; tuned by Xi."),
         conditionalPanel(
           condition = "input.cluster2_method == 'dbscan'",
-          numericInput("eps2", "DBSCAN Epsilon (nm)", value = 200, min = 3)
+          numericInput("eps2", "DBSCAN Epsilon (nm)", value = SMLM_DEFAULTS$eps2, min = 3)
         ),
         conditionalPanel(
           condition = "input.cluster2_method == 'optics'",
-          numericInput("cluster2_xi", "OPTICS Xi (steepness, 0-1; lower = more/smaller clusters)", value = 0.05, min = 0.001, max = 0.5, step = 0.005)
+          numericInput("cluster2_xi", "OPTICS Xi (steepness, 0-1; lower = more/smaller clusters)", value = SMLM_DEFAULTS$cluster2_xi, min = 0.001, max = 0.5, step = 0.005)
         ),
-        numericInput("minpts2", "MinPts (all methods)", value = 15, min = 1),
+        numericInput("minpts2", "MinPts (all methods)", value = SMLM_DEFAULTS$minpts2, min = 1),
         helpText("Tip: set MinPts near the smallest number of TIDs you'd call a real structure."),
         # -- local-density prefilter (drop scattered background TIDs) --
-        checkboxInput("cluster2_prefilter", "Density prefilter (drop sparse background TIDs first)", value = FALSE),
+        checkboxInput("cluster2_prefilter", "Density prefilter (drop sparse background TIDs first)", value = SMLM_DEFAULTS$cluster2_prefilter),
         conditionalPanel(
           condition = "input.cluster2_prefilter == true",
-          numericInput("cluster2_prefilter_r", "Prefilter radius (nm)", value = 200, min = 1),
-          numericInput("cluster2_prefilter_min", "Min neighbours within radius", value = 3, min = 1),
+          numericInput("cluster2_prefilter_r", "Prefilter radius (nm)", value = SMLM_DEFAULTS$cluster2_prefilter_r, min = 1),
+          numericInput("cluster2_prefilter_min", "Min neighbours within radius", value = SMLM_DEFAULTS$cluster2_prefilter_min, min = 1),
           helpText("Keeps only centroids with at least this many neighbours within the radius, then groups the survivors.")
         ),
         # -- core-only membership (DBSCAN*) --
         conditionalPanel(
           condition = "input.cluster2_method == 'dbscan'",
-          checkboxInput("cluster2_core_only", "Core points only (drop border points)", value = FALSE),
+          checkboxInput("cluster2_core_only", "Core points only (drop border points)", value = SMLM_DEFAULTS$cluster2_core_only),
           helpText("DBSCAN also assigns border points: centroids within eps of a core point but sparse themselves.",
                    "This keeps only centroids that reach MinPts neighbours within eps.",
                    "HDBSCAN and OPTICS are already defined this way.")
         ),
         # -- minimum members per cluster --
-        numericInput("cluster2_min_members", "Min members per Median Cluster", value = 0, min = 0, step = 1),
+        numericInput("cluster2_min_members", "Min members per Median Cluster", value = SMLM_DEFAULTS$cluster2_min_members, min = 0, step = 1),
         helpText("Clusters left with fewer members than this are dropped whole. 0 = off. Counted after any core-only or pruning step."),
         # -- sparse-member pruning (post-clustering trim of loose members) --
-        checkboxInput("cluster2_prune", "Prune sparse cluster members (trim loosely-attached traces)", value = FALSE),
+        checkboxInput("cluster2_prune", "Prune sparse cluster members (trim loosely-attached traces)", value = SMLM_DEFAULTS$cluster2_prune),
         conditionalPanel(
           condition = "input.cluster2_prune == true",
-          numericInput("cluster2_prune_tol", "Prune tolerance (x local core distance; lower = stricter)", value = 2, min = 1.1, step = 0.1),
+          numericInput("cluster2_prune_tol", "Prune tolerance (x local core distance; lower = stricter)", value = SMLM_DEFAULTS$cluster2_prune_tol, min = 1.1, step = 0.1),
           helpText("Demotes to noise any member whose core distance (radius needed to reach MinPts neighbours)",
                    "exceeds this multiple of the median core distance of the members around it.",
                    "The baseline is local, so a density gradient within a structure does not condemn its sparser side.")
@@ -976,7 +976,7 @@ smlm_ui <- fluidPage(
       # block below.
       tags$details(class = "sim-group",
       tags$summary(tags$b("Channels: 2-colour split")),
-      checkboxInput("enable_two_color", "Split into 2 channels by DCR (per-trace median)", value = FALSE),
+      checkboxInput("enable_two_color", "Split into 2 channels by DCR (per-trace median)", value = SMLM_DEFAULTS$enable_two_color),
       helpText("Splits traces into two channels on their median DCR (or on 'fluo'). ",
                "Nothing is ever grouped across a channel: de-blinked molecules and ",
                "Median Clusters each belong to exactly one."),
@@ -985,13 +985,13 @@ smlm_ui <- fluidPage(
       conditionalPanel(
         condition = "input.enable_two_color == true",
         # DCR ranges (default mode when not using fluo)
-        checkboxInput("color_by_fluo", "Override with 'fluo' groups (1/2)", value = FALSE),
+        checkboxInput("color_by_fluo", "Override with 'fluo' groups (1/2)", value = SMLM_DEFAULTS$color_by_fluo),
         conditionalPanel(
           condition = "input.color_by_fluo == false",
           shinyWidgets::numericRangeInput("dcr_group1", "DCR range: Group 1",
-                                          value = c(0, 0.369), min = 0, max = 2),
+                                          value = SMLM_DEFAULTS$dcr_group1, min = 0, max = 2),
           shinyWidgets::numericRangeInput("dcr_group2", "DCR range: Group 2",
-                                          value = c(0.3691, 1), min = 0, max = 2),
+                                          value = SMLM_DEFAULTS$dcr_group2, min = 0, max = 2),
           actionButton("auto_detect_dcr", "Auto-detect split (GMM)",
                        icon = icon("wand-magic-sparkles"), class = "btn-sm btn-info"),
           uiOutput("dcr_gmm_info"),
@@ -1444,14 +1444,14 @@ smlm_ui <- fluidPage(
                 HTML("Whole <b>units</b> are dropped, never single localizations, so traces and de-blinking stay intact. Density divides by the estimated support, since a field includes the cell edge and dark regions. The draw is seeded per file."),
                 HTML("Use it only when density varies for reasons outside the biology. When density is the biology, equalising it removes the effect. Thinning is one-way and can push small clusters below minPts.")),
               helpText("For cells whose labelling density varies for reasons outside the biology. Leave off otherwise."),
-              checkboxInput("dens_norm_enable", "Measure density per file", value = FALSE),
+              checkboxInput("dens_norm_enable", "Measure density per file", value = SMLM_DEFAULTS$dens_norm_enable),
               conditionalPanel(
                 condition = "input.dens_norm_enable == true",
                 selectInput("dens_norm_unit", "Unit",
                             choices = c("Auto (molecules if de-blinking on)" = "auto",
                                         "De-blinked molecules" = "cluster",
                                         "Trace IDs"            = "tid"),
-                            selected = "auto"),
+                            selected = SMLM_DEFAULTS$dens_norm_unit),
                 checkboxInput("dens_norm_3d", "3-D (per µm³)", value = FALSE),
                 numericInput("dens_nn_k", "k for local density / NN check", value = 3,
                              min = 1, max = 20, step = 1),
@@ -1500,7 +1500,7 @@ smlm_ui <- fluidPage(
                 checkboxInput("dens_plot_log", "Log density axis", value = TRUE),
                 helpText("Local density spans a wide range within one cell."),
                 tags$hr(style = "margin:8px 0;"),
-                checkboxInput("dens_thin_enable", "Thin all files to a common density", value = FALSE),
+                checkboxInput("dens_thin_enable", "Thin all files to a common density", value = SMLM_DEFAULTS$dens_thin_enable),
             tags$div(style = "font-size:0.82em; color:#7a5c00; margin:2px 0 6px; padding:4px 8px; border-left:3px solid #e0c890; background:#fffdf6;",
               tags$b("Only for count-based read-outs"), " (DBSCAN counts, % in clusters, cluster sizes, NN ",
               "distances). Ripley's L and g(r) already divide density out."),
@@ -1675,7 +1675,7 @@ smlm_ui <- fluidPage(
           numericInput("fid_recur_r",  "Recurrence radius (nm, reported only)", value = 100, min = 10, max = 1000, step = 10),
           numericInput("fid_recur_min","Min co-located traces (reported only)", value = 4, min = 1, max = 50, step = 1),
           checkboxInput("fid_all_files", "Use all loaded files (uncheck for active file only)", value = TRUE),
-          checkboxInput("fid_exclude", "Exclude flagged traces from analyses", value = FALSE),
+          checkboxInput("fid_exclude", "Exclude flagged traces from analyses", value = SMLM_DEFAULTS$fid_exclude),
           helpText(style = "margin-top:-6px; font-size:0.78em; color:#888;",
                    "Reversible. Re-run the scan after changing thresholds."),
           actionButton("run_fiducial", "Run", icon = icon("play"), class = "btn-primary btn-sm"),

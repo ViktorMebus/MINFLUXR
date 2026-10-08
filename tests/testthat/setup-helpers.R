@@ -5,6 +5,7 @@ suppressMessages({
   source(file.path(.repo_root, "helpers_shared.R"))
   source(file.path(.repo_root, "helpers_tracking.R"))
   source(file.path(.repo_root, "helpers_smlm.R"))
+  source(file.path(.repo_root, "R", "smlm_settings.R"))
 })
 # Slow Monte-Carlo recovery tests run only when asked for.
 skip_if_not_slow <- function()

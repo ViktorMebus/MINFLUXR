@@ -26,6 +26,7 @@ source("R/est_dmap.R")       # spatially resolved D-map
 source("R/est_hmm.R")        # continuous-time diffusive-state HMM
 source("R/est_percell.R")    # per-cell (per-file) summaries for comparing conditions
 source("R/est_calib.R")      # instrument calibration (prefactor a, wander floor) from an immobile sample
+source("R/smlm_settings.R")  # SMLM settings: one set of defaults for the UI, helpers and reset buttons
 source("ui_smlm.R")
 source("ui_tracking.R")
 source("sim_ui.R")
