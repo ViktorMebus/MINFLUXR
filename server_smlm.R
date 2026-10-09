@@ -423,7 +423,9 @@ smlm_server <- function(input, output, session) {
   # file by TIM breakpoints) carrying mplex_channel / mplex_label / mplex_color.
   # Registered as one synthetic entry in smlm_file_store so the plot and every
   # Analysis tool operate on it unchanged. See plan: graceful-marinating-pudding.
-  mplex_name   <- "★ Multiplex"
+  # Plain name: it becomes part of downloaded file names (settings, CSV), where a
+  # symbol such as a star is rejected or mangled by some systems.
+  mplex_name   <- "Multiplex"
   MPLEX_TID_OFF <- 1e10            # per-channel tid offset (> u4 tid max ~4.3e9)
   mplex_spec_rv <- reactiveVal(NULL)  # list(channel,label,color,n_loc,n_trace)
 
@@ -596,7 +598,7 @@ smlm_server <- function(input, output, session) {
   #                  tim_file, tim_method, tim_breaks, tim_windows [tim mode]
   #                  labels, colors = one per channel (optional; defaults used))
   # RETURNS TRUE on success; FALSE after telling the user what is missing.
-  # SIDE EFFECTS registers the result as the "★ Multiplex" store entry, makes it
+  # SIDE EFFECTS registers the result as the "Multiplex" store entry, makes it
   #   active, remembers cfg (for Save) and re-applies remembered alignment offsets.
   # =========================================================================
   mplex_cfg_rv <- reactiveVal(NULL)   # recipe of the last successful build
@@ -786,7 +788,7 @@ smlm_server <- function(input, output, session) {
   #   rounds line up again.
   #
   # WHICH DATASET IS "THE MULTIPLEX"
-  #   Either the built "★ Multiplex" entry, or a loaded CSV that was exported
+  #   Either the built "Multiplex" entry, or a loaded CSV that was exported
   #   from a multiplex (it carries mplex_channel / mplex_label). mplex_target_rv
   #   names the store entry; mplex_spec_rv holds its channels. Each such store
   #   entry describes itself through attributes:
@@ -1273,7 +1275,7 @@ smlm_server <- function(input, output, session) {
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     ct <- NULL
     if (!is.null(df) && nrow(df))
-      ct <- tryCatch(attr(attach_channel_colors(resolve_channels(df, input), input),
+      ct <- tryCatch(attr(attach_channel_colors(resolve_channels(df, input), smlm_channel_colors(input)),
                           "channel_table"), error = function(e) NULL)
     if (is.null(ct) || nrow(ct) < 2L) return(NULL)
     ch <- stats::setNames(paste0("only:", ct$channel),
@@ -1836,8 +1838,8 @@ smlm_server <- function(input, output, session) {
       dcr_group1 = SMLM_DEFAULTS$dcr_group1,
       dcr_group2 = SMLM_DEFAULTS$dcr_group2,
       
-      color_group1 = "#1f77b4",
-      color_group2 = "#d62728",
+      color_group1 = SMLM_DISPLAY_DEFAULTS$color_group1,
+      color_group2 = SMLM_DISPLAY_DEFAULTS$color_group2,
       
       
       # CLUSTERING PARAMETERS ARE NOT HERE ANY MORE. There is one clustering
@@ -2824,7 +2826,7 @@ smlm_server <- function(input, output, session) {
   channel_spread_table <- reactive({
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    df <- tryCatch(attach_channel_colors(resolve_channels(df, input), input),
+    df <- tryCatch(attach_channel_colors(resolve_channels(df, input), smlm_channel_colors(input)),
                    error = function(e) NULL)
     if (is.null(df) || !nrow(df) || !"channel" %in% names(df)) return(NULL)
     thr  <- tryCatch(deblink_threshold_for_channel(df, input), error = function(e) NULL)
@@ -3754,7 +3756,7 @@ smlm_server <- function(input, output, session) {
   sd_channel_map <- reactive({
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    d <- tryCatch(attach_channel_colors(resolve_channels(df, input), input),
+    d <- tryCatch(attach_channel_colors(resolve_channels(df, input), smlm_channel_colors(input)),
                   error = function(e) NULL)
     if (is.null(d) || !nrow(d) || !"channel" %in% names(d)) return(NULL)
     if (length(unique(d$channel[!is.na(d$channel)])) < 2L) return(NULL)
@@ -5577,9 +5579,10 @@ smlm_server <- function(input, output, session) {
     # 3) POINTS (build pts + marker once)
     # -----------------------------------
     # --- build the points once (same idea as 3D) ---
-    pts <- build_pts_2d(df, input)
-    pts$color <- build_colors_for_pts(pts, input, default_palette_col = "color")
-    cmap <- color_mapping_for_pts(pts, input)
+    disp <- smlm_display_from_input(input)
+    pts <- build_pts_2d(df, disp, deblinked = isTRUE(input$enable_clustering))
+    pts$color <- build_colors_for_pts(pts, disp, default_palette_col = "color")
+    cmap <- color_mapping_for_pts(pts, disp)
     
     # bail out early if empty; still keep overlay + axes
     if (!nrow(pts)) {
@@ -6416,7 +6419,7 @@ smlm_server <- function(input, output, session) {
     # Colour is presentation, so it is applied here rather than inside the cached
     # chain - see attach_channel_colors(). This is what keeps the colour pickers
     # out of the prepared-data cache key.
-    df <- attach_channel_colors(df, input)
+    df <- attach_channel_colors(df, smlm_channel_colors(input))
     n_ch <- length(unique(df$channel[!is.na(df$channel)]))
 
     # ── Colours ─────────────────────────────────────────────────────────────
@@ -6883,12 +6886,13 @@ smlm_server <- function(input, output, session) {
     zero_col <- if (isTRUE(input$dark_mode)) "rgba(255,255,255,0.25)" else "rgba(0,0,0,0.25)"
     
     # Build the point table we actually plot
-    pts <- build_pts_3d(df, input)
+    disp <- smlm_display_from_input(input)
+    pts <- build_pts_3d(df, disp, deblinked = isTRUE(input$enable_clustering))
     
     # Compute colors for that table (default uses your existing palette in pts$color)
-    pts$color <- build_colors_for_pts(pts, input, default_palette_col = "color")
+    pts$color <- build_colors_for_pts(pts, disp, default_palette_col = "color")
     
-    cmap <- color_mapping_for_pts(pts, input)
+    cmap <- color_mapping_for_pts(pts, disp)
     
     # Plot the points ONCE
     fig <- plotly::plot_ly()

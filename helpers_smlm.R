@@ -532,7 +532,7 @@ resolve_channels <- function(df, settings) {
   # clusters and force every file to be re-clustered. Reading them here also made
   # the cache key dishonest - it did not include them, so a recoloured channel
   # kept serving the old hex. Colour is attached at render time instead, by
-  # attach_channel_colors(). See .prep_key_selftest() in server_smlm.R.
+  # attach_channel_colors(). See the cache key in prepared_df(), server_smlm.R.
   #
   # `mplex_color` is different and stays: it is a DATA column written by the
   # multiplex builder, not a live input.
@@ -636,15 +636,15 @@ resolve_channels <- function(df, settings) {
 #   PRESENTATION and is applied here, cheaply, every render.
 #
 # ARGUMENTS
-#   df    : a frame carrying `channel` (from resolve_channels)
-#   input : Shiny input list. Reads color_group1 / color_group2 only.
+#   df     : a frame carrying `channel` (from resolve_channels)
+#   colors : channel colours, A then B (smlm_channel_colors(); the colour pickers)
 #
 # RETURNS
 #   df with channel_color filled and attr "channel_table" refreshed. Rows that
 #   already carry a colour (multiplex, whose builder writes `mplex_color` into
 #   the data) keep it.
 # =============================================================================
-attach_channel_colors <- function(df, input) {
+attach_channel_colors <- function(df, colors = smlm_channel_colors()) {
   if (!is.data.frame(df) || !nrow(df) || !"channel" %in% names(df)) return(df)
   if (!"channel_color" %in% names(df)) df$channel_color <- NA_character_
 
@@ -658,7 +658,7 @@ attach_channel_colors <- function(df, input) {
   if (any(need)) {
     ids <- sort(unique(df$channel[!is.na(df$channel)]))
     pal <- if (length(ids) <= 2L)
-      c(input$color_group1 %||% "#1f77b4", input$color_group2 %||% "#d62728")
+      colors
       else mplex_default_colors(length(ids))
     idx <- match(df$channel, ids)
     df$channel_color[need] <- pal[((idx[need] - 1L) %% length(pal)) + 1L]
@@ -976,9 +976,12 @@ assign_analysis_group_from_mplex <- function(df, chA, chB) {
   df[!is.na(df$analysis_group), , drop = FALSE]
 }
 
+# GOAL: one colour per point for the current colouring mode.
+#   display : display options (SMLM_DISPLAY_DEFAULTS; smlm_display_from_input)
 # Always returns a color vector length nrow(df_pts)
-build_colors_for_pts <- function(df_pts, input, default_palette_col = "color") {
-  mode <- (input$color_mode %||% "default")
+build_colors_for_pts <- function(df_pts, display = NULL, default_palette_col = "color") {
+  d    <- .smlm_display(display)
+  mode <- d$color_mode
   map_to_gradient <- function(v, pal_name = NULL, reverse = FALSE) {
     v <- as.numeric(v)
     if (!length(v) || all(!is.finite(v))) return(rep("#bdbdbd", length(v)))
@@ -992,7 +995,7 @@ build_colors_for_pts <- function(df_pts, input, default_palette_col = "color") {
       v <- v + seq_len(length(v)) * eps
       lo <- min(v, na.rm = TRUE); hi <- max(v, na.rm = TRUE)
     }
-    pal <- get_palette_hex(pal_name %||% input$numeric_palette, n = 256, reverse = isTRUE(reverse))
+    pal <- get_palette_hex(pal_name %||% d$numeric_palette, n = 256, reverse = isTRUE(reverse))
     idx <- round(1 + 255 * (v - lo) / (hi - lo))
     idx[!is.finite(idx)] <- 128
     pal[pmax(1, pmin(256, idx))]
@@ -1002,14 +1005,14 @@ build_colors_for_pts <- function(df_pts, input, default_palette_col = "color") {
   if (mode == "default") {
     # Respect existing categorical colors (trace/cluster) you already computed
     col <- df_pts[[default_palette_col]]
-    if (is.null(col)) col <- rep(input$unicolor_hex %||% "#1f77b4", nrow(df_pts))
+    if (is.null(col)) col <- rep(d$unicolor_hex, nrow(df_pts))
     col[!nzchar(col)] <- "#bdbdbd"
     col[is.na(col)]   <- "#bdbdbd"
     return(col)
   }
   
   if (mode == "unicolor") {
-    return(rep(input$unicolor_hex %||% "#1f77b4", nrow(df_pts)))
+    return(rep(d$unicolor_hex, nrow(df_pts)))
   }
 
   if (mode == "multiplex") {
@@ -1023,12 +1026,12 @@ build_colors_for_pts <- function(df_pts, input, default_palette_col = "color") {
   if (mode == "z") {
     # raw points: 'z' exists; medians: we put 'z_med' in builders
     base <- if ("z" %in% names(df_pts)) df_pts$z else df_pts$z_med
-    return(map_to_gradient(base, pal_name = input$numeric_palette, reverse = input$numeric_palette_reverse))
+    return(map_to_gradient(base, pal_name = d$numeric_palette, reverse = d$numeric_palette_reverse))
     
   } else if (mode == "tim") {
     # medians: 'tim_med'; raw: fallback to per-point 'tim'
     base <- if ("tim_med" %in% names(df_pts)) df_pts$tim_med else df_pts$tim
-    return(map_to_gradient(base, pal_name = input$numeric_palette, reverse = input$numeric_palette_reverse))
+    return(map_to_gradient(base, pal_name = d$numeric_palette, reverse = d$numeric_palette_reverse))
     
   }  else if (mode %in% c("density","locdens")) {
     # precomputed in builders: 'dens' (counts per TID/cluster for medians; per-trace for raw)
@@ -1038,7 +1041,7 @@ build_colors_for_pts <- function(df_pts, input, default_palette_col = "color") {
       eps <- max(1e-9, abs(as.numeric(base[which(is.finite(base))[1]]) %||% 1) * 1e-6)
       base <- as.numeric(base) + seq_len(length(base)) * eps
     }
-    return(map_to_gradient(base, pal_name = input$numeric_palette, reverse = input$numeric_palette_reverse))
+    return(map_to_gradient(base, pal_name = d$numeric_palette, reverse = d$numeric_palette_reverse))
   }
   
   # fallback
@@ -1063,7 +1066,10 @@ compute_spatial_density <- function(x, y, z = NULL, r = 150, k_max = 1000) {
   as.integer(dens)
 }
 # --- build_pts_2d ---
-build_pts_2d <- function(df, input) {
+#   display   : display options (dens_radius_nm, show_medians are read)
+#   deblinked : TRUE when de-blinking ran, so medians are per molecule (`cluster`)
+build_pts_2d <- function(df, display = NULL, deblinked = FALSE) {
+  d <- .smlm_display(display)
   stopifnot(all(c("x","y","tid") %in% names(df)))
   
   # --- 1) compute per-tid medians once ---
@@ -1084,15 +1090,15 @@ build_pts_2d <- function(df, input) {
     dplyr::filter(is.finite(x), is.finite(y))
 
   # --- 2) spatial density of trace medians (2D) ---
-  r_nm <- input$dens_radius_nm %||% 500  # UI default (sliderInput "dens_radius_nm")
+  r_nm <- d$dens_radius_nm
   tid_meds$dens <- compute_spatial_density(tid_meds$x, tid_meds$y, r = r_nm)
   
-  if (isTRUE(input$show_medians)) {
+  if (isTRUE(d$show_medians)) {
     
     # If clustering AND you are showing cluster medians:
     # density should probably be computed on *cluster medians* (not tid medians),
     # because that's what you're plotting. We'll keep that consistent.
-    if (isTRUE(input$enable_clustering)) {
+    if (isTRUE(deblinked)) {
       pts <- df %>%
         dplyr::filter(!is.na(cluster) & cluster != 0) %>%
         dplyr::group_by(cluster) %>%
@@ -1125,7 +1131,7 @@ build_pts_2d <- function(df, input) {
       dplyr::mutate(
         z_med   = if ("z"   %in% names(.)) z   else NA_real_,
         tim_med = if ("tim" %in% names(.)) tim else NA_real_,
-        group_id = if (isTRUE(input$enable_clustering) && "cluster" %in% names(.))
+        group_id = if (isTRUE(deblinked) && "cluster" %in% names(.))
           ifelse(is.na(cluster) | cluster == 0, -1L, cluster) else tid
       )
   }
@@ -1140,7 +1146,10 @@ build_pts_2d <- function(df, input) {
 
 
 # --- build_pts_3d ---
-build_pts_3d <- function(df, input) {
+#   display   : display options (dens_radius_nm, show_medians are read)
+#   deblinked : TRUE when de-blinking ran, so medians are per molecule (`cluster`)
+build_pts_3d <- function(df, display = NULL, deblinked = FALSE) {
+  d <- .smlm_display(display)
   stopifnot(all(c("x","y","z","tid") %in% names(df)))
   
   tid_meds <- df %>%
@@ -1159,11 +1168,11 @@ build_pts_3d <- function(df, input) {
     ) %>%
     dplyr::filter(is.finite(x), is.finite(y), is.finite(z))
 
-  r_nm <- input$dens_radius_nm %||% 500
+  r_nm <- d$dens_radius_nm
   tid_meds$dens <- compute_spatial_density(tid_meds$x, tid_meds$y, tid_meds$z, r = r_nm)
   
-  if (isTRUE(input$show_medians)) {
-    if (isTRUE(input$enable_clustering)) {
+  if (isTRUE(d$show_medians)) {
+    if (isTRUE(deblinked)) {
       pts <- df %>%
         dplyr::filter(!is.na(cluster) & cluster != 0) %>%
         dplyr::group_by(cluster) %>%
@@ -1193,7 +1202,7 @@ build_pts_3d <- function(df, input) {
       dplyr::left_join(tid_meds %>% dplyr::select(tid, dens), by = "tid") %>%
       dplyr::mutate(
         tim_med = if ("tim" %in% names(.)) tim else NA_real_,
-        group_id = if (isTRUE(input$enable_clustering) && "cluster" %in% names(.))
+        group_id = if (isTRUE(deblinked) && "cluster" %in% names(.))
           ifelse(is.na(cluster) | cluster == 0, -1L, cluster) else tid
       )
   }
@@ -1205,10 +1214,14 @@ build_pts_3d <- function(df, input) {
   pts %>% dplyr::filter(is.finite(x), is.finite(y), is.finite(z))
 }
 # --- color_mapping_for_pts ---
-color_mapping_for_pts <- function(pts, input) {
-  mode     <- (input$color_mode %||% "default")
-  pal_name <- input$numeric_palette %||% "Spectral"
-  pal_rev  <- isTRUE(input$numeric_palette_reverse)
+# GOAL: the plotly colour specification for the points (a hex vector, or a
+# numeric colour scale with its range) in the current colouring mode.
+#   display : display options (SMLM_DISPLAY_DEFAULTS; smlm_display_from_input)
+color_mapping_for_pts <- function(pts, display = NULL) {
+  d        <- .smlm_display(display)
+  mode     <- d$color_mode
+  pal_name <- d$numeric_palette
+  pal_rev  <- isTRUE(d$numeric_palette_reverse)
   
   # Helper: build a numeric colorscale mapping
   build_num_map <- function(v, title) {
@@ -1246,7 +1259,7 @@ color_mapping_for_pts <- function(pts, input) {
   
   if (mode == "default") {
     col <- pts$color
-    if (is.null(col)) col <- rep(input$unicolor_hex %||% "#1f77b4", nrow(pts))
+    if (is.null(col)) col <- rep(d$unicolor_hex, nrow(pts))
     col[!nzchar(col)] <- "#bdbdbd"; col[is.na(col)] <- "#bdbdbd"
     return(list(showscale = FALSE, kind = "hex", hex = col))
   }
@@ -1254,7 +1267,7 @@ color_mapping_for_pts <- function(pts, input) {
   if (mode == "unicolor") {
     return(list(
       showscale = FALSE, kind = "hex",
-      hex = rep(input$unicolor_hex %||% "#1f77b4", nrow(pts))
+      hex = rep(d$unicolor_hex, nrow(pts))
     ))
   }
 

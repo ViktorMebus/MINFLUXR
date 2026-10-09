@@ -348,12 +348,12 @@ smlm_ui <- fluidPage(
             "Time (tim)"                             = "tim",
             "Trace-median spatial density"           = "locdens"
           ),
-          selected = "default"
+          selected = SMLM_DISPLAY_DEFAULTS$color_mode
         ),
         
         conditionalPanel(
           condition = "input.color_mode == 'unicolor'",
-          colourpicker::colourInput("unicolor_hex", "Unicolor", value = "#1f77b4")
+          colourpicker::colourInput("unicolor_hex", "Unicolor", value = SMLM_DISPLAY_DEFAULTS$unicolor_hex)
         ),
         
         conditionalPanel(
@@ -361,17 +361,17 @@ smlm_ui <- fluidPage(
           selectInput(
             "numeric_palette", "Numeric colorscale",
             choices = NUMERIC_PALETTES,
-            selected = "Spectral"
+            selected = SMLM_DISPLAY_DEFAULTS$numeric_palette
           ),
           conditionalPanel(
             condition = "input.color_mode == 'locdens'",
             sliderInput("dens_radius_nm", "Spatial density radius (nm)",
-                        min = 10, max = 5000, value = 500, step = 10),
+                        min = 10, max = 5000, value = SMLM_DISPLAY_DEFAULTS$dens_radius_nm, step = 10),
             helpText("Counts how many other trace-median positions fall within this radius. Colors traces by that local density.")
           ),
-          checkboxInput("numeric_palette_reverse", "Reverse colorscale", value = FALSE)),
+          checkboxInput("numeric_palette_reverse", "Reverse colorscale", value = SMLM_DISPLAY_DEFAULTS$numeric_palette_reverse)),
         
-        checkboxInput("show_medians", "Show trace median positions.", value = FALSE),
+        checkboxInput("show_medians", "Show trace median positions.", value = SMLM_DISPLAY_DEFAULTS$show_medians),
         checkboxInput("dark_mode", "Dark mode", value = FALSE),
         checkboxInput("hide_grid", "Hide gridlines & axis titles", value = FALSE),
         conditionalPanel(
@@ -1007,8 +1007,8 @@ smlm_ui <- fluidPage(
             downloadButton("download_dcr_conf", "Download per-trace confidence", class = "btn-sm"))
         ),
         
-        colourpicker::colourInput("color_group1", "Color: Group 1", value = "#1f77b4"),
-        colourpicker::colourInput("color_group2", "Color: Group 2", value = "#d62728"),
+        colourpicker::colourInput("color_group1", "Color: Group 1", value = SMLM_DISPLAY_DEFAULTS$color_group1),
+        colourpicker::colourInput("color_group2", "Color: Group 2", value = SMLM_DISPLAY_DEFAULTS$color_group2),
         
         # NN is NOT duplicated here either. The Nearest Neighbor Analysis panel
         # above ADAPTS when channels exist: it gains a Within / Between / All

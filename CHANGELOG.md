@@ -147,7 +147,16 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
   Ten settings were also never saved (the Median Cluster method and its options, and the density
   unit). Settings files now carry every setting that changes results, and loading restores all of
   them; an older file restores what it holds.
+- The plot helpers take display options (colour mode, palette, medians, density radius, channel
+  colours) as plain arguments with one set of defaults (`SMLM_DISPLAY_DEFAULTS`), kept apart from
+  the settings that change results. No helper reads the app's input directly any more.
 - Removed three unused helper functions.
+
+### Multiplex: plain dataset name
+
+- The built multiplex dataset is called "Multiplex" (it was "★ Multiplex"). The name is part of
+  downloaded file names (settings, CSV export), where the star was rejected or garbled on some
+  systems.
 
 ### Tests
 

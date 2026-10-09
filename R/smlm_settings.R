@@ -30,6 +30,9 @@
 ##   smlm_settings_from_file(raw) .. settings from a saved settings file (either layout)
 ##   smlm_settings_to_legacy() ..... write settings into the older file layout
 ##   smlm_settings_restore_plan() .. which widget update restores each setting, in order
+##   SMLM_DISPLAY_DEFAULTS ......... display options (colour, palette, medians); not settings
+##   smlm_display_from_input() ..... display options from the app
+##   smlm_channel_colors() ......... channel A/B colours for attach_channel_colors()
 ##   SMLM_SETTINGS_SPEC ............ default / type / limits / stage per setting
 ##   SMLM_DEFAULTS ................. the defaults alone, for UI widgets and fallbacks
 ##
@@ -385,6 +388,47 @@ smlm_settings_restore_plan <- function(s, ids) {
   plan <- data.frame(id = ids, widget = unname(kind), stringsAsFactors = FALSE)
   attr(plan, "values") <- lapply(ids, function(id) .subset2(s, id))
   plan
+}
+
+# =============================================================================
+# DISPLAY OPTIONS - how points are drawn, never what is computed
+# =============================================================================
+# Kept apart from the settings above on purpose: they change the picture, not a
+# number, so they stay out of the cache key and a palette change never
+# re-clusters. The plot helpers (build_pts_2d/3d, build_colors_for_pts,
+# color_mapping_for_pts, attach_channel_colors) take these as plain arguments,
+# and the UI widgets read their initial values from here.
+SMLM_DISPLAY_DEFAULTS <- list(
+  color_mode              = "default",   # default / multiplex / unicolor / z / tim / locdens
+  numeric_palette         = "Spectral",
+  numeric_palette_reverse = FALSE,
+  unicolor_hex            = "#1f77b4",
+  dens_radius_nm          = 500,         # radius for the trace-median density colouring
+  show_medians            = FALSE,       # draw trace (or molecule) medians instead of localizations
+  color_group1            = "#1f77b4",   # channel A
+  color_group2            = "#d62728"    # channel B
+)
+
+# GOAL: the display options from a Shiny `input` (or a partial list), each
+# missing one at its default. Reads only these eight inputs.
+smlm_display_from_input <- function(input) {
+  stats::setNames(lapply(names(SMLM_DISPLAY_DEFAULTS), function(id)
+    input[[id]] %||% SMLM_DISPLAY_DEFAULTS[[id]]), names(SMLM_DISPLAY_DEFAULTS))
+}
+
+# GOAL: what the plot helpers call on their `display` argument: a complete list,
+# whether they were given display options, a partial list, or Shiny's input.
+.smlm_display <- function(display) {
+  if (is.null(display)) return(SMLM_DISPLAY_DEFAULTS)
+  if (inherits(display, "reactivevalues")) return(smlm_display_from_input(display))
+  utils::modifyList(SMLM_DISPLAY_DEFAULTS, as.list(display)[intersect(names(display),
+                                                                       names(SMLM_DISPLAY_DEFAULTS))])
+}
+
+# The two channel colours, A then B, as attach_channel_colors() takes them.
+smlm_channel_colors <- function(display = NULL) {
+  d <- .smlm_display(display)
+  c(d$color_group1, d$color_group2)
 }
 
 # Print only what differs from the defaults: a settings object is mostly defaults.
