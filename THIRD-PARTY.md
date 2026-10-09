@@ -46,7 +46,7 @@ notice of modification are kept. That is the purpose of this section.
 **Reimplemented in R in MINFLUXR:**
 - **DCR pooling across iterations** (`helpers_shared.R`, `.minflux_finalize_df` / `pool_dcr`): the
   ECO-weighted mean of `dcr1` over iterations with non-zero DCR and ECO, per trace ID.
-- **Per-trace spread** (`helpers_smlm.R`, `sd_by_tid`): the per-axis standard deviation of the
+- **Per-trace spread** (`R/smlm_filters.R`, `sd_by_tid`): the per-axis standard deviation of the
   localizations within one trace ID, used as a quality statistic.
 
 **Changes made:**

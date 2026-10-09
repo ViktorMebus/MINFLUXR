@@ -18,7 +18,7 @@
 ##   global.R            Auto-sourced by Shiny; loads packages and all helpers
 ##   packages.R          Package install + load, upload limit, global constants
 ##   helpers_shared.R    Helper functions used by both SMLM and tracking
-##   helpers_smlm.R      SMLM-only helpers
+##   helpers_smlm.R      SMLM-only helpers (loads R/smlm_*.R)
 ##   helpers_tracking.R  Tracking-only helper functions
 ##   ui_smlm.R           smlm_ui  — SMLM fluidPage interior
 ##   ui_tracking.R       tracking_ui — Tracking fluidPage interior

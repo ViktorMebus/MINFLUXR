@@ -79,8 +79,10 @@ test_that("a plain list and the app's input give the same plot points", {
 # GUARD: no helper reads Shiny's input directly any more, and the display widgets
 # take their initial values from SMLM_DISPLAY_DEFAULTS.
 test_that("helpers do not read input$ and display widgets use the shared defaults", {
-  h <- paste(readLines(file.path(.repo_root, "helpers_smlm.R"), warn = FALSE, encoding = "UTF-8"),
-             collapse = "\n")
+  parts <- list.files(file.path(.repo_root, "R"), "^smlm_.*\\.R$", full.names = TRUE)
+  parts <- c(file.path(.repo_root, "helpers_smlm.R"), setdiff(parts, file.path(.repo_root, "R", "smlm_settings.R")))
+  expect_gt(length(parts), 10)                           # the split helper files are scanned
+  h <- paste(unlist(lapply(parts, readLines, warn = FALSE, encoding = "UTF-8")), collapse = "\n")
   expect_false(grepl("input$", gsub("#[^\n]*", "", h), fixed = TRUE))
   ui <- paste(readLines(file.path(.repo_root, "ui_smlm.R"), warn = FALSE, encoding = "UTF-8"),
               collapse = "\n")

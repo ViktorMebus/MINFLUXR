@@ -92,7 +92,10 @@ test_that("the data chain reads only settings that are defined", {
 test_that("no literal defaults for defined settings in helpers or server", {
   ids <- paste(names(SMLM_SETTINGS_SPEC), collapse = "|")
   pat <- sprintf("input\\$(%s)\\s*%%\\|\\|%%\\s*(?!SMLM_DEFAULTS)[^,)\\s]+", ids)
-  hits <- unlist(lapply(c("helpers_smlm.R", "server_smlm.R"), function(f)
+  helper_parts <- setdiff(file.path("R", list.files(file.path(.repo_root, "R"), "^smlm_.*\\.R$")),
+                          "R/smlm_settings.R")
+  expect_gt(length(helper_parts), 10)
+  hits <- unlist(lapply(c(helper_parts, "server_smlm.R"), function(f)
     regmatches(.read_src(f), gregexpr(pat, .read_src(f), perl = TRUE))[[1]]))
   allowed <- c("input$tid_length_range %||% c(0", "input$minpts2 %||% 4L")
   expect_equal(setdiff(hits, allowed), character(0))

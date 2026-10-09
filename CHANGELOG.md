@@ -153,7 +153,14 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - Each Run button takes one snapshot of the settings when pressed and uses it for every file it
   processes; panels that update live keep reading only the settings they use. Results are
   unchanged.
-- Removed six unused helper functions.
+- Removed unused helper functions: six during the settings work, then 24 more found by tracing
+  every function's callers (colour conversions, an older trace-spread table and histogram, mesh
+  builders, NN edge builder and small utilities, none called anywhere). Also removed a second
+  `%||%` and an earlier `geometric_median()` that the later definition had always overridden.
+- **The SMLM helpers are split by theme** into `R/smlm_*.R` (plot, channels, filters,
+  clustering, nearest neighbour, shapes, structures, ground-truth estimate, spatial statistics,
+  support, hotspots, summaries). `helpers_smlm.R` now loads them, so anything that sources it
+  works as before. Every function is unchanged.
 
 ### Multiplex: plain dataset name
 

@@ -60,7 +60,7 @@
 ##   therefore measure the LABEL, not the biology. In `cluster2`, id 0 means
 ##   noise/unassigned and must be excluded before counting; `cluster` has no 0
 ##   because de-blinking assigns every trace (see deblink_assign_singletons).
-##   (Implementation: apply_clustering_pipeline() in helpers_smlm.R.)
+##   (Implementation: apply_clustering_pipeline() in R/smlm_clustering.R.)
 ##
 ## ── 3. MAP OF THE ANALYSES (grep the name; line numbers drift) ───────────────
 ##   Upload & settings ......... uploaded_df, get_ui_settings, raw_df, df_full_raw
@@ -78,7 +78,7 @@
 ##   Image overlay ............. confocal_meta, image_overlay
 ##
 ##   The heavy spatial statistics themselves (Ripley L/L12, PCF, KDE
-##   co-localization, RoG, batch NN) live in helpers_smlm.R - this file wires
+##   co-localization, RoG, batch NN) live in R/smlm_*.R - this file wires
 ##   them to inputs and outputs.
 ##
 ## ── 4. CONVENTIONS & GOTCHAS ─────────────────────────────────────────────────
@@ -6157,7 +6157,7 @@ smlm_server <- function(input, output, session) {
   }
   # make_two_color_tid_map() was a third copy of the DCR/fluo trace split, kept
   # alongside assign_two_color_group() and assign_analysis_group(). All three are
-  # now resolve_channels() in helpers_smlm.R, which is the only place a channel
+  # now resolve_channels() in R/smlm_channels.R, which is the only place a channel
   # is defined.
   
   
@@ -6942,7 +6942,7 @@ smlm_server <- function(input, output, session) {
       }
       
       # No alpha radius is asked for: alpha_surface_3d() derives one per group
-      # from that group's own point spacing. See its header in helpers_smlm.R for
+      # from that group's own point spacing. See its header in R/smlm_shapes.R for
       # why a single global radius was both meaningless (a 30 nm molecule and a
       # 500 nm structure need different radii) and inert (the old code drew the
       # whole tetrahedralization, which is identical at every alpha).
@@ -8153,7 +8153,7 @@ smlm_server <- function(input, output, session) {
         group_df <- wrap_group_rows(df, "cluster2", g)
         if (nrow(group_df) >= 4) {
           # Radius derived per cluster from its own point spacing - see
-          # alpha_surface_3d() in helpers_smlm.R.
+          # alpha_surface_3d() in R/smlm_shapes.R.
           srf <- alpha_surface_3d(as.matrix(group_df[, c("x", "y", "z")]))
           if (!is.null(srf)) {
 
@@ -8385,7 +8385,7 @@ smlm_server <- function(input, output, session) {
   ## been run, tagged with each file's group, so between-group statistics use one
   ## value per cell. Group-mode histograms pool units across files, which is fine
   ## for looking but pseudo-replicates any test run on them; see per_file_summary()
-  ## in helpers_smlm.R. Reads the stored results at download time, so it reflects
+  ## in R/smlm_summary.R. Reads the stored results at download time, so it reflects
   ## the last Run of each panel. The result stores are defined further down this
   ## function; they exist by the time the handler can fire.
   output$download_per_file_summary <- downloadHandler(
@@ -8425,7 +8425,7 @@ smlm_server <- function(input, output, session) {
   ##
   ## The maths, the choice of thinning target and the trap in using NN distances
   ## as that target are all documented at the "8b. LABELLING-DENSITY
-  ## NORMALISATION" banner in helpers_smlm.R. Read that before changing anything
+  ## NORMALISATION" banner in R/smlm_support.R. Read that before changing anything
   ## here. In one line: g(r) and K(r) are exactly invariant under independent
   ## thinning, so thinning removes a density artefact without removing real
   ## clustering - but the TARGET must be the global density n/support, which
@@ -9052,7 +9052,7 @@ smlm_server <- function(input, output, session) {
   ## One switch, because it is one methodological choice: whether Ripley's L, g(r),
   ## L12, g12 and the co-localization null measure intensity over the SAMPLE SUPPORT
   ## or over the axis-aligned bounding box. See the SUPPORT-AWARE OBSERVATION WINDOW
-  ## banner in helpers_smlm.R for the measured effect (a CSR pattern in an L-shaped
+  ## banner in R/smlm_support.R for the measured effect (a CSR pattern in an L-shaped
   ## cell read as clustered by +68.9 nm of L-r with the box, -13.5 nm with the
   ## support; co-localization false positives 17-37% -> 0%).
   ##
@@ -13594,7 +13594,7 @@ smlm_server <- function(input, output, session) {
   ## Computes, per file: the cell footprint, every unit's local density as a
   ## MULTIPLE OF THAT CELL'S OWN MEAN, a CSR-calibrated DBSCAN eps, and the foci
   ## that eps finds. See the block banner "8c. LOCAL DENSITY & HOTSPOTS" in
-  ## helpers_smlm.R for why these statistics and not nearest-neighbour distance.
+  ## R/smlm_hotspots.R for why these statistics and not nearest-neighbour distance.
   ##
   ## THE FOOTPRINT IS NOT OPTIONAL HERE, which is the one place this panel departs
   ## from the rest of the tab. Elsewhere `spatial_use_support` is an opt-in that

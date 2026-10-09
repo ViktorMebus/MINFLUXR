@@ -557,7 +557,7 @@ smlm_ui <- fluidPage(
           )
         ),
 
-        # -- anisotropic metric (see deblink_axis_weights in helpers_smlm.R) --
+        # -- anisotropic metric (see deblink_axis_weights in R/smlm_clustering.R) --
         checkboxInput("deblink_anisotropic",
                       "Scale axes by their own spread (anisotropic radius)", value = SMLM_DEFAULTS$deblink_anisotropic),
         helpText("Weights x, y and z by their measured trace spread before merging, so one radius ",
