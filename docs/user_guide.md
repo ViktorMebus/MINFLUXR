@@ -169,7 +169,10 @@ moving emitters).
   spread > k × that axis's median. Dropped traces are removed **before** grouping, clustering, fits
   and surfaces.
 
-**Download / Load Filter Settings** saves and restores all filter parameters as JSON.
+**Download / Load Filter Settings** saves and restores, as JSON, every setting that changes results
+(filters, trimming, channel split, de-blinking, median clustering, density thinning, fiducial
+exclusion, axial calibration) together with the crop and the display state. Loading an older file
+restores the settings it holds and leaves the others as they are.
 **Export MINFLUX data (.csv)** writes the currently filtered localizations.
 
 ### Visualization Options

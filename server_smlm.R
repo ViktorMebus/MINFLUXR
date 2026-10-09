@@ -1533,7 +1533,13 @@ smlm_server <- function(input, output, session) {
   get_ui_settings <- reactive({
     req(uploaded_df_rv())
     list(
-  
+      # Every setting that changes results, complete by construction
+      # (R/smlm_settings.R). The loader reads this block first; the fields below
+      # keep the older layout readable and carry everything that is not a setting
+      # (display state, crop region, overlay, QC thresholds).
+      settings_version = SMLM_SETTINGS_FILE_VERSION,
+      smlm_settings    = unclass(smlm_settings_from_input(input)),
+
       efo_range        = input$efo_range,
       cfr_range        = input$cfr_range,
       tim_range        = input$tim_range,
@@ -3118,6 +3124,16 @@ smlm_server <- function(input, output, session) {
       return()
     }
     
+    # Settings that change results: from the file's smlm_settings block, or from
+    # the older layout for files saved before it existed. Some are restored below
+    # by the filter / crop / QC code from their older places (it clamps ranges to
+    # the loaded data), so the block's values are copied there first; every other
+    # setting is applied by restore_settings_plan(). Settings a file does not hold
+    # are left as they are.
+    sf  <- smlm_settings_from_file(raw)
+    raw <- smlm_settings_to_legacy(raw, sf$settings,
+                                   intersect(sf$present, .SETTINGS_RESTORED_WITH_FILTERS))
+
     base_fil <- filters_defaults_from_data(uploaded_df())
     fil <- modifyList(base_fil, raw, keep.null = TRUE)
     ov  <- modifyList(overlay_defaults(), raw$overlay %||% list(), keep.null = TRUE)
@@ -3249,6 +3265,26 @@ smlm_server <- function(input, output, session) {
         }
       }
 
+      # ── Restore every other setting that changes results ───────────────────
+      # Channels, de-blinking, median clustering, channel scope, density unit.
+      # Before this, a reloaded settings file restored the filters but clustered
+      # with whatever the session had.
+      restore_settings_plan(smlm_settings_restore_plan(
+        sf$settings, setdiff(sf$present, .SETTINGS_RESTORED_WITH_FILTERS)))
+
+      # Axial calibration rescales every z distance; restore and commit it, as the
+      # Median Cluster settings file does.
+      zs <- suppressWarnings(as.numeric(raw$z_scale))
+      if (length(zs) == 1L && is.finite(zs) && zs > 0) {
+        updateNumericInput(session, "z_scale", value = zs)
+        commit_z_scale(zs, reason = "Axial calibration from settings")
+      }
+      # Channel colours (display only, but part of the saved two-colour block).
+      tc <- raw$two_color %||% list()
+      for (nm in c("color_group1", "color_group2"))
+        if (is.character(tc[[nm]]) && length(tc[[nm]]) == 1L)
+          colourpicker::updateColourInput(session, nm, value = tc[[nm]])
+
       apply_overlay(ov)
       apply_heatmap(hm)
       # Re-run the plotted/exported pipeline so a restored 2D crop or trimmer
@@ -3256,6 +3292,30 @@ smlm_server <- function(input, output, session) {
       plot_trigger(Sys.time())
     }, once = TRUE)
   })
+
+  # Settings the loader above restores through the filter / crop / QC code, from
+  # their places in the older file layout. Every other setting in
+  # SMLM_SETTINGS_SPEC is restored by restore_settings_plan().
+  .SETTINGS_RESTORED_WITH_FILTERS <- c(
+    "efo_range", "cfr_range", "dcr_range", "eco_range", "tim_range", "dwell_range",
+    "fluo_range", "tid_length_range", "sd_min_locs", "trim_outliers", "trim_k",
+    "view_SD", "target_sd_x", "target_sd_y", "fid_exclude", "use_pooled_dcr",
+    "dens_norm_enable", "dens_thin_enable")
+
+  # Apply a smlm_settings_restore_plan(): one widget update per setting, in order.
+  restore_settings_plan <- function(plan) {
+    vals <- attr(plan, "values")
+    for (i in seq_len(nrow(plan))) {
+      id <- plan$id[i]; v <- vals[[i]]
+      switch(plan$widget[i],
+        checkbox = updateCheckboxInput(session, id, value = isTRUE(v)),
+        numeric  = if (length(v) == 1L && !is.na(v)) updateNumericInput(session, id, value = v),
+        range    = if (length(v) == 2L) shinyWidgets::updateNumericRangeInput(session, id, value = v),
+        radio    = updateRadioButtons(session, id, selected = v),
+        select   = updateSelectInput(session, id, selected = v))
+    }
+    invisible(plan)
+  }
   cluster2_file_reset_key <- reactiveVal(0)
   
   output$cluster2_settings_file_ui <- renderUI({

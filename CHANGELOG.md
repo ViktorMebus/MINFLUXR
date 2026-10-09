@@ -141,6 +141,12 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - The per-file cache of filtered and clustered data is keyed on the settings object that the
   clustering actually runs with, plus the data version, thinning and fiducial exclusions. A setting
   can no longer be left out of the key.
+- **Fixed: loading a settings file did not restore de-blinking, median clustering, the two-colour
+  split or the axial calibration.** The file held most of them, but the loader restored only the
+  filters, crop and QC options, so a reloaded analysis clustered with whatever the session had.
+  Ten settings were also never saved (the Median Cluster method and its options, and the density
+  unit). Settings files now carry every setting that changes results, and loading restores all of
+  them; an older file restores what it holds.
 - Removed three unused helper functions.
 
 ### Tests
