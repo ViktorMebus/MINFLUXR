@@ -1275,7 +1275,7 @@ smlm_server <- function(input, output, session) {
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     ct <- NULL
     if (!is.null(df) && nrow(df))
-      ct <- tryCatch(attr(attach_channel_colors(resolve_channels(df, input), smlm_channel_colors(input)),
+      ct <- tryCatch(attr(attach_channel_colors(resolve_channels(df, as_smlm_settings(input)), smlm_channel_colors(input)),
                           "channel_table"), error = function(e) NULL)
     if (is.null(ct) || nrow(ct) < 2L) return(NULL)
     ch <- stats::setNames(paste0("only:", ct$channel),
@@ -2826,10 +2826,10 @@ smlm_server <- function(input, output, session) {
   channel_spread_table <- reactive({
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    df <- tryCatch(attach_channel_colors(resolve_channels(df, input), smlm_channel_colors(input)),
+    df <- tryCatch(attach_channel_colors(resolve_channels(df, as_smlm_settings(input)), smlm_channel_colors(input)),
                    error = function(e) NULL)
     if (is.null(df) || !nrow(df) || !"channel" %in% names(df)) return(NULL)
-    thr  <- tryCatch(deblink_threshold_for_channel(df, input), error = function(e) NULL)
+    thr  <- tryCatch(deblink_threshold_for_channel(df, as_smlm_settings(input)), error = function(e) NULL)
     if (is.null(thr)) return(NULL)
     ct   <- attr(df, "channel_table")
     meas <- attr(thr, "measured"); sig <- attr(thr, "sigma")
@@ -3756,7 +3756,7 @@ smlm_server <- function(input, output, session) {
   sd_channel_map <- reactive({
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    d <- tryCatch(attach_channel_colors(resolve_channels(df, input), smlm_channel_colors(input)),
+    d <- tryCatch(attach_channel_colors(resolve_channels(df, as_smlm_settings(input)), smlm_channel_colors(input)),
                   error = function(e) NULL)
     if (is.null(d) || !nrow(d) || !"channel" %in% names(d)) return(NULL)
     if (length(unique(d$channel[!is.na(d$channel)])) < 2L) return(NULL)
@@ -4478,69 +4478,6 @@ smlm_server <- function(input, output, session) {
       )
   })
   #2-color NN helpers
-  # One-row-per-entity table: either per TID or per cluster, with optional 2-color grouping.
-  # - If z doesn't exist, we use z=0.
-  # - If enable_clustering is TRUE, we use cluster medians (cluster != 0) and propagate group by majority vote.
-  build_geo_medians <- function(df, input, use_two_color = FALSE) {
-    if (!"z" %in% names(df)) df$z <- 0
-    
-    # Always guarantee the column exists (even if we can't assign groups)
-    if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
-    
-    if (isTRUE(use_two_color)) {
-      # assign_two_color_group() returns one row per tid with analysis_group
-      gmap <- tryCatch(assign_two_color_group(df, input), error = function(e) NULL)
-      
-      if (is.data.frame(gmap) && nrow(gmap) && "analysis_group" %in% names(gmap)) {
-        df <- df %>%
-          dplyr::left_join(gmap %>% dplyr::select(tid, analysis_group), by = "tid")
-      }
-      
-      # If join didn’t happen for any reason, still keep the column
-      if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
-      
-    } else {
-      # your general grouping (may set NA_integer_ when disabled)
-      df2 <- tryCatch(assign_analysis_group(df, input), error = function(e) df)
-      df <- df2
-      if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
-    }
-    
-    if (isTRUE(input$enable_clustering) && "cluster" %in% names(df)) {
-      geo <- df %>%
-        dplyr::filter(!is.na(.data$cluster) & .data$cluster != 0) %>%
-        dplyr::group_by(.data$cluster) %>%
-        dplyr::summarise(
-          id = dplyr::first(.data$cluster),
-          x  = stats::median(.data$x, na.rm = TRUE),
-          y  = stats::median(.data$y, na.rm = TRUE),
-          z  = stats::median(.data$z, na.rm = TRUE),
-          analysis_group = {
-            v <- .data$analysis_group[!is.na(.data$analysis_group)]
-            if (length(v)) as.integer(names(which.max(table(v)))) else NA_integer_
-          },
-          .groups = "drop"
-        ) %>%
-        dplyr::mutate(id_type = "cluster")
-    } else {
-      geo <- df %>%
-        dplyr::group_by(.data$tid) %>%
-        dplyr::summarise(
-          id = dplyr::first(.data$tid),
-          x  = stats::median(.data$x, na.rm = TRUE),
-          y  = stats::median(.data$y, na.rm = TRUE),
-          z  = stats::median(.data$z, na.rm = TRUE),
-          analysis_group = {
-            v <- .data$analysis_group[!is.na(.data$analysis_group)]
-            if (length(v)) as.integer(round(stats::median(v))) else NA_integer_
-          },
-          .groups = "drop"
-        ) %>%
-        dplyr::mutate(id_type = "tid")
-    }
-    
-    geo
-  }
   
   
   safe_nn2_local <- function(coords, k) {
@@ -4754,53 +4691,6 @@ smlm_server <- function(input, output, session) {
   }
   
   
-  # 2) Attach analysis_group (1/2) to the *median table*
-  #    Uses your existing assign_analysis_group(df, input) which tags raw rows.
-  #    We then propagate group to the medians (by tid or cluster mapping).
-  attach_group_to_medians <- function(df_med, df_raw, input, enable_clustering = FALSE) {
-    if (!nrow(df_med)) return(dplyr::mutate(df_med, analysis_group = NA_integer_))
-    
-    tagged <- assign_analysis_group(df_raw, input)
-    # Build a map from tid or cluster to analysis_group at the *trace level*.
-    # For cluster medians, we derive the cluster->group via the majority vote of member traces.
-    if (enable_clustering && "cluster" %in% names(tagged)) {
-      # majority group per cluster (using tid-level group assignment)
-      tid_groups <- tagged %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(analysis_group = suppressWarnings(as.integer(round(stats::median(analysis_group, na.rm = TRUE)))),
-                         cluster = suppressWarnings(as.integer(round(stats::median(cluster, na.rm = TRUE)))),
-                         .groups = "drop")
-      cl_map <- tid_groups %>%
-        dplyr::filter(!is.na(cluster) & cluster != 0) %>%
-        dplyr::group_by(cluster) %>%
-        dplyr::summarise(
-          analysis_group = {
-            v <- analysis_group[!is.na(analysis_group)]
-            if (length(v)) as.integer(names(which.max(table(v)))) else NA_integer_
-          },
-          .groups = "drop"
-        ) %>%
-        dplyr::rename(group_id = cluster)
-      
-      out <- df_med %>%
-        dplyr::left_join(cl_map, by = "group_id")
-    } else {
-      # simple map: tid -> group (median over rows for that tid)
-      tid_map <- tagged %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(
-          analysis_group = suppressWarnings(as.integer(round(stats::median(analysis_group, na.rm = TRUE)))),
-          .groups = "drop"
-        ) %>%
-        dplyr::rename(group_id = tid)
-      
-      out <- df_med %>%
-        dplyr::left_join(tid_map, by = "group_id")
-    }
-    
-    if (!"analysis_group" %in% names(out)) out$analysis_group <- NA_integer_
-    out
-  }
   
   
   #--- 2D-Only server parts:
@@ -5226,13 +5116,14 @@ smlm_server <- function(input, output, session) {
   # Median Cluster (each = one standard structure of known stoichiometry).
   gt_calib <- reactiveVal(NULL)
   observeEvent(input$gt_calib_run, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store(); fn <- input$gt_calib_file
     if (is.null(fn) || !nzchar(fn %||% "") || !fn %in% names(store)) {
       showNotification("Pick a loaded standard dataset first.", type = "warning"); return()
     }
     k <- max(1L, as.integer(input$gt_calib_k %||% 1L))
     res <- tryCatch({
-      df <- apply_clustering_pipeline(apply_meta_filters_batch(store[[fn]], input), input)
+      df <- apply_clustering_pipeline(apply_meta_filters_batch(store[[fn]], run_set), run_set)
       measure_label_multiplicity(df, k_per_structure = k)
     }, error = function(e) { message("[GT-calib] ", conditionMessage(e)); NULL })
     if (is.null(res) || !isTRUE(res$ok)) {
@@ -6315,6 +6206,7 @@ smlm_server <- function(input, output, session) {
   #   colour columns, and the multiplex channel/label columns when active
   # ==========================================================================
   plottable_data <- eventReactive(plot_trigger(), {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     df <- filtered_df()
     # Multiplex channel alignment: shift not yet in the active copy (see the
     # MULTIPLEX CHANNEL ALIGNMENT block). Before the crops, so a crop box drawn
@@ -6347,7 +6239,7 @@ smlm_server <- function(input, output, session) {
     
     if (nrow(df) == 0) return(df)
     
-    df <- assign_analysis_group(df, input)
+    df <- assign_analysis_group(df, run_set)
     
     # Safety check
     if (nrow(df) == 0) return(df)
@@ -7374,7 +7266,7 @@ smlm_server <- function(input, output, session) {
         has_valid_group <- "analysis_group" %in% names(df_surface) &&
                            any(!is.na(df_surface$analysis_group))
         if (!has_valid_group && isTRUE(input$enable_two_color)) {
-          gmap <- tryCatch(assign_two_color_group(df_surface, input), error = function(e) NULL)
+          gmap <- tryCatch(assign_two_color_group(df_surface, as_smlm_settings(input)), error = function(e) NULL)
           if (is.data.frame(gmap) && "analysis_group" %in% names(gmap)) {
             df_surface <- df_surface %>%
               dplyr::select(-dplyr::any_of("analysis_group")) %>%
@@ -8559,6 +8451,7 @@ smlm_server <- function(input, output, session) {
 
   ## ── Measure: build the per-file density profile ───────────────────────────
   observeEvent(input$run_density, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
 
@@ -8589,12 +8482,12 @@ smlm_server <- function(input, output, session) {
         incProgress(0.6 / nf, detail = fname)
         df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) { skipped <- c(skipped, fname); next }
-        df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+        df <- tryCatch(apply_meta_filters_batch(df, run_set), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) { skipped <- c(skipped, fname); next }
         # De-blinking must run before molecule density can be measured. NOT thinned
         # here - this is the pre-thinning reference the whole panel is built on.
         if (needs_cluster) {
-          df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) df)
+          df <- tryCatch(apply_clustering_pipeline(df, run_set), error = function(e) df)
         }
         prepped[[fname]] <- df
         # Sweep on the same points the support is built from (all localizations),
@@ -9017,10 +8910,10 @@ smlm_server <- function(input, output, session) {
       prof$close_nm[1] else max(0, as.numeric(input$dens_close_nm %||% 200))
 
     df <- qc_exclude_from(store[[fname]], fname)
-    df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+    df <- tryCatch(apply_meta_filters_batch(df, as_smlm_settings(input)), error = function(e) NULL)
     shiny::validate(shiny::need(!is.null(df) && nrow(df) > 0, "No localizations after filtering."))
     if (unit == "cluster")
-      df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) df)
+      df <- tryCatch(apply_clustering_pipeline(df, as_smlm_settings(input)), error = function(e) df)
 
     keep <- if (use_3d) c("x", "y", "z") else c("x", "y")
     shiny::validate(shiny::need(all(keep %in% names(df)), "Missing coordinates."))
@@ -9748,6 +9641,7 @@ smlm_server <- function(input, output, session) {
   })
 
   observeEvent(input$run_batch_nn, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     unit  <- resolve_unit(input$nn_batch_unit, "pcid", "tid", "Batch NN")
     k     <- max(1L, as.integer(input$nn_batch_k %||% 1L))
     gf    <- input$nn_batch_group %||% "all"
@@ -9800,16 +9694,16 @@ smlm_server <- function(input, output, session) {
         df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
 
-        df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+        df <- tryCatch(apply_meta_filters_batch(df, run_set), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
-        df <- apply_density_thinning(df, fname)   # opt-in labelling-density match
+        df <- apply_density_thinning(df, fname, run_set)   # opt-in labelling-density match
         if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
 
         if (mplex_groups) {
           # Between-channel: cluster (within-channel) if needed, then derive
           # analysis_group from channel membership (X→1, Y→2) for compute_batch_nn.
           if (needs_clustering)
-            df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) df)
+            df <- tryCatch(apply_clustering_pipeline(df, run_set), error = function(e) df)
           if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
           df$analysis_group <- dplyr::case_when(
             df$mplex_label == chx ~ 1L,
@@ -9818,13 +9712,13 @@ smlm_server <- function(input, output, session) {
         } else if (two_color_mode && needs_grouping) {
           # Same pipeline as every other branch; resolve_channels() inside it
           # derives analysis_group from the 2-colour split.
-          df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
+          df <- tryCatch(apply_clustering_pipeline(df, run_set), error = function(e) NULL)
           if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
         } else if (needs_clustering) {
-          df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
+          df <- tryCatch(apply_clustering_pipeline(df, run_set), error = function(e) NULL)
           if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
         } else if (needs_grouping) {
-          df <- tryCatch(assign_analysis_group(df, input), error = function(e) df)
+          df <- tryCatch(assign_analysis_group(df, run_set), error = function(e) df)
         }
 
         # Per-channel facet. A CROSS-channel run (mplex_groups, or a group
@@ -10424,6 +10318,7 @@ smlm_server <- function(input, output, session) {
   tid_time_results <- reactiveVal(NULL)
 
   observeEvent(input$run_tid_time, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
     # Active-file-only unless "all files" is ticked.
@@ -10448,9 +10343,9 @@ smlm_server <- function(input, output, session) {
         df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) next
         # Row-level metadata filters only (efo/cfr/dcr/...); NOT spread/length.
-        df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+        df <- tryCatch(apply_meta_filters_batch(df, run_set), error = function(e) NULL)
         if (is.null(df) || !nrow(df) || !all(c("tid", "tim") %in% names(df))) next
-        df <- apply_density_thinning(df, fname)   # opt-in labelling-density match
+        df <- apply_density_thinning(df, fname, run_set)   # opt-in labelling-density match
         if (is.null(df) || !nrow(df)) next
         # Trace-length prefilter: keep only trace IDs whose localization count is
         # in [len_min, len_max]. Counts are per-file (a tid is within one file).
@@ -10569,6 +10464,7 @@ smlm_server <- function(input, output, session) {
   # so this scatter is not a spot width and does not scale like one.
   prec_cloud_results <- reactiveVal(NULL)
   observeEvent(input$run_prec_cloud, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
     # Precision is ALWAYS assessed on the single ACTIVE dataset - never pooled across
@@ -10609,7 +10505,7 @@ smlm_server <- function(input, output, session) {
         # Assess precision on the SAME localizations the Display tab plots: apply the
         # metadata / trace-length / trace-spread filters (and any fiducial exclusion),
         # so the cloud reflects the post-filter data rather than the raw acquisition.
-        df <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), input),
+        df <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), run_set),
                        error = function(e) store[[fname]])
         if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) next
         hasz <- use_z && has_axial_data(df)   # z must vary; a planar z = 0 column is not 3D
@@ -10764,7 +10660,7 @@ smlm_server <- function(input, output, session) {
     # Measured per file and pooled, because time is only comparable within one
     # acquisition - two files start their clocks independently.
     drift_by_file <- lapply(names(store), function(fname) {
-      dfx <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), input),
+      dfx <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), run_set),
                       error = function(e) NULL)
       if (!is.data.frame(dfx) || !nrow(dfx) || !"tim" %in% names(dfx)) return(NULL)
       # Group traces into molecules first, so a fluorophore seen at several
@@ -14479,6 +14375,7 @@ smlm_server <- function(input, output, session) {
   cross_nn_results <- reactiveVal(NULL)
 
   observeEvent(input$run_cross_nn, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No datasets loaded.", type = "warning"); return() }
 
@@ -14497,7 +14394,7 @@ smlm_server <- function(input, output, session) {
       for (i in seq_along(store)) {
         incProgress(1 / length(store))
         nm <- names(store)[i]
-        df <- apply_meta_filters_batch(store[[nm]], input)
+        df <- apply_meta_filters_batch(store[[nm]], run_set)
         if (!nrow(df)) next
 
         # A chosen multiplex pair is collapsed to analysis_group 1/2 FIRST;
@@ -14506,7 +14403,7 @@ smlm_server <- function(input, output, session) {
         # counted unit is the raw trace, so it is not conditional here.
         if (!is.null(mplex_pair))
           df <- assign_analysis_group_from_mplex(df, mplex_pair[1], mplex_pair[2])
-        if (nrow(df)) df <- apply_clustering_pipeline(df, input)
+        if (nrow(df)) df <- apply_clustering_pipeline(df, run_set)
         if (!nrow(df)) next
         if (!all(c(1L, 2L) %in% df$analysis_group)) next
 
@@ -14693,6 +14590,7 @@ smlm_server <- function(input, output, session) {
   ripley12_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
 
   observeEvent(input$run_ripley12, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No datasets loaded.", type = "warning"); return() }
 
@@ -14734,11 +14632,11 @@ smlm_server <- function(input, output, session) {
     # avoids prepping twice.
     prepped <- Filter(Negate(is.null), lapply(seq_along(store), function(i) {
       nm <- names(store)[i]
-      df <- apply_meta_filters_batch(store[[nm]], input)
+      df <- apply_meta_filters_batch(store[[nm]], run_set)
       if (!nrow(df)) return(NULL)
       if (!is.null(mplex_pair))
         df <- assign_analysis_group_from_mplex(df, mplex_pair[1], mplex_pair[2])
-      if (nrow(df)) df <- apply_clustering_pipeline(df, input)
+      if (nrow(df)) df <- apply_clustering_pipeline(df, run_set)
       if (!nrow(df) || !all(c(1L, 2L) %in% df$analysis_group)) return(NULL)
       list(df = df, tag = nm)
     }))
@@ -14916,13 +14814,14 @@ smlm_server <- function(input, output, session) {
   }
 
   # ── shared helper: prepare data for one file in two-color batch ───────────
-  prep_tc_df <- function(raw, input, needs_cluster) {
-    df <- apply_meta_filters_batch(raw, input)
+  #   settings : the run's settings snapshot (smlm_settings_from_input)
+  prep_tc_df <- function(raw, settings, needs_cluster) {
+    df <- apply_meta_filters_batch(raw, settings)
     if (!nrow(df)) return(NULL)
     mplex_pair <- mplex_cross_pair()
     if (!is.null(mplex_pair))
       df <- assign_analysis_group_from_mplex(df, mplex_pair[1], mplex_pair[2])
-    if (nrow(df)) df <- apply_clustering_pipeline(df, input)
+    if (nrow(df)) df <- apply_clustering_pipeline(df, settings)
     if (!nrow(df) || !all(c(1L, 2L) %in% df$analysis_group)) return(NULL)
     df
   }
@@ -14932,6 +14831,7 @@ smlm_server <- function(input, output, session) {
   pcf12_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
 
   observeEvent(input$run_pcf12, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No datasets loaded.", type = "warning"); return() }
 
@@ -14947,7 +14847,7 @@ smlm_server <- function(input, output, session) {
     # Prep first so one gap-fill radius covers the whole set (spatial_resolve_close()).
     prepped <- Filter(Negate(is.null), lapply(seq_along(store), function(i) {
       nm <- names(store)[i]
-      df <- prep_tc_df(store[[nm]], input, needs_cluster)
+      df <- prep_tc_df(store[[nm]], run_set, needs_cluster)
       if (is.null(df)) return(NULL)
       list(df = df, tag = nm)
     }))
@@ -15100,7 +15000,7 @@ smlm_server <- function(input, output, session) {
     costes_n      <- max(0L, as.integer(input$kde_costes_nsim %||% 0L))
     needs_cluster <- unit == "cluster"
 
-    df <- prep_tc_df(raw, input, needs_cluster)
+    df <- prep_tc_df(raw, smlm_settings_from_input(input), needs_cluster)
     if (is.null(df)) {
       showNotification("Could not assign two-color groups. Check 2-color settings.", type = "warning")
       kde_coloc_results(NULL); return()

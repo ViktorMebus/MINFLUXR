@@ -150,7 +150,10 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - The plot helpers take display options (colour mode, palette, medians, density radius, channel
   colours) as plain arguments with one set of defaults (`SMLM_DISPLAY_DEFAULTS`), kept apart from
   the settings that change results. No helper reads the app's input directly any more.
-- Removed three unused helper functions.
+- Each Run button takes one snapshot of the settings when pressed and uses it for every file it
+  processes; panels that update live keep reading only the settings they use. Results are
+  unchanged.
+- Removed six unused helper functions.
 
 ### Multiplex: plain dataset name
 

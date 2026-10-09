@@ -425,10 +425,12 @@ smlm_display_from_input <- function(input) {
                                                                        names(SMLM_DISPLAY_DEFAULTS))])
 }
 
-# The two channel colours, A then B, as attach_channel_colors() takes them.
+# The two channel colours, A then B, as attach_channel_colors() takes them. Reads
+# only those two fields, so a reactive that passes Shiny's input here depends on
+# the two colour pickers and not on the palette or colour mode.
 smlm_channel_colors <- function(display = NULL) {
-  d <- .smlm_display(display)
-  c(d$color_group1, d$color_group2)
+  c(display[["color_group1"]] %||% SMLM_DISPLAY_DEFAULTS$color_group1,
+    display[["color_group2"]] %||% SMLM_DISPLAY_DEFAULTS$color_group2)
 }
 
 # Print only what differs from the defaults: a settings object is mostly defaults.

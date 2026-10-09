@@ -2575,9 +2575,6 @@ compute_batch_nn <- function(df, unit = "tid", k = 1L, group_filter = NA_integer
   data.frame()
 }
 
-# ---- 2D aliases
-assign_analysis_group_2d            <- assign_analysis_group
-get_equal_limits_2d_fn              <- get_equal_limits_2d
 
 
 #3D Helpers
@@ -11334,28 +11331,6 @@ compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L,
   out
 }
 
-## ── Grid-based density correlation (multi-scale) ─────────────────────────────
-## For each cell size in `cell_sizes`, bins Ch1 and Ch2 molecules into a 2D
-## grid and returns Pearson r between per-cell counts - a multi-scale
-## co-localization measure.
-
-make_helpers <- function(mode) {
-  if (identical(mode, "3D")) {
-    list(
-      assign_group         = function(df, input) assign_analysis_group(df, input),
-      equal_limits         = function(df) { lim <- get_equal_limits(df$x, df$y, df$z); list(x=lim$x, y=lim$y, z=lim$z) },
-      distance_to_fit      = function(...) calculate_distance_to_fit(...),         # 3D
-      add_distance_lines   = function(fig, med) add_distance_lines_to_plot(fig, med) # 3D
-    )
-  } else {
-    list(
-      assign_group         = function(df, input) assign_analysis_group_2d(df, input),
-      equal_limits         = function(df) get_equal_limits_2d_fn(df$x, df$y),
-      distance_to_fit      = function(...) calculate_distance_to_fit(...),
-      add_distance_lines   = function(fig, med) add_distance_lines_to_plot(fig, med) # 3D
-    )
-  }
-}
 
 
 # =============================================================================
