@@ -161,6 +161,11 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
   clustering, nearest neighbour, shapes, structures, ground-truth estimate, spatial statistics,
   support, hotspots, summaries). `helpers_smlm.R` now loads them, so anything that sources it
   works as before. Every function is unchanged.
+- Computation is moving out of `server_smlm.R` into `R/smlm_*.R`: 24 panel helpers that
+  depended only on their arguments, and the per-file Ripley's L / g(r) computation
+  (`spatial_curve_for_points()`), which the two panels had each carried as a near-identical copy.
+  The NN-line overlay takes its options as a list (`smlm_nn_options()`). 11 unused functions
+  inside the servers were removed. Results are unchanged.
 
 ### Multiplex: plain dataset name
 

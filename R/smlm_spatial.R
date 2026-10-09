@@ -12,7 +12,8 @@
 ##   compute_cluster_rog, .stable_subsample, compute_ripley_L,
 ##   compute_ripley_L12, compute_pcf12, fit_correlation_length, compute_pcf,
 ##   .shift_channel, compute_ripley_envelope, envelope_global_p,
-##   compute_kde_coloc
+##   compute_kde_coloc, .add_global_band, .global_p_caption, .global_p_annot,
+##   .rmax_axis_title
 ##
 ## Part of the SMLM helpers; loaded by helpers_smlm.R (see its header for the data
 ## hierarchy and units). Plain functions, no Shiny: testable in the console.
@@ -995,5 +996,151 @@ compute_kde_coloc <- function(x1, y1, x2, y2, bandwidth = NULL, n_grid = 100L,
   }
 
   out
+}
+
+
+# =============================================================================
+# spatial_curve_for_points() - ONE FILE'S L(r) OR g(r), WITH ITS ENVELOPE
+# =============================================================================
+#
+# GOAL
+#   The computation behind the Ripley's L and g(r) panels for one point set: the
+#   curve, and optionally its randomisation envelope with the global
+#   (studentized maximum-deviation) test. The panels call this once per file or
+#   channel; resolving the footprint, the progress bar and storing results stay
+#   in the server.
+#
+# THE WINDOW AND THE FOOTPRINT ARE INPUTS
+#   `win` and `support` are passed in, not derived from `pts`: when a file is
+#   split into channels, both channels must be measured in the pooled file's
+#   window, or the sparser channel's window shrinks around it and its curve is
+#   deflated (see split_df_by_channel()). The curve and its envelope always share
+#   the one window given here, so the edge bias cancels between them.
+#
+# ARGUMENTS
+#   pts          data.frame x, y (and z), one row per unit (unit_centroids())
+#   win          2 x d matrix of the window's per-axis min/max
+#   estimator    "L" (Ripley's L, reported as L(r) - r) or "g" (pair correlation)
+#   r_seq        radii (nm); NULL lets the estimator choose from the window
+#   use_3d       measure in 3D
+#   support      footprint (estimate_support(..., return_mask = TRUE)) or NULL
+#   edge_correct translation edge correction from the footprint's set covariance
+#   envelope     also compute the envelope and global p-value
+#   nsim         simulations for the envelope
+#   progress     function(frac) called per simulation, or NULL
+#   tag          dataset label written into the result rows
+#
+# RETURNS  list(curve, env) - env NULL without an envelope - or NULL when the
+#          estimator returns no curve.
+# =============================================================================
+spatial_curve_for_points <- function(pts, win, estimator = c("L", "g"), r_seq = NULL,
+                                     use_3d = FALSE, support = NULL, edge_correct = TRUE,
+                                     envelope = FALSE, nsim = 99L, progress = NULL,
+                                     tag = NULL) {
+  estimator <- match.arg(estimator)
+  # One set-covariance build per file, reused by the curve AND every simulation.
+  if (!is.null(support) && isTRUE(edge_correct))
+    support <- attach_gamma_cache(support, r_max = sqrt(sum((win[2, ] - win[1, ])^2)),
+                                  use_3d = use_3d)
+  z <- if (use_3d) pts$z else NULL
+  curve <- if (estimator == "L")
+    compute_ripley_L(pts$x, pts$y, z, r_seq = r_seq, use_3d = use_3d, window_ranges = win,
+                     support = support, edge_correct = isTRUE(edge_correct))
+  else
+    compute_pcf(pts$x, pts$y, z, r_seq = r_seq, use_3d = use_3d, window_ranges = win,
+                support = support, edge_correct = isTRUE(edge_correct))
+  if (is.null(curve) || !nrow(curve)) return(NULL)
+  curve$dataset <- tag
+  if (estimator == "g") curve$n_units <- nrow(pts)
+  env <- NULL
+  if (isTRUE(envelope)) {
+    env <- compute_ripley_envelope(n = min(nrow(pts), 2000L), window_ranges = win,
+                                   r_seq = curve$r, use_3d = use_3d, nsim = nsim,
+                                   estimator = estimator, support = support,
+                                   edge_correct = isTRUE(edge_correct), progress = progress)
+    # Global test, computed here because rbind drops the attributes the envelope
+    # carries. One p per file for the whole r range.
+    if (!is.null(env)) {
+      gp <- envelope_global_p(env, if (estimator == "L") curve$Lr_minus_r else curve$g)
+      env$global_p <- gp$p %||% NA_real_
+      env$dataset <- tag
+    }
+  }
+  list(curve = curve, env = env)
+}
+
+# =============================================================================
+# PANEL HELPERS (moved from server_smlm.R; plain functions of their arguments)
+# =============================================================================
+
+## The shaded envelope is POINTWISE: it holds at each r on its own, so a curve
+## that leaves it somewhere is not significant at 5% - on simulated random data
+## in a cell footprint that happens in 96-100% of runs. `g_lo`/`g_hi` (from
+## compute_ripley_envelope) are the studentized maximum-deviation band, which the
+## curve crosses anywhere with probability 5% under the null, and `global_p` is
+## the matching p-value for the whole r range. Both are drawn/reported per file.
+## `smooth_fn` is the builder's own smoother (each panel defines its own from its
+## smoothing controls), so the band gets exactly the same treatment as the curve.
+.add_global_band <- function(fig, e, col, nm, smooth_fn = NULL) {
+  if (is.null(e$g_lo) || all(!is.finite(e$g_lo))) return(fig)
+  sm <- if (is.function(smooth_fn)) smooth_fn else function(r, y) y
+  gl <- sm(e$r, e$g_lo); gh <- sm(e$r, e$g_hi)
+  fig %>%
+    plotly::add_trace(x = e$r, y = gh, type = "scatter", mode = "lines",
+      line = list(color = col, width = 1, dash = "dash"), legendgroup = nm,
+      name = paste0(nm, " global 95% band"), showlegend = TRUE, hoverinfo = "skip") %>%
+    plotly::add_trace(x = e$r, y = gl, type = "scatter", mode = "lines",
+      line = list(color = col, width = 1, dash = "dash"), legendgroup = nm,
+      showlegend = FALSE, hoverinfo = "skip")
+}
+
+## One line naming each file's global p, for the plot caption. Files beyond the
+## fourth are summarised so the caption cannot grow without bound.
+.global_p_caption <- function(env_res) {
+  if (is.null(env_res) || !"global_p" %in% names(env_res)) return(NULL)
+  d <- unique(env_res[, c("dataset", "global_p")])
+  d <- d[is.finite(d$global_p), , drop = FALSE]
+  if (!nrow(d)) return(NULL)
+  fmt <- function(p) if (p <= 1 / 100) sprintf("p \u2264 %.2g", p) else sprintf("p = %.2f", p)
+  txt <- paste(sprintf("%s %s", d$dataset, vapply(d$global_p, fmt, character(1))), collapse = "  \u00b7  ")
+  if (nrow(d) > 4) txt <- paste0(paste(sprintf("%s %s", d$dataset[1:4], vapply(d$global_p[1:4], fmt, character(1))),
+                                       collapse = "  \u00b7  "),
+                                 sprintf("  \u00b7  (+%d more, %d with p < 0.05)", nrow(d) - 4,
+                                         sum(d$global_p < 0.05, na.rm = TRUE)))
+  # Two-channel panels: say which null the p-value is against, since the three
+  # nulls answer different questions (see compute_ripley_envelope).
+  nl <- if ("null_mode" %in% names(env_res)) unique(stats::na.omit(env_res$null_mode)) else character(0)
+  nl_txt <- c(shift = "null: channel B shifted at random (independent placement)",
+              labels = "null: random labelling (do the channels differ in arrangement)",
+              csr = "null: independent random patterns in the window")[nl]
+  nl_txt <- nl_txt[!is.na(nl_txt)]
+  paste0("Global test over the whole r range: ", txt,
+         if (length(nl_txt)) paste0("  |  ", paste(nl_txt, collapse = "; ")) else "")
+}
+
+## Caption as a plot annotation (NULL when no envelope was computed).
+.global_p_annot <- function(env_res) {
+  cap <- .global_p_caption(env_res)
+  if (is.null(cap)) return(NULL)
+  list(list(text = cap, xref = "paper", yref = "paper", x = 0, y = 1.06,
+            xanchor = "left", showarrow = FALSE, font = list(size = 11, color = "#555")))
+}
+
+## GOAL: say on the axis why a group curve stops where it does.
+##
+## In group mode the curves are averaged on a grid capped at the SMALLEST
+## per-file r max, so if one cell was measured to 400 nm and another to 1500 the
+## group curve ends at 400. That is deliberate - averaging past it would compare
+## a mean of five files against a mean of one - but with the axis now ending
+## there too, nothing on screen says the longer files were truncated. This puts
+## it in the axis title, where it costs no space and cannot be missed.
+.rmax_axis_title <- function(grouped, res, rmax_c, show_files) {
+  base <- "r (nm)"
+  if (!isTRUE(grouped) || isTRUE(show_files)) return(base)
+  rmax_all <- suppressWarnings(max(res$r, na.rm = TRUE))
+  if (!is.finite(rmax_c) || !is.finite(rmax_all) || rmax_all <= rmax_c * 1.02)
+    return(base)
+  sprintf("r (nm) - group curves stop at %.0f nm, the smallest r max in the set (longest file reaches %.0f)",
+          rmax_c, rmax_all)
 }
 

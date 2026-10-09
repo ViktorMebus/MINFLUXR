@@ -13,7 +13,8 @@
 ##   create_global_surface, cluster2_member_col, SIGMA_GAP_FACTOR,
 ##   cluster_density_field, density_field_mesh, iso_channel_color,
 ##   add_cluster_isosurface, iso_mesh_trace, iso_status_ui, isTRUE_vec,
-##   cluster_alpha_volume, estimate_cluster2_curvature, build_curvature_table
+##   cluster_alpha_volume, estimate_cluster2_curvature, build_curvature_table,
+##   .viewer_curve_points, .viewer_surface_mesh
 ##
 ## Part of the SMLM helpers; loaded by helpers_smlm.R (see its header for the data
 ## hierarchy and units). Plain functions, no Shiny: testable in the console.
@@ -1858,5 +1859,51 @@ build_curvature_table <- function(df) {
   out$ecc_sphere_floor <- ifelse(is.na(nm_col), NA_real_,
     stats::approx(log(kn), kv, xout = log(pmax(nm_col, 2)), rule = 2)$y)
   out
+}
+
+
+# =============================================================================
+# PANEL HELPERS (moved from server_smlm.R; plain functions of their arguments)
+# =============================================================================
+
+# Curve overlays (ring/arc/helix): ordered points to draw as a connected line.
+.viewer_curve_points <- function(f, shape) {
+  pts <- tryCatch(switch(shape,
+    ring = { p <- as.matrix(mle_sample_ring(f, n = 240)); rbind(p, p[1, ]) },  # close loop
+    arc  = as.matrix(mle_sample_arc(f, n = 240)),
+    helix = {
+      if (!is.null(f$t)) {
+        tr <- range(f$t, na.rm = TRUE)
+        ts <- seq(tr[1], tr[2], length.out = 600L)
+        t(vapply(ts, .helix_point, numeric(3),
+                 c = f$center, u = f$axis, r = f$radius, p = f$pitch, phi0 = f$phi0))
+      } else if (!is.null(f$H)) as.matrix(f$H) else NULL
+    },
+    NULL), error = function(e) NULL)
+  if (is.null(pts) || !nrow(pts)) return(NULL)
+  pts <- as.matrix(pts)[, 1:3, drop = FALSE]; colnames(pts) <- c("x", "y", "z"); pts
+}
+
+# Surface overlays (sphere/ellipsoid): a (theta,phi) vertex grid + triangle
+# faces for a translucent mesh3d in 3D; the projected convex hull is the exact
+# orthographic silhouette outline for these convex bodies in 2D.
+.viewer_surface_mesh <- function(f, shape, nu = 48L, nv = 28L) {
+  res <- tryCatch({
+    uu <- rep(seq(0, 2*pi, length.out = nu), times = nv)
+    vv <- rep(seq(0, pi,  length.out = nv), each  = nu)
+    base <- cbind(sin(vv) * cos(uu), sin(vv) * sin(uu), cos(vv))
+    verts <- switch(shape,
+      sphere    = base * f$radius,
+      ellipsoid = sweep(base, 2, f$axes, "*") %*% t(f$R),
+      NULL)
+    if (is.null(verts)) stop("unsupported")
+    verts <- sweep(verts, 2, f$center, "+")
+    iu <- rep(seq_len(nu - 1L), times = nv - 1L)
+    iv <- rep(seq_len(nv - 1L), each  = nu - 1L)
+    a <- (iv - 1L) * nu + (iu - 1L); b <- (iv - 1L) * nu + iu     # 0-based vertex ids
+    cc <- iv * nu + iu;              d <- iv * nu + (iu - 1L)
+    list(verts = verts, i = c(a, a), j = c(b, cc), k = c(cc, d))
+  }, error = function(e) NULL)
+  res
 }
 

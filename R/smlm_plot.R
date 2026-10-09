@@ -12,7 +12,8 @@
 ##   build_colors_for_pts, compute_spatial_density, build_pts_2d,
 ##   build_pts_3d, color_mapping_for_pts, palette_colors, plotly_colorscale,
 ##   get_equal_limits, QUAL_COLORS, qual_palette, .adjust_lum, shade_colors,
-##   density_axis_range
+##   density_axis_range, .draw_centroid_gap, expand_limits_with_image,
+##   heatmap_input_df, compute_kde, sd_hist_clip, .int_input, .name_or
 ##
 ## Part of the SMLM helpers; loaded by helpers_smlm.R (see its header for the data
 ## hierarchy and units). Plain functions, no Shiny: testable in the console.
@@ -538,5 +539,171 @@ density_axis_range <- function(local_vals, global_vals, use_log = TRUE,
   }
   list(lim = lim, range = rng,
        clip = function(v) pmin(pmax(v, lim[1]), lim[2]))
+}
+
+
+# =============================================================================
+# PANEL HELPERS (moved from server_smlm.R; plain functions of their arguments)
+# =============================================================================
+
+# Drawn by BOTH the single-colour and two-colour panels. Factored so the two
+# can never drift apart visually or in what the lines mean.
+.draw_centroid_gap <- function(r, cur_thr) {
+  wi <- r$within[is.finite(r$within) & r$within > 0]
+  bw <- r$between[is.finite(r$between) & r$between > 0]
+  validate(need(length(wi) >= 2, "Not enough within-trace distances to plot."))
+
+  COL_W <- "#1f78b4"; COL_B <- "#e08214"; COL_S <- "#1a9850"; COL_E <- "#d7191c"
+  # LOG x-axis. The re-blink hump sits at a few nm and the distinct-molecule
+  # hump at hundreds; on a linear axis clipped to a quantile of the pooled
+  # distances the second hump fell off the plot entirely, which defeats the
+  # point - the threshold is supposed to be placed in the GAP between them.
+  xhi <- max(stats::quantile(bw, 0.99, names = FALSE), stats::quantile(wi, 0.99, names = FALSE),
+             3 * r$suggested, na.rm = TRUE)
+  xlo <- max(0.5, min(stats::quantile(c(wi, bw), 0.005, names = FALSE), r$sigma / 4))
+  scal <- function(v) {
+    v <- v[v > 0]
+    d <- stats::density(log10(v), n = 512L, from = log10(xlo), to = log10(xhi))
+    d$x <- 10^d$x; d$y <- d$y / max(d$y); d
+  }
+  # Legend goes in the BOTTOM margin. Note xpd is NOT set in par(): doing so
+  # let abline() draw its vertical markers out through the margins too, which
+  # is what made the lines run past the plot box.
+  op <- graphics::par(mar = c(8.2, 4.5, 3.0, 1.2))
+  on.exit(graphics::par(op), add = TRUE)
+  dw <- scal(wi)
+  graphics::plot(dw$x, dw$y, type = "l", col = COL_W, lwd = 2.5, ylim = c(0, 1.05),
+                 xlim = c(xlo, xhi), log = "x",
+                 xlab = "distance (nm, log scale)", ylab = "density (scaled to peak)",
+                 main = "Within-trace scatter vs between-trace centroid spacing")
+  if (length(bw) >= 2) { db <- scal(bw); graphics::lines(db$x, db$y, col = COL_B, lwd = 2.5) }
+  graphics::abline(v = r$sigma,     col = COL_W, lwd = 2, lty = 3)
+  graphics::abline(v = r$suggested, col = COL_S, lwd = 2, lty = 4)
+  if (length(cur_thr) == 1 && is.finite(cur_thr))
+    graphics::abline(v = cur_thr, col = COL_E, lwd = 2.5, lty = 2)
+  # Placed in device coords so the log x-axis cannot distort it; xpd = NA is
+  # scoped to this call alone.
+  graphics::legend(x = graphics::grconvertX(0.02, "ndc", "user"),
+                   y = graphics::grconvertY(0.14, "ndc", "user"),
+    bty = "n", cex = 0.85, ncol = 2, xpd = NA,
+    legend = c("within trace (loc to its centroid)", "between traces (centroid NN)",
+               "sigma", "suggested", "current threshold"),
+    col = c(COL_W, COL_B, COL_W, COL_S, COL_E),
+    lty = c(1, 1, 3, 4, 2), lwd = c(2.5, 2.5, 2, 2, 2.5))
+  invisible(NULL)
+}
+
+# helper: expand axes to include the image bbox; safe if overlay is NULL
+expand_limits_with_image <- function(lim, overlay, invert_y = TRUE) {
+  if (is.null(overlay)) return(lim)
+  x0 <- overlay$x;  w <- overlay$sizex
+  y  <- overlay$y;  h <- overlay$sizey
+  xr <- c(x0, x0 + w)
+  yr <- if (invert_y) c(y - h, y) else c(y, y + h)
+  list(x = range(c(lim$x, xr), na.rm = TRUE),
+       y = range(c(lim$y, yr), na.rm = TRUE))
+}
+
+# Use trace medians (or de-blinked molecule medians when de-blinking is on),
+# unless the user explicitly requests raw points.
+heatmap_input_df <- function(df, use_raw = FALSE, clustering = FALSE) {
+  if (isTRUE(use_raw)) {
+    return(df %>% dplyr::select(x, y))
+  }
+  if (isTRUE(clustering) && "cluster" %in% names(df) && any(df$cluster > 0, na.rm = TRUE)) {
+    return(
+      df %>%
+        dplyr::filter(is.finite(cluster) & cluster > 0) %>%
+        dplyr::group_by(cluster) %>%
+        dplyr::summarise(
+          x = stats::median(x, na.rm = TRUE),
+          y = stats::median(y, na.rm = TRUE),
+          .groups = "drop"
+        )
+    )
+  }
+  if ("tid" %in% names(df)) {
+    return(
+      df %>%
+        dplyr::group_by(tid) %>%
+        dplyr::summarise(
+          x = stats::median(x, na.rm = TRUE),
+          y = stats::median(y, na.rm = TRUE),
+          .groups = "drop"
+        )
+    )
+  }
+  df %>% dplyr::select(x, y)
+}
+
+compute_kde <- function(df, lim, n = 200, bw = NA_real_, bw_factor = 1) {
+  if (!all(c("x","y") %in% names(df)) || nrow(df) < 2) return(NULL)
+  n <- max(25, min(1000, as.integer(n)))
+  if (any(!is.finite(c(lim$x, lim$y)))) return(NULL)
+  
+  if (is.finite(bw) && bw > 0) {
+    # ABSOLUTE bandwidth (same for x and y)
+    h <- c(bw, bw)
+  } else {
+    # Scott rule (isotropic), then scale by bw_factor
+    vx  <- stats::var(df$x, na.rm = TRUE)
+    vy  <- stats::var(df$y, na.rm = TRUE)
+    sdx <- sqrt(max(vx, 0)); sdy <- sqrt(max(vy, 0))
+    sx  <- min(sdx, stats::IQR(df$x, na.rm = TRUE) / 1.34)
+    sy  <- min(sdy, stats::IQR(df$y, na.rm = TRUE) / 1.34)
+    s   <- sqrt((sx^2 + sy^2) / 2)
+    npts <- nrow(df)
+    hiso <- 1.06 * s * (npts ^ (-1/6))
+    if (!is.finite(hiso) || hiso <= 0) {
+      rngx <- diff(range(df$x, na.rm = TRUE))
+      rngy <- diff(range(df$y, na.rm = TRUE))
+      hiso <- max((rngx + rngy)/2 * 0.02, 1e-6)
+    }
+    hiso <- hiso * if (is.finite(bw_factor) && bw_factor > 0) bw_factor else 1
+    h <- c(hiso, hiso)
+  }
+  
+  MASS::kde2d(
+    df$x, df$y, n = n,
+    lims = c(lim$x[1], lim$x[2], lim$y[1], lim$y[2]),
+    h = h
+  )
+}
+
+# Values outside a MANUAL range must be dropped, not drawn. sd_counts() clamps
+# anything beyond the outermost break into the edge bin, which is right for an
+# auto range (nothing is outside it) but would put every broad trace into one
+# tall bar at the right edge of a user-set range - a spike that is pure
+# artifact and would be read as a real population in a figure.
+sd_hist_clip <- function(v, sh) {
+  if (is.null(sh) || !isTRUE(sh$manual)) return(v)
+  v <- as.numeric(v)
+  v[is.finite(v) & v >= sh$xrange[1] & v <= sh$xrange[2]]
+}
+
+## GOAL: read a numericInput as a whole number inside a range, and survive the
+## user emptying the box.
+##
+## WHY `%||%` IS NOT ENOUGH. An emptied numericInput does not send NULL, it sends
+## **NA**, and `%||%` only substitutes for NULL. NA then survives as.integer(),
+## and min()/max() propagate it rather than clamping it, so
+## `max(1L, min(6L, NA))` is NA and the loop below died on `seq_len(NA)` the
+## moment the group-count box was cleared. Anything that SIZES something from a
+## user-typed number needs this, not `%||%`.
+.int_input <- function(x, default, lo = -Inf, hi = Inf) {
+  v <- suppressWarnings(as.integer(x))
+  if (!length(v) || is.na(v[1])) v <- as.integer(default)
+  as.integer(max(lo, min(hi, v[1])))
+}
+
+## Look a name up in a named vector WITHOUT the `[[` trap. `v[["absent"]]` raises
+## "subscript out of bounds" rather than returning NULL, so `%||%` never sees it
+## and cannot supply the default - which is how an ungrouped file took the whole
+## enhancement curve down. Single-bracket indexing yields NA for a missing name,
+## which this turns into the default.
+.name_or <- function(v, key, default) {
+  if (is.null(v) || !length(v) || is.null(key) || !length(key)) return(default)
+  out <- unname(v[as.character(key)[1]])
+  if (length(out) != 1L || is.na(out)) default else out
 }
 

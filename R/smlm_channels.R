@@ -12,7 +12,8 @@
 ##   assign_analysis_group, resolve_channels, attach_channel_colors,
 ##   channels_in_scope, pair_passes_scope, mplex_default_colors,
 ##   assign_analysis_group_from_mplex, format_tc_id, wrap_groups,
-##   wrap_group_rows
+##   wrap_group_rows, .mplex_key, .mplex_adopt_csv, channel_parts,
+##   split_df_by_channel, .facet_name, get_tc_pts
 ##
 ## Part of the SMLM helpers; loaded by helpers_smlm.R (see its header for the data
 ## hierarchy and units). Plain functions, no Shiny: testable in the console.
@@ -688,5 +689,115 @@ wrap_group_rows <- function(df, id_col, g) {
   if (!is.na(g$channel) && "channel" %in% names(df))
     sel <- sel & !is.na(df$channel) & df$channel == g$channel
   df[sel, , drop = FALSE]
+}
+
+
+# =============================================================================
+# PANEL HELPERS (moved from server_smlm.R; plain functions of their arguments)
+# =============================================================================
+
+# Source key of one spec entry (older specs without $src fall back to the channel).
+.mplex_key <- function(c) c$src %||% paste0("ch:", c$channel)
+
+# GOAL: recognise a CSV exported from a multiplex and describe it as one.
+#   The export writes mplex_channel / mplex_label / mplex_color per row and the
+#   total alignment shift already applied (mplex_dx_nm / _dy_nm / _dz_nm). The
+#   shift is recorded in the spec as $prior (display and re-export only; the
+#   coordinates already carry it) and the columns are dropped so they cannot
+#   go stale. New nudges on the loaded file start from zero.
+# RETURNS df, with the multiplex attributes when it is a multiplex CSV.
+.mplex_adopt_csv <- function(df, fname) {
+  if (!is.data.frame(df) || !all(c("mplex_channel", "mplex_label") %in% names(df))) return(df)
+  df$mplex_channel <- suppressWarnings(as.integer(df$mplex_channel))
+  df <- df[!is.na(df$mplex_channel), , drop = FALSE]
+  if (!nrow(df)) return(df)
+  if (!"mplex_color" %in% names(df)) df$mplex_color <- NA_character_
+  chans <- sort(unique(df$mplex_channel))
+  defs  <- mplex_default_colors(length(chans))
+  pcol  <- c("mplex_dx_nm", "mplex_dy_nm", "mplex_dz_nm")
+  spec <- lapply(seq_along(chans), function(i) {
+    rows <- df$mplex_channel == chans[i]
+    col  <- df$mplex_color[rows][1]
+    if (is.na(col) || !nzchar(col)) { col <- defs[i]; df$mplex_color[rows] <<- col }
+    lab  <- as.character(df$mplex_label[rows][1])
+    pr   <- vapply(pcol, function(p)
+      if (p %in% names(df)) suppressWarnings(as.numeric(df[[p]][rows][1])) else 0, numeric(1))
+    pr[!is.finite(pr)] <- 0
+    list(channel = chans[i], label = lab, color = col,
+         n_loc = sum(rows), n_trace = dplyr::n_distinct(df$tid[rows]),
+         src = paste0("csv:", fname, ":", lab),
+         prior = stats::setNames(pr, c("x", "y", "z")))
+  })
+  df <- df[, setdiff(names(df), pcol), drop = FALSE]
+  attr(df, "mplex_spec")       <- spec
+  attr(df, "mplex_store_name") <- fname
+  attr(df, "mplex_off")        <- list()
+  df
+}
+
+#
+# Covers BOTH channel sources - a 2-colour DCR split and a multiplex build -
+# because they are one concept now. The older `mplex_split_active()` above is
+# multiplex-only and splits the RAW upload; this one splits a frame that has
+# already been through resolve_channels(), so the labels and colours match
+# everything else on screen.
+#
+# THE POOLED PARENT COMES BACK WITH EACH CHANNEL, and that is the point.
+# Ripley's L and g(r) divide by the observed area. If each channel derived its
+# own window, the sparser channel would get a smaller bounding box and
+# footprint, hence a higher apparent density, hence a DEFLATED curve - a
+# difference between the channels manufactured out of their difference in
+# count. The two dyes imaged the SAME field, so they must be measured in the
+# same window; then a real difference in curve is a difference in how the two
+# targets are arranged in that field, which is the biology being asked about.
+# The plain split: one entry per channel, tagged "file · channel". Used by
+# every analysis that does NOT divide by an area. Returns a single untagged
+# entry when there is nothing to split, so callers need no special case.
+channel_parts <- function(df, tag) {
+  none <- list(list(df = df, tag = tag))
+  if (!is.data.frame(df) || !nrow(df) || !"channel" %in% names(df)) return(none)
+  ids <- sort(unique(df$channel[!is.na(df$channel)]))
+  if (length(ids) < 2L) return(none)
+  lapply(ids, function(ch) {
+    sub <- df[which(df$channel == ch), , drop = FALSE]
+    list(df = sub, tag = .facet_name(tag, as.character(sub$channel_label[1])))
+  })
+}
+
+# The same split, plus the pooled parent, for the analyses that DO divide by an
+# area (see the note above).
+split_df_by_channel <- function(df, tag) {
+  lapply(channel_parts(df, tag), function(pt)
+    c(pt, list(win_df  = df,    # pooled file - the shared observation window
+               win_tag = tag))) # shared support cache key, so it is built once
+}
+
+# Append the channel label to a dataset name, so one series per file becomes one
+# series per file-and-channel and every existing grouping/colour path downstream
+# keeps working unchanged.
+.facet_name <- function(fname, label)
+  if (nzchar(label %||% "")) paste0(fname, " · ", label) else fname
+
+get_tc_pts <- function(df, grp, unit) {
+  sub <- dplyr::filter(df, analysis_group == grp)
+  if (!nrow(sub)) return(data.frame(x = numeric(), y = numeric(), z = numeric()))
+  if (unit == "tid") {
+    sub %>%
+      dplyr::group_by(tid) %>%
+      dplyr::summarise(x = median(x, na.rm = TRUE), y = median(y, na.rm = TRUE),
+                       z = if ("z" %in% names(sub)) median(z, na.rm = TRUE) else 0,
+                       .groups = "drop") %>%
+      dplyr::filter(is.finite(x), is.finite(y))
+  } else {
+    if (!"cluster" %in% names(sub) || !any(!is.na(sub$cluster) & sub$cluster > 0L))
+      return(data.frame(x = numeric(), y = numeric(), z = numeric()))
+    sub %>%
+      dplyr::filter(!is.na(cluster), cluster > 0L) %>%
+      dplyr::group_by(cluster) %>%
+      dplyr::summarise(x = median(x, na.rm = TRUE), y = median(y, na.rm = TRUE),
+                       z = if ("z" %in% names(sub)) median(z, na.rm = TRUE) else 0,
+                       .groups = "drop") %>%
+      dplyr::filter(is.finite(x), is.finite(y))
+  }
 }
 

@@ -10,7 +10,7 @@
 ## CONTENTS (in file order)
 ##   compute_local_enhancement, compute_dispersion_index,
 ##   calibrate_dbscan_eps, compute_foci_table, csr_cv_local_density,
-##   hotspot_summary_row
+##   hotspot_summary_row, hotspot_unit_label
 ##
 ## Part of the SMLM helpers; loaded by helpers_smlm.R (see its header for the data
 ## hierarchy and units). Plain functions, no Shiny: testable in the console.
@@ -609,4 +609,26 @@ hotspot_summary_row <- function(pts, support = NULL, k = 5L, quadrat_nm = 250,
     used_bbox    = isTRUE(le$used_bbox),
     stringsAsFactors = FALSE)
 }
+
+
+# =============================================================================
+# PANEL HELPERS (moved from server_smlm.R; plain functions of their arguments)
+# =============================================================================
+
+## THE UNIT IS THE WHOLE MEASUREMENT, so it is named in words on every axis and
+## title rather than left to the control panel.
+##
+## RAW LOCALIZATIONS ARE NOT OFFERED, and this is not a convenience choice.
+## Localizations inside one trace sit a few nm apart, so the k-th neighbour
+## distance collapses to the localization precision and the local density
+## measures HOW LONG THAT FLUOROPHORE STAYED ON, not how the protein is
+## arranged. Measured on the two-condition pair: on localizations the enhancement runs
+## to 3,000-17,000x the cell mean and NEITHER the CV nor the 90th percentile
+## separates the conditions (CV 1.46-1.74 against 1.23-2.54, overlapping), while
+## the same statistics on trace-ID centroids are cleanly disjoint. Trace length
+## is photophysics; the spatial arrangement of separate traces is the biology.
+hotspot_unit_label <- function(u) switch(u %||% "tid",
+  tid     = "trace ID centroids",
+  cluster = "de-blinked molecules",
+  "units")
 

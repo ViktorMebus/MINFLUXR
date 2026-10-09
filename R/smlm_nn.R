@@ -7,7 +7,8 @@
 ##   the NN and cross-channel NN panels.
 ##
 ## CONTENTS (in file order)
-##   nn_index_pairs, compute_batch_nn, safe_nn2, compute_cross_nn
+##   nn_index_pairs, compute_batch_nn, safe_nn2, compute_cross_nn,
+##   .nn_pairs_scoped, build_nn_segments, perp_offset_xy, member_nn_stats
 ##
 ## Part of the SMLM helpers; loaded by helpers_smlm.R (see its header for the data
 ## hierarchy and units). Plain functions, no Shiny: testable in the console.
@@ -281,5 +282,204 @@ compute_cross_nn <- function(df, unit = "tid", k = 1L) {
     data.frame(direction = "Group 2 → Group 1", distance = run_nn(pts2, pts1, k2),
                n_ref = nrow(pts1), area = bbox_area)
   )
+}
+
+
+# =============================================================================
+# PANEL HELPERS (moved from server_smlm.R; plain functions of their arguments)
+# =============================================================================
+
+# GOAL: the options of the NN-line overlay and NN table, read once from the app.
+#   nn_k            neighbours per point
+#   nn_mplex_scope  "within" / "across" / "all" channel pairs
+#   deblinked       de-blinking ran, so lines join molecule medians
+#   distance_range  keep lines whose length lies in this range (nm)
+#   within_cluster2 keep only lines inside one Median Cluster
+#   label_offset    distance-label offset (nm)
+smlm_nn_options <- function(input) {
+  list(nn_k            = input[["nn_k"]] %||% 4,
+       nn_mplex_scope  = input[["nn_mplex_scope"]] %||% "within",
+       deblinked       = isTRUE(input[["enable_clustering"]]),
+       distance_range  = input[["distance_range"]] %||% c(0, Inf),
+       within_cluster2 = isTRUE(input[["nn_within_cluster2"]]) && isTRUE(input[["enable_cluster2"]]),
+       label_offset    = suppressWarnings(as.numeric(input[["nn_label_offset"]] %||% 5)))
+}
+
+# NN index pairs honouring the channel scope radio. Reads `channel`, so one
+# control covers a 2-colour split and a multiplex build alike; single-channel
+# data falls back to a global k-NN. "within" = same-channel only, "across" =
+# strictly between different channels (never within), "all" = both.
+# Used by every NN-line / NN-table path.
+#   opts : smlm_nn_options()
+.nn_pairs_scoped <- function(df_geo, coords, opts) {
+  k <- opts$nn_k %||% 4
+  ch <- if ("channel" %in% names(df_geo)) df_geo$channel
+        else if ("mplex_channel" %in% names(df_geo)) df_geo$mplex_channel else NULL
+  if (is.null(ch) || length(unique(ch[!is.na(ch)])) < 2L)
+    return(nn_index_pairs(coords, k))
+  scope <- opts$nn_mplex_scope %||% "within"
+  if (identical(scope, "all")) return(nn_index_pairs(coords, k))
+  nn_index_pairs(coords, k, channel = ch,
+                 mode = if (identical(scope, "across")) "between" else "within")
+}
+
+# core builder used by both 2D/3D
+#   opts : smlm_nn_options()
+build_nn_segments <- function(df, opts, is3d = TRUE) {
+  if (!nrow(df)) return(NULL)
+  
+  # If analysis_group isn't present, create NA column (scope=="all" will still work)
+  if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
+  
+  scope <- "all"
+  
+  # 1) Choose medians: by cluster if enabled, else by tid
+  if (isTRUE(opts$deblinked) && "cluster" %in% names(df)) {
+    df_geo <- df %>%
+      dplyr::filter(!is.na(cluster) & cluster != 0) %>%
+      dplyr::group_by(cluster) %>%
+      dplyr::summarise(
+        x = stats::median(x, na.rm = TRUE),
+        y = stats::median(y, na.rm = TRUE),
+        z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
+        color = dplyr::first(color),
+        cluster2 = if ("cluster2" %in% names(df)) dplyr::first(cluster2) else NA_integer_,
+        analysis_group = suppressWarnings(dplyr::first(analysis_group)),
+        channel = if ("channel" %in% names(df)) dplyr::first(channel) else NA_integer_,
+        channel_color = if ("channel_color" %in% names(df)) dplyr::first(channel_color) else NA_character_,
+        channel_label = if ("channel_label" %in% names(df)) dplyr::first(channel_label) else NA_character_,
+        mplex_channel = if ("mplex_channel" %in% names(df)) dplyr::first(mplex_channel) else NA_integer_,
+        .groups = "drop"
+      )
+  } else {
+    df_geo <- df %>%
+      dplyr::group_by(tid) %>%
+      dplyr::summarise(
+        x = stats::median(x, na.rm = TRUE),
+        y = stats::median(y, na.rm = TRUE),
+        z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
+        color = dplyr::first(color),
+        cluster2 = if ("cluster2" %in% names(df)) dplyr::first(cluster2) else NA_integer_,
+        analysis_group = suppressWarnings(dplyr::first(analysis_group)),
+        channel = if ("channel" %in% names(df)) dplyr::first(channel) else NA_integer_,
+        channel_color = if ("channel_color" %in% names(df)) dplyr::first(channel_color) else NA_character_,
+        channel_label = if ("channel_label" %in% names(df)) dplyr::first(channel_label) else NA_character_,
+        mplex_channel = if ("mplex_channel" %in% names(df)) dplyr::first(mplex_channel) else NA_integer_,
+        .groups = "drop"
+      )
+  }
+
+  if (nrow(df_geo) < 2) return(NULL)
+
+  coords <- as.matrix(df_geo[, c("x","y","z")])
+  pm <- .nn_pairs_scoped(df_geo, coords, opts)
+  if (!nrow(pm)) return(NULL)
+
+  seg_x <- c(); seg_y <- c(); seg_z <- c()
+  lab_x <- c(); lab_y <- c(); lab_z <- c(); labs <- c()
+  e_i <- c(); e_j <- c(); e_d <- c()      # per-edge record, for channel colouring
+  seen  <- new.env(parent = emptyenv())
+
+  dmin <- (opts$distance_range %||% c(0, Inf))[1]
+  dmax <- (opts$distance_range %||% c(0, Inf))[2]
+
+  for (r in seq_len(nrow(pm))) {
+    i <- pm[r, 1]; ni <- pm[r, 2]
+    {
+      # dedupe undirected
+      key <- paste0(min(i, ni), "_", max(i, ni))
+      if (!is.null(seen[[key]])) next
+      seen[[key]] <- TRUE
+
+      # within/between/all
+      g1 <- df_geo$analysis_group[i]
+      g2 <- df_geo$analysis_group[ni]
+      if (!pair_passes_scope(g1, g2, scope)) next
+
+      dist <- pm[r, 3]
+      if (dist < dmin || dist > dmax) next
+
+      # within-cluster2 filter
+      if (isTRUE(opts$within_cluster2) && "cluster2" %in% names(df_geo)) {
+        c2i <- df_geo$cluster2[i]; c2ni <- df_geo$cluster2[ni]
+        if (is.na(c2i) || is.na(c2ni) || c2i == 0 || c2ni == 0 || c2i != c2ni) next
+      }
+
+      seg_x <- c(seg_x, coords[i,1], coords[ni,1], NA_real_)
+      seg_y <- c(seg_y, coords[i,2], coords[ni,2], NA_real_)
+      seg_z <- c(seg_z, coords[i,3], coords[ni,3], NA_real_)
+
+      nn_off <- opts$label_offset %||% 5
+      if (!is.finite(nn_off) || nn_off < 0) nn_off <- 5
+      mid <- perp_offset_xy(coords[i,], coords[ni,], nn_off)
+      lab_x <- c(lab_x, mid[1]); lab_y <- c(lab_y, mid[2]); lab_z <- c(lab_z, mid[3])
+      labs  <- c(labs, round(dist, 2))
+      e_i <- c(e_i, i); e_j <- c(e_j, ni); e_d <- c(e_d, dist)
+    }
+  }
+
+  if (!length(seg_x)) return(NULL)
+
+  # Per-edge table, so the plot can colour a line by the channels it joins.
+  # This is what the separate 2-colour NN panel used to exist for: a
+  # within-channel line drawn in that channel's colour, a cross-channel line in
+  # magenta. It is the one thing that panel did which the shared one could not,
+  # so it moved here rather than being dropped with it.
+  edges <- data.frame(
+    x1 = coords[e_i, 1], y1 = coords[e_i, 2], z1 = coords[e_i, 3],
+    x2 = coords[e_j, 1], y2 = coords[e_j, 2], z2 = coords[e_j, 3],
+    dist = e_d,
+    ch1 = df_geo$channel[e_i], ch2 = df_geo$channel[e_j],
+    lab1 = df_geo$channel_label[e_i], lab2 = df_geo$channel_label[e_j],
+    stringsAsFactors = FALSE
+  )
+  same <- !is.na(edges$ch1) & !is.na(edges$ch2) & edges$ch1 == edges$ch2
+  col_same <- df_geo$channel_color[e_i]
+  edges$color <- ifelse(same,
+                        ifelse(is.na(col_same), "#666666", col_same),
+                        "magenta")
+
+  list(
+    seg_x = seg_x, seg_y = seg_y, seg_z = seg_z,
+    lab_x = lab_x, lab_y = lab_y, lab_z = lab_z, labs = labs,
+    edges = edges
+  )
+}
+
+# Shift midpoint of segment (p1→p2) perpendicularly in XY plane by offset_nm.
+# Works for both 2-element (x,y) and 3-element (x,y,z) vectors.
+perp_offset_xy <- function(p1, p2, offset_nm) {
+  p1 <- as.numeric(p1); p2 <- as.numeric(p2)
+  mid <- (p1 + p2) / 2
+  if (!is.finite(offset_nm) || offset_nm <= 0) return(mid)
+  dx <- p2[1] - p1[1]; dy <- p2[2] - p1[2]
+  len <- sqrt(dx^2 + dy^2)
+  if (len < 1e-10) return(mid)
+  perp <- c(-dy / len, dx / len)
+  if (length(mid) == 3) perp <- c(perp, 0)
+  mid + perp * offset_nm
+}
+
+# SINGLE SOURCE OF TRUTH for "how close are the members of a median cluster",
+# used by BOTH the Crowding panel and the Within-cluster-NN-vs-size panel so the
+# two report the SAME number. Both panels build their member centroids on the
+# same unit (de-blinked molecule when de-blinking is on, else trace ID; see
+# smlm_nn_unit below) and pass the member coordinates here.
+#
+# For each member, mean distance to its k nearest members (k clamped to n-1;
+# k=1 => nearest-neighbour spacing), then the MEDIAN over members with a robust
+# spread (MAD and the inter-quartile range) as the ± error.
+# pts = numeric matrix of member coordinates (one row per member).
+member_nn_stats <- function(pts, k = 1L) {
+  n <- nrow(pts)
+  if (is.null(n) || n < 2L) return(NULL)
+  k_eff <- min(max(1L, as.integer(k)), n - 1L)
+  nn <- tryCatch(dbscan::kNN(pts, k = k_eff)$dist, error = function(e) NULL)
+  if (is.null(nn)) return(NULL)
+  spacing <- if (k_eff == 1L) as.numeric(nn) else rowMeans(nn, na.rm = TRUE)
+  qs <- as.numeric(stats::quantile(spacing, c(0.25, 0.75), na.rm = TRUE))
+  list(median = stats::median(spacing, na.rm = TRUE),
+       mad    = stats::mad(spacing, na.rm = TRUE),
+       q1 = qs[1], q3 = qs[2], k_used = k_eff, n = n)
 }
 
