@@ -60,7 +60,7 @@
 ##   therefore measure the LABEL, not the biology. In `cluster2`, id 0 means
 ##   noise/unassigned and must be excluded before counting; `cluster` has no 0
 ##   because de-blinking assigns every trace (see deblink_assign_singletons).
-##   (Implementation: apply_clustering_pipeline() in helpers_smlm.R.)
+##   (Implementation: apply_clustering_pipeline() in R/smlm_clustering.R.)
 ##
 ## ── 3. MAP OF THE ANALYSES (grep the name; line numbers drift) ───────────────
 ##   Upload & settings ......... uploaded_df, get_ui_settings, raw_df, df_full_raw
@@ -78,7 +78,7 @@
 ##   Image overlay ............. confocal_meta, image_overlay
 ##
 ##   The heavy spatial statistics themselves (Ripley L/L12, PCF, KDE
-##   co-localization, RoG, batch NN) live in helpers_smlm.R - this file wires
+##   co-localization, RoG, batch NN) live in R/smlm_*.R - this file wires
 ##   them to inputs and outputs.
 ##
 ## ── 4. CONVENTIONS & GOTCHAS ─────────────────────────────────────────────────
@@ -423,7 +423,9 @@ smlm_server <- function(input, output, session) {
   # file by TIM breakpoints) carrying mplex_channel / mplex_label / mplex_color.
   # Registered as one synthetic entry in smlm_file_store so the plot and every
   # Analysis tool operate on it unchanged. See plan: graceful-marinating-pudding.
-  mplex_name   <- "★ Multiplex"
+  # Plain name: it becomes part of downloaded file names (settings, CSV), where a
+  # symbol such as a star is rejected or mangled by some systems.
+  mplex_name   <- "Multiplex"
   MPLEX_TID_OFF <- 1e10            # per-channel tid offset (> u4 tid max ~4.3e9)
   mplex_spec_rv <- reactiveVal(NULL)  # list(channel,label,color,n_loc,n_trace)
 
@@ -596,7 +598,7 @@ smlm_server <- function(input, output, session) {
   #                  tim_file, tim_method, tim_breaks, tim_windows [tim mode]
   #                  labels, colors = one per channel (optional; defaults used))
   # RETURNS TRUE on success; FALSE after telling the user what is missing.
-  # SIDE EFFECTS registers the result as the "★ Multiplex" store entry, makes it
+  # SIDE EFFECTS registers the result as the "Multiplex" store entry, makes it
   #   active, remembers cfg (for Save) and re-applies remembered alignment offsets.
   # =========================================================================
   mplex_cfg_rv <- reactiveVal(NULL)   # recipe of the last successful build
@@ -786,7 +788,7 @@ smlm_server <- function(input, output, session) {
   #   rounds line up again.
   #
   # WHICH DATASET IS "THE MULTIPLEX"
-  #   Either the built "★ Multiplex" entry, or a loaded CSV that was exported
+  #   Either the built "Multiplex" entry, or a loaded CSV that was exported
   #   from a multiplex (it carries mplex_channel / mplex_label). mplex_target_rv
   #   names the store entry; mplex_spec_rv holds its channels. Each such store
   #   entry describes itself through attributes:
@@ -828,8 +830,6 @@ smlm_server <- function(input, output, session) {
   mplex_target_rv  <- reactiveVal(NULL)     # store name of the current multiplex
 
   .mplex_zero <- c(x = 0, y = 0, z = 0)
-  # Source key of one spec entry (older specs without $src fall back to the channel).
-  .mplex_key <- function(c) c$src %||% paste0("ch:", c$channel)
   # Offset for one source key from a table, zero when absent.
   .mplex_off_of <- function(tbl, key) {
     v <- tbl[[key]]
@@ -855,41 +855,6 @@ smlm_server <- function(input, output, session) {
     invisible(TRUE)
   }
 
-  # GOAL: recognise a CSV exported from a multiplex and describe it as one.
-  #   The export writes mplex_channel / mplex_label / mplex_color per row and the
-  #   total alignment shift already applied (mplex_dx_nm / _dy_nm / _dz_nm). The
-  #   shift is recorded in the spec as $prior (display and re-export only; the
-  #   coordinates already carry it) and the columns are dropped so they cannot
-  #   go stale. New nudges on the loaded file start from zero.
-  # RETURNS df, with the multiplex attributes when it is a multiplex CSV.
-  .mplex_adopt_csv <- function(df, fname) {
-    if (!is.data.frame(df) || !all(c("mplex_channel", "mplex_label") %in% names(df))) return(df)
-    df$mplex_channel <- suppressWarnings(as.integer(df$mplex_channel))
-    df <- df[!is.na(df$mplex_channel), , drop = FALSE]
-    if (!nrow(df)) return(df)
-    if (!"mplex_color" %in% names(df)) df$mplex_color <- NA_character_
-    chans <- sort(unique(df$mplex_channel))
-    defs  <- mplex_default_colors(length(chans))
-    pcol  <- c("mplex_dx_nm", "mplex_dy_nm", "mplex_dz_nm")
-    spec <- lapply(seq_along(chans), function(i) {
-      rows <- df$mplex_channel == chans[i]
-      col  <- df$mplex_color[rows][1]
-      if (is.na(col) || !nzchar(col)) { col <- defs[i]; df$mplex_color[rows] <<- col }
-      lab  <- as.character(df$mplex_label[rows][1])
-      pr   <- vapply(pcol, function(p)
-        if (p %in% names(df)) suppressWarnings(as.numeric(df[[p]][rows][1])) else 0, numeric(1))
-      pr[!is.finite(pr)] <- 0
-      list(channel = chans[i], label = lab, color = col,
-           n_loc = sum(rows), n_trace = dplyr::n_distinct(df$tid[rows]),
-           src = paste0("csv:", fname, ":", lab),
-           prior = stats::setNames(pr, c("x", "y", "z")))
-    })
-    df <- df[, setdiff(names(df), pcol), drop = FALSE]
-    attr(df, "mplex_spec")       <- spec
-    attr(df, "mplex_store_name") <- fname
-    attr(df, "mplex_off")        <- list()
-    df
-  }
 
   # GOAL: bring the current multiplex in the STORE to the WANTED offsets.
   # ARGS  update_active : replot the active view (FALSE from the builder, which
@@ -1207,42 +1172,7 @@ smlm_server <- function(input, output, session) {
   })
 
   # ── Split one prepared file into its channels, for the spatial statistics ──
-  #
-  # Covers BOTH channel sources - a 2-colour DCR split and a multiplex build -
-  # because they are one concept now. The older `mplex_split_active()` above is
-  # multiplex-only and splits the RAW upload; this one splits a frame that has
-  # already been through resolve_channels(), so the labels and colours match
-  # everything else on screen.
-  #
-  # THE POOLED PARENT COMES BACK WITH EACH CHANNEL, and that is the point.
-  # Ripley's L and g(r) divide by the observed area. If each channel derived its
-  # own window, the sparser channel would get a smaller bounding box and
-  # footprint, hence a higher apparent density, hence a DEFLATED curve - a
-  # difference between the channels manufactured out of their difference in
-  # count. The two dyes imaged the SAME field, so they must be measured in the
-  # same window; then a real difference in curve is a difference in how the two
-  # targets are arranged in that field, which is the biology being asked about.
-  # The plain split: one entry per channel, tagged "file · channel". Used by
-  # every analysis that does NOT divide by an area. Returns a single untagged
-  # entry when there is nothing to split, so callers need no special case.
-  channel_parts <- function(df, tag) {
-    none <- list(list(df = df, tag = tag))
-    if (!is.data.frame(df) || !nrow(df) || !"channel" %in% names(df)) return(none)
-    ids <- sort(unique(df$channel[!is.na(df$channel)]))
-    if (length(ids) < 2L) return(none)
-    lapply(ids, function(ch) {
-      sub <- df[which(df$channel == ch), , drop = FALSE]
-      list(df = sub, tag = .facet_name(tag, as.character(sub$channel_label[1])))
-    })
-  }
 
-  # The same split, plus the pooled parent, for the analyses that DO divide by an
-  # area (see the note above).
-  split_df_by_channel <- function(df, tag) {
-    lapply(channel_parts(df, tag), function(pt)
-      c(pt, list(win_df  = df,    # pooled file - the shared observation window
-                 win_tag = tag))) # shared support cache key, so it is built once
-  }
 
   # TRUE when the active dataset is a multiplex (drives the *_by_channel UIs).
   output$mplex_active <- reactive({
@@ -1273,7 +1203,7 @@ smlm_server <- function(input, output, session) {
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     ct <- NULL
     if (!is.null(df) && nrow(df))
-      ct <- tryCatch(attr(attach_channel_colors(resolve_channels(df, input), input),
+      ct <- tryCatch(attr(attach_channel_colors(resolve_channels(df, as_smlm_settings(input)), smlm_channel_colors(input)),
                           "channel_table"), error = function(e) NULL)
     if (is.null(ct) || nrow(ct) < 2L) return(NULL)
     ch <- stats::setNames(paste0("only:", ct$channel),
@@ -1533,7 +1463,13 @@ smlm_server <- function(input, output, session) {
   get_ui_settings <- reactive({
     req(uploaded_df_rv())
     list(
-  
+      # Every setting that changes results, complete by construction
+      # (R/smlm_settings.R). The loader reads this block first; the fields below
+      # keep the older layout readable and carry everything that is not a setting
+      # (display state, crop region, overlay, QC thresholds).
+      settings_version = SMLM_SETTINGS_FILE_VERSION,
+      smlm_settings    = unclass(smlm_settings_from_input(input)),
+
       efo_range        = input$efo_range,
       cfr_range        = input$cfr_range,
       tim_range        = input$tim_range,
@@ -1830,8 +1766,8 @@ smlm_server <- function(input, output, session) {
       dcr_group1 = SMLM_DEFAULTS$dcr_group1,
       dcr_group2 = SMLM_DEFAULTS$dcr_group2,
       
-      color_group1 = "#1f77b4",
-      color_group2 = "#d62728",
+      color_group1 = SMLM_DISPLAY_DEFAULTS$color_group1,
+      color_group2 = SMLM_DISPLAY_DEFAULTS$color_group2,
       
       
       # CLUSTERING PARAMETERS ARE NOT HERE ANY MORE. There is one clustering
@@ -2749,52 +2685,6 @@ smlm_server <- function(input, output, session) {
     compute_centroid_suggestion()
   })
 
-  # Drawn by BOTH the single-colour and two-colour panels. Factored so the two
-  # can never drift apart visually or in what the lines mean.
-  .draw_centroid_gap <- function(r, cur_thr) {
-    wi <- r$within[is.finite(r$within) & r$within > 0]
-    bw <- r$between[is.finite(r$between) & r$between > 0]
-    validate(need(length(wi) >= 2, "Not enough within-trace distances to plot."))
-
-    COL_W <- "#1f78b4"; COL_B <- "#e08214"; COL_S <- "#1a9850"; COL_E <- "#d7191c"
-    # LOG x-axis. The re-blink hump sits at a few nm and the distinct-molecule
-    # hump at hundreds; on a linear axis clipped to a quantile of the pooled
-    # distances the second hump fell off the plot entirely, which defeats the
-    # point - the threshold is supposed to be placed in the GAP between them.
-    xhi <- max(stats::quantile(bw, 0.99, names = FALSE), stats::quantile(wi, 0.99, names = FALSE),
-               3 * r$suggested, na.rm = TRUE)
-    xlo <- max(0.5, min(stats::quantile(c(wi, bw), 0.005, names = FALSE), r$sigma / 4))
-    scal <- function(v) {
-      v <- v[v > 0]
-      d <- stats::density(log10(v), n = 512L, from = log10(xlo), to = log10(xhi))
-      d$x <- 10^d$x; d$y <- d$y / max(d$y); d
-    }
-    # Legend goes in the BOTTOM margin. Note xpd is NOT set in par(): doing so
-    # let abline() draw its vertical markers out through the margins too, which
-    # is what made the lines run past the plot box.
-    op <- graphics::par(mar = c(8.2, 4.5, 3.0, 1.2))
-    on.exit(graphics::par(op), add = TRUE)
-    dw <- scal(wi)
-    graphics::plot(dw$x, dw$y, type = "l", col = COL_W, lwd = 2.5, ylim = c(0, 1.05),
-                   xlim = c(xlo, xhi), log = "x",
-                   xlab = "distance (nm, log scale)", ylab = "density (scaled to peak)",
-                   main = "Within-trace scatter vs between-trace centroid spacing")
-    if (length(bw) >= 2) { db <- scal(bw); graphics::lines(db$x, db$y, col = COL_B, lwd = 2.5) }
-    graphics::abline(v = r$sigma,     col = COL_W, lwd = 2, lty = 3)
-    graphics::abline(v = r$suggested, col = COL_S, lwd = 2, lty = 4)
-    if (length(cur_thr) == 1 && is.finite(cur_thr))
-      graphics::abline(v = cur_thr, col = COL_E, lwd = 2.5, lty = 2)
-    # Placed in device coords so the log x-axis cannot distort it; xpd = NA is
-    # scoped to this call alone.
-    graphics::legend(x = graphics::grconvertX(0.02, "ndc", "user"),
-                     y = graphics::grconvertY(0.14, "ndc", "user"),
-      bty = "n", cex = 0.85, ncol = 2, xpd = NA,
-      legend = c("within trace (loc to its centroid)", "between traces (centroid NN)",
-                 "sigma", "suggested", "current threshold"),
-      col = c(COL_W, COL_B, COL_W, COL_S, COL_E),
-      lty = c(1, 1, 3, 4, 2), lwd = c(2.5, 2.5, 2, 2, 2.5))
-    invisible(NULL)
-  }
 
   output$centroid_gap_plot <- renderPlot({
     r <- centroid_gap_data()
@@ -2818,10 +2708,10 @@ smlm_server <- function(input, output, session) {
   channel_spread_table <- reactive({
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    df <- tryCatch(attach_channel_colors(resolve_channels(df, input), input),
+    df <- tryCatch(attach_channel_colors(resolve_channels(df, as_smlm_settings(input)), smlm_channel_colors(input)),
                    error = function(e) NULL)
     if (is.null(df) || !nrow(df) || !"channel" %in% names(df)) return(NULL)
-    thr  <- tryCatch(deblink_threshold_for_channel(df, input), error = function(e) NULL)
+    thr  <- tryCatch(deblink_threshold_for_channel(df, as_smlm_settings(input)), error = function(e) NULL)
     if (is.null(thr)) return(NULL)
     ct   <- attr(df, "channel_table")
     meas <- attr(thr, "measured"); sig <- attr(thr, "sigma")
@@ -3118,6 +3008,16 @@ smlm_server <- function(input, output, session) {
       return()
     }
     
+    # Settings that change results: from the file's smlm_settings block, or from
+    # the older layout for files saved before it existed. Some are restored below
+    # by the filter / crop / QC code from their older places (it clamps ranges to
+    # the loaded data), so the block's values are copied there first; every other
+    # setting is applied by restore_settings_plan(). Settings a file does not hold
+    # are left as they are.
+    sf  <- smlm_settings_from_file(raw)
+    raw <- smlm_settings_to_legacy(raw, sf$settings,
+                                   intersect(sf$present, .SETTINGS_RESTORED_WITH_FILTERS))
+
     base_fil <- filters_defaults_from_data(uploaded_df())
     fil <- modifyList(base_fil, raw, keep.null = TRUE)
     ov  <- modifyList(overlay_defaults(), raw$overlay %||% list(), keep.null = TRUE)
@@ -3249,6 +3149,26 @@ smlm_server <- function(input, output, session) {
         }
       }
 
+      # ── Restore every other setting that changes results ───────────────────
+      # Channels, de-blinking, median clustering, channel scope, density unit.
+      # Before this, a reloaded settings file restored the filters but clustered
+      # with whatever the session had.
+      restore_settings_plan(smlm_settings_restore_plan(
+        sf$settings, setdiff(sf$present, .SETTINGS_RESTORED_WITH_FILTERS)))
+
+      # Axial calibration rescales every z distance; restore and commit it, as the
+      # Median Cluster settings file does.
+      zs <- suppressWarnings(as.numeric(raw$z_scale))
+      if (length(zs) == 1L && is.finite(zs) && zs > 0) {
+        updateNumericInput(session, "z_scale", value = zs)
+        commit_z_scale(zs, reason = "Axial calibration from settings")
+      }
+      # Channel colours (display only, but part of the saved two-colour block).
+      tc <- raw$two_color %||% list()
+      for (nm in c("color_group1", "color_group2"))
+        if (is.character(tc[[nm]]) && length(tc[[nm]]) == 1L)
+          colourpicker::updateColourInput(session, nm, value = tc[[nm]])
+
       apply_overlay(ov)
       apply_heatmap(hm)
       # Re-run the plotted/exported pipeline so a restored 2D crop or trimmer
@@ -3256,6 +3176,30 @@ smlm_server <- function(input, output, session) {
       plot_trigger(Sys.time())
     }, once = TRUE)
   })
+
+  # Settings the loader above restores through the filter / crop / QC code, from
+  # their places in the older file layout. Every other setting in
+  # SMLM_SETTINGS_SPEC is restored by restore_settings_plan().
+  .SETTINGS_RESTORED_WITH_FILTERS <- c(
+    "efo_range", "cfr_range", "dcr_range", "eco_range", "tim_range", "dwell_range",
+    "fluo_range", "tid_length_range", "sd_min_locs", "trim_outliers", "trim_k",
+    "view_SD", "target_sd_x", "target_sd_y", "fid_exclude", "use_pooled_dcr",
+    "dens_norm_enable", "dens_thin_enable")
+
+  # Apply a smlm_settings_restore_plan(): one widget update per setting, in order.
+  restore_settings_plan <- function(plan) {
+    vals <- attr(plan, "values")
+    for (i in seq_len(nrow(plan))) {
+      id <- plan$id[i]; v <- vals[[i]]
+      switch(plan$widget[i],
+        checkbox = updateCheckboxInput(session, id, value = isTRUE(v)),
+        numeric  = if (length(v) == 1L && !is.na(v)) updateNumericInput(session, id, value = v),
+        range    = if (length(v) == 2L) shinyWidgets::updateNumericRangeInput(session, id, value = v),
+        radio    = updateRadioButtons(session, id, selected = v),
+        select   = updateSelectInput(session, id, selected = v))
+    }
+    invisible(plan)
+  }
   cluster2_file_reset_key <- reactiveVal(0)
   
   output$cluster2_settings_file_ui <- renderUI({
@@ -3593,9 +3537,6 @@ smlm_server <- function(input, output, session) {
       outputOptions(output, id, suspendWhenHidden = FALSE)
     }
   })
-  safe_update_sd_range_local <- function(session, inputId, value) {
-    shinyWidgets::updateNumericRangeInput(session, inputId, value = value)
-  }
   
   
   # Dynamic container that shows the right set of histograms (X,Y and Z if present)
@@ -3634,16 +3575,6 @@ smlm_server <- function(input, output, session) {
   #
   # RETURNS NULL when off, so each renderer falls back to its own range.
   # ==========================================================================
-  # Values outside a MANUAL range must be dropped, not drawn. sd_counts() clamps
-  # anything beyond the outermost break into the edge bin, which is right for an
-  # auto range (nothing is outside it) but would put every broad trace into one
-  # tall bar at the right edge of a user-set range - a spike that is pure
-  # artifact and would be read as a real population in a figure.
-  sd_hist_clip <- function(v, sh) {
-    if (is.null(sh) || !isTRUE(sh$manual)) return(v)
-    v <- as.numeric(v)
-    v[is.finite(v) & v >= sh$xrange[1] & v <= sh$xrange[2]]
-  }
 
   # Median +/- normalized MAD, ONE LINE PER CHANNEL, each in its channel's colour.
   #
@@ -3694,7 +3625,7 @@ smlm_server <- function(input, output, session) {
   sd_channel_map <- reactive({
     df <- tryCatch(filtered_df(), error = function(e) NULL)
     if (is.null(df) || !nrow(df)) return(NULL)
-    d <- tryCatch(attach_channel_colors(resolve_channels(df, input), input),
+    d <- tryCatch(attach_channel_colors(resolve_channels(df, as_smlm_settings(input)), smlm_channel_colors(input)),
                   error = function(e) NULL)
     if (is.null(d) || !nrow(d) || !"channel" %in% names(d)) return(NULL)
     if (length(unique(d$channel[!is.na(d$channel)])) < 2L) return(NULL)
@@ -4041,18 +3972,6 @@ smlm_server <- function(input, output, session) {
     )
   })
 
-  .sanitize_range <- function(r, v) {
-    v <- v[is.finite(v)]
-    if (is.null(r) || length(r) != 2 || any(!is.finite(r))) {
-      if (length(v)) {
-        # default to [min, 95th percentile] so you don't nuke the data
-        c(min(v), stats::quantile(v, 0.95, na.rm = TRUE, names = FALSE))
-      } else {
-        c(-Inf, Inf)
-      }
-    } else r
-  }
-  
   # --------- 8) TRIGGERS & STORES ----------
   plot_trigger <- reactiveVal(NULL)
   smlm_diag      <- reactiveVal(NULL)   # list(data_clusters, img_blobs) in data coords
@@ -4416,329 +4335,14 @@ smlm_server <- function(input, output, session) {
       )
   })
   #2-color NN helpers
-  # One-row-per-entity table: either per TID or per cluster, with optional 2-color grouping.
-  # - If z doesn't exist, we use z=0.
-  # - If enable_clustering is TRUE, we use cluster medians (cluster != 0) and propagate group by majority vote.
-  build_geo_medians <- function(df, input, use_two_color = FALSE) {
-    if (!"z" %in% names(df)) df$z <- 0
-    
-    # Always guarantee the column exists (even if we can't assign groups)
-    if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
-    
-    if (isTRUE(use_two_color)) {
-      # assign_two_color_group() returns one row per tid with analysis_group
-      gmap <- tryCatch(assign_two_color_group(df, input), error = function(e) NULL)
-      
-      if (is.data.frame(gmap) && nrow(gmap) && "analysis_group" %in% names(gmap)) {
-        df <- df %>%
-          dplyr::left_join(gmap %>% dplyr::select(tid, analysis_group), by = "tid")
-      }
-      
-      # If join didn’t happen for any reason, still keep the column
-      if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
-      
-    } else {
-      # your general grouping (may set NA_integer_ when disabled)
-      df2 <- tryCatch(assign_analysis_group(df, input), error = function(e) df)
-      df <- df2
-      if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
-    }
-    
-    if (isTRUE(input$enable_clustering) && "cluster" %in% names(df)) {
-      geo <- df %>%
-        dplyr::filter(!is.na(.data$cluster) & .data$cluster != 0) %>%
-        dplyr::group_by(.data$cluster) %>%
-        dplyr::summarise(
-          id = dplyr::first(.data$cluster),
-          x  = stats::median(.data$x, na.rm = TRUE),
-          y  = stats::median(.data$y, na.rm = TRUE),
-          z  = stats::median(.data$z, na.rm = TRUE),
-          analysis_group = {
-            v <- .data$analysis_group[!is.na(.data$analysis_group)]
-            if (length(v)) as.integer(names(which.max(table(v)))) else NA_integer_
-          },
-          .groups = "drop"
-        ) %>%
-        dplyr::mutate(id_type = "cluster")
-    } else {
-      geo <- df %>%
-        dplyr::group_by(.data$tid) %>%
-        dplyr::summarise(
-          id = dplyr::first(.data$tid),
-          x  = stats::median(.data$x, na.rm = TRUE),
-          y  = stats::median(.data$y, na.rm = TRUE),
-          z  = stats::median(.data$z, na.rm = TRUE),
-          analysis_group = {
-            v <- .data$analysis_group[!is.na(.data$analysis_group)]
-            if (length(v)) as.integer(round(stats::median(v))) else NA_integer_
-          },
-          .groups = "drop"
-        ) %>%
-        dplyr::mutate(id_type = "tid")
-    }
-    
-    geo
-  }
   
   
-  safe_nn2_local <- function(coords, k) {
-    # Use your existing one if you already have it
-    out <- tryCatch({
-      if (!is.matrix(coords) || nrow(coords) < 1) return(list(nn = NULL, k_eff = 0))
-      k_eff <- max(1, min(k, nrow(coords)))
-      nn <- RANN::nn2(coords, k = k_eff)
-      list(nn = nn, k_eff = k_eff)
-    }, error = function(e) list(nn = NULL, k_eff = 0))
-    out
-  }
-  
-  # Shift midpoint of segment (p1→p2) perpendicularly in XY plane by offset_nm.
-  # Works for both 2-element (x,y) and 3-element (x,y,z) vectors.
-  perp_offset_xy <- function(p1, p2, offset_nm) {
-    p1 <- as.numeric(p1); p2 <- as.numeric(p2)
-    mid <- (p1 + p2) / 2
-    if (!is.finite(offset_nm) || offset_nm <= 0) return(mid)
-    dx <- p2[1] - p1[1]; dy <- p2[2] - p1[2]
-    len <- sqrt(dx^2 + dy^2)
-    if (len < 1e-10) return(mid)
-    perp <- c(-dy / len, dx / len)
-    if (length(mid) == 3) perp <- c(perp, 0)
-    mid + perp * offset_nm
-  }
 
-  # NN index pairs honouring the channel scope radio. Reads `channel`, so one
-  # control covers a 2-colour split and a multiplex build alike; single-channel
-  # data falls back to a global k-NN. "within" = same-channel only, "across" =
-  # strictly between different channels (never within), "all" = both.
-  # Used by every NN-line / NN-table path.
-  .nn_pairs_scoped <- function(df_geo, coords, input) {
-    k <- input$nn_k %||% 4
-    ch <- if ("channel" %in% names(df_geo)) df_geo$channel
-          else if ("mplex_channel" %in% names(df_geo)) df_geo$mplex_channel else NULL
-    if (is.null(ch) || length(unique(ch[!is.na(ch)])) < 2L)
-      return(nn_index_pairs(coords, k))
-    scope <- input$nn_mplex_scope %||% "within"
-    if (identical(scope, "all")) return(nn_index_pairs(coords, k))
-    nn_index_pairs(coords, k, channel = ch,
-                   mode = if (identical(scope, "across")) "between" else "within")
-  }
 
-  # core builder used by both 2D/3D
-  build_nn_segments <- function(df, input, is3d = TRUE) {
-    if (!nrow(df)) return(NULL)
-    
-    # If analysis_group isn't present, create NA column (scope=="all" will still work)
-    if (!"analysis_group" %in% names(df)) df$analysis_group <- NA_integer_
-    
-    scope <- "all"
-    
-    # 1) Choose medians: by cluster if enabled, else by tid
-    if (isTRUE(input$enable_clustering) && "cluster" %in% names(df)) {
-      df_geo <- df %>%
-        dplyr::filter(!is.na(cluster) & cluster != 0) %>%
-        dplyr::group_by(cluster) %>%
-        dplyr::summarise(
-          x = stats::median(x, na.rm = TRUE),
-          y = stats::median(y, na.rm = TRUE),
-          z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
-          color = dplyr::first(color),
-          cluster2 = if ("cluster2" %in% names(df)) dplyr::first(cluster2) else NA_integer_,
-          analysis_group = suppressWarnings(dplyr::first(analysis_group)),
-          channel = if ("channel" %in% names(df)) dplyr::first(channel) else NA_integer_,
-          channel_color = if ("channel_color" %in% names(df)) dplyr::first(channel_color) else NA_character_,
-          channel_label = if ("channel_label" %in% names(df)) dplyr::first(channel_label) else NA_character_,
-          mplex_channel = if ("mplex_channel" %in% names(df)) dplyr::first(mplex_channel) else NA_integer_,
-          .groups = "drop"
-        )
-    } else {
-      df_geo <- df %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(
-          x = stats::median(x, na.rm = TRUE),
-          y = stats::median(y, na.rm = TRUE),
-          z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
-          color = dplyr::first(color),
-          cluster2 = if ("cluster2" %in% names(df)) dplyr::first(cluster2) else NA_integer_,
-          analysis_group = suppressWarnings(dplyr::first(analysis_group)),
-          channel = if ("channel" %in% names(df)) dplyr::first(channel) else NA_integer_,
-          channel_color = if ("channel_color" %in% names(df)) dplyr::first(channel_color) else NA_character_,
-          channel_label = if ("channel_label" %in% names(df)) dplyr::first(channel_label) else NA_character_,
-          mplex_channel = if ("mplex_channel" %in% names(df)) dplyr::first(mplex_channel) else NA_integer_,
-          .groups = "drop"
-        )
-    }
-
-    if (nrow(df_geo) < 2) return(NULL)
-
-    coords <- as.matrix(df_geo[, c("x","y","z")])
-    pm <- .nn_pairs_scoped(df_geo, coords, input)
-    if (!nrow(pm)) return(NULL)
-
-    seg_x <- c(); seg_y <- c(); seg_z <- c()
-    lab_x <- c(); lab_y <- c(); lab_z <- c(); labs <- c()
-    e_i <- c(); e_j <- c(); e_d <- c()      # per-edge record, for channel colouring
-    seen  <- new.env(parent = emptyenv())
-
-    dmin <- (input$distance_range %||% c(0, Inf))[1]
-    dmax <- (input$distance_range %||% c(0, Inf))[2]
-
-    for (r in seq_len(nrow(pm))) {
-      i <- pm[r, 1]; ni <- pm[r, 2]
-      {
-        # dedupe undirected
-        key <- paste0(min(i, ni), "_", max(i, ni))
-        if (!is.null(seen[[key]])) next
-        seen[[key]] <- TRUE
-
-        # within/between/all
-        g1 <- df_geo$analysis_group[i]
-        g2 <- df_geo$analysis_group[ni]
-        if (!pair_passes_scope(g1, g2, scope)) next
-
-        dist <- pm[r, 3]
-        if (dist < dmin || dist > dmax) next
-
-        # within-cluster2 filter
-        if (isTRUE(input$nn_within_cluster2) && isTRUE(input$enable_cluster2) && "cluster2" %in% names(df_geo)) {
-          c2i <- df_geo$cluster2[i]; c2ni <- df_geo$cluster2[ni]
-          if (is.na(c2i) || is.na(c2ni) || c2i == 0 || c2ni == 0 || c2i != c2ni) next
-        }
-
-        seg_x <- c(seg_x, coords[i,1], coords[ni,1], NA_real_)
-        seg_y <- c(seg_y, coords[i,2], coords[ni,2], NA_real_)
-        seg_z <- c(seg_z, coords[i,3], coords[ni,3], NA_real_)
-
-        nn_off <- suppressWarnings(as.numeric(input$nn_label_offset %||% 5))
-        if (!is.finite(nn_off) || nn_off < 0) nn_off <- 5
-        mid <- perp_offset_xy(coords[i,], coords[ni,], nn_off)
-        lab_x <- c(lab_x, mid[1]); lab_y <- c(lab_y, mid[2]); lab_z <- c(lab_z, mid[3])
-        labs  <- c(labs, round(dist, 2))
-        e_i <- c(e_i, i); e_j <- c(e_j, ni); e_d <- c(e_d, dist)
-      }
-    }
-
-    if (!length(seg_x)) return(NULL)
-
-    # Per-edge table, so the plot can colour a line by the channels it joins.
-    # This is what the separate 2-colour NN panel used to exist for: a
-    # within-channel line drawn in that channel's colour, a cross-channel line in
-    # magenta. It is the one thing that panel did which the shared one could not,
-    # so it moved here rather than being dropped with it.
-    edges <- data.frame(
-      x1 = coords[e_i, 1], y1 = coords[e_i, 2], z1 = coords[e_i, 3],
-      x2 = coords[e_j, 1], y2 = coords[e_j, 2], z2 = coords[e_j, 3],
-      dist = e_d,
-      ch1 = df_geo$channel[e_i], ch2 = df_geo$channel[e_j],
-      lab1 = df_geo$channel_label[e_i], lab2 = df_geo$channel_label[e_j],
-      stringsAsFactors = FALSE
-    )
-    same <- !is.na(edges$ch1) & !is.na(edges$ch2) & edges$ch1 == edges$ch2
-    col_same <- df_geo$channel_color[e_i]
-    edges$color <- ifelse(same,
-                          ifelse(is.na(col_same), "#666666", col_same),
-                          "magenta")
-
-    list(
-      seg_x = seg_x, seg_y = seg_y, seg_z = seg_z,
-      lab_x = lab_x, lab_y = lab_y, lab_z = lab_z, labs = labs,
-      edges = edges
-    )
-  }
   
   
-  `%||%` <- function(a, b) if (!is.null(a)) a else b
-  
-  # Always return a correctly-shaped empty edge table
-  empty_edges <- function() {
-    data.frame(
-      x1 = numeric(0), y1 = numeric(0), z1 = numeric(0),
-      x2 = numeric(0), y2 = numeric(0), z2 = numeric(0),
-      dist = numeric(0),
-      g1 = integer(0), g2 = integer(0),
-      stringsAsFactors = FALSE
-    )
-  }
-  
-  # 1) Median coordinates depending on "enable_clustering"
-  #    - If clustering = TRUE, use cluster medians (cluster != 0)
-  #    - Else, use trace medians by tid
-  #    Returns: data.frame(group_id, x,y,z?, optional aux columns you might add upstream)
-  nn_medians <- function(df, enable_clustering = FALSE) {
-    if (enable_clustering) {
-      out <- df %>%
-        dplyr::filter(!is.na(cluster) & cluster != 0) %>%
-        dplyr::group_by(cluster) %>%
-        dplyr::summarise(
-          x = stats::median(x, na.rm = TRUE),
-          y = stats::median(y, na.rm = TRUE),
-          z = stats::median(z, na.rm = TRUE),
-          analysis_group = suppressWarnings(dplyr::first(analysis_group)),
-          .groups = "drop"
-        ) %>%
-        dplyr::mutate(key_id = paste0("C", cluster))
-    } else {
-      out <- df %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(
-          x = stats::median(x, na.rm = TRUE),
-          y = stats::median(y, na.rm = TRUE),
-          z = stats::median(z, na.rm = TRUE),
-          analysis_group = suppressWarnings(dplyr::first(analysis_group)),
-          .groups = "drop"
-        ) %>%
-        dplyr::mutate(key_id = paste0("T", tid))
-    }
-    out
-  }
   
   
-  # 2) Attach analysis_group (1/2) to the *median table*
-  #    Uses your existing assign_analysis_group(df, input) which tags raw rows.
-  #    We then propagate group to the medians (by tid or cluster mapping).
-  attach_group_to_medians <- function(df_med, df_raw, input, enable_clustering = FALSE) {
-    if (!nrow(df_med)) return(dplyr::mutate(df_med, analysis_group = NA_integer_))
-    
-    tagged <- assign_analysis_group(df_raw, input)
-    # Build a map from tid or cluster to analysis_group at the *trace level*.
-    # For cluster medians, we derive the cluster->group via the majority vote of member traces.
-    if (enable_clustering && "cluster" %in% names(tagged)) {
-      # majority group per cluster (using tid-level group assignment)
-      tid_groups <- tagged %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(analysis_group = suppressWarnings(as.integer(round(stats::median(analysis_group, na.rm = TRUE)))),
-                         cluster = suppressWarnings(as.integer(round(stats::median(cluster, na.rm = TRUE)))),
-                         .groups = "drop")
-      cl_map <- tid_groups %>%
-        dplyr::filter(!is.na(cluster) & cluster != 0) %>%
-        dplyr::group_by(cluster) %>%
-        dplyr::summarise(
-          analysis_group = {
-            v <- analysis_group[!is.na(analysis_group)]
-            if (length(v)) as.integer(names(which.max(table(v)))) else NA_integer_
-          },
-          .groups = "drop"
-        ) %>%
-        dplyr::rename(group_id = cluster)
-      
-      out <- df_med %>%
-        dplyr::left_join(cl_map, by = "group_id")
-    } else {
-      # simple map: tid -> group (median over rows for that tid)
-      tid_map <- tagged %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(
-          analysis_group = suppressWarnings(as.integer(round(stats::median(analysis_group, na.rm = TRUE)))),
-          .groups = "drop"
-        ) %>%
-        dplyr::rename(group_id = tid)
-      
-      out <- df_med %>%
-        dplyr::left_join(tid_map, by = "group_id")
-    }
-    
-    if (!"analysis_group" %in% names(out)) out$analysis_group <- NA_integer_
-    out
-  }
   
   
   #--- 2D-Only server parts:
@@ -4788,39 +4392,6 @@ smlm_server <- function(input, output, session) {
     if (length(rows)) dplyr::bind_rows(rows) else df_geo[0, ]
   })
   
-  compute_kde <- function(df, lim, n = 200, bw = NA_real_, bw_factor = 1) {
-    if (!all(c("x","y") %in% names(df)) || nrow(df) < 2) return(NULL)
-    n <- max(25, min(1000, as.integer(n)))
-    if (any(!is.finite(c(lim$x, lim$y)))) return(NULL)
-    
-    if (is.finite(bw) && bw > 0) {
-      # ABSOLUTE bandwidth (same for x and y)
-      h <- c(bw, bw)
-    } else {
-      # Scott rule (isotropic), then scale by bw_factor
-      vx  <- stats::var(df$x, na.rm = TRUE)
-      vy  <- stats::var(df$y, na.rm = TRUE)
-      sdx <- sqrt(max(vx, 0)); sdy <- sqrt(max(vy, 0))
-      sx  <- min(sdx, stats::IQR(df$x, na.rm = TRUE) / 1.34)
-      sy  <- min(sdy, stats::IQR(df$y, na.rm = TRUE) / 1.34)
-      s   <- sqrt((sx^2 + sy^2) / 2)
-      npts <- nrow(df)
-      hiso <- 1.06 * s * (npts ^ (-1/6))
-      if (!is.finite(hiso) || hiso <= 0) {
-        rngx <- diff(range(df$x, na.rm = TRUE))
-        rngy <- diff(range(df$y, na.rm = TRUE))
-        hiso <- max((rngx + rngy)/2 * 0.02, 1e-6)
-      }
-      hiso <- hiso * if (is.finite(bw_factor) && bw_factor > 0) bw_factor else 1
-      h <- c(hiso, hiso)
-    }
-    
-    MASS::kde2d(
-      df$x, df$y, n = n,
-      lims = c(lim$x[1], lim$x[2], lim$y[1], lim$y[2]),
-      h = h
-    )
-  }
   
   # ---- Reset filters to full ranges ----
   observeEvent(uploaded_df(), {
@@ -4876,37 +4447,6 @@ smlm_server <- function(input, output, session) {
       shinyWidgets::updateNumericRangeInput(session, "hist_range", value = rng)
     }
   })
-  # Use trace medians (or de-blinked molecule medians when de-blinking is on),
-  # unless the user explicitly requests raw points.
-  heatmap_input_df <- function(df, use_raw = FALSE, clustering = FALSE) {
-    if (isTRUE(use_raw)) {
-      return(df %>% dplyr::select(x, y))
-    }
-    if (isTRUE(clustering) && "cluster" %in% names(df) && any(df$cluster > 0, na.rm = TRUE)) {
-      return(
-        df %>%
-          dplyr::filter(is.finite(cluster) & cluster > 0) %>%
-          dplyr::group_by(cluster) %>%
-          dplyr::summarise(
-            x = stats::median(x, na.rm = TRUE),
-            y = stats::median(y, na.rm = TRUE),
-            .groups = "drop"
-          )
-      )
-    }
-    if ("tid" %in% names(df)) {
-      return(
-        df %>%
-          dplyr::group_by(tid) %>%
-          dplyr::summarise(
-            x = stats::median(x, na.rm = TRUE),
-            y = stats::median(y, na.rm = TRUE),
-            .groups = "drop"
-          )
-      )
-    }
-    df %>% dplyr::select(x, y)
-  }
   
   
   # Reads, optionally rotates, and prepares a data-URI + pixel size
@@ -4970,16 +4510,6 @@ smlm_server <- function(input, output, session) {
     )
   })
   
-  # helper: expand axes to include the image bbox; safe if overlay is NULL
-  expand_limits_with_image <- function(lim, overlay, invert_y = TRUE) {
-    if (is.null(overlay)) return(lim)
-    x0 <- overlay$x;  w <- overlay$sizex
-    y  <- overlay$y;  h <- overlay$sizey
-    xr <- c(x0, x0 + w)
-    yr <- if (invert_y) c(y - h, y) else c(y, y + h)
-    list(x = range(c(lim$x, xr), na.rm = TRUE),
-         y = range(c(lim$y, yr), na.rm = TRUE))
-  }
 
   # ---- Auto-align overlay helpers ----
   .load_smlm_img <- function() {
@@ -5164,13 +4694,14 @@ smlm_server <- function(input, output, session) {
   # Median Cluster (each = one standard structure of known stoichiometry).
   gt_calib <- reactiveVal(NULL)
   observeEvent(input$gt_calib_run, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store(); fn <- input$gt_calib_file
     if (is.null(fn) || !nzchar(fn %||% "") || !fn %in% names(store)) {
       showNotification("Pick a loaded standard dataset first.", type = "warning"); return()
     }
     k <- max(1L, as.integer(input$gt_calib_k %||% 1L))
     res <- tryCatch({
-      df <- apply_clustering_pipeline(apply_meta_filters_batch(store[[fn]], input), input)
+      df <- apply_clustering_pipeline(apply_meta_filters_batch(store[[fn]], run_set), run_set)
       measure_label_multiplicity(df, k_per_structure = k)
     }, error = function(e) { message("[GT-calib] ", conditionMessage(e)); NULL })
     if (is.null(res) || !isTRUE(res$ok)) {
@@ -5517,9 +5048,10 @@ smlm_server <- function(input, output, session) {
     # 3) POINTS (build pts + marker once)
     # -----------------------------------
     # --- build the points once (same idea as 3D) ---
-    pts <- build_pts_2d(df, input)
-    pts$color <- build_colors_for_pts(pts, input, default_palette_col = "color")
-    cmap <- color_mapping_for_pts(pts, input)
+    disp <- smlm_display_from_input(input)
+    pts <- build_pts_2d(df, disp, deblinked = isTRUE(input$enable_clustering))
+    pts$color <- build_colors_for_pts(pts, disp, default_palette_col = "color")
+    cmap <- color_mapping_for_pts(pts, disp)
     
     # bail out early if empty; still keep overlay + axes
     if (!nrow(pts)) {
@@ -5632,7 +5164,7 @@ smlm_server <- function(input, output, session) {
     # 6) GENERAL NN + 2-color NN (your blocks)
     # ------------------------------------
     if (isTRUE(input$show_nn_lines) && nrow(df) > 1) {
-      nn <- build_nn_segments(df, input, is3d = FALSE)
+      nn <- build_nn_segments(df, smlm_nn_options(input), is3d = FALSE)
       if (!is.null(nn)) {
         ln_col <- if (isTRUE(input$dark_mode)) "white" else "black"
         # With channels, colour each line by the channels it joins: a
@@ -6139,71 +5671,10 @@ smlm_server <- function(input, output, session) {
       flatshading = TRUE, hoverinfo = "skip", showlegend = FALSE, showscale = FALSE, name = "crop preview")
   }
   
-  assign_analysis_group_local <- function(df, input) {
-    # guard columns
-    if (!("tid" %in% names(df))) stop("Missing 'tid' column in data.")
-    .dcr_col <- if (isTRUE(input$use_pooled_dcr %||% SMLM_DEFAULTS$use_pooled_dcr) && "dcr_pooled" %in% names(df))
-      "dcr_pooled" else if ("dcr" %in% names(df)) "dcr" else NULL
-    med_tbl <- df %>%
-      dplyr::group_by(tid) %>%
-      dplyr::summarise(
-        dcr_med  = if (!is.null(.dcr_col)) stats::median(.data[[.dcr_col]], na.rm = TRUE) else NA_real_,
-        fluo_med = if ("fluo" %in% names(df)) stats::median(fluo, na.rm = TRUE) else NA_real_,
-        .groups = "drop"
-      )
-    df <- dplyr::left_join(df, med_tbl, by = "tid")
-    
-    mode <- (input$grouping_mode %||% "none")
-    if (isTRUE(input$color_by_fluo)) mode <- "fluo"  # force fluo when override is on
-    
-    if (mode == "fluo") {
-      df$analysis_group <- dplyr::case_when(
-        is.finite(df$fluo_med) & round(df$fluo_med) == 1 ~ 1L,
-        is.finite(df$fluo_med) & round(df$fluo_med) == 2 ~ 2L,
-        TRUE ~ NA_integer_
-      )
-    } else if (mode == "dcr") {
-      g1 <- input$dcr_group1; g2 <- input$dcr_group2
-      if (!is.null(g1) && !is.null(g2) && length(g1) == 2 && length(g2) == 2 && all(is.finite(c(g1,g2)))) {
-        v <- df$dcr_med
-        df$analysis_group <- dplyr::case_when(
-          is.finite(v) & v >= g1[1] & v <  g1[2] ~ 1L,
-          is.finite(v) & v >= g2[1] & v <= g2[2] ~ 2L,
-          TRUE ~ NA_integer_
-        )
-      } else {
-        df$analysis_group <- NA_integer_
-      }
-    } else {
-      df$analysis_group <- NA_integer_
-    }
-    df
-  }
-  # Put these with your other helpers ----
-  normalize_scope <- function(s) {
-    s <- as.character(s %||% "")
-    if (s %in% c("within","between","all")) s else "between"
-  }
   
-  pair_passes_scope_2c <- function(g1, g2, scope = c("within","between")) {
-    scope <- match.arg(scope)
-    if (is.na(g1) || is.na(g2)) return(FALSE)
-    if (!(g1 %in% c(1L,2L)) || !(g2 %in% c(1L,2L))) return(FALSE)
-    if (scope == "within") return(g1 == g2)
-    return(g1 != g2)  # "between"
-  }
-  
-  pair_passes_scope_all <- function(g1, g2, scope = c("within","between","all")) {
-    scope <- match.arg(scope)
-    if (is.na(g1) || is.na(g2)) return(FALSE)
-    if (!(g1 %in% c(1L,2L)) || !(g2 %in% c(1L,2L))) return(FALSE)
-    if (scope == "within")  return(g1 == g2)
-    if (scope == "between") return(g1 != g2)
-    TRUE  # "all"
-  }
   # make_two_color_tid_map() was a third copy of the DCR/fluo trace split, kept
   # alongside assign_two_color_group() and assign_analysis_group(). All three are
-  # now resolve_channels() in helpers_smlm.R, which is the only place a channel
+  # now resolve_channels() in R/smlm_channels.R, which is the only place a channel
   # is defined.
   
   
@@ -6252,6 +5723,7 @@ smlm_server <- function(input, output, session) {
   #   colour columns, and the multiplex channel/label columns when active
   # ==========================================================================
   plottable_data <- eventReactive(plot_trigger(), {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     df <- filtered_df()
     # Multiplex channel alignment: shift not yet in the active copy (see the
     # MULTIPLEX CHANNEL ALIGNMENT block). Before the crops, so a crop box drawn
@@ -6284,7 +5756,7 @@ smlm_server <- function(input, output, session) {
     
     if (nrow(df) == 0) return(df)
     
-    df <- assign_analysis_group(df, input)
+    df <- assign_analysis_group(df, run_set)
     
     # Safety check
     if (nrow(df) == 0) return(df)
@@ -6356,7 +5828,7 @@ smlm_server <- function(input, output, session) {
     # Colour is presentation, so it is applied here rather than inside the cached
     # chain - see attach_channel_colors(). This is what keeps the colour pickers
     # out of the prepared-data cache key.
-    df <- attach_channel_colors(df, input)
+    df <- attach_channel_colors(df, smlm_channel_colors(input))
     n_ch <- length(unique(df$channel[!is.na(df$channel)]))
 
     # ── Colours ─────────────────────────────────────────────────────────────
@@ -6590,7 +6062,7 @@ smlm_server <- function(input, output, session) {
     if (nrow(df_geo) < 2) return(df_geo[0, ])
 
     coords <- as.matrix(df_geo[, c("x","y","z")])
-    pm <- .nn_pairs_scoped(df_geo, coords, input)
+    pm <- .nn_pairs_scoped(df_geo, coords, smlm_nn_options(input))
     if (!nrow(pm)) return(df_geo[0, ])
 
     rows <- list()
@@ -6638,7 +6110,7 @@ smlm_server <- function(input, output, session) {
       # Second sheet when channels exist: one row per drawn pair, carrying which
       # channel each end belongs to. This replaces the separate "2-color NN table"
       # export, which was the same thing computed by a second code path.
-      ed <- tryCatch(build_nn_segments(plottable_data(), input, is3d = TRUE)$edges,
+      ed <- tryCatch(build_nn_segments(plottable_data(), smlm_nn_options(input), is3d = TRUE)$edges,
                      error = function(e) NULL)
       if (is.data.frame(ed) && nrow(ed) &&
           length(unique(stats::na.omit(c(ed$ch1, ed$ch2)))) > 1L)
@@ -6823,12 +6295,13 @@ smlm_server <- function(input, output, session) {
     zero_col <- if (isTRUE(input$dark_mode)) "rgba(255,255,255,0.25)" else "rgba(0,0,0,0.25)"
     
     # Build the point table we actually plot
-    pts <- build_pts_3d(df, input)
+    disp <- smlm_display_from_input(input)
+    pts <- build_pts_3d(df, disp, deblinked = isTRUE(input$enable_clustering))
     
     # Compute colors for that table (default uses your existing palette in pts$color)
-    pts$color <- build_colors_for_pts(pts, input, default_palette_col = "color")
+    pts$color <- build_colors_for_pts(pts, disp, default_palette_col = "color")
     
-    cmap <- color_mapping_for_pts(pts, input)
+    cmap <- color_mapping_for_pts(pts, disp)
     
     # Plot the points ONCE
     fig <- plotly::plot_ly()
@@ -6986,7 +6459,7 @@ smlm_server <- function(input, output, session) {
       }
       
       # No alpha radius is asked for: alpha_surface_3d() derives one per group
-      # from that group's own point spacing. See its header in helpers_smlm.R for
+      # from that group's own point spacing. See its header in R/smlm_shapes.R for
       # why a single global radius was both meaningless (a 30 nm molecule and a
       # 500 nm structure need different radii) and inert (the old code drew the
       # whole tetrahedralization, which is identical at every alpha).
@@ -7037,7 +6510,7 @@ smlm_server <- function(input, output, session) {
     # again - which is how the 2D and 3D views could disagree about which pairs
     # were neighbours. One builder now serves both.
     if (isTRUE(input$show_nn_lines) && nrow(df) > 1) {
-      nn <- build_nn_segments(df, input, is3d = TRUE)
+      nn <- build_nn_segments(df, smlm_nn_options(input), is3d = TRUE)
       if (!is.null(nn)) {
         ln_col <- if (isTRUE(input$dark_mode)) "white" else "black"
         ed <- nn$edges
@@ -7310,7 +6783,7 @@ smlm_server <- function(input, output, session) {
         has_valid_group <- "analysis_group" %in% names(df_surface) &&
                            any(!is.na(df_surface$analysis_group))
         if (!has_valid_group && isTRUE(input$enable_two_color)) {
-          gmap <- tryCatch(assign_two_color_group(df_surface, input), error = function(e) NULL)
+          gmap <- tryCatch(assign_two_color_group(df_surface, as_smlm_settings(input)), error = function(e) NULL)
           if (is.data.frame(gmap) && "analysis_group" %in% names(gmap)) {
             df_surface <- df_surface %>%
               dplyr::select(-dplyr::any_of("analysis_group")) %>%
@@ -8197,7 +7670,7 @@ smlm_server <- function(input, output, session) {
         group_df <- wrap_group_rows(df, "cluster2", g)
         if (nrow(group_df) >= 4) {
           # Radius derived per cluster from its own point spacing - see
-          # alpha_surface_3d() in helpers_smlm.R.
+          # alpha_surface_3d() in R/smlm_shapes.R.
           srf <- alpha_surface_3d(as.matrix(group_df[, c("x", "y", "z")]))
           if (!is.null(srf)) {
 
@@ -8286,20 +7759,6 @@ smlm_server <- function(input, output, session) {
     }
   }, ignoreNULL = FALSE)
 
-  ## GOAL: read a numericInput as a whole number inside a range, and survive the
-  ## user emptying the box.
-  ##
-  ## WHY `%||%` IS NOT ENOUGH. An emptied numericInput does not send NULL, it sends
-  ## **NA**, and `%||%` only substitutes for NULL. NA then survives as.integer(),
-  ## and min()/max() propagate it rather than clamping it, so
-  ## `max(1L, min(6L, NA))` is NA and the loop below died on `seq_len(NA)` the
-  ## moment the group-count box was cleared. Anything that SIZES something from a
-  ## user-typed number needs this, not `%||%`.
-  .int_input <- function(x, default, lo = -Inf, hi = Inf) {
-    v <- suppressWarnings(as.integer(x))
-    if (!length(v) || is.na(v[1])) v <- as.integer(default)
-    as.integer(max(lo, min(hi, v[1])))
-  }
 
   # file -> group-name map (only the first n_groups slots, only assigned files)
   file_group_map <- reactive({
@@ -8393,23 +7852,7 @@ smlm_server <- function(input, output, session) {
   #   this function. Until that exists the spatial statistics stay pooled: a
   #   pooled curve is honest, a per-channel curve with a per-channel window is
   #   not.
-  channel_facets <- function(df) {
-    none <- list(list(label = "", df = df))
-    if (!isTRUE(input$analysis_by_channel %||% FALSE)) return(none)
-    if (!is.data.frame(df) || !nrow(df) || !"channel" %in% names(df)) return(none)
-    ids <- sort(unique(df$channel[!is.na(df$channel)]))
-    if (length(ids) < 2L) return(none)
-    lapply(ids, function(ch) {
-      sub <- df[which(df$channel == ch), , drop = FALSE]
-      list(label = as.character(sub$channel_label[1]), df = sub)
-    })
-  }
 
-  # Append the channel label to a dataset name, so one series per file becomes one
-  # series per file-and-channel and every existing grouping/colour path downstream
-  # keeps working unchanged.
-  .facet_name <- function(fname, label)
-    if (nzchar(label %||% "")) paste0(fname, " · ", label) else fname
 
   # Relabel a results data frame's `dataset` column to its group. In group mode,
   # files not assigned to any group are dropped. Analyses call this at read time,
@@ -8429,7 +7872,7 @@ smlm_server <- function(input, output, session) {
   ## been run, tagged with each file's group, so between-group statistics use one
   ## value per cell. Group-mode histograms pool units across files, which is fine
   ## for looking but pseudo-replicates any test run on them; see per_file_summary()
-  ## in helpers_smlm.R. Reads the stored results at download time, so it reflects
+  ## in R/smlm_summary.R. Reads the stored results at download time, so it reflects
   ## the last Run of each panel. The result stores are defined further down this
   ## function; they exist by the time the handler can fire.
   output$download_per_file_summary <- downloadHandler(
@@ -8469,7 +7912,7 @@ smlm_server <- function(input, output, session) {
   ##
   ## The maths, the choice of thinning target and the trap in using NN distances
   ## as that target are all documented at the "8b. LABELLING-DENSITY
-  ## NORMALISATION" banner in helpers_smlm.R. Read that before changing anything
+  ## NORMALISATION" banner in R/smlm_support.R. Read that before changing anything
   ## here. In one line: g(r) and K(r) are exactly invariant under independent
   ## thinning, so thinning removes a density artefact without removing real
   ## clustering - but the TARGET must be the global density n/support, which
@@ -8495,6 +7938,7 @@ smlm_server <- function(input, output, session) {
 
   ## ── Measure: build the per-file density profile ───────────────────────────
   observeEvent(input$run_density, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
 
@@ -8511,94 +7955,39 @@ smlm_server <- function(input, output, session) {
     auto_close <- isTRUE(input$dens_close_auto) && smode == "grid"
     want_sweep <- auto_close || (isTRUE(input$dens_show_sweep) && smode == "grid")
 
-    rows <- list(); skipped <- character(0); sweeps <- list()
-    prepped <- list(); locals <- list()
-    withProgress(message = "Measuring labelling density...", value = 0, {
+    prepped <- list()
+    out <- withProgress(message = "Measuring labelling density...", value = 0, {
       nf <- length(store)
-
-      ## ── Pass 1: filter (and de-blink) each file, and sweep the closing radius ──
-      # The sweep must finish before any density is computed, because the radius it
-      # picks has to be THE SAME for every file - different denominators measuring
-      # different kinds of region is precisely what makes a density ratio wrong.
+      # Filter (and de-blink) each file. NOT thinned: this is the pre-thinning
+      # reference the whole panel is built on.
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]
         incProgress(0.6 / nf, detail = fname)
         df <- qc_exclude_from(store[[fname]], fname)
-        if (!is.data.frame(df) || !nrow(df)) { skipped <- c(skipped, fname); next }
-        df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
-        if (is.null(df) || !nrow(df)) { skipped <- c(skipped, fname); next }
-        # De-blinking must run before molecule density can be measured. NOT thinned
-        # here - this is the pre-thinning reference the whole panel is built on.
+        if (!is.data.frame(df) || !nrow(df)) next
+        df <- tryCatch(apply_meta_filters_batch(df, run_set), error = function(e) NULL)
+        if (is.null(df) || !nrow(df)) next
         if (needs_cluster) {
-          df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) df)
+          df <- tryCatch(apply_clustering_pipeline(df, run_set), error = function(e) df)
         }
         prepped[[fname]] <- df
-        # Sweep on the same points the support is built from (all localizations),
-        # so the plateau the user reads is the plateau the density actually used.
-        if (want_sweep) {
-          keep <- if (use_3d) c("x", "y", "z") else c("x", "y")
-          if (all(keep %in% names(df))) {
-            sp <- df[, keep, drop = FALSE]
-            if (!use_3d) sp$z <- 0
-            sw <- tryCatch(support_closing_sweep(sp[stats::complete.cases(sp), , drop = FALSE],
-                                                 use_3d = use_3d, h_nm = h_nm),
-                           error = function(e) NULL)
-            if (!is.null(sw)) { sw$dataset <- fname; sweeps[[fname]] <- sw }
-          }
-        }
       }
-
-      ## ── Resolve the one common gap-fill radius ──
-      # Each file's plateau start is read off its own sweep, then the LARGEST is
-      # taken: a radius below a file's plateau leaves that file's support tracking
-      # its structures, and it is better to be slightly generous on the files that
-      # plateaued early than wrong on the one that did not.
-      if (auto_close && length(sweeps)) {
-        pls <- vapply(sweeps, function(s) plateau_close_nm(s), numeric(1))
-        pls <- pls[is.finite(pls)]
-        if (length(pls)) close_n <- max(pls)
-      }
-
-      ## ── Pass 2: densities, all on that one radius ──
-      for (fname in names(prepped)) {
-        incProgress(0.4 / max(1L, length(prepped)), detail = fname)
-        df <- prepped[[fname]]
-        r <- tryCatch(compute_unit_density(df, unit = unit, use_3d = use_3d,
-                                          support_mode = smode, h_nm = h_nm,
-                                          close_nm = close_n, k = kk,
-                                          support_from = input$dens_support_from %||% "units",
-                                          bw_nm = kde_bw, frac = kde_fr),
-                      error = function(e) NULL)
-        if (is.null(r)) { skipped <- c(skipped, fname); next }
-        r$dataset    <- fname
-        r$unit       <- unit
-        r$close_auto <- auto_close
-        # Freeze the settings this row was measured with, so the status line and
-        # the density plot describe the run rather than the live sliders.
-        r$run_mode   <- smode
-        r$run_bw     <- kde_bw
-        r$run_frac   <- kde_fr
-        r$run_3d     <- use_3d
-        rows[[fname]] <- r
-        # Per-unit local density for the distribution plot. Subsampled - the plot
-        # only needs the shape, and violins on 10^5 points are slow to render.
-        lv <- tryCatch(unit_local_density(unit_centroids(df, unit, use_3d),
-                                         k = kk, use_3d = use_3d),
-                       error = function(e) numeric(0))
-        lv <- lv[is.finite(lv) & lv > 0]
-        if (length(lv) > 4000L) lv <- lv[seq(1, length(lv), length.out = 4000L)]
-        if (length(lv)) locals[[fname]] <- data.frame(dataset = fname, local = lv)
-      }
+      density_profile_files(prepped, unit = unit, use_3d = use_3d, support_mode = smode,
+                            h_nm = h_nm, close_nm = close_n, auto_close = auto_close,
+                            want_sweep = want_sweep, k = kk,
+                            support_from = input$dens_support_from %||% "units",
+                            bw_nm = kde_bw, frac = kde_fr,
+                            progress = function(frac, detail) incProgress(frac, detail = detail))
     })
-    res <- do.call(rbind, rows)
+    res <- out$profile
     if (is.null(res) || !nrow(res)) {
       showNotification("Could not measure density on any file (need >=3 units per file).",
                        type = "warning")
       density_profile_rv(NULL); return()
     }
     density_profile_rv(res)
-    density_sweep_rv(if (length(sweeps)) do.call(rbind, sweeps) else NULL)
-    density_local_rv(if (length(locals)) do.call(rbind, locals) else NULL)
+    density_sweep_rv(out$sweeps)
+    density_local_rv(out$locals)
     rr <- range(res$density, na.rm = TRUE)
     showNotification(sprintf(
       "Density measured on %d file(s): %.1f - %.1f units/%s (%.1fx spread).",
@@ -8953,10 +8342,10 @@ smlm_server <- function(input, output, session) {
       prof$close_nm[1] else max(0, as.numeric(input$dens_close_nm %||% 200))
 
     df <- qc_exclude_from(store[[fname]], fname)
-    df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+    df <- tryCatch(apply_meta_filters_batch(df, as_smlm_settings(input)), error = function(e) NULL)
     shiny::validate(shiny::need(!is.null(df) && nrow(df) > 0, "No localizations after filtering."))
     if (unit == "cluster")
-      df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) df)
+      df <- tryCatch(apply_clustering_pipeline(df, as_smlm_settings(input)), error = function(e) df)
 
     keep <- if (use_3d) c("x", "y", "z") else c("x", "y")
     shiny::validate(shiny::need(all(keep %in% names(df)), "Missing coordinates."))
@@ -9095,7 +8484,7 @@ smlm_server <- function(input, output, session) {
   ## One switch, because it is one methodological choice: whether Ripley's L, g(r),
   ## L12, g12 and the co-localization null measure intensity over the SAMPLE SUPPORT
   ## or over the axis-aligned bounding box. See the SUPPORT-AWARE OBSERVATION WINDOW
-  ## banner in helpers_smlm.R for the measured effect (a CSR pattern in an L-shaped
+  ## banner in R/smlm_support.R for the measured effect (a CSR pattern in an L-shaped
   ## cell read as clustered by +68.9 nm of L-r with the box, -13.5 nm with the
   ## support; co-localization false positives 17-37% -> 0%).
   ##
@@ -9684,6 +9073,7 @@ smlm_server <- function(input, output, session) {
   })
 
   observeEvent(input$run_batch_nn, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     unit  <- resolve_unit(input$nn_batch_unit, "pcid", "tid", "Batch NN")
     k     <- max(1L, as.integer(input$nn_batch_k %||% 1L))
     gf    <- input$nn_batch_group %||% "all"
@@ -9722,10 +9112,6 @@ smlm_server <- function(input, output, session) {
       mplex_groups <- TRUE
     }
 
-    needs_clustering <- unit != "tid"
-    two_color_mode   <- isTRUE(input$enable_two_color)
-    needs_grouping   <- !is.na(group_filter) || !is.null(cross_groups)
-
     results   <- list()
     n_skipped <- 0L
     withProgress(message = "Running batch NN...", value = 0, {
@@ -9736,53 +9122,17 @@ smlm_server <- function(input, output, session) {
         df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
 
-        df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+        df <- tryCatch(apply_meta_filters_batch(df, run_set), error = function(e) NULL)
         if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
-        df <- apply_density_thinning(df, fname)   # opt-in labelling-density match
+        df <- apply_density_thinning(df, fname, run_set)   # opt-in labelling-density match
         if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
 
-        if (mplex_groups) {
-          # Between-channel: cluster (within-channel) if needed, then derive
-          # analysis_group from channel membership (X→1, Y→2) for compute_batch_nn.
-          if (needs_clustering)
-            df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) df)
-          if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
-          df$analysis_group <- dplyr::case_when(
-            df$mplex_label == chx ~ 1L,
-            df$mplex_label == chy ~ 2L,
-            TRUE ~ NA_integer_)
-        } else if (two_color_mode && needs_grouping) {
-          # Same pipeline as every other branch; resolve_channels() inside it
-          # derives analysis_group from the 2-colour split.
-          df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
-          if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
-        } else if (needs_clustering) {
-          df <- tryCatch(apply_clustering_pipeline(df, input), error = function(e) NULL)
-          if (is.null(df) || !nrow(df)) { n_skipped <- n_skipped + 1L; next }
-        } else if (needs_grouping) {
-          df <- tryCatch(assign_analysis_group(df, input), error = function(e) df)
-        }
-
-        # Per-channel facet. A CROSS-channel run (mplex_groups, or a group
-        # filter) is never faceted: it is a statistic ABOUT the pair, so
-        # splitting it by channel would ask a question that has no answer.
-        facets <- if (mplex_groups || needs_grouping) list(list(label = "", df = df))
-                  else channel_facets(df)
-        got <- FALSE
-        for (fc in facets) {
-          d <- tryCatch(
-            compute_batch_nn(fc$df, unit = unit, k = k, group_filter = group_filter,
-                             cross_groups = cross_groups),
-            error = function(e) data.frame()
-          )
-          if (!nrow(d)) next
-          nm2 <- .facet_name(fname, fc$label)
-          d$dataset <- nm2
-          d$tag     <- if (".dataset_tag" %in% names(df)) df$.dataset_tag[[1L]] else fname
-          results[[nm2]] <- d
-          got <- TRUE
-        }
-        if (!got) { n_skipped <- n_skipped + 1L; next }
+        got <- batch_nn_for_file(df, fname, run_set, unit = unit, k = k,
+                                 group_filter = group_filter, cross_groups = cross_groups,
+                                 mplex_pair = if (mplex_groups) c(chx, chy) else NULL,
+                                 by_channel = isTRUE(input$analysis_by_channel %||% FALSE))
+        if (!length(got)) { n_skipped <- n_skipped + 1L; next }
+        results[names(got)] <- got
       }
     })
 
@@ -10360,6 +9710,7 @@ smlm_server <- function(input, output, session) {
   tid_time_results <- reactiveVal(NULL)
 
   observeEvent(input$run_tid_time, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
     # Active-file-only unless "all files" is ticked.
@@ -10384,9 +9735,9 @@ smlm_server <- function(input, output, session) {
         df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) next
         # Row-level metadata filters only (efo/cfr/dcr/...); NOT spread/length.
-        df <- tryCatch(apply_meta_filters_batch(df, input), error = function(e) NULL)
+        df <- tryCatch(apply_meta_filters_batch(df, run_set), error = function(e) NULL)
         if (is.null(df) || !nrow(df) || !all(c("tid", "tim") %in% names(df))) next
-        df <- apply_density_thinning(df, fname)   # opt-in labelling-density match
+        df <- apply_density_thinning(df, fname, run_set)   # opt-in labelling-density match
         if (is.null(df) || !nrow(df)) next
         # Trace-length prefilter: keep only trace IDs whose localization count is
         # in [len_min, len_max]. Counts are per-file (a tid is within one file).
@@ -10505,6 +9856,7 @@ smlm_server <- function(input, output, session) {
   # so this scatter is not a spot width and does not scale like one.
   prec_cloud_results <- reactiveVal(NULL)
   observeEvent(input$run_prec_cloud, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No files loaded.", type = "warning"); return() }
     # Precision is ALWAYS assessed on the single ACTIVE dataset - never pooled across
@@ -10514,236 +9866,25 @@ smlm_server <- function(input, output, session) {
     store <- store[af]
     min_loc <- max(3L, as.integer(input$prec_cloud_min_loc %||% 5L))
     use_z   <- isTRUE(input$prec_cloud_use_z)
-    dxall <- dyall <- dzall <- numeric(0)          # pooled residuals (length-weighted)
-    # Per-TRACE VARIANCES (one vote each, robust) and per-TRACE covariances. The
-    # cross terms are needed because a cloud tilted off the x/y axes has its
-    # elongation entirely there - per-axis spreads alone cannot see it.
-    vxt <- vyt <- vzt <- numeric(0)
-    cxyt <- cxzt <- cyzt <- numeric(0)
-    nlt <- integer(0)                              # localizations per trace
-    # Pooled sums of squares + their exact degrees of freedom. Kept separately
-    # from the residual vectors because the correct divisor is sum(n_i - 1),
-    # NOT the number of localizations: subtracting each trace's own centre
-    # spends one degree of freedom PER TRACE. Dividing by N - 1 instead (what
-    # sd() on the pooled residuals does) reads ~5% low at 5 localizations per
-    # trace and ~1% low at 15 - a real, n-dependent underestimate of sigma.
-    ssx_all <- ssy_all <- ssz_all <- 0
-    dof_all <- dofz_all <- 0L
-    per_file <- list()
-    pooled   <- list()                             # per-loc residuals (dx/dy/dz) for the plot
-    # Median-of-chi-square correction. s^2 ~ sigma^2 * chisq(n-1)/(n-1), which is
-    # right-skewed, so the MEDIAN of the per-trace variances sits BELOW sigma^2 -
-    # by 16% at n = 5, i.e. sigma reads 8% low. Dividing by that distribution's
-    # own median removes it exactly (same idea as the 1.4826 that makes the MAD
-    # consistent for sigma). NOTE the usual c4 factor is the WRONG correction
-    # here: c4 corrects E[s], and this estimator takes a median, not a mean.
-    med_fac <- function(n) ifelse(n > 1L, stats::qchisq(0.5, n - 1L) / (n - 1L), NA_real_)
-    withProgress(message = "Computing precision cloud...", value = 0, {
-      nf <- length(store)
-      for (i in seq_along(store)) {
-        fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
-        # Assess precision on the SAME localizations the Display tab plots: apply the
-        # metadata / trace-length / trace-spread filters (and any fiducial exclusion),
-        # so the cloud reflects the post-filter data rather than the raw acquisition.
-        df <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), input),
-                       error = function(e) store[[fname]])
-        if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) next
-        hasz <- use_z && has_axial_data(df)   # z must vary; a planar z = 0 column is not 3D
-        # Residuals are taken about each trace's MEAN, not its median. The mean is
-        # the maximum-likelihood centre under the Gaussian error model this panel
-        # assumes, and it is the only centre for which the degree-of-freedom
-        # corrections below are exact - a median centre has no matching
-        # correction. It is also the honest choice: a robust centre partly
-        # ABSORBS the mislinked localizations that this panel exists to reveal.
-        # Outlier resistance is supplied instead by the per-trace median further
-        # down, which gives every trace one vote regardless of length.
-        dd <- df %>%
-          dplyr::group_by(tid) %>%
-          dplyr::mutate(nloc = dplyr::n()) %>%
-          dplyr::filter(nloc >= min_loc) %>%
-          dplyr::mutate(dx = x - mean(x, na.rm = TRUE),
-                        dy = y - mean(y, na.rm = TRUE),
-                        dz = if (hasz) z - mean(z, na.rm = TRUE) else NA_real_) %>%
-          dplyr::ungroup()
-        if (!nrow(dd)) next
-        pooled[[fname]] <- data.frame(dx = dd$dx, dy = dd$dy,
-                                      dz = if (hasz) dd$dz else NA_real_)
-        dxall <- c(dxall, dd$dx); dyall <- c(dyall, dd$dy)
-        if (hasz) dzall <- c(dzall, dd$dz[is.finite(dd$dz)])
-        # One robust σ per trace (each trace counts once, so a 2000-loc fiducial
-        # doesn't dominate the precision estimate the way the pooled cloud does).
-        safe_cov <- function(u, v) {
-          ok <- is.finite(u) & is.finite(v)
-          if (sum(ok) < 3L) return(NA_real_)
-          stats::cov(u[ok], v[ok])
-        }
-        pts <- dd %>% dplyr::group_by(tid) %>%
-          dplyr::summarise(nl  = dplyr::n(),
-                           ssx = sum(dx^2, na.rm = TRUE),
-                           ssy = sum(dy^2, na.rm = TRUE),
-                           ssz = if (hasz) sum(dz^2, na.rm = TRUE) else NA_real_,
-                           vx  = stats::var(dx, na.rm = TRUE),
-                           vy  = stats::var(dy, na.rm = TRUE),
-                           vz  = if (hasz) stats::var(dz, na.rm = TRUE) else NA_real_,
-                           cxy = safe_cov(dx, dy),
-                           cxz = if (hasz) safe_cov(dx, dz) else NA_real_,
-                           cyz = if (hasz) safe_cov(dy, dz) else NA_real_,
-                           .groups = "drop")
-        # ONE factor applied to every second moment of a trace, so the ellipse
-        # SHAPE (and hence the anisotropy and tilt) is untouched - only its size
-        # is de-biased.
-        mf <- med_fac(pts$nl)
-        vxt <- c(vxt, pts$vx / mf); vyt <- c(vyt, pts$vy / mf)
-        # Keep vzt the SAME LENGTH as vxt/vyt/cxzt by carrying NA through rather
-        # than dropping non-finite entries here. robust_median_cov() drops them
-        # itself; filtering only this one vector meant var_z and cov_xz were
-        # medians over different subsets of traces, so the robust xz/yz matrices
-        # mixed two populations.
-        if (hasz) vzt <- c(vzt, pts$vz / mf)
-        cxyt <- c(cxyt, pts$cxy / mf)
-        if (hasz) { cxzt <- c(cxzt, pts$cxz / mf); cyzt <- c(cyzt, pts$cyz / mf) }
-        nlt <- c(nlt, pts$nl)
-        # Pooled sums of squares with their exact degrees of freedom.
-        dof_f  <- sum(pts$nl - 1L)
-        dofz_f <- sum((pts$nl - 1L)[is.finite(pts$ssz)])
-        ssx_all <- ssx_all + sum(pts$ssx, na.rm = TRUE)
-        ssy_all <- ssy_all + sum(pts$ssy, na.rm = TRUE)
-        ssz_all <- ssz_all + sum(pts$ssz, na.rm = TRUE)
-        dof_all <- dof_all + dof_f; dofz_all <- dofz_all + dofz_f
-        per_file[[fname]] <- data.frame(
-          dataset  = fname,
-          sigma_x  = sqrt(sum(pts$ssx, na.rm = TRUE) / max(dof_f, 1L)),
-          sigma_y  = sqrt(sum(pts$ssy, na.rm = TRUE) / max(dof_f, 1L)),
-          sigma_z  = if (dofz_f > 0) sqrt(sum(pts$ssz, na.rm = TRUE) / dofz_f) else NA_real_,
-          n_traces = nrow(pts), n_locs = nrow(dd),
-          stringsAsFactors = FALSE)
-      }
-    })
-    if (!length(dxall)) {
+    # Filtered on the SAME localizations the Display tab plots (metadata, trace
+    # length and spread filters, fiducial exclusion). If filtering fails the cloud
+    # falls back to the unfiltered file, while the drift estimate skips it.
+    filt <- lapply(names(store), function(fname)
+      tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), run_set),
+               error = function(e) NULL))
+    names(filt) <- names(store)
+    dfs <- lapply(names(store), function(fname) filt[[fname]] %||% store[[fname]])
+    names(dfs) <- names(store)
+    res <- withProgress(message = "Computing precision cloud...", value = 0,
+      precision_cloud(dfs, min_loc = min_loc, use_z = use_z, drift_dfs = filt,
+                      progress = function(frac, detail) incProgress(frac, detail = detail)))
+    if (is.null(res)) {
       showNotification("No traces with enough localizations (lower 'Min localizations / trace').",
                        type = "warning"); prec_cloud_results(NULL); return()
     }
-    mom <- function(v, p) { v <- v[is.finite(v)]; m <- mean(v); s <- stats::sd(v)
-                            if (s <= 0) NA_real_ else mean((v - m)^p) / s^p }
-    # Pooled sigma, exact degrees of freedom (see the accumulator comment above).
-    sx <- sqrt(ssx_all / max(dof_all, 1L)); sy <- sqrt(ssy_all / max(dof_all, 1L))
-    sz <- if (dofz_all > 0) sqrt(ssz_all / dofz_all) else NA_real_
-    sx_med <- sqrt(stats::median(vxt, na.rm = TRUE))
-    sy_med <- sqrt(stats::median(vyt, na.rm = TRUE))
-    sz_med <- if (length(vzt)) sqrt(stats::median(vzt, na.rm = TRUE)) else NA_real_
-    # subsample rows for the plot (dx/dy/dz/is_fid kept aligned); σ computed from all
-    P <- do.call(rbind, pooled)
-
-    # ── Covariance matrices: the shape of the cloud, tilt included ────────────
-    # POOLED describes exactly the population the heatmap draws (every
-    # localization, so long traces weigh more). ROBUST gives each trace one vote.
-    # Both are kept and both are drawn: when they disagree the gap IS the
-    # "a few long/wide traces dominate" diagnostic, made visible.
-    pair_cov <- function(u, v) {
-      ok <- is.finite(u) & is.finite(v)
-      if (sum(ok) < 3L) return(NULL)
-      stats::cov(cbind(u[ok], v[ok]))
-    }
-    # cov() divides by (rows - 1); the honest divisor is sum(n_i - 1). Rescaling
-    # by that ratio keeps the drawn pooled ellipse consistent with the pooled
-    # sigma reported above, instead of ~5% tighter at short traces.
-    dof_scale <- if (dof_all > 0) (nrow(P) - 1) / dof_all else 1
-    cov_pooled <- lapply(list(
-      xy = pair_cov(P$dx, P$dy),
-      xz = if (length(dzall)) pair_cov(P$dx, P$dz) else NULL,
-      yz = if (length(dzall)) pair_cov(P$dy, P$dz) else NULL),
-      function(S) if (is.null(S)) NULL else S * dof_scale)
-    cov_trace <- list(
-      xy = robust_median_cov(vxt, vyt, cxyt),
-      xz = if (length(vzt)) robust_median_cov(vxt, vzt, cxzt) else NULL,
-      yz = if (length(vzt)) robust_median_cov(vyt, vzt, cyzt) else NULL)
-
-    # Headline anisotropy comes from the ROBUST matrix and is the eigenvalue
-    # ratio, not max(σx,σy)/min(σx,σy) - the latter reads ~1.0 on a 45°-tilted
-    # cloud and would report drifted data as "isotropic".
-    ell_r <- cov_ellipse_params(cov_trace$xy)
-
-    # ── How heavy SHOULD the tails be? ────────────────────────────────────────
-    # The pooled cloud mixes traces that do NOT share one sigma: MINFLUX
-    # precision scales as 1/sqrt(photons) and photon counts vary a lot between
-    # traces. A mixture of Gaussians of DIFFERENT widths is leptokurtic no
-    # matter how clean the data are - for X|v ~ N(0, v), kurtosis =
-    # 3·E[v²]/E[v]². So comparing the observed kurtosis against 3 (which this
-    # panel used to do, warning "possible mislinks / double events") flags
-    # perfectly good data: at a realistic spread of per-trace sigma the
-    # kurtosis of artifact-free simulated data reaches 7-15.
-    # What is diagnostic is the EXCESS over what the observed sigma spread
-    # already explains. Traces are weighted by n_i because that is how they
-    # enter the pooled cloud. The per-trace variances are themselves noisy -
-    # v̂ ~ v·χ²(n-1)/(n-1) gives E[v̂²] = v²(1 + 2/(n-1)) - so E[v²] is recovered
-    # by the EXACT factor (n-1)/(n+1). Without it, short traces manufacture a
-    # heterogeneity that is not there, the prediction comes out too low, and
-    # the panel goes back to crying artifact on clean data.
-    vv <- (vxt + vyt) / 2                          # per-trace variance, de-biased
-    ok_v <- is.finite(vv) & vv > 0 & is.finite(nlt)
-    kurt_exp <- NA_real_; sigma_spread <- NA_real_
-    if (sum(ok_v) >= 5L) {
-      v <- vv[ok_v]; nl <- nlt[ok_v]; w <- nl / sum(nl)
-      Ev  <- sum(w * v)
-      Ev2 <- sum(w * v^2 * (nl - 1L) / (nl + 1L))
-      kurt_exp <- 3 * max(Ev2, Ev^2) / Ev^2
-      # Spread of the per-trace precision itself - a real property of the
-      # acquisition, reported in its own right rather than mislabelled as tails.
-      sigma_spread <- stats::IQR(sqrt(v)) / stats::median(sqrt(v))
-    }
-
-    # ── Sample stability: drift and jitter ────────────────────────────────────
-    # Belongs here rather than in the de-blink panel: it describes the SAMPLE,
-    # and folding it into the merge radius would be circular (the only molecules
-    # whose motion is observable are the ones already merged, i.e. those that
-    # moved LESS than the radius in question).
-    # Measured per file and pooled, because time is only comparable within one
-    # acquisition - two files start their clocks independently.
-    drift_by_file <- lapply(names(store), function(fname) {
-      dfx <- tryCatch(apply_meta_filters_batch(qc_exclude_from(store[[fname]], fname), input),
-                      error = function(e) NULL)
-      if (!is.data.frame(dfx) || !nrow(dfx) || !"tim" %in% names(dfx)) return(NULL)
-      # Group traces into molecules first, so a fluorophore seen at several
-      # separate times contributes a trajectory rather than one displacement.
-      # A generous radius is used deliberately: pairs that are really two
-      # different molecules displace in no particular direction, so they widen
-      # the interval without biasing the drift.
-      sgq <- tryCatch(suggest_centroid_threshold(dfx, min_n = min_loc)$sigma,
-                      error = function(e) NULL)
-      gid <- if (!is.null(sgq) && is.finite(sgq))
-        tryCatch(deblink_merge_centroids(dfx, 5 * sgq, NULL), error = function(e) NULL) else NULL
-      tryCatch(sample_drift_estimate(dfx, min_n = min_loc, group = gid),
-               error = function(e) NULL)
-    })
-    names(drift_by_file) <- names(store)
-    drift_by_file <- Filter(Negate(is.null), drift_by_file)
-
-    keep <- if (nrow(P) > 40000L) sort(sample.int(nrow(P), 40000L)) else seq_len(nrow(P))
-    Pp <- P[keep, , drop = FALSE]
-    prec_cloud_results(list(
-      drift = drift_by_file,
-      dx = Pp$dx, dy = Pp$dy, dz = Pp$dz,
-      sigma_x = sx, sigma_y = sy, sigma_z = sz,
-      sigma_x_med = sx_med, sigma_y_med = sy_med, sigma_z_med = sz_med,
-      sigma_xy   = sqrt((sx^2 + sy^2) / 2),
-      # robust, one-vote-per-trace precision (immune to fiducials / long traces)
-      sigma_xy_med = sqrt((sx_med^2 + sy_med^2) / 2),
-      cov_pooled = cov_pooled, cov_trace = cov_trace,
-      # Rotation-invariant shape of the robust cloud, and WHICH WAY it leans.
-      aniso_ev  = if (!is.null(ell_r)) ell_r$ratio     else NA_real_,
-      tilt_deg  = if (!is.null(ell_r)) ell_r$angle_deg else NA_real_,
-      rho_xy    = if (!is.null(ell_r)) ell_r$rho       else NA_real_,
-      # Kept for the per-axis read-out; NOT used for the warning any more, since
-      # it cannot see elongation that runs diagonally.
-      anisotropy = max(sx, sy) / max(1e-9, min(sx, sy)),
-      skew_x = mom(dxall, 3), skew_y = mom(dyall, 3),
-      kurt_x = mom(dxall, 4), kurt_y = mom(dyall, 4),
-      # What the per-trace sigma spread alone predicts, and that spread itself.
-      kurt_exp = kurt_exp, sigma_spread = sigma_spread,
-      n_locs = length(dxall), n_traces = length(vxt), has_z = length(dzall) > 0,
-      per_file = do.call(rbind, per_file)))
+    prec_cloud_results(res)
     showNotification(sprintf("Precision cloud: %s localizations; σ_xy = %.2f nm.",
-                             format(length(dxall), big.mark = ","), sqrt((sx^2 + sy^2) / 2)),
+                             format(res$n_locs, big.mark = ","), res$sigma_xy),
                      type = "message", duration = 4)
   })
 
@@ -11289,84 +10430,16 @@ smlm_server <- function(input, output, session) {
     k_len     <- max(2, input$fid_len_z    %||% 4)      # length outlier (robust z), reported only
     recur_r   <- max(1, input$fid_recur_r  %||% 100)    # recurrence radius (nm), reported only
     recur_min <- max(1, input$fid_recur_min %||% 4)     # co-located traces, reported only
-    # Robust z of log10(v): (log10 v − median) / MAD. 0 when MAD collapses (too few
-    # / identical values) so a tiny or degenerate file flags nothing.
-    rzlog <- function(v) {
-      x <- log10(pmax(as.numeric(v), 1e-9))
-      m <- stats::median(x, na.rm = TRUE); s <- stats::mad(x, na.rm = TRUE)
-      if (!is.finite(s) || s <= 0) rep(0, length(x)) else (x - m) / s
-    }
-    # For each trace centroid, count OTHER centroids within radius R (spatial
-    # recurrence). Grid-bucketed so it stays O(n) on thousands of traces.
-    recurrence <- function(cx, cy, R) {
-      n <- length(cx); if (n < 2) return(integer(n))
-      ox <- floor(cx / R); oy <- floor(cy / R)
-      idx <- split(seq_len(n), paste(ox, oy)); cnt <- integer(n)
-      for (i in seq_len(n)) {
-        nb <- integer(0)
-        for (a in -1:1) for (b in -1:1) {
-          k <- paste(ox[i] + a, oy[i] + b); j <- idx[[k]]
-          if (!is.null(j)) nb <- c(nb, j)
-        }
-        d <- sqrt((cx[nb] - cx[i])^2 + (cy[nb] - cy[i])^2)
-        cnt[i] <- sum(d <= R) - 1L
-      }
-      cnt
-    }
     rows <- list()
     withProgress(message = "Scanning for fiducials / contaminants...", value = 0, {
       nf <- length(store)
       for (i in seq_along(store)) {
         fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
         # A single odd file must not abort the whole scan - skip it and continue.
-        rows[[fname]] <- tryCatch({
-          df <- store[[fname]]
-          if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df)))
-            stop("no coords")
-          # Shared predicate: z counts only if it VARIES (planar exports carry z = 0).
-          hasz  <- has_axial_data(df)
-          has_e <- "efo" %in% names(df); has_c <- "cfr" %in% names(df); has_t <- "tim" %in% names(df)
-          feat <- df %>%
-            dplyr::group_by(tid) %>%
-            dplyr::summarise(
-              n_loc    = dplyr::n(),
-              duration = if (has_t) max(tim, na.rm = TRUE) - min(tim, na.rm = TRUE) else NA_real_,
-              efo_med  = if (has_e) stats::median(efo, na.rm = TRUE) else NA_real_,
-              cfr_med  = if (has_c) stats::median(cfr, na.rm = TRUE) else NA_real_,
-              cx       = stats::median(x, na.rm = TRUE),
-              cy       = stats::median(y, na.rm = TRUE),
-              spread   = sqrt(mean((x - stats::median(x, na.rm = TRUE))^2 +
-                                   (y - stats::median(y, na.rm = TRUE))^2 +
-                                   (if (hasz) (z - stats::median(z, na.rm = TRUE))^2 else 0), na.rm = TRUE)),
-              .groups  = "drop") %>%
-            dplyr::mutate(dataset = fname)
-          if (!nrow(feat)) stop("no traces")
-          # Robust outlier scores + spatial recurrence (all per file).
-          feat$z_efo <- if (has_e) rzlog(feat$efo_med) else rep(NA_real_, nrow(feat))
-          feat$z_len <- rzlog(feat$n_loc)
-          feat$recur <- recurrence(feat$cx, feat$cy, recur_r)
-          # ── HOW LONG THE TRACKER STAYED LOCKED ON, RELATIVE TO THIS FILE ──────
-          # A fiducial does not bleach, so the sequence keeps re-finding it and its
-          # trace outlives every real fluorophore in the same acquisition. That is
-          # the primary signature; brightness is secondary, and on some samples the
-          # bead is not even the brightest thing in the file.
-          # The reference is the file's own 99th percentile of the durations of
-          # traces that live at all (duration > 0) - a file can be mostly
-          # single-localization traces, which would collapse a median/MAD scale.
-          live <- feat$duration[is.finite(feat$duration) & feat$duration > 0]
-          dur_q99 <- if (length(live) >= 20L) unname(stats::quantile(live, 0.99)) else NA_real_
-          feat$dur_x_q99 <- if (is.finite(dur_q99) && dur_q99 > 0) feat$duration / dur_q99 else NA_real_
-          long_lived <- is.finite(feat$dur_x_q99) & feat$dur_x_q99 >= k_dur
-          # Brightness outlier, but only for a trace that persisted: a single very
-          # bright localization is a blip, not a bead. Measured on the labelled set
-          # (Test data/Fiducial test): every brightness-only false positive in the
-          # bead-free files was a 1-3 localization trace at 850-5700 kHz.
-          bright <- has_e & is.finite(feat$z_efo) & feat$z_efo >= k_efo & feat$n_loc >= min_locs
-          feat$flagged <- long_lived | bright
-          feat$rule <- ifelse(long_lived & bright, "long+bright",
-                       ifelse(long_lived, "long-lived", ifelse(bright, "bright", "")))
-          feat
-        }, error = function(e) NULL)
+        rows[[fname]] <- tryCatch(
+          fiducial_scan_file(store[[fname]], fname, k_efo = k_efo, k_dur = k_dur,
+                             min_locs = min_locs, recur_r = recur_r),
+          error = function(e) NULL)
       }
     })
     rows <- Filter(Negate(is.null), rows)
@@ -11472,28 +10545,6 @@ smlm_server <- function(input, output, session) {
   }
 
   # ── Shared within-cluster NN statistics ─────────────────────────────────────
-  # SINGLE SOURCE OF TRUTH for "how close are the members of a median cluster",
-  # used by BOTH the Crowding panel and the Within-cluster-NN-vs-size panel so the
-  # two report the SAME number. Both panels build their member centroids on the
-  # same unit (de-blinked molecule when de-blinking is on, else trace ID; see
-  # smlm_nn_unit below) and pass the member coordinates here.
-  #
-  # For each member, mean distance to its k nearest members (k clamped to n-1;
-  # k=1 => nearest-neighbour spacing), then the MEDIAN over members with a robust
-  # spread (MAD and the inter-quartile range) as the ± error.
-  # pts = numeric matrix of member coordinates (one row per member).
-  member_nn_stats <- function(pts, k = 1L) {
-    n <- nrow(pts)
-    if (is.null(n) || n < 2L) return(NULL)
-    k_eff <- min(max(1L, as.integer(k)), n - 1L)
-    nn <- tryCatch(dbscan::kNN(pts, k = k_eff)$dist, error = function(e) NULL)
-    if (is.null(nn)) return(NULL)
-    spacing <- if (k_eff == 1L) as.numeric(nn) else rowMeans(nn, na.rm = TRUE)
-    qs <- as.numeric(stats::quantile(spacing, c(0.25, 0.75), na.rm = TRUE))
-    list(median = stats::median(spacing, na.rm = TRUE),
-         mad    = stats::mad(spacing, na.rm = TRUE),
-         q1 = qs[1], q3 = qs[2], k_used = k_eff, n = n)
-  }
   # Which unit the within-cluster NN is measured between: de-blinked molecules
   # (primary `cluster`) when de-blinking is enabled and present, else trace IDs.
   smlm_nn_unit <- function(df) {
@@ -11526,7 +10577,6 @@ smlm_server <- function(input, output, session) {
     min_n  <- max(3L, as.integer(input$crowd_min_members %||% 4L))
     kk     <- max(1L, as.integer(input$crowd_k %||% 1L))
     use_3d <- isTRUE(input$crowd_use_3d)
-    cols   <- if (use_3d) c("x", "y", "z") else c("x", "y")
 
     # ── no-crowding null (label permutation) ──────────────────────────────────
     # The panel's y-axis has a trend built in even with NO crowding effect: denser
@@ -11546,10 +10596,9 @@ smlm_server <- function(input, output, session) {
     B       <- if (do_null) max(49L, min(2000L, as.integer(input$crowd_nsim %||% 200L))) else 0L
 
     rows      <- list()
-    null_rows <- list()   # one B-length vector of null time_shifts per cluster row
-    # Why-it-found-nothing counters. An empty result has several distinct causes and
-    # the old generic message named only one of them, so a stale filter or a missing
-    # background was indistinguishable from "no structures".
+    null_rows <- list()   # per file: structures x B matrix of null time shifts
+    # Why-it-found-nothing counters. An empty result has several distinct causes,
+    # so each one is counted and named in the warning.
     diag <- c(no_tim = 0L, filtered_out = 0L, no_c2 = 0L, no_z = 0L,
               no_clusters = 0L, no_background = 0L, too_small = 0L)
     withProgress(message = "Computing crowding vs detection-time shift...", value = 0, {
@@ -11559,79 +10608,12 @@ smlm_server <- function(input, output, session) {
         incProgress(1 / n_files, detail = fname)
         df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df) || !"tim" %in% names(df)) { diag["no_tim"] <- diag["no_tim"] + 1L; next }
-        df <- prepared_df(fname)   # cached filter -> thin -> cluster chain
-        # NOTE: the column is `cluster2`. "Median cluster" is only ever the *display*
-        # name (hover labels); testing for it here skipped every file unconditionally,
-        # so this panel could never return a result.
-        if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { diag["no_c2"] <- diag["no_c2"] + 1L; next }
-        if (use_3d && !"z" %in% names(df)) { diag["no_z"] <- diag["no_z"] + 1L; next }
-
-        # Members = de-blinked molecules (when de-blinking is on) or trace IDs -
-        # the SAME unit the Within-cluster-NN panel uses, so the two agree. When
-        # using molecules, primary noise (cluster 0) is dropped; each molecule's
-        # detection time is the median tim of its traces.
-        id_col <- smlm_nn_unit(df)
-        base   <- if (id_col == "cluster") dplyr::filter(df, !is.na(cluster) & cluster > 0L) else df
-        per_tid <- base %>%
-          dplyr::group_by(.data[[id_col]]) %>%
-          dplyr::summarise(
-            tim_med = stats::median(tim, na.rm = TRUE),
-            x = stats::median(x, na.rm = TRUE),
-            y = stats::median(y, na.rm = TRUE),
-            z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
-            cl2 = { v <- cluster2[!is.na(cluster2) & cluster2 > 0L]; if (length(v)) v[1] else 0L },
-            .groups = "drop"
-          ) %>%
-          dplyr::filter(is.finite(tim_med))
-        if (!nrow(per_tid)) next
-
-        cids <- unique(per_tid$cl2[per_tid$cl2 > 0L])
-        if (!length(cids)) { diag["no_clusters"] <- diag["no_clusters"] + 1L; next }
-
-        bg_med <- stats::median(per_tid$tim_med[per_tid$cl2 == 0L], na.rm = TRUE)
-        if (!is.finite(bg_med)) {        # need an unclustered background to reference
-          diag["no_background"] <- diag["no_background"] + 1L; next
-        }
-
-        keep_idx <- list()   # row indices of each qualifying cluster, for the permutation
-        for (cid in cids) {
-          which_c <- which(per_tid$cl2 == cid)
-          sub <- per_tid[which_c, , drop = FALSE]
-          n   <- nrow(sub)
-          if (n < min_n) { diag["too_small"] <- diag["too_small"] + 1L; next }
-          pts <- as.matrix(sub[, cols, drop = FALSE])
-          pts <- pts[stats::complete.cases(pts), , drop = FALSE]
-          if (nrow(pts) < 2L) next
-          st <- member_nn_stats(pts, k = kk)
-          if (is.null(st)) next
-
-          rows[[length(rows) + 1L]] <- data.frame(
-            dataset    = fname,
-            cluster2   = cid,
-            n_tids     = n,
-            nn_median  = st$median,
-            nn_mad     = st$mad,
-            unit       = if (id_col == "cluster") "molecule" else "tid",
-            time_shift = stats::median(sub$tim_med) - bg_med,
-            stringsAsFactors = FALSE
-          )
-          keep_idx[[length(keep_idx) + 1L]] <- which_c
-        }
-
-        # Permute detection times WITHIN this file; geometry and membership untouched.
-        if (do_null && length(keep_idx)) {
-          tv     <- per_tid$tim_med
-          is_bg  <- per_tid$cl2 == 0L
-          nullm  <- matrix(NA_real_, nrow = length(keep_idx), ncol = B)
-          for (b in seq_len(B)) {
-            tv_b   <- tv[sample.int(length(tv))]          # shuffle times across all traces
-            bg_b   <- stats::median(tv_b[is_bg], na.rm = TRUE)
-            nullm[, b] <- vapply(keep_idx,
-                                 function(ix) stats::median(tv_b[ix], na.rm = TRUE) - bg_b,
-                                 numeric(1))
-          }
-          for (r in seq_len(nrow(nullm))) null_rows[[length(null_rows) + 1L]] <- nullm[r, ]
-        }
+        df  <- prepared_df(fname)   # cached filter -> thin -> cluster chain
+        got <- crowding_for_file(df, fname, id_col = smlm_nn_unit(df), min_n = min_n,
+                                 k = kk, use_3d = use_3d, B = B)
+        diag[names(got$diag)] <- diag[names(got$diag)] + got$diag
+        if (!is.null(got$rows)) rows[[length(rows) + 1L]] <- got$rows
+        if (!is.null(got$null)) null_rows[[length(null_rows) + 1L]] <- got$null
       }
     })
 
@@ -11653,29 +10635,9 @@ smlm_server <- function(input, output, session) {
       crowd_results(NULL); crowd_null_stats(NULL); return()
     }
     # ── attach the null band + the global trend test ──────────────────────────
-    crowd_null_stats(NULL)
-    if (do_null && length(null_rows) == nrow(res)) {
-      NM <- do.call(rbind, null_rows)                     # clusters x B
-      qs <- t(apply(NM, 1, stats::quantile, probs = c(0.025, 0.5, 0.975), na.rm = TRUE))
-      res$null_lo  <- qs[, 1]; res$null_med <- qs[, 2]; res$null_hi <- qs[, 3]
-
-      # Global test on the TREND, not the offset: Spearman rho between crowding and
-      # time shift, observed vs its permutation distribution. Rank-based, so it is
-      # unaffected by a constant clustered-vs-background offset and by the skew of
-      # the shift distribution - it asks only "does the shift depend on crowding?".
-      rho_of <- function(y) suppressWarnings(
-        stats::cor(res$nn_median, y, method = "spearman", use = "complete.obs"))
-      rho_obs  <- rho_of(res$time_shift)
-      rho_null <- apply(NM, 2, rho_of)
-      rho_null <- rho_null[is.finite(rho_null)]
-      p_two <- if (is.finite(rho_obs) && length(rho_null))
-        (1 + sum(abs(rho_null) >= abs(rho_obs))) / (length(rho_null) + 1) else NA_real_
-      outside <- mean(res$time_shift < res$null_lo | res$time_shift > res$null_hi, na.rm = TRUE)
-      crowd_null_stats(list(rho_obs = rho_obs, p = p_two, B = length(rho_null),
-                            outside = outside))
-    } else {
-      res$null_lo <- NA_real_; res$null_med <- NA_real_; res$null_hi <- NA_real_
-    }
+    tst <- crowding_null_test(res, if (do_null && length(null_rows)) do.call(rbind, null_rows) else NULL)
+    res <- tst$res
+    crowd_null_stats(tst$stats)
 
     crowd_results(res)
     ns <- crowd_null_stats()
@@ -11823,8 +10785,6 @@ smlm_server <- function(input, output, session) {
     min_n       <- max(2L, as.integer(input$size_nn_min_members %||% 3L))
     kk          <- max(1L, as.integer(input$size_nn_k %||% 1L))
     use_3d      <- isTRUE(input$size_nn_use_3d)
-    cols        <- if (use_3d) c("x", "y", "z") else c("x", "y")
-    use_primary <- deblink_on()
 
     rows <- list()
     # Same why-it-found-nothing counters as the crowding panel: an empty result has
@@ -11837,47 +10797,11 @@ smlm_server <- function(input, output, session) {
         fname <- names(store)[[i]]; incProgress(1 / nf, detail = fname)
         df <- qc_exclude_from(store[[fname]], fname)
         if (!is.data.frame(df) || !nrow(df)) { diag["empty"] <- diag["empty"] + 1L; next }
-        df <- prepared_df(fname)   # cached filter -> thin -> cluster chain
-        # NOTE: the column is `cluster2`. "Median Cluster" is only the DISPLAY name;
-        # testing for it here skipped every file, so this panel could never return a
-        # result. (Same defect as the crowding panel, which used "Median cluster".)
-        if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { diag["no_c2"] <- diag["no_c2"] + 1L; next }
-        if (use_3d && !"z" %in% names(df)) { diag["no_z"] <- diag["no_z"] + 1L; next }
-
-        id_col <- smlm_nn_unit(df)   # shared unit rule: molecule if de-blinking on, else tid
-        cent <- df %>%
-          dplyr::filter(!is.na(cluster2) & cluster2 > 0L) %>%
-          { if (id_col == "cluster") dplyr::filter(., !is.na(cluster) & cluster > 0L) else . } %>%
-          dplyr::group_by(cluster2, .data[[id_col]]) %>%
-          dplyr::summarise(
-            x = stats::median(x, na.rm = TRUE),
-            y = stats::median(y, na.rm = TRUE),
-            z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
-            .groups = "drop")
-        if (!nrow(cent)) { diag["no_clusters"] <- diag["no_clusters"] + 1L; next }
-
-        for (cid in unique(cent$cluster2)) {
-          sub <- cent[cent$cluster2 == cid, , drop = FALSE]
-          n   <- nrow(sub)
-          if (n < min_n) { diag["too_small"] <- diag["too_small"] + 1L; next }
-          pts <- as.matrix(sub[, cols, drop = FALSE])
-          pts <- pts[stats::complete.cases(pts), , drop = FALSE]
-          if (nrow(pts) < 2L) { diag["degenerate"] <- diag["degenerate"] + 1L; next }
-          # Shared k-NN spacing (median over members ± MAD) - identical definition
-          # to the Crowding panel, so the two report the same within-cluster NN.
-          st <- member_nn_stats(pts, k = kk)
-          if (is.null(st)) next
-          # convex-hull size: area (2D) / volume (3D); NA if degenerate
-          hull <- tryCatch(geometry::convhulln(pts, options = "FA")$vol, error = function(e) NA_real_)
-          rows[[length(rows) + 1L]] <- data.frame(
-            dataset   = fname, cluster2 = cid, size = n,
-            nn_median = st$median,
-            nn_mad    = st$mad,
-            hull_size = if (is.finite(hull) && hull > 0) hull else NA_real_,
-            dim       = length(cols),
-            unit      = if (id_col == "cluster") "molecule" else "tid",
-            stringsAsFactors = FALSE)
-        }
+        df  <- prepared_df(fname)   # cached filter -> thin -> cluster chain
+        got <- size_nn_for_file(df, fname, id_col = smlm_nn_unit(df), min_n = min_n,
+                                k = kk, use_3d = use_3d)
+        diag[names(got$diag)] <- diag[names(got$diag)] + got$diag
+        if (!is.null(got$rows)) rows[[length(rows) + 1L]] <- got$rows
       }
     })
 
@@ -12264,46 +11188,7 @@ smlm_server <- function(input, output, session) {
     c(core, list(best = best, criterion = crit_col))
   })
 
-  # Curve overlays (ring/arc/helix): ordered points to draw as a connected line.
-  .viewer_curve_points <- function(f, shape) {
-    pts <- tryCatch(switch(shape,
-      ring = { p <- as.matrix(mle_sample_ring(f, n = 240)); rbind(p, p[1, ]) },  # close loop
-      arc  = as.matrix(mle_sample_arc(f, n = 240)),
-      helix = {
-        if (!is.null(f$t)) {
-          tr <- range(f$t, na.rm = TRUE)
-          ts <- seq(tr[1], tr[2], length.out = 600L)
-          t(vapply(ts, .helix_point, numeric(3),
-                   c = f$center, u = f$axis, r = f$radius, p = f$pitch, phi0 = f$phi0))
-        } else if (!is.null(f$H)) as.matrix(f$H) else NULL
-      },
-      NULL), error = function(e) NULL)
-    if (is.null(pts) || !nrow(pts)) return(NULL)
-    pts <- as.matrix(pts)[, 1:3, drop = FALSE]; colnames(pts) <- c("x", "y", "z"); pts
-  }
 
-  # Surface overlays (sphere/ellipsoid): a (theta,phi) vertex grid + triangle
-  # faces for a translucent mesh3d in 3D; the projected convex hull is the exact
-  # orthographic silhouette outline for these convex bodies in 2D.
-  .viewer_surface_mesh <- function(f, shape, nu = 48L, nv = 28L) {
-    res <- tryCatch({
-      uu <- rep(seq(0, 2*pi, length.out = nu), times = nv)
-      vv <- rep(seq(0, pi,  length.out = nv), each  = nu)
-      base <- cbind(sin(vv) * cos(uu), sin(vv) * sin(uu), cos(vv))
-      verts <- switch(shape,
-        sphere    = base * f$radius,
-        ellipsoid = sweep(base, 2, f$axes, "*") %*% t(f$R),
-        NULL)
-      if (is.null(verts)) stop("unsupported")
-      verts <- sweep(verts, 2, f$center, "+")
-      iu <- rep(seq_len(nu - 1L), times = nv - 1L)
-      iv <- rep(seq_len(nv - 1L), each  = nu - 1L)
-      a <- (iv - 1L) * nu + (iu - 1L); b <- (iv - 1L) * nu + iu     # 0-based vertex ids
-      cc <- iv * nu + iu;              d <- iv * nu + (iu - 1L)
-      list(verts = verts, i = c(a, a), j = c(b, cc), k = c(cc, d))
-    }, error = function(e) NULL)
-    res
-  }
 
   output$viewer_header <- renderText({
     cur  <- viewer_current()
@@ -12604,57 +11489,7 @@ smlm_server <- function(input, output, session) {
 
   ## ── Ripley's L(r) ─────────────────────────────────────────────────────────
   ## ── Global (whole-curve) CSR test: band + caption ──────────────────────────
-  ## The shaded envelope is POINTWISE: it holds at each r on its own, so a curve
-  ## that leaves it somewhere is not significant at 5% - on simulated random data
-  ## in a cell footprint that happens in 96-100% of runs. `g_lo`/`g_hi` (from
-  ## compute_ripley_envelope) are the studentized maximum-deviation band, which the
-  ## curve crosses anywhere with probability 5% under the null, and `global_p` is
-  ## the matching p-value for the whole r range. Both are drawn/reported per file.
-  ## `smooth_fn` is the builder's own smoother (each panel defines its own from its
-  ## smoothing controls), so the band gets exactly the same treatment as the curve.
-  .add_global_band <- function(fig, e, col, nm, smooth_fn = NULL) {
-    if (is.null(e$g_lo) || all(!is.finite(e$g_lo))) return(fig)
-    sm <- if (is.function(smooth_fn)) smooth_fn else function(r, y) y
-    gl <- sm(e$r, e$g_lo); gh <- sm(e$r, e$g_hi)
-    fig %>%
-      plotly::add_trace(x = e$r, y = gh, type = "scatter", mode = "lines",
-        line = list(color = col, width = 1, dash = "dash"), legendgroup = nm,
-        name = paste0(nm, " global 95% band"), showlegend = TRUE, hoverinfo = "skip") %>%
-      plotly::add_trace(x = e$r, y = gl, type = "scatter", mode = "lines",
-        line = list(color = col, width = 1, dash = "dash"), legendgroup = nm,
-        showlegend = FALSE, hoverinfo = "skip")
-  }
-  ## One line naming each file's global p, for the plot caption. Files beyond the
-  ## fourth are summarised so the caption cannot grow without bound.
-  .global_p_caption <- function(env_res) {
-    if (is.null(env_res) || !"global_p" %in% names(env_res)) return(NULL)
-    d <- unique(env_res[, c("dataset", "global_p")])
-    d <- d[is.finite(d$global_p), , drop = FALSE]
-    if (!nrow(d)) return(NULL)
-    fmt <- function(p) if (p <= 1 / 100) sprintf("p \u2264 %.2g", p) else sprintf("p = %.2f", p)
-    txt <- paste(sprintf("%s %s", d$dataset, vapply(d$global_p, fmt, character(1))), collapse = "  \u00b7  ")
-    if (nrow(d) > 4) txt <- paste0(paste(sprintf("%s %s", d$dataset[1:4], vapply(d$global_p[1:4], fmt, character(1))),
-                                         collapse = "  \u00b7  "),
-                                   sprintf("  \u00b7  (+%d more, %d with p < 0.05)", nrow(d) - 4,
-                                           sum(d$global_p < 0.05, na.rm = TRUE)))
-    # Two-channel panels: say which null the p-value is against, since the three
-    # nulls answer different questions (see compute_ripley_envelope).
-    nl <- if ("null_mode" %in% names(env_res)) unique(stats::na.omit(env_res$null_mode)) else character(0)
-    nl_txt <- c(shift = "null: channel B shifted at random (independent placement)",
-                labels = "null: random labelling (do the channels differ in arrangement)",
-                csr = "null: independent random patterns in the window")[nl]
-    nl_txt <- nl_txt[!is.na(nl_txt)]
-    paste0("Global test over the whole r range: ", txt,
-           if (length(nl_txt)) paste0("  |  ", paste(nl_txt, collapse = "; ")) else "")
-  }
 
-  ## Caption as a plot annotation (NULL when no envelope was computed).
-  .global_p_annot <- function(env_res) {
-    cap <- .global_p_caption(env_res)
-    if (is.null(cap)) return(NULL)
-    list(list(text = cap, xref = "paper", yref = "paper", x = 0, y = 1.06,
-              xanchor = "left", showarrow = FALSE, font = list(size = 11, color = "#555")))
-  }
 
   ripley_results     <- reactiveVal(NULL)
   ripley_params      <- reactiveVal(NULL)   # compute settings, frozen at Run
@@ -12672,27 +11507,9 @@ smlm_server <- function(input, output, session) {
 
     needs_cluster <- unit == "cluster"
 
-    get_pts_flat <- function(df) {
-      if (unit == "tid") {
-        df %>%
-          dplyr::group_by(tid) %>%
-          dplyr::summarise(x=median(x,na.rm=T), y=median(y,na.rm=T),
-                           z=if("z"%in%names(df)) median(z,na.rm=T) else 0, .groups="drop") %>%
-          dplyr::filter(is.finite(x), is.finite(y))
-      } else {
-        if (!"cluster" %in% names(df) || !any(!is.na(df$cluster) & df$cluster > 0L)) return(NULL)
-        df %>%
-          dplyr::filter(!is.na(cluster), cluster > 0L) %>%
-          dplyr::group_by(cluster) %>%
-          dplyr::summarise(x=median(x,na.rm=T), y=median(y,na.rm=T),
-                           z=if("z"%in%names(df)) median(z,na.rm=T) else 0, .groups="drop") %>%
-          dplyr::filter(is.finite(x), is.finite(y))
-      }
-    }
-
     compute_ripley_for_df <- function(df, tag, r_seq_use, do_env, close_nm = NULL,
                                       win_df = NULL, win_tag = NULL) {
-      pts <- get_pts_flat(df)
+      pts <- unit_centroids(df, unit = unit, use_3d = use_3d)
       if (is.null(pts) || nrow(pts) < 2L) return(NULL)
       # THE WINDOW COMES FROM win_df, NOT FROM pts. Normally they are the same
       # frame. They differ when this file has been split into channels: there
@@ -12700,46 +11517,19 @@ smlm_server <- function(input, output, session) {
       # (see split_df_by_channel). Deriving it from the channel's own points
       # would shrink the window around the sparser channel and deflate its curve.
       wdf  <- if (is.data.frame(win_df) && nrow(win_df)) win_df else df
-      wpts <- if (identical(wdf, df)) pts else get_pts_flat(wdf)
+      wpts <- if (identical(wdf, df)) pts else unit_centroids(wdf, unit = unit, use_3d = use_3d)
       if (is.null(wpts) || !nrow(wpts)) wpts <- pts
-      # Freeze the observation window so the curve and its CSR envelope share one
-      # identical window (edge bias then cancels).
       axes <- if (use_3d) c("x", "y", "z") else c("x", "y")
       win  <- apply(as.matrix(wpts[, axes, drop = FALSE]), 2, range)
-      # Support window (opt-in): the observed curve and the envelope MUST get the
-      # same support, or the band no longer references the same geometry. Keyed on
-      # win_tag so channels of one file share a single cached support.
-      # Same shared choice of outline points as the hotspot panel, so one cell
-      # gets one area whichever panel measured it.
+      # Support window (opt-in), keyed on win_tag so channels of one file share a
+      # single cached support. Same shared choice of outline points as the
+      # hotspot panel, so one cell gets one area whichever panel measured it.
       sup  <- spatial_support_of(spatial_outline_pts(wdf, wpts), use_3d,
                                  tag = win_tag %||% tag, close_nm = close_nm)
-      # One set-covariance build per file, reused by the curve AND every simulation.
-      if (!is.null(sup) && isTRUE(input$spatial_edge_correct))
-        sup <- attach_gamma_cache(sup, r_max = sqrt(sum((win[2, ] - win[1, ])^2)),
-                                  use_3d = use_3d)
-      curve <- compute_ripley_L(pts$x, pts$y, if (use_3d) pts$z else NULL,
-                                r_seq = r_seq_use, use_3d = use_3d,
-                                window_ranges = win, support = sup,
-                                edge_correct = isTRUE(input$spatial_edge_correct))
-      if (!nrow(curve)) return(NULL)
-      curve$dataset <- tag
-      env <- NULL
-      if (do_env) {
-        env <- compute_ripley_envelope(n = min(nrow(pts), 2000L),
-                                       window_ranges = win, r_seq = curve$r,
-                                       use_3d = use_3d, nsim = nsim, estimator = "L",
-                                       support = sup,
-                                       edge_correct = isTRUE(input$spatial_edge_correct),
-                                       progress = env_prog)
-        # Global (studentized max-deviation) test, computed here because rbind drops
-        # the attributes the envelope carries. One p per file for the whole r range.
-        if (!is.null(env)) {
-          gp <- envelope_global_p(env, curve$Lr_minus_r)
-          env$global_p <- gp$p %||% NA_real_
-          env$dataset <- tag
-        }
-      }
-      list(curve = curve, env = env)
+      spatial_curve_for_points(pts, win, estimator = "L", r_seq = r_seq_use,
+                               use_3d = use_3d, support = sup,
+                               edge_correct = isTRUE(input$spatial_edge_correct),
+                               envelope = do_env, nsim = nsim, progress = env_prog, tag = tag)
     }
 
     get_df_list <- function() {
@@ -12781,7 +11571,7 @@ smlm_server <- function(input, output, session) {
     # window area - incomparable between files. Never blocks.
     # The sweep runs on the same points the window will be drawn from.
     cc <- spatial_gate_close(lapply(df_list, function(it) {
-      u <- tryCatch(get_pts_flat(it$df), error = function(e) NULL)
+      u <- tryCatch(unit_centroids(it$df, unit = unit, use_3d = use_3d), error = function(e) NULL)
       list(df = spatial_outline_pts(it$df, u), tag = it$tag)
     }), use_3d)
     common_close <- cc$close_nm
@@ -13121,30 +11911,10 @@ smlm_server <- function(input, output, session) {
       # gets one area whichever panel measured it.
       sup  <- spatial_support_of(spatial_outline_pts(wdf, wpts), use_3d,
                                  tag = win_tag %||% tag, close_nm = close_nm)
-      if (!is.null(sup) && isTRUE(input$spatial_edge_correct))
-        sup <- attach_gamma_cache(sup, r_max = sqrt(sum((win[2, ] - win[1, ])^2)),
-                                  use_3d = use_3d)
-      curve <- compute_pcf(pts$x, pts$y, if (use_3d) pts$z else NULL,
-                           r_seq = r_seq_use, use_3d = use_3d, window_ranges = win,
-                           support = sup,
-                           edge_correct = isTRUE(input$spatial_edge_correct))
-      if (is.null(curve) || !nrow(curve)) return(NULL)
-      curve$dataset <- tag
-      curve$n_units <- nrow(pts)
-      env <- NULL
-      if (do_env) {
-        env <- compute_ripley_envelope(n = min(nrow(pts), 2000L), window_ranges = win,
-                                       r_seq = curve$r, use_3d = use_3d,
-                                       nsim = nsim, estimator = "g", support = sup,
-                                       edge_correct = isTRUE(input$spatial_edge_correct),
-                                       progress = env_prog)
-        if (!is.null(env)) {
-          gp <- envelope_global_p(env, curve$g)
-          env$global_p <- gp$p %||% NA_real_
-          env$dataset <- tag
-        }
-      }
-      list(curve = curve, env = env)
+      spatial_curve_for_points(pts, win, estimator = "g", r_seq = r_seq_use,
+                               use_3d = use_3d, support = sup,
+                               edge_correct = isTRUE(input$spatial_edge_correct),
+                               envelope = do_env, nsim = nsim, progress = env_prog, tag = tag)
     }
 
     get_df_list <- function() {
@@ -13634,7 +12404,7 @@ smlm_server <- function(input, output, session) {
   ## Computes, per file: the cell footprint, every unit's local density as a
   ## MULTIPLE OF THAT CELL'S OWN MEAN, a CSR-calibrated DBSCAN eps, and the foci
   ## that eps finds. See the block banner "8c. LOCAL DENSITY & HOTSPOTS" in
-  ## helpers_smlm.R for why these statistics and not nearest-neighbour distance.
+  ## R/smlm_hotspots.R for why these statistics and not nearest-neighbour distance.
   ##
   ## THE FOOTPRINT IS NOT OPTIONAL HERE, which is the one place this panel departs
   ## from the rest of the tab. Elsewhere `spatial_use_support` is an opt-in that
@@ -13649,23 +12419,6 @@ smlm_server <- function(input, output, session) {
   hotspot_params <- reactiveVal(NULL)   # resolved params, frozen at Run
   hotspot_unit   <- reactiveVal(NULL)   # the unit the stored results were built on
 
-  ## GOAL: say on the axis why a group curve stops where it does.
-  ##
-  ## In group mode the curves are averaged on a grid capped at the SMALLEST
-  ## per-file r max, so if one cell was measured to 400 nm and another to 1500 the
-  ## group curve ends at 400. That is deliberate - averaging past it would compare
-  ## a mean of five files against a mean of one - but with the axis now ending
-  ## there too, nothing on screen says the longer files were truncated. This puts
-  ## it in the axis title, where it costs no space and cannot be missed.
-  .rmax_axis_title <- function(grouped, res, rmax_c, show_files) {
-    base <- "r (nm)"
-    if (!isTRUE(grouped) || isTRUE(show_files)) return(base)
-    rmax_all <- suppressWarnings(max(res$r, na.rm = TRUE))
-    if (!is.finite(rmax_c) || !is.finite(rmax_all) || rmax_all <= rmax_c * 1.02)
-      return(base)
-    sprintf("r (nm) - group curves stop at %.0f nm, the smallest r max in the set (longest file reaches %.0f)",
-            rmax_c, rmax_all)
-  }
 
   ## GOAL: pick the point set that draws the observation window, per the shared
   ## `dens_support_from` setting. `locs` is the localization table, `units` the
@@ -13677,33 +12430,7 @@ smlm_server <- function(input, output, session) {
     if (is.data.frame(unit_pts) && nrow(unit_pts)) unit_pts else locs_df
   }
 
-  ## Look a name up in a named vector WITHOUT the `[[` trap. `v[["absent"]]` raises
-  ## "subscript out of bounds" rather than returning NULL, so `%||%` never sees it
-  ## and cannot supply the default - which is how an ungrouped file took the whole
-  ## enhancement curve down. Single-bracket indexing yields NA for a missing name,
-  ## which this turns into the default.
-  .name_or <- function(v, key, default) {
-    if (is.null(v) || !length(v) || is.null(key) || !length(key)) return(default)
-    out <- unname(v[as.character(key)[1]])
-    if (length(out) != 1L || is.na(out)) default else out
-  }
 
-  ## THE UNIT IS THE WHOLE MEASUREMENT, so it is named in words on every axis and
-  ## title rather than left to the control panel.
-  ##
-  ## RAW LOCALIZATIONS ARE NOT OFFERED, and this is not a convenience choice.
-  ## Localizations inside one trace sit a few nm apart, so the k-th neighbour
-  ## distance collapses to the localization precision and the local density
-  ## measures HOW LONG THAT FLUOROPHORE STAYED ON, not how the protein is
-  ## arranged. Measured on the two-condition pair: on localizations the enhancement runs
-  ## to 3,000-17,000x the cell mean and NEITHER the CV nor the 90th percentile
-  ## separates the conditions (CV 1.46-1.74 against 1.23-2.54, overlapping), while
-  ## the same statistics on trace-ID centroids are cleanly disjoint. Trace length
-  ## is photophysics; the spatial arrangement of separate traces is the biology.
-  hotspot_unit_label <- function(u) switch(u %||% "tid",
-    tid     = "trace ID centroids",
-    cluster = "de-blinked molecules",
-    "units")
 
   observeEvent(input$run_hotspot, {
     unit    <- resolve_unit(input$hot_unit, "cluster", "tid", "Local density & hotspots")
@@ -13771,23 +12498,9 @@ smlm_server <- function(input, output, session) {
                                            use_3d, tag = it$tag,
                                            close_nm = close_nm, force = TRUE),
                         error = function(e) NULL)
-        le <- compute_local_enhancement(it$pts, k = k, use_3d = use_3d, support = sup)
-        if (is.null(le)) return(NULL)
-        ec <- tryCatch(calibrate_dbscan_eps(it$pts, support = sup, minPts = minpts,
-                                            target_frac = target, nsim = nsim,
-                                            use_3d = use_3d),
-                       error = function(e) NULL)
-        ft <- if (!is.null(ec))
-          compute_foci_table(it$pts, eps = ec$eps, minPts = minpts, use_3d = use_3d) else NULL
-        row <- hotspot_summary_row(it$pts, support = sup, k = k, quadrat_nm = quad,
-                                   enh_thresh = thresh, eps_cal = ec, minPts = minpts,
-                                   use_3d = use_3d, dataset = it$tag)
-        # bbox_support() returns an all-TRUE mask and a finite area, so a bounding
-        # box does not fail here - it silently measures the imaged FRAME instead of
-        # the cell. Record the mode so the run can say so.
-        row$window_mode <- sup$mode %||% NA_character_
-        list(tag = it$tag, pts = it$pts, support = sup, enh = le$enh, le = le,
-             eps_cal = ec, foci = ft, row = row)
+        hotspot_for_points(it$pts, support = sup, k = k, quadrat_nm = quad,
+                           enh_thresh = thresh, minPts = minpts, target_frac = target,
+                           nsim = nsim, use_3d = use_3d, tag = it$tag)
       })
     })
     out <- Filter(Negate(is.null), out)
@@ -14415,6 +13128,7 @@ smlm_server <- function(input, output, session) {
   cross_nn_results <- reactiveVal(NULL)
 
   observeEvent(input$run_cross_nn, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No datasets loaded.", type = "warning"); return() }
 
@@ -14433,7 +13147,7 @@ smlm_server <- function(input, output, session) {
       for (i in seq_along(store)) {
         incProgress(1 / length(store))
         nm <- names(store)[i]
-        df <- apply_meta_filters_batch(store[[nm]], input)
+        df <- apply_meta_filters_batch(store[[nm]], run_set)
         if (!nrow(df)) next
 
         # A chosen multiplex pair is collapsed to analysis_group 1/2 FIRST;
@@ -14442,7 +13156,7 @@ smlm_server <- function(input, output, session) {
         # counted unit is the raw trace, so it is not conditional here.
         if (!is.null(mplex_pair))
           df <- assign_analysis_group_from_mplex(df, mplex_pair[1], mplex_pair[2])
-        if (nrow(df)) df <- apply_clustering_pipeline(df, input)
+        if (nrow(df)) df <- apply_clustering_pipeline(df, run_set)
         if (!nrow(df)) next
         if (!all(c(1L, 2L) %in% df$analysis_group)) next
 
@@ -14629,6 +13343,7 @@ smlm_server <- function(input, output, session) {
   ripley12_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
 
   observeEvent(input$run_ripley12, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No datasets loaded.", type = "warning"); return() }
 
@@ -14641,41 +13356,12 @@ smlm_server <- function(input, output, session) {
     env_file_cap <- 6L
     needs_cluster <- unit == "cluster"
 
-    get_pts_for_grp <- function(d, grp) {
-      sub <- dplyr::filter(d, analysis_group == grp)
-      if (!nrow(sub)) return(data.frame(x=numeric(), y=numeric(), z=numeric()))
-      if (unit == "tid") {
-        sub %>%
-          dplyr::group_by(tid) %>%
-          dplyr::summarise(x=median(x,na.rm=T), y=median(y,na.rm=T),
-                           z=if("z"%in%names(sub)) median(z,na.rm=T) else 0, .groups="drop") %>%
-          dplyr::filter(is.finite(x), is.finite(y))
-      } else {
-        if (!"cluster" %in% names(sub) || !any(!is.na(sub$cluster) & sub$cluster > 0L))
-          return(data.frame(x=numeric(), y=numeric(), z=numeric()))
-        sub %>%
-          dplyr::filter(!is.na(cluster), cluster > 0L) %>%
-          dplyr::group_by(cluster) %>%
-          dplyr::summarise(x=median(x,na.rm=T), y=median(y,na.rm=T),
-                           z=if("z"%in%names(sub)) median(z,na.rm=T) else 0, .groups="drop") %>%
-          dplyr::filter(is.finite(x), is.finite(y))
-      }
-    }
-
-    two_color_mode <- isTRUE(input$enable_two_color)
-    mplex_pair     <- mplex_cross_pair()
-
     # Prep every file FIRST, so one gap-fill radius can be resolved for the whole
-    # set before any curve is computed (see spatial_resolve_close()). This also
-    # avoids prepping twice.
+    # set before any curve is computed (see spatial_resolve_close()).
     prepped <- Filter(Negate(is.null), lapply(seq_along(store), function(i) {
       nm <- names(store)[i]
-      df <- apply_meta_filters_batch(store[[nm]], input)
-      if (!nrow(df)) return(NULL)
-      if (!is.null(mplex_pair))
-        df <- assign_analysis_group_from_mplex(df, mplex_pair[1], mplex_pair[2])
-      if (nrow(df)) df <- apply_clustering_pipeline(df, input)
-      if (!nrow(df) || !all(c(1L, 2L) %in% df$analysis_group)) return(NULL)
+      df <- prep_tc_df(store[[nm]], run_set, needs_cluster)
+      if (is.null(df)) return(NULL)
       list(df = df, tag = nm)
     }))
     if (!length(prepped)) {
@@ -14693,39 +13379,19 @@ smlm_server <- function(input, output, session) {
         df <- prepped[[i]]$df
 
         r_seq <- if (r_max_raw > 0) seq(0, r_max_raw, length.out = r_steps) else NULL
-
-        pts1 <- get_pts_for_grp(df, 1L)
-        pts2 <- get_pts_for_grp(df, 2L)
+        pts1 <- get_tc_pts(df, 1L, unit); pts2 <- get_tc_pts(df, 2L, unit)
         if (!nrow(pts1) || !nrow(pts2)) next
-        # Shared window for observed curve and CSR envelope (bounding box of both
-        # channels' points), so the edge bias cancels in the envelope.
-        axes <- if (use_3d) c("x", "y", "z") else c("x", "y")
-        win  <- apply(as.matrix(rbind(pts1[, axes, drop = FALSE],
-                                      pts2[, axes, drop = FALSE])), 2, range)
-        sup  <- spatial_support_of(df, use_3d, tag = nm, close_nm = common_close)
-        lr <- compute_ripley_L12(
-          x1=pts1$x, y1=pts1$y, z1=if(use_3d) pts1$z else NULL,
-          x2=pts2$x, y2=pts2$y, z2=if(use_3d) pts2$z else NULL,
-          r_seq=r_seq, use_3d=use_3d, window_ranges = win,
-          support = sup, edge_correct = isTRUE(input$spatial_edge_correct)
-        )
-        if (is.null(lr) || !nrow(lr)) next
-        results[[nm]] <- cbind(dataset = nm, lr)
-
-        if (want_env && length(env_list) < env_file_cap) {
-          env <- compute_ripley_envelope(
-            n = min(nrow(pts1), 2000L), n2 = min(nrow(pts2), 2000L),
-            window_ranges = win, r_seq = lr$r, use_3d = use_3d,
-            nsim = nsim, estimator = "L12", support = sup,
-            edge_correct = isTRUE(input$spatial_edge_correct),
-            null_mode = input$coloc_null_mode %||% "shift", pts1 = pts1, pts2 = pts2)
-          if (!is.null(env)) {
-            gp <- envelope_global_p(env, lr$Lr_minus_r)
-            env$global_p <- gp$p %||% NA_real_
-            env$null_mode <- attr(env, "null_mode") %||% NA_character_
-            env$dataset <- nm; env_list[[nm]] <- env
-          }
-        }
+        sup <- spatial_support_of(df, use_3d, tag = nm, close_nm = common_close)
+        out <- cross_curve_for_points(pts1, pts2,
+                                      estimator = "L12", r_seq = r_seq, use_3d = use_3d,
+                                      support = sup,
+                                      edge_correct = isTRUE(input$spatial_edge_correct),
+                                      envelope = want_env && length(env_list) < env_file_cap,
+                                      nsim = nsim, null_mode = input$coloc_null_mode %||% "shift",
+                                      tag = nm)
+        if (is.null(out)) next
+        results[[nm]] <- out$curve
+        if (!is.null(out$env)) env_list[[nm]] <- out$env
       }
     })
 
@@ -14828,37 +13494,16 @@ smlm_server <- function(input, output, session) {
   )
 
   # ── shared helper: build per-group point sets for two-color analyses ─────
-  get_tc_pts <- function(df, grp, unit) {
-    sub <- dplyr::filter(df, analysis_group == grp)
-    if (!nrow(sub)) return(data.frame(x = numeric(), y = numeric(), z = numeric()))
-    if (unit == "tid") {
-      sub %>%
-        dplyr::group_by(tid) %>%
-        dplyr::summarise(x = median(x, na.rm = TRUE), y = median(y, na.rm = TRUE),
-                         z = if ("z" %in% names(sub)) median(z, na.rm = TRUE) else 0,
-                         .groups = "drop") %>%
-        dplyr::filter(is.finite(x), is.finite(y))
-    } else {
-      if (!"cluster" %in% names(sub) || !any(!is.na(sub$cluster) & sub$cluster > 0L))
-        return(data.frame(x = numeric(), y = numeric(), z = numeric()))
-      sub %>%
-        dplyr::filter(!is.na(cluster), cluster > 0L) %>%
-        dplyr::group_by(cluster) %>%
-        dplyr::summarise(x = median(x, na.rm = TRUE), y = median(y, na.rm = TRUE),
-                         z = if ("z" %in% names(sub)) median(z, na.rm = TRUE) else 0,
-                         .groups = "drop") %>%
-        dplyr::filter(is.finite(x), is.finite(y))
-    }
-  }
 
   # ── shared helper: prepare data for one file in two-color batch ───────────
-  prep_tc_df <- function(raw, input, needs_cluster) {
-    df <- apply_meta_filters_batch(raw, input)
+  #   settings : the run's settings snapshot (smlm_settings_from_input)
+  prep_tc_df <- function(raw, settings, needs_cluster) {
+    df <- apply_meta_filters_batch(raw, settings)
     if (!nrow(df)) return(NULL)
     mplex_pair <- mplex_cross_pair()
     if (!is.null(mplex_pair))
       df <- assign_analysis_group_from_mplex(df, mplex_pair[1], mplex_pair[2])
-    if (nrow(df)) df <- apply_clustering_pipeline(df, input)
+    if (nrow(df)) df <- apply_clustering_pipeline(df, settings)
     if (!nrow(df) || !all(c(1L, 2L) %in% df$analysis_group)) return(NULL)
     df
   }
@@ -14868,6 +13513,7 @@ smlm_server <- function(input, output, session) {
   pcf12_env_results <- reactiveVal(NULL)  # Monte-Carlo CSR envelope (per dataset)
 
   observeEvent(input$run_pcf12, {
+    run_set <- smlm_settings_from_input(input)   # one settings snapshot for this run
     store <- smlm_file_store()
     if (!length(store)) { showNotification("No datasets loaded.", type = "warning"); return() }
 
@@ -14883,7 +13529,7 @@ smlm_server <- function(input, output, session) {
     # Prep first so one gap-fill radius covers the whole set (spatial_resolve_close()).
     prepped <- Filter(Negate(is.null), lapply(seq_along(store), function(i) {
       nm <- names(store)[i]
-      df <- prep_tc_df(store[[nm]], input, needs_cluster)
+      df <- prep_tc_df(store[[nm]], run_set, needs_cluster)
       if (is.null(df)) return(NULL)
       list(df = df, tag = nm)
     }))
@@ -14900,35 +13546,20 @@ smlm_server <- function(input, output, session) {
         incProgress(1 / length(prepped))
         nm <- prepped[[i]]$tag
         df <- prepped[[i]]$df
-        pts1 <- get_tc_pts(df, 1L, unit)
-        pts2 <- get_tc_pts(df, 2L, unit)
-        if (!nrow(pts1) || !nrow(pts2)) next
         r_seq <- if (r_max_raw > 0) seq(0, r_max_raw, length.out = r_steps) else NULL
-        axes  <- if (use_3d) c("x", "y", "z") else c("x", "y")
-        win   <- apply(as.matrix(rbind(pts1[, axes, drop = FALSE],
-                                       pts2[, axes, drop = FALSE])), 2, range)
+        pts1 <- get_tc_pts(df, 1L, unit); pts2 <- get_tc_pts(df, 2L, unit)
+        if (!nrow(pts1) || !nrow(pts2)) next
         sup   <- spatial_support_of(df, use_3d, tag = nm, close_nm = common_close)
-        g <- compute_pcf12(pts1$x, pts1$y, if (use_3d) pts1$z else NULL,
-                           pts2$x, pts2$y, if (use_3d) pts2$z else NULL,
-                           r_seq = r_seq, use_3d = use_3d, window_ranges = win,
-                           support = sup,
-                           edge_correct = isTRUE(input$spatial_edge_correct))
-        if (!nrow(g)) next
-        results[[nm]] <- cbind(dataset = nm, g)
-        if (want_env && length(env_list) < env_file_cap) {
-          env <- compute_ripley_envelope(
-            n = min(nrow(pts1), 2000L), n2 = min(nrow(pts2), 2000L),
-            window_ranges = win, r_seq = g$r, use_3d = use_3d,
-            nsim = nsim, estimator = "pcf", support = sup,
-            edge_correct = isTRUE(input$spatial_edge_correct),
-            null_mode = input$coloc_null_mode %||% "shift", pts1 = pts1, pts2 = pts2)
-          if (!is.null(env)) {
-            gp <- envelope_global_p(env, g$g12)
-            env$global_p <- gp$p %||% NA_real_
-            env$null_mode <- attr(env, "null_mode") %||% NA_character_
-            env$dataset <- nm; env_list[[nm]] <- env
-          }
-        }
+        out <- cross_curve_for_points(pts1, pts2,
+                                      estimator = "g12", r_seq = r_seq, use_3d = use_3d,
+                                      support = sup,
+                                      edge_correct = isTRUE(input$spatial_edge_correct),
+                                      envelope = want_env && length(env_list) < env_file_cap,
+                                      nsim = nsim, null_mode = input$coloc_null_mode %||% "shift",
+                                      tag = nm)
+        if (is.null(out)) next
+        results[[nm]] <- out$curve
+        if (!is.null(out$env)) env_list[[nm]] <- out$env
       }
     })
 
@@ -15036,7 +13667,7 @@ smlm_server <- function(input, output, session) {
     costes_n      <- max(0L, as.integer(input$kde_costes_nsim %||% 0L))
     needs_cluster <- unit == "cluster"
 
-    df <- prep_tc_df(raw, input, needs_cluster)
+    df <- prep_tc_df(raw, smlm_settings_from_input(input), needs_cluster)
     if (is.null(df)) {
       showNotification("Could not assign two-color groups. Check 2-color settings.", type = "warning")
       kde_coloc_results(NULL); return()

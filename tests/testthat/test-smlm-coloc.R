@@ -104,3 +104,26 @@ test_that("KDE shift null with a footprint does not over-reject", {
   })
   expect_lte(mean(p < 0.05), 0.15)
 })
+
+# CLAIM: the L12 / g12 panels' per-file computation (cross_curve_for_points) is the
+# estimator on the two channels' shared bounding box, plus the envelope under the
+# chosen null when asked.
+test_that("cross_curve_for_points matches the estimators and carries the null", {
+  set.seed(9)
+  a <- data.frame(x = stats::runif(300, 0, 4000), y = stats::runif(300, 0, 4000), z = 0)
+  b <- data.frame(x = stats::runif(200, 0, 4000), y = stats::runif(200, 0, 4000), z = 0)
+  win <- apply(as.matrix(rbind(a[, 1:2], b[, 1:2])), 2, range); r <- seq(50, 400, by = 50)
+  L <- cross_curve_for_points(a, b, "L12", r_seq = r, tag = "f")
+  expect_identical(names(L$curve)[1], "dataset")
+  expect_equal(L$curve$Lr_minus_r,
+               compute_ripley_L12(a$x, a$y, NULL, b$x, b$y, NULL, r_seq = r, window_ranges = win)$Lr_minus_r)
+  g <- cross_curve_for_points(a, b, "g12", r_seq = r, tag = "f")
+  expect_equal(g$curve$g12,
+               compute_pcf12(a$x, a$y, NULL, b$x, b$y, NULL, r_seq = r, window_ranges = win)$g12)
+  set.seed(10)
+  e <- cross_curve_for_points(a, b, "L12", r_seq = r, envelope = TRUE, nsim = 19,
+                              null_mode = "labels", tag = "f")
+  expect_true(all(e$env$null_mode == "labels"))
+  expect_true(all(c("global_p", "dataset") %in% names(e$env)))
+  expect_null(cross_curve_for_points(a[0, ], b, "L12", r_seq = r))
+})

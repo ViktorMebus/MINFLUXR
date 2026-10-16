@@ -91,3 +91,20 @@ test_that("g(r) of a clustered pattern is invariant under p-thinning", {
   })
   expect_equal(mean(ratio), 1, tolerance = 0.08)
 })
+
+test_that("density profile: one shared gap-fill radius across files", {
+  set.seed(12)
+  mk <- function(n) data.frame(tid = seq_len(n), x = stats::runif(n, 0, 3000),
+                               y = stats::runif(n, 0, 3000))
+  pp <- list(a = mk(300), b = mk(900))
+  out <- density_profile_files(pp, unit = "tid", support_mode = "grid", auto_close = TRUE)
+  expect_identical(out$profile$dataset, c("a", "b"))
+  expect_length(unique(out$profile$close_nm), 1L)          # the same radius for both
+  expect_equal(unique(out$profile$close_nm), out$close_nm)
+  expect_setequal(unique(out$sweeps$dataset), c("a", "b"))
+  expect_gt(out$profile$density[2] / out$profile$density[1], 2.5)
+  expect_true(all(out$profile$close_auto))
+  fixed <- density_profile_files(pp, unit = "tid", support_mode = "grid", close_nm = 150)
+  expect_null(fixed$sweeps)
+  expect_equal(fixed$close_nm, 150)
+})

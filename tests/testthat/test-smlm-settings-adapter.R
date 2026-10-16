@@ -47,6 +47,35 @@ test_that("a reactive calling the pipeline depends only on the settings it uses"
   step(rv$eps2 <- 120);                expect_equal(n, 3)   # now it is used
 })
 
+# GUARD: the server passes the settings helpers either a per-run snapshot
+# (smlm_settings_from_input, in Run handlers) or the explicit lazy view
+# (as_smlm_settings(input), in reactives) - never bare `input`.
+test_that("server call sites never pass bare input to a settings helper", {
+  src <- readLines(file.path(.repo_root, "server_smlm.R"), warn = FALSE, encoding = "UTF-8")
+  src <- src[!grepl("^\\s*#", src)]
+  fns <- c("apply_meta_filters_batch", "apply_clustering_pipeline", "resolve_channels",
+           "assign_analysis_group", "assign_two_color_group", "deblink_threshold_for_channel",
+           "prep_tc_df")
+  pat <- sprintf("\\b(%s)\\([^()]*(\\([^()]*\\))?[^()]*,\\s*input\\s*[,)]", paste(fns, collapse = "|"))
+  expect_equal(grep(pat, src, value = TRUE, perl = TRUE), character(0))
+  expect_gt(sum(grepl("run_set <- smlm_settings_from_input(input)", src, fixed = TRUE)), 5)
+})
+
+# CLAIM: channel colours read only the two colour pickers, so a channel table does
+# not recompute when the palette or colour mode changes.
+test_that("channel colours depend on the two colour pickers only", {
+  rv <- shiny::reactiveValues(color_group1 = "#111111", color_group2 = "#222222",
+                              color_mode = "default", numeric_palette = "Spectral")
+  n  <- 0
+  r  <- shiny::reactive({ n <<- n + 1; smlm_channel_colors(rv) })
+  step <- function(expr) { force(expr); shiny:::flushReact(); invisible(shiny::isolate(r())) }
+  step(NULL);                       expect_equal(n, 1)
+  step(rv$color_mode <- "z");       expect_equal(n, 1)
+  step(rv$numeric_palette <- "Viridis"); expect_equal(n, 1)
+  step(rv$color_group2 <- "#333333"); expect_equal(n, 2)
+  expect_identical(shiny::isolate(r()), c("#111111", "#333333"))
+})
+
 test_that("small helpers take plain arguments", {
   df <- data.frame(channel = c(1L, 2L, 2L, 3L))
   expect_equal(channels_in_scope(df), 1:3)

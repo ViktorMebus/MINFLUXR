@@ -1,4 +1,4 @@
-# De-blinking: complete linkage on trace centroids (helpers_smlm.R, section
+# De-blinking: complete linkage on trace centroids (R/smlm_clustering.R, section
 # "deblink_*" and apply_clustering_pipeline). Ground truth from sim_smlm_traces().
 
 # CLAIM: link_complete_threshold() gives exactly the partition of a full

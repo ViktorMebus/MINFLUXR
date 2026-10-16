@@ -27,6 +27,12 @@
 ##                                   lazy view (see the function for why lazy)
 ##   smlm_set(s, ...) .............. a copy with some settings replaced
 ##   smlm_settings_key(s) .......... hash of the settings, for cache keys
+##   smlm_settings_from_file(raw) .. settings from a saved settings file (either layout)
+##   smlm_settings_to_legacy() ..... write settings into the older file layout
+##   smlm_settings_restore_plan() .. which widget update restores each setting, in order
+##   SMLM_DISPLAY_DEFAULTS ......... display options (colour, palette, medians); not settings
+##   smlm_display_from_input() ..... display options from the app
+##   smlm_channel_colors() ......... channel A/B colours for attach_channel_colors()
 ##   SMLM_SETTINGS_SPEC ............ default / type / limits / stage per setting
 ##   SMLM_DEFAULTS ................. the defaults alone, for UI widgets and fallbacks
 ##
@@ -282,6 +288,149 @@ smlm_set <- function(s, ...) {
 smlm_settings_key <- function(s) {
   if (!inherits(s, "smlm_settings")) s <- smlm_settings_from_input(s)
   digest::digest(unclass(s)[names(SMLM_SETTINGS_SPEC)], algo = "xxhash64")
+}
+
+# =============================================================================
+# SETTINGS FILES - the smlm_settings block, and the layout older files used
+# =============================================================================
+# A settings file (Download settings in the SMLM tab) carries the complete
+# settings object as `smlm_settings`, so every setting that changes results is
+# saved by construction. Files written before that block existed kept most
+# settings at the top level under their input ID, and a few in sub-lists; the
+# paths below say where. Settings that are absent from such a file are reported
+# as not present, so a loader leaves them alone rather than resetting them.
+SMLM_SETTINGS_FILE_VERSION <- 2L
+.SMLM_LEGACY_PATH <- list(
+  enable_two_color = c("two_color", "enable"),
+  color_by_fluo    = c("two_color", "use_fluo"),
+  dcr_group1       = c("two_color", "dcr_group1"),
+  dcr_group2       = c("two_color", "dcr_group2"),
+  use_pooled_dcr   = c("analysis", "use_pooled_dcr"),
+  dens_norm_enable = c("analysis", "dens_norm_enable"),
+  dens_thin_enable = c("analysis", "dens_thin_enable"),
+  fid_exclude      = c("fiducial", "fid_exclude")
+)
+.smlm_legacy_path <- function(id) .SMLM_LEGACY_PATH[[id]] %||% id
+
+# Value at a path of nested names, or NULL when any level is missing.
+.smlm_dig <- function(x, path) {
+  for (p in path) { if (!is.list(x) || is.null(x[[p]])) return(NULL); x <- x[[p]] }
+  x
+}
+
+# =============================================================================
+# smlm_settings_from_file() - THE SETTINGS IN A LOADED SETTINGS FILE
+# =============================================================================
+# GOAL: read the settings out of a parsed settings file (jsonlite::fromJSON), in
+# either layout, and say which ones the file actually holds.
+#
+# ARGS     raw : the parsed file (a list)
+# RETURNS  list(settings = smlm_settings object, present = character ids,
+#               layout = "block" | "legacy")
+#          Settings not present take the defaults in `settings`; a loader should
+#          apply only `present`.
+# =============================================================================
+smlm_settings_from_file <- function(raw) {
+  if (is.list(raw$smlm_settings)) {
+    blk <- raw$smlm_settings
+    present <- intersect(names(blk), names(SMLM_SETTINGS_SPEC))
+    return(list(settings = smlm_settings_from_input(blk), present = present, layout = "block"))
+  }
+  src <- list()
+  for (id in names(SMLM_SETTINGS_SPEC)) {
+    v <- .smlm_dig(raw, .smlm_legacy_path(id))
+    if (!is.null(v)) src[[id]] <- v
+  }
+  list(settings = smlm_settings_from_input(src), present = names(src), layout = "legacy")
+}
+
+# GOAL: write settings into the older file layout, so code that restores from
+# those places (the filter, crop and QC restore in server_smlm.R) sees the values
+# of a new-layout file too.
+#   raw : parsed file; s : settings; ids : which settings to write
+smlm_settings_to_legacy <- function(raw, s, ids) {
+  for (id in ids) {
+    path <- .smlm_legacy_path(id)
+    v <- .subset2(s, id)
+    if (length(path) == 1L) raw[path] <- list(v)
+    else {
+      sub <- if (is.list(raw[[path[1]]])) raw[[path[1]]] else list()
+      sub[path[2]] <- list(v)
+      raw[[path[1]]] <- sub
+    }
+  }
+  raw
+}
+
+# =============================================================================
+# smlm_settings_restore_plan() - HOW TO PUT SETTINGS BACK INTO THE WIDGETS
+# =============================================================================
+# GOAL: one widget update per setting, in an order that works: every parameter
+# before the switch that puts it into effect (enable_clustering,
+# enable_cluster2, enable_two_color last), so a restored analysis never runs for
+# a moment with the old parameters.
+#
+# The widget kind follows the setting's type; the two choices shown as drop-downs
+# are named here, every other choice is a radio group.
+#
+# ARGS     s : settings; ids : which settings to restore
+# RETURNS  data.frame(id, widget) in application order, with the values in
+#          attr "values" (a list, since ranges are length 2)
+# =============================================================================
+smlm_settings_restore_plan <- function(s, ids) {
+  ids <- intersect(names(SMLM_SETTINGS_SPEC), ids)       # spec order, unknowns dropped
+  last <- c("enable_two_color", "enable_clustering", "enable_cluster2")
+  ids <- c(setdiff(ids, last), intersect(last, ids))
+  selects <- c("cluster_group_scope", "dens_norm_unit")
+  kind <- vapply(ids, function(id) switch(SMLM_SETTINGS_SPEC[[id]]$type,
+    flag = "checkbox", num = "numeric", int = "numeric", range = "range",
+    choice = if (id %in% selects) "select" else "radio"), character(1))
+  plan <- data.frame(id = ids, widget = unname(kind), stringsAsFactors = FALSE)
+  attr(plan, "values") <- lapply(ids, function(id) .subset2(s, id))
+  plan
+}
+
+# =============================================================================
+# DISPLAY OPTIONS - how points are drawn, never what is computed
+# =============================================================================
+# Kept apart from the settings above on purpose: they change the picture, not a
+# number, so they stay out of the cache key and a palette change never
+# re-clusters. The plot helpers (build_pts_2d/3d, build_colors_for_pts,
+# color_mapping_for_pts, attach_channel_colors) take these as plain arguments,
+# and the UI widgets read their initial values from here.
+SMLM_DISPLAY_DEFAULTS <- list(
+  color_mode              = "default",   # default / multiplex / unicolor / z / tim / locdens
+  numeric_palette         = "Spectral",
+  numeric_palette_reverse = FALSE,
+  unicolor_hex            = "#1f77b4",
+  dens_radius_nm          = 500,         # radius for the trace-median density colouring
+  show_medians            = FALSE,       # draw trace (or molecule) medians instead of localizations
+  color_group1            = "#1f77b4",   # channel A
+  color_group2            = "#d62728"    # channel B
+)
+
+# GOAL: the display options from a Shiny `input` (or a partial list), each
+# missing one at its default. Reads only these eight inputs.
+smlm_display_from_input <- function(input) {
+  stats::setNames(lapply(names(SMLM_DISPLAY_DEFAULTS), function(id)
+    input[[id]] %||% SMLM_DISPLAY_DEFAULTS[[id]]), names(SMLM_DISPLAY_DEFAULTS))
+}
+
+# GOAL: what the plot helpers call on their `display` argument: a complete list,
+# whether they were given display options, a partial list, or Shiny's input.
+.smlm_display <- function(display) {
+  if (is.null(display)) return(SMLM_DISPLAY_DEFAULTS)
+  if (inherits(display, "reactivevalues")) return(smlm_display_from_input(display))
+  utils::modifyList(SMLM_DISPLAY_DEFAULTS, as.list(display)[intersect(names(display),
+                                                                       names(SMLM_DISPLAY_DEFAULTS))])
+}
+
+# The two channel colours, A then B, as attach_channel_colors() takes them. Reads
+# only those two fields, so a reactive that passes Shiny's input here depends on
+# the two colour pickers and not on the palette or colour mode.
+smlm_channel_colors <- function(display = NULL) {
+  c(display[["color_group1"]] %||% SMLM_DISPLAY_DEFAULTS$color_group1,
+    display[["color_group2"]] %||% SMLM_DISPLAY_DEFAULTS$color_group2)
 }
 
 # Print only what differs from the defaults: a settings object is mostly defaults.

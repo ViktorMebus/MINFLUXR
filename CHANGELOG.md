@@ -5,6 +5,18 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 
 ## Unreleased
 
+### Import: CFR, ECC and EFC are carried per localization
+
+- **Each final localization now gets the CFR of its own localization.** CFR is measured in one
+  iteration only (itr 6 in 3D imaging sequences, the final iteration in 2D tracking sequences). The
+  importer previously took one value per trace (from the trace's last localization) and gave it to
+  every localization in that trace. ECC and EFC had the same problem. Within a trace, a localization
+  is now the run of rows ending at a final row: 3D imaging writes itr 0 to 9 once, then repeats 6 to 9
+  for each further localization. Each final row takes the last positive value from its own run.
+  Tracking localizations keep the CFR measured at their own final iteration. Applies to `.json` and
+  `.npy` uploads in all tabs. CFR filters and CFR-coloured plots change for any trace with more than
+  one localization.
+
 ### Tracking: headline D and the immobile MSD
 
 - **The headline D is now the upper-regime MSD** (the MSD panel's fit window and settings) in Data
@@ -141,7 +153,44 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - The per-file cache of filtered and clustered data is keyed on the settings object that the
   clustering actually runs with, plus the data version, thinning and fiducial exclusions. A setting
   can no longer be left out of the key.
-- Removed three unused helper functions.
+- **Fixed: loading a settings file did not restore de-blinking, median clustering, the two-colour
+  split or the axial calibration.** The file held most of them, but the loader restored only the
+  filters, crop and QC options, so a reloaded analysis clustered with whatever the session had.
+  Ten settings were also never saved (the Median Cluster method and its options, and the density
+  unit). Settings files now carry every setting that changes results, and loading restores all of
+  them; an older file restores what it holds.
+- The plot helpers take display options (colour mode, palette, medians, density radius, channel
+  colours) as plain arguments with one set of defaults (`SMLM_DISPLAY_DEFAULTS`), kept apart from
+  the settings that change results. No helper reads the app's input directly any more.
+- Each Run button takes one snapshot of the settings when pressed and uses it for every file it
+  processes; panels that update live keep reading only the settings they use. Results are
+  unchanged.
+- Removed unused helper functions: six during the settings work, then 24 more found by tracing
+  every function's callers (colour conversions, an older trace-spread table and histogram, mesh
+  builders, NN edge builder and small utilities, none called anywhere). Also removed a second
+  `%||%` and an earlier `geometric_median()` that the later definition had always overridden.
+- **The SMLM helpers are split by theme** into `R/smlm_*.R` (plot, channels, filters,
+  clustering, nearest neighbour, shapes, structures, ground-truth estimate, spatial statistics,
+  support, hotspots, summaries). `helpers_smlm.R` now loads them, so anything that sources it
+  works as before. Every function is unchanged.
+- Computation is moving out of `server_smlm.R` into `R/smlm_*.R`: 24 panel helpers that
+  depended only on their arguments, and the per-file Ripley's L / g(r) computation
+  (`spatial_curve_for_points()`), which the two panels had each carried as a near-identical copy.
+  The NN-line overlay takes its options as a list (`smlm_nn_options()`). 11 unused functions
+  inside the servers were removed. Results are unchanged.
+- The Run buttons' computation now lives in tested functions, with the server keeping input
+  reading, file preparation and notifications: L₁₂ / g₁₂ (`cross_curve_for_points()`, shared
+  by both panels), batch NN (`batch_nn_for_file()`, `channel_facets()`), precision cloud
+  (`precision_cloud()`), crowding vs detection time (`crowding_for_file()`,
+  `crowding_null_test()`), within-cluster NN vs size (`size_nn_for_file()`), labelling density
+  (`density_profile_files()`), fiducial scan (`fiducial_scan_file()`) and local density &
+  hotspots (`hotspot_for_points()`). Each panel gives identical results before and after.
+
+### Multiplex: plain dataset name
+
+- The built multiplex dataset is called "Multiplex" (it was "★ Multiplex"). The name is part of
+  downloaded file names (settings, CSV export), where the star was rejected or garbled on some
+  systems.
 
 ### Tests
 

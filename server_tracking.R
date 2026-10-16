@@ -2956,11 +2956,6 @@ tracking_server <- function(input, output, session) {
     # (saved before cleaning was persisted) leaves the current cleaning setup alone
     # instead of silently switching split/trim/gate off.
     num <- function(v) suppressWarnings(as.numeric(unlist(v)))
-    upd_rng <- function(id) {
-      v <- s[[id]]
-      if (!is.null(v) && length(unlist(v)) == 2)
-        shinyWidgets::updateNumericRangeInput(session, id, value = num(v))
-    }
     upd_num <- function(id) {
       v <- s[[id]]
       if (!is.null(v)) { n <- num(v)[1]; if (is.finite(n)) updateNumericInput(session, id, value = n) }
@@ -4807,10 +4802,6 @@ tracking_server <- function(input, output, session) {
     })
   }, ignoreInit = TRUE)
 
-  cap_for <- function(n) {
-    if (n <= 200) 0L else ceiling(sqrt(n) * 6)
-  }
-  
   
   # ---- Draw helpers ----
   draw_frame <- function(k, force = FALSE) {

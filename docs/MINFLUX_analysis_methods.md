@@ -39,7 +39,7 @@ Part II ratings:
 # Part I - Implementation
 
 *What each tool computes, as coded. Formulas are transcribed from the source (`server_tracking.R`,
-`server_smlm.R`, `helpers_smlm.R`, `sim_server.R`); each entry names its Part II appropriateness rating.
+`server_smlm.R`, `R/smlm_*.R`, `sim_server.R`); each entry names its Part II appropriateness rating.
 Units in code: positions in **nm**, time internally in **ms** (imported `tim` is seconds → ×1000). D is
 carried internally in **nm²/ms** and displayed in **µm²/s**, with `D_um2_s = D_nm2ms / 1e3`
 (1 µm²/s = 10³ nm²/ms).*
@@ -305,7 +305,7 @@ analysis and is saved in the settings JSON.
   files only (cost = `nsim × files × O(n²)`).
 
 #### CSR envelopes: what they test
-`compute_ripley_envelope` + `envelope_global_p` (helpers_smlm.R), used by L(r), g(r), L₁₂ and g₁₂.
+`compute_ripley_envelope` + `envelope_global_p` (`R/smlm_spatial.R`), used by L(r), g(r), L₁₂ and g₁₂.
 - **Pointwise band (2.5–97.5%)** at each r. It is descriptive: it holds at ONE radius, so a curve
   leaving it *somewhere* over many radii is not a 5% test, and random data does so in most replicates.
 - **Global band + p**, the studentized maximum-deviation test (Loosmore & Ford 2006; Myllymäki et al.
@@ -354,7 +354,7 @@ analysis and is saved in the settings JSON.
   (`spatial_envelope_coverage.R`).
 
 ### I-A.3a Sample footprint & labelling-density thinning (opt-in) — [Part II §6.2b]
-Block 8b of `helpers_smlm.R`.
+`R/smlm_support.R`.
 - **Unit:** `unit_centroids()`, one median position per trace ID or, preferably, per de-blinked molecule
   (a trace ID is one blink, so trace-ID density mixes expression with photophysics).
 - **Footprint:** `estimate_support(mode = grid | hull | bbox | kde)`. The default is a morphological
@@ -374,7 +374,7 @@ Block 8b of `helpers_smlm.R`.
 - **Error budget:** the support estimate, above all its gap-fill radius, dominates. Thinning is one-way.
 
 ### I-A.3b Local density & hotspots — [Part II §6.2c]
-Block 8c of `helpers_smlm.R`. Dimensionless per-cell statistics that read the **tail** of the
+`R/smlm_hotspots.R`. Dimensionless per-cell statistics that read the **tail** of the
 local-density distribution, for samples where a minority of molecules sit in foci. A median NN distance
 mostly tracks overall density, so it cannot separate a clustered cell from a denser uniform one; these
 statistics can.
@@ -615,7 +615,7 @@ It is a visualization.
   quote it as a description of the structure.
 
 ### I-A.8 Ground-truth position/count estimator — [Part II §6.6, 🟠 EXPLORATORY]
-`estimate_gt_from_labeling(df, preset, eff)` — a **labelling-model inverse** (`helpers_smlm.R`):
+`estimate_gt_from_labeling(df, preset, eff)` — a **labelling-model inverse** (`R/smlm_gt.R`):
 - **Label preset** parameters: `n_fluor` (mean dyes/molecule), `link_nm` (linker length), `dye_spread_nm`
   (dye scatter σ within the complex), `footprint_nm`, `blink_lambda` (extra re-appearances), `eff`
   (labelling efficiency).

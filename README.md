@@ -101,8 +101,8 @@ Every analysis panel carries a rating chip in its method box:
 | 🟡 adapted, with caution | Sound, but with a stated limitation you need to read before quoting it |
 | 🟠 exploratory for MINFLUX | Research tool. Interpretation is not settled; do not quote it as a result |
 
-The estimators behind the tracking panels live in `R/est_*.R` as plain functions, and
-`tests/` checks them against ground truth from the simulator (`Rscript tests/run_tests.R`;
+The estimators behind the tracking panels live in `R/est_*.R` and the SMLM computations in
+`R/smlm_*.R`, all as plain functions, and `tests/` checks them against ground truth from the simulator (`Rscript tests/run_tests.R`;
 slow Monte-Carlo tests with `MINFLUXR_SLOW_TESTS=true`). The longer validation runs and their
 results are in `tests/validation/`.
 
@@ -118,7 +118,7 @@ results are in `tests/validation/`.
 | [`docs/simulation_module.md`](docs/simulation_module.md) | The ground-truth diffusion simulator: model, validation and the CVE round-trip on D |
 | [`docs/sigma_loc_model.md`](docs/sigma_loc_model.md) | The tracking localization-precision model: derivation and immobile-sample calibration |
 | [`THIRD-PARTY.md`](THIRD-PARTY.md) | External work this builds on, what was taken and what was changed |
-| File headers in `helpers_*.R`, `server_*.R`, `R/est_*.R` | Code architecture: each file opens with a map of its contents, data flow and conventions |
+| File headers in `helpers_*.R`, `server_*.R`, `R/est_*.R`, `R/smlm_*.R` | Code architecture: each file opens with a map of its contents, data flow and conventions |
 
 ---
 

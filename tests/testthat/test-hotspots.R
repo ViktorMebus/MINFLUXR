@@ -41,3 +41,16 @@ test_that("eps calibration converges on a dense CSR rod and the focus ratio read
   expect_lt(row$max_focus_ratio, 1.5)
   expect_lt(abs(row$cv_ratio - 1), 0.25)
 })
+
+# The per-file core the Run handler calls: one bundle per file, window mode recorded.
+test_that("hotspot_for_points bundles enhancement, eps, foci and the summary row", {
+  pts <- .rod_csr(400L, 77)
+  sup <- estimate_support(pts, mode = "grid", h_nm = 100, close_nm = 200, return_mask = TRUE)
+  set.seed(3)
+  o <- hotspot_for_points(pts, support = sup, k = 5L, nsim = 5L, tag = "f")
+  expect_named(o, c("tag", "pts", "support", "enh", "le", "eps_cal", "foci", "row"))
+  expect_identical(o$row$dataset, "f")
+  expect_identical(o$row$window_mode, sup$mode %||% NA_character_)
+  expect_equal(length(o$enh), sum(o$le$keep))
+  expect_null(hotspot_for_points(pts[1:2, ], support = sup))
+})

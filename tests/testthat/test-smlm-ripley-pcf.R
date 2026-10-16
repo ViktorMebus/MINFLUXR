@@ -90,3 +90,23 @@ test_that("fit_correlation_length recovers xi on a noisy exponential", {
   flat <- fit_correlation_length(r, 1 + stats::rnorm(length(r), 0, 0.05))
   expect_true(is.na(flat$xi) || flat$xi_se > flat$xi)   # no decay, no trustworthy xi
 })
+
+# CLAIM: the panels' per-file computation (spatial_curve_for_points) is exactly the
+# estimator on the given window, plus an envelope and global p when asked.
+test_that("spatial_curve_for_points gives the estimator's curve and the envelope", {
+  set.seed(7)
+  p   <- data.frame(x = stats::runif(400, 0, 4000), y = stats::runif(400, 0, 4000), z = 0)
+  win <- rbind(c(0, 0), c(4000, 4000)); r <- seq(50, 400, by = 50)
+  L <- spatial_curve_for_points(p, win, "L", r_seq = r, tag = "a")
+  expect_equal(L$curve$Lr_minus_r,
+               compute_ripley_L(p$x, p$y, r_seq = r, window_ranges = win)$Lr_minus_r)
+  expect_true(all(L$curve$dataset == "a")); expect_null(L$env)
+  g <- spatial_curve_for_points(p, win, "g", r_seq = r, tag = "a")
+  expect_equal(g$curve$g, compute_pcf(p$x, p$y, r_seq = r, window_ranges = win)$g)
+  expect_true(all(g$curve$n_units == 400)); expect_false("n_units" %in% names(L$curve))
+  set.seed(8)
+  e <- spatial_curve_for_points(p, win, "L", r_seq = r, envelope = TRUE, nsim = 19, tag = "a")
+  expect_true(all(c("lo", "hi", "global_p", "dataset") %in% names(e$env)))
+  expect_true(e$env$global_p[1] >= 0 && e$env$global_p[1] <= 1)
+  expect_null(spatial_curve_for_points(p[1:2, ], win, "L", r_seq = r))
+})
