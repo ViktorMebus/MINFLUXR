@@ -1070,6 +1070,69 @@ spatial_curve_for_points <- function(pts, win, estimator = c("L", "g"), r_seq = 
 }
 
 # =============================================================================
+# cross_curve_for_points() - ONE FILE'S L12(r) OR g12(r), WITH ITS ENVELOPE
+# =============================================================================
+#
+# GOAL
+#   The computation behind the bivariate L12 and g12 panels for one file: the
+#   cross curve between channel A (pts1) and channel B (pts2), and optionally
+#   its envelope under the chosen null with the global test. Footprint
+#   resolution, progress and storing results stay in the server.
+#
+# THE WINDOW
+#   The bounding box of both channels' points together, shared by the curve and
+#   its envelope so the edge bias cancels between them.
+#
+# ARGUMENTS
+#   pts1, pts2   data.frame x, y (and z): channel A and B units (get_tc_pts())
+#   estimator    "L12" (reported as L12(r) - r) or "g12"
+#   r_seq        radii (nm); NULL lets the estimator choose from the window
+#   use_3d       measure in 3D
+#   support      footprint or NULL; edge_correct as for the univariate panels
+#   envelope     also compute the envelope and global p-value
+#   nsim         simulations
+#   null_mode    "shift" (toroidal shift of B; default), "labels" or "csr"
+#   tag          dataset label, written as the first column of the curve
+#
+# RETURNS  list(curve, env) - env NULL without an envelope - or NULL when either
+#          channel is empty or the estimator returns no curve.
+# =============================================================================
+cross_curve_for_points <- function(pts1, pts2, estimator = c("L12", "g12"), r_seq = NULL,
+                                   use_3d = FALSE, support = NULL, edge_correct = TRUE,
+                                   envelope = FALSE, nsim = 99L, null_mode = "shift",
+                                   tag = NULL) {
+  estimator <- match.arg(estimator)
+  if (!nrow(pts1) || !nrow(pts2)) return(NULL)
+  axes <- if (use_3d) c("x", "y", "z") else c("x", "y")
+  win  <- apply(as.matrix(rbind(pts1[, axes, drop = FALSE], pts2[, axes, drop = FALSE])), 2, range)
+  z1 <- if (use_3d) pts1$z else NULL; z2 <- if (use_3d) pts2$z else NULL
+  curve <- if (estimator == "L12")
+    compute_ripley_L12(x1 = pts1$x, y1 = pts1$y, z1 = z1, x2 = pts2$x, y2 = pts2$y, z2 = z2,
+                       r_seq = r_seq, use_3d = use_3d, window_ranges = win,
+                       support = support, edge_correct = isTRUE(edge_correct))
+  else
+    compute_pcf12(pts1$x, pts1$y, z1, pts2$x, pts2$y, z2, r_seq = r_seq, use_3d = use_3d,
+                  window_ranges = win, support = support, edge_correct = isTRUE(edge_correct))
+  if (is.null(curve) || !nrow(curve)) return(NULL)
+  curve <- cbind(dataset = tag, curve)
+  env <- NULL
+  if (isTRUE(envelope)) {
+    env <- compute_ripley_envelope(
+      n = min(nrow(pts1), 2000L), n2 = min(nrow(pts2), 2000L),
+      window_ranges = win, r_seq = curve$r, use_3d = use_3d, nsim = nsim,
+      estimator = if (estimator == "L12") "L12" else "pcf", support = support,
+      edge_correct = isTRUE(edge_correct), null_mode = null_mode, pts1 = pts1, pts2 = pts2)
+    if (!is.null(env)) {
+      gp <- envelope_global_p(env, if (estimator == "L12") curve$Lr_minus_r else curve$g12)
+      env$global_p  <- gp$p %||% NA_real_
+      env$null_mode <- attr(env, "null_mode") %||% NA_character_
+      env$dataset   <- tag
+    }
+  }
+  list(curve = curve, env = env)
+}
+
+# =============================================================================
 # PANEL HELPERS (moved from server_smlm.R; plain functions of their arguments)
 # =============================================================================
 

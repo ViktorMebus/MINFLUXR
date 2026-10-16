@@ -576,8 +576,8 @@ read_minflux_json_as_df <- function(path,
 # Shared post-processing for a raw per-iteration MINFLUX table (`df_all`, one row
 # per iteration with columns x/y/z [m], tid, itr, tim, efo, eco, cfr, ecc, efc,
 # dcr1, ...). Used by both the JSON and .npy readers. Performs: cfr fallback,
-# x/y NA drop, optional ECO-weighted DCR pooling, per-TID cfr/ecc/efc carry-
-# forward, final-iteration selection, dwell computation and m -> nm scaling.
+# x/y NA drop, optional ECO-weighted DCR pooling, per-localization cfr/ecc/efc
+# carry-forward, final-iteration selection, dwell computation and m -> nm scaling.
 # `use_fnl = TRUE` selects the final localization via the boolean `fnl` flag
 # (Abberior .npy) instead of itr == max(itr) (JSON).
 .minflux_finalize_df <- function(df_all,
@@ -619,8 +619,27 @@ read_minflux_json_as_df <- function(path,
       dplyr::summarise(dcr_pooled = sum(dcr1 * eco) / sum(eco), .groups = "drop")
   }
 
-  # ---- Carry-forward per TID: CFR + ECC + EFC (single sorted pass) ----------
-  safe_inc(0.08, "Computing per-TID carry-over (cfr/ecc/efc)")
+  # ---- Final-localization rows -----------------------------------------------
+  # The final rows are needed twice: they mark where each localization ends (for
+  # the carry-forward below) and they are the rows kept when keep_final_only.
+  use_fnl_now <- isTRUE(use_fnl) && "fnl" %in% names(df_all) && any(df_all$fnl %in% TRUE)
+  if (!use_fnl_now && (is.na(final_itr) || !is.finite(as.numeric(final_itr)))) {
+    final_itr <- suppressWarnings(max(df_all$itr, na.rm = TRUE))
+  }
+  is_final <- if (use_fnl_now) df_all$fnl %in% TRUE else
+              !is.na(df_all$itr) & df_all$itr == as.integer(final_itr)
+
+  # ---- Carry-forward per LOCALIZATION: CFR + ECC + EFC -----------------------
+  # CFR is measured in one iteration only (e.g. itr 6 in a 3D imaging sequence,
+  # the final itr in a 2D tracking sequence), so the final row of a localization
+  # usually holds 0 and must take the value from an earlier row of the SAME
+  # localization. Within a trace the rows are in acquisition order and every
+  # localization is the run of rows that ends at a final row: 3D imaging writes
+  # itr 0..9 for the first localization and then repeats 6,7,8,9 for each further
+  # one. Each final row gets the last finite, positive value of its own run (its
+  # own value when that is positive); a run with no such value keeps the final
+  # row's own value. Non-final rows are left as they are.
+  safe_inc(0.08, "Carrying cfr/ecc/efc forward per localization")
 
   carry_cols <- switch(cfr_strategy,
     none   = character(0),
@@ -628,59 +647,42 @@ read_minflux_json_as_df <- function(path,
     intersect(c("cfr", "ecc", "efc"), names(df_all))  # last_nonzero
   )
 
-  carry_tbls <- list()
-  if (length(carry_cols)) {
-    # Vectorised replacement for  arrange(tid, itr)  +  per-column
-    # group_by(tid) |> slice_tail(n = 1): sort the rows ONCE by (tid, itr); for each
-    # column the carried value is the last finite, positive entry per tid, i.e. the
-    # last row of each tid-run in the sorted valid subset. Grouped slice_tail is one
-    # of dplyr's slowest operations and dominated .npy import (~0.7 s on an 11k-loc
-    # file); this base-R form gives the identical result an order of magnitude faster.
-    base_idx <- if (cfr_strategy == "itr6") which(df_all$itr == 6L) else seq_len(nrow(df_all))
-    if (length(base_idx)) {
-      o     <- order(df_all$tid[base_idx], df_all$itr[base_idx])   # radix, stable
-      idx_s <- base_idx[o]
-      tid_s <- df_all$tid[idx_s]
-      for (col in carry_cols) {
-        v  <- df_all[[col]][idx_s]
-        ok <- is.finite(v) & v > 0
-        if (!any(ok)) next
-        ts <- tid_s[ok]; vs <- v[ok]
-        # keep the last row of each tid-run (value at the highest itr for that tid)
-        keep <- c(ts[-length(ts)] != ts[-1], TRUE)
-        tbl  <- data.frame(tid = ts[keep], vs[keep])
-        names(tbl)[2] <- col
-        carry_tbls[[col]] <- tbl
-      }
+  n_all <- nrow(df_all)
+  if (length(carry_cols) && any(is_final)) {
+    # Trace by trace, keeping file (= acquisition) order inside each trace.
+    o     <- order(df_all$tid, seq_len(n_all), method = "radix")
+    tid_s <- df_all$tid[o]
+    fin_s <- is_final[o]
+    pos   <- seq_len(n_all)
+    # A localization starts at a trace's first row or right after a final row.
+    starts <- c(TRUE, tid_s[-1] != tid_s[-n_all] | fin_s[-n_all])
+    starts[is.na(starts)] <- TRUE
+    run_start <- cummax(ifelse(starts, pos, 0L))       # sorted position where each row's run begins
+    fin_pos   <- which(fin_s)
+    # "itr6" restricts the source rows to iteration 6 (the 3D imaging CFR iteration).
+    src_ok <- if (cfr_strategy == "itr6") df_all$itr[o] %in% 6L else rep(TRUE, n_all)
+    for (col in carry_cols) {
+      v  <- df_all[[col]][o]
+      ok <- is.finite(v) & v > 0 & src_ok
+      if (!any(ok)) next
+      last_ok <- cummax(ifelse(ok, pos, 0L))           # latest usable row at or before each row
+      hit <- fin_pos[last_ok[fin_pos] >= run_start[fin_pos]]   # usable row lies in the same run
+      df_all[[col]][o[hit]] <- v[last_ok[hit]]
     }
   }
 
   # ---- Keep only final-iteration rows ----------------------------------------
-  use_fnl_now <- isTRUE(keep_final_only) && isTRUE(use_fnl) &&
-                 "fnl" %in% names(df_all) && any(df_all$fnl %in% TRUE)
-  if (isTRUE(keep_final_only) && !use_fnl_now &&
-      (is.na(final_itr) || !is.finite(as.numeric(final_itr)))) {
-    final_itr <- suppressWarnings(max(df_all$itr, na.rm = TRUE))
-  }
-
   df <- if (!isTRUE(keep_final_only)) {
     df_all
-  } else if (use_fnl_now) {
-    safe_inc(0.06, "Filtering to final localizations (fnl flag)")
-    df_all[df_all$fnl %in% TRUE, , drop = FALSE]
   } else {
-    safe_inc(0.06, sprintf("Filtering to final iteration (itr=%s)", as.integer(final_itr)))
-    df_all[!is.na(df_all$itr) & df_all$itr == as.integer(final_itr), , drop = FALSE]
+    safe_inc(0.06, if (use_fnl_now) "Filtering to final localizations (fnl flag)" else
+                   sprintf("Filtering to final iteration (itr=%s)", as.integer(final_itr)))
+    df_all[is_final, , drop = FALSE]
   }
   rm(df_all)
   if (!nrow(df)) return(df)
 
-  # ---- Join carried fields and pooled DCR ------------------------------------
-  safe_inc(0.04, "Joining per-TID carry-over")
-  for (col in names(carry_tbls)) {
-    df <- df |> dplyr::select(-dplyr::all_of(col)) |>
-      dplyr::left_join(carry_tbls[[col]], by = "tid")
-  }
+  # ---- Join pooled DCR -------------------------------------------------------
   if (!is.null(dcr_pool_tbl) && nrow(dcr_pool_tbl)) {
     df <- df |> dplyr::left_join(dcr_pool_tbl, by = "tid")
   }

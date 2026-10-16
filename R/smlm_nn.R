@@ -483,3 +483,274 @@ member_nn_stats <- function(pts, k = 1L) {
        q1 = qs[1], q3 = qs[2], k_used = k_eff, n = n)
 }
 
+
+# =============================================================================
+# batch_nn_for_file() - ONE FILE'S NEAREST-NEIGHBOUR DISTANCES FOR BATCH NN
+# =============================================================================
+# GOAL: the Batch NN panel's work for one file that has already been filtered
+# (and thinned): cluster or group it as the chosen comparison needs, facet it by
+# channel when asked, and compute the k-th NN distances per facet.
+#
+# WHICH PREPARATION
+#   multiplex pair  cluster if the unit needs it, then channel X -> group 1 and
+#                   channel Y -> group 2, for a between-channel distance
+#   two-colour with a group filter or cross-group comparison: the pipeline,
+#                   whose channel split sets analysis_group
+#   molecule unit   the pipeline (de-blinking)
+#   group filter only (trace unit): assign_analysis_group
+#   A cross-channel run is never faceted: it is a statistic about the pair.
+#
+# ARGUMENTS
+#   df            filtered localization table of one file
+#   fname         dataset name (facet names are built from it)
+#   settings      smlm_settings or input (the run's snapshot)
+#   unit          "tid", "pcid", "cluster2_tid" or "cluster2_pcid"
+#   k             neighbour order
+#   group_filter  1L / 2L to stay within one group, NA for all
+#   cross_groups  c(from, to) for between-group distances, or NULL
+#   mplex_pair    c(channel X, channel Y) labels for a multiplex between run, or NULL
+#   by_channel    facet by channel (the "analyse each channel" switch)
+#
+# RETURNS  named list of data.frames (distance, dataset, tag, ...), one per facet
+#          that produced distances; empty list when none did.
+# =============================================================================
+batch_nn_for_file <- function(df, fname, settings, unit = "tid", k = 1L,
+                              group_filter = NA_integer_, cross_groups = NULL,
+                              mplex_pair = NULL, by_channel = FALSE) {
+  s <- as_smlm_settings(settings)
+  needs_clustering <- unit != "tid"
+  needs_grouping   <- !is.na(group_filter) || !is.null(cross_groups)
+  if (!is.null(mplex_pair)) {
+    if (needs_clustering)
+      df <- tryCatch(apply_clustering_pipeline(df, settings), error = function(e) df)
+    if (is.null(df) || !nrow(df)) return(list())
+    df$analysis_group <- dplyr::case_when(
+      df$mplex_label == mplex_pair[1] ~ 1L,
+      df$mplex_label == mplex_pair[2] ~ 2L,
+      TRUE ~ NA_integer_)
+  } else if (isTRUE(s$enable_two_color) && needs_grouping) {
+    df <- tryCatch(apply_clustering_pipeline(df, settings), error = function(e) NULL)
+    if (is.null(df) || !nrow(df)) return(list())
+  } else if (needs_clustering) {
+    df <- tryCatch(apply_clustering_pipeline(df, settings), error = function(e) NULL)
+    if (is.null(df) || !nrow(df)) return(list())
+  } else if (needs_grouping) {
+    df <- tryCatch(assign_analysis_group(df, settings), error = function(e) df)
+  }
+  facets <- if (!is.null(mplex_pair) || needs_grouping) list(list(label = "", df = df))
+            else channel_facets(df, by_channel)
+  out <- list()
+  for (fc in facets) {
+    d <- tryCatch(compute_batch_nn(fc$df, unit = unit, k = k, group_filter = group_filter,
+                                   cross_groups = cross_groups),
+                  error = function(e) data.frame())
+    if (!nrow(d)) next
+    nm2 <- .facet_name(fname, fc$label)
+    d$dataset <- nm2
+    d$tag     <- if (".dataset_tag" %in% names(df)) df$.dataset_tag[[1L]] else fname
+    out[[nm2]] <- d
+  }
+  out
+}
+
+# =============================================================================
+# crowding_for_file() - CROWDING VS DETECTION-TIME SHIFT, ONE FILE
+# =============================================================================
+# GOAL: for every Median Cluster (cluster2) structure in one prepared file, the
+# member spacing (median k-NN distance among member centroids) and the
+# detection-time shift (median member detection time minus the median of the
+# unclustered background). Optionally the no-crowding null: detection times
+# shuffled among the units of this file B times, geometry and membership kept.
+#
+# Members are de-blinked molecules when id_col = "cluster" (primary noise dropped),
+# else trace IDs: the same unit as the Within-cluster-NN panel. A member's
+# detection time is the median tim of its localizations.
+#
+# ARGUMENTS
+#   df      prepared localization table (filter -> thin -> cluster chain), with
+#           tim and cluster2
+#   fname   dataset name written into the rows
+#   id_col  member unit: "cluster" (de-blinked molecules, the server's
+#           smlm_nn_unit()) or "tid"
+#   min_n   members a structure needs
+#   k       neighbour order for the spacing
+#   use_3d  use z in the spacing
+#   B       permutations for the null (0 = no null)
+#
+# RETURNS list(rows = data.frame or NULL, null = structures x B matrix or NULL,
+#              diag = counts of why structures or the file were skipped).
+#          Draws random numbers when B > 0.
+# =============================================================================
+crowding_for_file <- function(df, fname, id_col = "tid", min_n = 4L, k = 1L,
+                              use_3d = FALSE, B = 0L) {
+  diag <- c(no_c2 = 0L, no_z = 0L, no_clusters = 0L, no_background = 0L, too_small = 0L)
+  out  <- list(rows = NULL, null = NULL, diag = diag)
+  # NOTE: the column is `cluster2`. "Median cluster" is only the display name.
+  if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { out$diag["no_c2"] <- 1L; return(out) }
+  if (use_3d && !"z" %in% names(df)) { out$diag["no_z"] <- 1L; return(out) }
+  cols <- if (use_3d) c("x", "y", "z") else c("x", "y")
+
+  # one row per member unit: detection time, centroid, structure id
+  base   <- if (id_col == "cluster") dplyr::filter(df, !is.na(cluster) & cluster > 0L) else df
+  per_tid <- base %>%
+    dplyr::group_by(.data[[id_col]]) %>%
+    dplyr::summarise(
+      tim_med = stats::median(tim, na.rm = TRUE),
+      x = stats::median(x, na.rm = TRUE),
+      y = stats::median(y, na.rm = TRUE),
+      z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
+      cl2 = { v <- cluster2[!is.na(cluster2) & cluster2 > 0L]; if (length(v)) v[1] else 0L },
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(is.finite(tim_med))
+  if (!nrow(per_tid)) return(out)
+
+  cids <- unique(per_tid$cl2[per_tid$cl2 > 0L])
+  if (!length(cids)) { out$diag["no_clusters"] <- 1L; return(out) }
+
+  bg_med <- stats::median(per_tid$tim_med[per_tid$cl2 == 0L], na.rm = TRUE)
+  if (!is.finite(bg_med)) {        # need an unclustered background to reference
+    out$diag["no_background"] <- 1L; return(out)
+  }
+
+  rows <- list()
+  keep_idx <- list()   # row indices of each qualifying cluster, for the permutation
+  for (cid in cids) {
+    which_c <- which(per_tid$cl2 == cid)
+    sub <- per_tid[which_c, , drop = FALSE]
+    n   <- nrow(sub)
+    if (n < min_n) { out$diag["too_small"] <- out$diag["too_small"] + 1L; next }
+    pts <- as.matrix(sub[, cols, drop = FALSE])
+    pts <- pts[stats::complete.cases(pts), , drop = FALSE]
+    if (nrow(pts) < 2L) next
+    st <- member_nn_stats(pts, k = k)
+    if (is.null(st)) next
+    rows[[length(rows) + 1L]] <- data.frame(
+      dataset    = fname,
+      cluster2   = cid,
+      n_tids     = n,
+      nn_median  = st$median,
+      nn_mad     = st$mad,
+      unit       = if (id_col == "cluster") "molecule" else "tid",
+      time_shift = stats::median(sub$tim_med) - bg_med,
+      stringsAsFactors = FALSE
+    )
+    keep_idx[[length(keep_idx) + 1L]] <- which_c
+  }
+  if (length(rows)) out$rows <- do.call(rbind, rows)
+
+  # Permute detection times WITHIN this file; geometry and membership untouched.
+  if (B > 0L && length(keep_idx)) {
+    tv     <- per_tid$tim_med
+    is_bg  <- per_tid$cl2 == 0L
+    nullm  <- matrix(NA_real_, nrow = length(keep_idx), ncol = B)
+    for (b in seq_len(B)) {
+      tv_b   <- tv[sample.int(length(tv))]          # shuffle times across all units
+      bg_b   <- stats::median(tv_b[is_bg], na.rm = TRUE)
+      nullm[, b] <- vapply(keep_idx,
+                           function(ix) stats::median(tv_b[ix], na.rm = TRUE) - bg_b,
+                           numeric(1))
+    }
+    out$null <- nullm
+  }
+  out
+}
+
+# =============================================================================
+# crowding_null_test() - NULL BAND AND TREND TEST FOR THE CROWDING PANEL
+# =============================================================================
+# GOAL: attach each structure's 95% no-crowding interval (null_lo, null_med,
+# null_hi) and test the TREND: Spearman rho between spacing and time shift,
+# observed against its permutation distribution. Rank-based, so a constant
+# clustered-vs-background offset and a skewed shift distribution do not move it.
+#
+# ARGUMENTS
+#   res  structure rows (crowding_for_file rows, all files bound)
+#   NM   structures x B matrix of permuted time shifts, rows matching res; NULL
+#        when no null was computed
+#
+# RETURNS list(res = res with the null columns (NA without a null),
+#              stats = list(rho_obs, p, B, outside) or NULL)
+# =============================================================================
+crowding_null_test <- function(res, NM = NULL) {
+  if (is.null(NM) || nrow(NM) != nrow(res)) {
+    res$null_lo <- NA_real_; res$null_med <- NA_real_; res$null_hi <- NA_real_
+    return(list(res = res, stats = NULL))
+  }
+  qs <- t(apply(NM, 1, stats::quantile, probs = c(0.025, 0.5, 0.975), na.rm = TRUE))
+  res$null_lo  <- qs[, 1]; res$null_med <- qs[, 2]; res$null_hi <- qs[, 3]
+  rho_of <- function(y) suppressWarnings(
+    stats::cor(res$nn_median, y, method = "spearman", use = "complete.obs"))
+  rho_obs  <- rho_of(res$time_shift)
+  rho_null <- apply(NM, 2, rho_of)
+  rho_null <- rho_null[is.finite(rho_null)]
+  p_two <- if (is.finite(rho_obs) && length(rho_null))
+    (1 + sum(abs(rho_null) >= abs(rho_obs))) / (length(rho_null) + 1) else NA_real_
+  outside <- mean(res$time_shift < res$null_lo | res$time_shift > res$null_hi, na.rm = TRUE)
+  list(res = res, stats = list(rho_obs = rho_obs, p = p_two, B = length(rho_null),
+                               outside = outside))
+}
+
+# =============================================================================
+# size_nn_for_file() - WITHIN-STRUCTURE NN SPACING VS STRUCTURE SIZE, ONE FILE
+# =============================================================================
+# GOAL: one row per Median Cluster (cluster2) structure: size (member count),
+# median k-NN spacing among member centroids (+- MAD, the same definition as the
+# Crowding panel) and convex-hull area (2D) or volume (3D). Tests whether the
+# spacing stays constant as structures grow or "balloons".
+#
+# ARGUMENTS
+#   df      prepared localization table with cluster2
+#   fname   dataset name written into the rows
+#   id_col  member unit: "cluster" (de-blinked molecules) or "tid"
+#   min_n   members a structure needs
+#   k       neighbour order for the spacing
+#   use_3d  use z for the spacing and the hull
+#
+# RETURNS list(rows = data.frame or NULL, diag = counts of why structures or the
+#              file were skipped)
+# =============================================================================
+size_nn_for_file <- function(df, fname, id_col = "tid", min_n = 3L, k = 1L, use_3d = FALSE) {
+  diag <- c(no_c2 = 0L, no_z = 0L, no_clusters = 0L, too_small = 0L, degenerate = 0L)
+  out  <- list(rows = NULL, diag = diag)
+  # NOTE: the column is `cluster2`. "Median Cluster" is only the display name.
+  if (is.null(df) || !nrow(df) || !"cluster2" %in% names(df)) { out$diag["no_c2"] <- 1L; return(out) }
+  if (use_3d && !"z" %in% names(df)) { out$diag["no_z"] <- 1L; return(out) }
+  cols <- if (use_3d) c("x", "y", "z") else c("x", "y")
+
+  # member centroids per structure
+  cent <- df %>%
+    dplyr::filter(!is.na(cluster2) & cluster2 > 0L) %>%
+    { if (id_col == "cluster") dplyr::filter(., !is.na(cluster) & cluster > 0L) else . } %>%
+    dplyr::group_by(cluster2, .data[[id_col]]) %>%
+    dplyr::summarise(
+      x = stats::median(x, na.rm = TRUE),
+      y = stats::median(y, na.rm = TRUE),
+      z = if ("z" %in% names(df)) stats::median(z, na.rm = TRUE) else 0,
+      .groups = "drop")
+  if (!nrow(cent)) { out$diag["no_clusters"] <- 1L; return(out) }
+
+  rows <- list()
+  for (cid in unique(cent$cluster2)) {
+    sub <- cent[cent$cluster2 == cid, , drop = FALSE]
+    n   <- nrow(sub)
+    if (n < min_n) { out$diag["too_small"] <- out$diag["too_small"] + 1L; next }
+    pts <- as.matrix(sub[, cols, drop = FALSE])
+    pts <- pts[stats::complete.cases(pts), , drop = FALSE]
+    if (nrow(pts) < 2L) { out$diag["degenerate"] <- out$diag["degenerate"] + 1L; next }
+    st <- member_nn_stats(pts, k = k)
+    if (is.null(st)) next
+    # convex-hull size: area (2D) / volume (3D); NA if degenerate
+    hull <- tryCatch(geometry::convhulln(pts, options = "FA")$vol, error = function(e) NA_real_)
+    rows[[length(rows) + 1L]] <- data.frame(
+      dataset   = fname, cluster2 = cid, size = n,
+      nn_median = st$median,
+      nn_mad    = st$mad,
+      hull_size = if (is.finite(hull) && hull > 0) hull else NA_real_,
+      dim       = length(cols),
+      unit      = if (id_col == "cluster") "molecule" else "tid",
+      stringsAsFactors = FALSE)
+  }
+  if (length(rows)) out$rows <- do.call(rbind, rows)
+  out
+}

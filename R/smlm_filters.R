@@ -1132,3 +1132,352 @@ smlm_loc_precision_nm <- function(df, min_n = 3L, fallback = 2, per_axis = FALSE
   if (!is.finite(out) || out <= 0) fallback else out
 }
 
+
+# =============================================================================
+# precision_cloud() - LOCALIZATION PRECISION FROM THE WITHIN-TRACE SCATTER
+# =============================================================================
+# GOAL: the numbers behind the precision-cloud panel. Every localization minus
+# its own trace's mean, pooled and recentred at (0, 0): the pooled sigma with the
+# exact degrees of freedom (sum of n_i - 1), a robust one-vote-per-trace sigma
+# (median of chi-square-corrected per-trace variances), pooled and robust
+# covariance matrices (shape and tilt), the kurtosis the per-trace sigma spread
+# alone predicts, and the sample drift per file. The reasoning behind each
+# correction is in the comments below.
+#
+# NOT a PSF width: MINFLUX fits no PSF, so this scatter is not a spot size.
+#
+# ARGUMENTS
+#   dfs        named list of filtered localization tables (one per file)
+#   min_loc    localizations a trace needs to contribute
+#   use_z      include z when the data has axial variation
+#   drift_dfs  the tables the drift estimate uses (default: dfs); an entry may be
+#              NULL to skip that file
+#   progress   optional function(frac, detail) called once per file
+#
+# RETURNS  the result list the panel stores (sigmas, covariances, plot residuals
+#          subsampled to 40,000, drift, per-file table), or NULL when no trace has
+#          enough localizations. Draws random numbers (drift bootstrap, plot
+#          subsample); set a seed for a reproducible plot sample.
+# =============================================================================
+precision_cloud <- function(dfs, min_loc = 5L, use_z = FALSE, drift_dfs = dfs,
+                            progress = NULL) {
+  dxall <- dyall <- dzall <- numeric(0)          # pooled residuals (length-weighted)
+  # Per-TRACE VARIANCES (one vote each, robust) and per-TRACE covariances. The
+  # cross terms are needed because a cloud tilted off the x/y axes has its
+  # elongation entirely there - per-axis spreads alone cannot see it.
+  vxt <- vyt <- vzt <- numeric(0)
+  cxyt <- cxzt <- cyzt <- numeric(0)
+  nlt <- integer(0)                              # localizations per trace
+  # Pooled sums of squares + their exact degrees of freedom. Kept separately
+  # from the residual vectors because the correct divisor is sum(n_i - 1),
+  # NOT the number of localizations: subtracting each trace's own centre
+  # spends one degree of freedom PER TRACE. Dividing by N - 1 instead (what
+  # sd() on the pooled residuals does) reads ~5% low at 5 localizations per
+  # trace and ~1% low at 15 - a real, n-dependent underestimate of sigma.
+  ssx_all <- ssy_all <- ssz_all <- 0
+  dof_all <- dofz_all <- 0L
+  per_file <- list()
+  pooled   <- list()                             # per-loc residuals (dx/dy/dz) for the plot
+  # Median-of-chi-square correction. s^2 ~ sigma^2 * chisq(n-1)/(n-1), which is
+  # right-skewed, so the MEDIAN of the per-trace variances sits BELOW sigma^2 -
+  # by 16% at n = 5, i.e. sigma reads 8% low. Dividing by that distribution's
+  # own median removes it exactly (same idea as the 1.4826 that makes the MAD
+  # consistent for sigma). NOTE the usual c4 factor is the WRONG correction
+  # here: c4 corrects E[s], and this estimator takes a median, not a mean.
+  med_fac <- function(n) ifelse(n > 1L, stats::qchisq(0.5, n - 1L) / (n - 1L), NA_real_)
+  nf <- length(dfs)
+  {
+    for (i in seq_along(dfs)) {
+      fname <- names(dfs)[[i]]
+      if (is.function(progress)) progress(1 / nf, fname)
+      # Assess precision on the SAME localizations the Display tab plots: apply the
+      # metadata / trace-length / trace-spread filters (and any fiducial exclusion),
+      # so the cloud reflects the post-filter data rather than the raw acquisition.
+      df <- dfs[[fname]]
+      if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) next
+      hasz <- use_z && has_axial_data(df)   # z must vary; a planar z = 0 column is not 3D
+      # Residuals are taken about each trace's MEAN, not its median. The mean is
+      # the maximum-likelihood centre under the Gaussian error model this panel
+      # assumes, and it is the only centre for which the degree-of-freedom
+      # corrections below are exact - a median centre has no matching
+      # correction. It is also the honest choice: a robust centre partly
+      # ABSORBS the mislinked localizations that this panel exists to reveal.
+      # Outlier resistance is supplied instead by the per-trace median further
+      # down, which gives every trace one vote regardless of length.
+      dd <- df %>%
+        dplyr::group_by(tid) %>%
+        dplyr::mutate(nloc = dplyr::n()) %>%
+        dplyr::filter(nloc >= min_loc) %>%
+        dplyr::mutate(dx = x - mean(x, na.rm = TRUE),
+                      dy = y - mean(y, na.rm = TRUE),
+                      dz = if (hasz) z - mean(z, na.rm = TRUE) else NA_real_) %>%
+        dplyr::ungroup()
+      if (!nrow(dd)) next
+      pooled[[fname]] <- data.frame(dx = dd$dx, dy = dd$dy,
+                                    dz = if (hasz) dd$dz else NA_real_)
+      dxall <- c(dxall, dd$dx); dyall <- c(dyall, dd$dy)
+      if (hasz) dzall <- c(dzall, dd$dz[is.finite(dd$dz)])
+      # One robust σ per trace (each trace counts once, so a 2000-loc fiducial
+      # doesn't dominate the precision estimate the way the pooled cloud does).
+      safe_cov <- function(u, v) {
+        ok <- is.finite(u) & is.finite(v)
+        if (sum(ok) < 3L) return(NA_real_)
+        stats::cov(u[ok], v[ok])
+      }
+      pts <- dd %>% dplyr::group_by(tid) %>%
+        dplyr::summarise(nl  = dplyr::n(),
+                         ssx = sum(dx^2, na.rm = TRUE),
+                         ssy = sum(dy^2, na.rm = TRUE),
+                         ssz = if (hasz) sum(dz^2, na.rm = TRUE) else NA_real_,
+                         vx  = stats::var(dx, na.rm = TRUE),
+                         vy  = stats::var(dy, na.rm = TRUE),
+                         vz  = if (hasz) stats::var(dz, na.rm = TRUE) else NA_real_,
+                         cxy = safe_cov(dx, dy),
+                         cxz = if (hasz) safe_cov(dx, dz) else NA_real_,
+                         cyz = if (hasz) safe_cov(dy, dz) else NA_real_,
+                         .groups = "drop")
+      # ONE factor applied to every second moment of a trace, so the ellipse
+      # SHAPE (and hence the anisotropy and tilt) is untouched - only its size
+      # is de-biased.
+      mf <- med_fac(pts$nl)
+      vxt <- c(vxt, pts$vx / mf); vyt <- c(vyt, pts$vy / mf)
+      # Keep vzt the SAME LENGTH as vxt/vyt/cxzt by carrying NA through rather
+      # than dropping non-finite entries here. robust_median_cov() drops them
+      # itself; filtering only this one vector meant var_z and cov_xz were
+      # medians over different subsets of traces, so the robust xz/yz matrices
+      # mixed two populations.
+      if (hasz) vzt <- c(vzt, pts$vz / mf)
+      cxyt <- c(cxyt, pts$cxy / mf)
+      if (hasz) { cxzt <- c(cxzt, pts$cxz / mf); cyzt <- c(cyzt, pts$cyz / mf) }
+      nlt <- c(nlt, pts$nl)
+      # Pooled sums of squares with their exact degrees of freedom.
+      dof_f  <- sum(pts$nl - 1L)
+      dofz_f <- sum((pts$nl - 1L)[is.finite(pts$ssz)])
+      ssx_all <- ssx_all + sum(pts$ssx, na.rm = TRUE)
+      ssy_all <- ssy_all + sum(pts$ssy, na.rm = TRUE)
+      ssz_all <- ssz_all + sum(pts$ssz, na.rm = TRUE)
+      dof_all <- dof_all + dof_f; dofz_all <- dofz_all + dofz_f
+      per_file[[fname]] <- data.frame(
+        dataset  = fname,
+        sigma_x  = sqrt(sum(pts$ssx, na.rm = TRUE) / max(dof_f, 1L)),
+        sigma_y  = sqrt(sum(pts$ssy, na.rm = TRUE) / max(dof_f, 1L)),
+        sigma_z  = if (dofz_f > 0) sqrt(sum(pts$ssz, na.rm = TRUE) / dofz_f) else NA_real_,
+        n_traces = nrow(pts), n_locs = nrow(dd),
+        stringsAsFactors = FALSE)
+    }
+  }
+  if (!length(dxall)) return(NULL)
+  mom <- function(v, p) { v <- v[is.finite(v)]; m <- mean(v); s <- stats::sd(v)
+                          if (s <= 0) NA_real_ else mean((v - m)^p) / s^p }
+  # Pooled sigma, exact degrees of freedom (see the accumulator comment above).
+  sx <- sqrt(ssx_all / max(dof_all, 1L)); sy <- sqrt(ssy_all / max(dof_all, 1L))
+  sz <- if (dofz_all > 0) sqrt(ssz_all / dofz_all) else NA_real_
+  sx_med <- sqrt(stats::median(vxt, na.rm = TRUE))
+  sy_med <- sqrt(stats::median(vyt, na.rm = TRUE))
+  sz_med <- if (length(vzt)) sqrt(stats::median(vzt, na.rm = TRUE)) else NA_real_
+  # subsample rows for the plot (dx/dy/dz/is_fid kept aligned); σ computed from all
+  P <- do.call(rbind, pooled)
+
+  # ── Covariance matrices: the shape of the cloud, tilt included ────────────
+  # POOLED describes exactly the population the heatmap draws (every
+  # localization, so long traces weigh more). ROBUST gives each trace one vote.
+  # Both are kept and both are drawn: when they disagree the gap IS the
+  # "a few long/wide traces dominate" diagnostic, made visible.
+  pair_cov <- function(u, v) {
+    ok <- is.finite(u) & is.finite(v)
+    if (sum(ok) < 3L) return(NULL)
+    stats::cov(cbind(u[ok], v[ok]))
+  }
+  # cov() divides by (rows - 1); the honest divisor is sum(n_i - 1). Rescaling
+  # by that ratio keeps the drawn pooled ellipse consistent with the pooled
+  # sigma reported above, instead of ~5% tighter at short traces.
+  dof_scale <- if (dof_all > 0) (nrow(P) - 1) / dof_all else 1
+  cov_pooled <- lapply(list(
+    xy = pair_cov(P$dx, P$dy),
+    xz = if (length(dzall)) pair_cov(P$dx, P$dz) else NULL,
+    yz = if (length(dzall)) pair_cov(P$dy, P$dz) else NULL),
+    function(S) if (is.null(S)) NULL else S * dof_scale)
+  cov_trace <- list(
+    xy = robust_median_cov(vxt, vyt, cxyt),
+    xz = if (length(vzt)) robust_median_cov(vxt, vzt, cxzt) else NULL,
+    yz = if (length(vzt)) robust_median_cov(vyt, vzt, cyzt) else NULL)
+
+  # Headline anisotropy comes from the ROBUST matrix and is the eigenvalue
+  # ratio, not max(σx,σy)/min(σx,σy) - the latter reads ~1.0 on a 45°-tilted
+  # cloud and would report drifted data as "isotropic".
+  ell_r <- cov_ellipse_params(cov_trace$xy)
+
+  # ── How heavy SHOULD the tails be? ────────────────────────────────────────
+  # The pooled cloud mixes traces that do NOT share one sigma: MINFLUX
+  # precision scales as 1/sqrt(photons) and photon counts vary a lot between
+  # traces. A mixture of Gaussians of DIFFERENT widths is leptokurtic no
+  # matter how clean the data are - for X|v ~ N(0, v), kurtosis =
+  # 3·E[v²]/E[v]². So comparing the observed kurtosis against 3 (which this
+  # panel used to do, warning "possible mislinks / double events") flags
+  # perfectly good data: at a realistic spread of per-trace sigma the
+  # kurtosis of artifact-free simulated data reaches 7-15.
+  # What is diagnostic is the EXCESS over what the observed sigma spread
+  # already explains. Traces are weighted by n_i because that is how they
+  # enter the pooled cloud. The per-trace variances are themselves noisy -
+  # v̂ ~ v·χ²(n-1)/(n-1) gives E[v̂²] = v²(1 + 2/(n-1)) - so E[v²] is recovered
+  # by the EXACT factor (n-1)/(n+1). Without it, short traces manufacture a
+  # heterogeneity that is not there, the prediction comes out too low, and
+  # the panel goes back to crying artifact on clean data.
+  vv <- (vxt + vyt) / 2                          # per-trace variance, de-biased
+  ok_v <- is.finite(vv) & vv > 0 & is.finite(nlt)
+  kurt_exp <- NA_real_; sigma_spread <- NA_real_
+  if (sum(ok_v) >= 5L) {
+    v <- vv[ok_v]; nl <- nlt[ok_v]; w <- nl / sum(nl)
+    Ev  <- sum(w * v)
+    Ev2 <- sum(w * v^2 * (nl - 1L) / (nl + 1L))
+    kurt_exp <- 3 * max(Ev2, Ev^2) / Ev^2
+    # Spread of the per-trace precision itself - a real property of the
+    # acquisition, reported in its own right rather than mislabelled as tails.
+    sigma_spread <- stats::IQR(sqrt(v)) / stats::median(sqrt(v))
+  }
+
+  # ── Sample stability: drift and jitter ────────────────────────────────────
+  # Belongs here rather than in the de-blink panel: it describes the SAMPLE,
+  # and folding it into the merge radius would be circular (the only molecules
+  # whose motion is observable are the ones already merged, i.e. those that
+  # moved LESS than the radius in question).
+  # Measured per file and pooled, because time is only comparable within one
+  # acquisition - two files start their clocks independently.
+  drift_by_file <- lapply(names(dfs), function(fname) {
+    dfx <- drift_dfs[[fname]]
+    if (!is.data.frame(dfx) || !nrow(dfx) || !"tim" %in% names(dfx)) return(NULL)
+    # Group traces into molecules first, so a fluorophore seen at several
+    # separate times contributes a trajectory rather than one displacement.
+    # A generous radius is used deliberately: pairs that are really two
+    # different molecules displace in no particular direction, so they widen
+    # the interval without biasing the drift.
+    sgq <- tryCatch(suggest_centroid_threshold(dfx, min_n = min_loc)$sigma,
+                    error = function(e) NULL)
+    gid <- if (!is.null(sgq) && is.finite(sgq))
+      tryCatch(deblink_merge_centroids(dfx, 5 * sgq, NULL), error = function(e) NULL) else NULL
+    tryCatch(sample_drift_estimate(dfx, min_n = min_loc, group = gid),
+             error = function(e) NULL)
+  })
+  names(drift_by_file) <- names(dfs)
+  drift_by_file <- Filter(Negate(is.null), drift_by_file)
+
+  keep <- if (nrow(P) > 40000L) sort(sample.int(nrow(P), 40000L)) else seq_len(nrow(P))
+  Pp <- P[keep, , drop = FALSE]
+  list(
+    drift = drift_by_file,
+    dx = Pp$dx, dy = Pp$dy, dz = Pp$dz,
+    sigma_x = sx, sigma_y = sy, sigma_z = sz,
+    sigma_x_med = sx_med, sigma_y_med = sy_med, sigma_z_med = sz_med,
+    sigma_xy   = sqrt((sx^2 + sy^2) / 2),
+    # robust, one-vote-per-trace precision (immune to fiducials / long traces)
+    sigma_xy_med = sqrt((sx_med^2 + sy_med^2) / 2),
+    cov_pooled = cov_pooled, cov_trace = cov_trace,
+    # Rotation-invariant shape of the robust cloud, and WHICH WAY it leans.
+    aniso_ev  = if (!is.null(ell_r)) ell_r$ratio     else NA_real_,
+    tilt_deg  = if (!is.null(ell_r)) ell_r$angle_deg else NA_real_,
+    rho_xy    = if (!is.null(ell_r)) ell_r$rho       else NA_real_,
+    # Kept for the per-axis read-out; NOT used for the warning any more, since
+    # it cannot see elongation that runs diagonally.
+    anisotropy = max(sx, sy) / max(1e-9, min(sx, sy)),
+    skew_x = mom(dxall, 3), skew_y = mom(dyall, 3),
+    kurt_x = mom(dxall, 4), kurt_y = mom(dyall, 4),
+    # What the per-trace sigma spread alone predicts, and that spread itself.
+    kurt_exp = kurt_exp, sigma_spread = sigma_spread,
+    n_locs = length(dxall), n_traces = length(vxt), has_z = length(dzall) > 0,
+    per_file = do.call(rbind, per_file))
+}
+
+# =============================================================================
+# robust_z_log10() - ROBUST Z-SCORE ON A LOG10 SCALE
+# =============================================================================
+# GOAL: (log10 v - median) / MAD. Returns 0 for every value when the MAD
+# collapses (too few or identical values), so a tiny or degenerate file flags
+# nothing.
+# =============================================================================
+robust_z_log10 <- function(v) {
+  x <- log10(pmax(as.numeric(v), 1e-9))
+  m <- stats::median(x, na.rm = TRUE); s <- stats::mad(x, na.rm = TRUE)
+  if (!is.finite(s) || s <= 0) rep(0, length(x)) else (x - m) / s
+}
+
+# =============================================================================
+# trace_recurrence() - HOW MANY OTHER CENTROIDS LIE WITHIN R
+# =============================================================================
+# GOAL: for each trace centroid, the count of OTHER centroids within radius R
+# (spatial recurrence). Grid-bucketed with cell size R, so only the 3 x 3
+# neighbouring cells are searched and it stays O(n) on thousands of traces.
+# =============================================================================
+trace_recurrence <- function(cx, cy, R) {
+  n <- length(cx); if (n < 2) return(integer(n))
+  ox <- floor(cx / R); oy <- floor(cy / R)
+  idx <- split(seq_len(n), paste(ox, oy)); cnt <- integer(n)
+  for (i in seq_len(n)) {
+    nb <- integer(0)
+    for (a in -1:1) for (b in -1:1) {
+      k <- paste(ox[i] + a, oy[i] + b); j <- idx[[k]]
+      if (!is.null(j)) nb <- c(nb, j)
+    }
+    d <- sqrt((cx[nb] - cx[i])^2 + (cy[nb] - cy[i])^2)
+    cnt[i] <- sum(d <= R) - 1L
+  }
+  cnt
+}
+
+# =============================================================================
+# fiducial_scan_file() - FLAG FIDUCIAL / CONTAMINANT TRACES IN ONE FILE
+# =============================================================================
+# GOAL: one row per trace with its features (localizations, duration, median efo
+# and cfr, centroid, spread), robust outlier scores and spatial recurrence, and a
+# flag. A trace is flagged when it is
+#   long-lived: duration >= k_dur x the file's 99th percentile of live (> 0)
+#               durations. A fiducial does not bleach, so the tracker keeps
+#               re-finding it and its trace outlives every real fluorophore;
+#               this is the primary signature. The q99 needs >= 20 live traces.
+#   bright:     robust log-z of median efo >= k_efo AND >= min_locs
+#               localizations, so a single very bright blip is not a bead.
+# Length z and recurrence are reported only.
+#
+# ARGUMENTS
+#   df        one file's localizations (tid, x, y; optional z, efo, cfr, tim)
+#   fname     dataset name written into the rows
+#   k_efo, k_dur, min_locs, recur_r   thresholds as above (recur_r in nm)
+#
+# RETURNS the per-trace table, or NULL when the file has no coordinates or traces
+# =============================================================================
+fiducial_scan_file <- function(df, fname, k_efo = 4, k_dur = 5, min_locs = 5, recur_r = 100) {
+  if (!is.data.frame(df) || !nrow(df) || !all(c("tid","x","y") %in% names(df))) return(NULL)
+  # z counts only if it VARIES (planar exports carry z = 0)
+  hasz  <- has_axial_data(df)
+  has_e <- "efo" %in% names(df); has_c <- "cfr" %in% names(df); has_t <- "tim" %in% names(df)
+  feat <- df %>%
+    dplyr::group_by(tid) %>%
+    dplyr::summarise(
+      n_loc    = dplyr::n(),
+      duration = if (has_t) max(tim, na.rm = TRUE) - min(tim, na.rm = TRUE) else NA_real_,
+      efo_med  = if (has_e) stats::median(efo, na.rm = TRUE) else NA_real_,
+      cfr_med  = if (has_c) stats::median(cfr, na.rm = TRUE) else NA_real_,
+      cx       = stats::median(x, na.rm = TRUE),
+      cy       = stats::median(y, na.rm = TRUE),
+      spread   = sqrt(mean((x - stats::median(x, na.rm = TRUE))^2 +
+                           (y - stats::median(y, na.rm = TRUE))^2 +
+                           (if (hasz) (z - stats::median(z, na.rm = TRUE))^2 else 0), na.rm = TRUE)),
+      .groups  = "drop") %>%
+    dplyr::mutate(dataset = fname)
+  if (!nrow(feat)) return(NULL)
+  # robust outlier scores + spatial recurrence (all per file)
+  feat$z_efo <- if (has_e) robust_z_log10(feat$efo_med) else rep(NA_real_, nrow(feat))
+  feat$z_len <- robust_z_log10(feat$n_loc)
+  feat$recur <- trace_recurrence(feat$cx, feat$cy, recur_r)
+  # duration relative to this file's q99 of live traces (a file can be mostly
+  # single-localization traces, which would collapse a median/MAD scale)
+  live <- feat$duration[is.finite(feat$duration) & feat$duration > 0]
+  dur_q99 <- if (length(live) >= 20L) unname(stats::quantile(live, 0.99)) else NA_real_
+  feat$dur_x_q99 <- if (is.finite(dur_q99) && dur_q99 > 0) feat$duration / dur_q99 else NA_real_
+  long_lived <- is.finite(feat$dur_x_q99) & feat$dur_x_q99 >= k_dur
+  # brightness outlier, only for a trace that persisted
+  bright <- has_e & is.finite(feat$z_efo) & feat$z_efo >= k_efo & feat$n_loc >= min_locs
+  feat$flagged <- long_lived | bright
+  feat$rule <- ifelse(long_lived & bright, "long+bright",
+               ifelse(long_lived, "long-lived", ifelse(bright, "bright", "")))
+  feat
+}

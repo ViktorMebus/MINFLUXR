@@ -5,6 +5,18 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 
 ## Unreleased
 
+### Import: CFR, ECC and EFC are carried per localization
+
+- **Each final localization now gets the CFR of its own localization.** CFR is measured in one
+  iteration only (itr 6 in 3D imaging sequences, the final iteration in 2D tracking sequences). The
+  importer previously took one value per trace (from the trace's last localization) and gave it to
+  every localization in that trace. ECC and EFC had the same problem. Within a trace, a localization
+  is now the run of rows ending at a final row: 3D imaging writes itr 0 to 9 once, then repeats 6 to 9
+  for each further localization. Each final row takes the last positive value from its own run.
+  Tracking localizations keep the CFR measured at their own final iteration. Applies to `.json` and
+  `.npy` uploads in all tabs. CFR filters and CFR-coloured plots change for any trace with more than
+  one localization.
+
 ### Tracking: headline D and the immobile MSD
 
 - **The headline D is now the upper-regime MSD** (the MSD panel's fit window and settings) in Data
@@ -166,6 +178,13 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
   (`spatial_curve_for_points()`), which the two panels had each carried as a near-identical copy.
   The NN-line overlay takes its options as a list (`smlm_nn_options()`). 11 unused functions
   inside the servers were removed. Results are unchanged.
+- The Run buttons' computation now lives in tested functions, with the server keeping input
+  reading, file preparation and notifications: L₁₂ / g₁₂ (`cross_curve_for_points()`, shared
+  by both panels), batch NN (`batch_nn_for_file()`, `channel_facets()`), precision cloud
+  (`precision_cloud()`), crowding vs detection time (`crowding_for_file()`,
+  `crowding_null_test()`), within-cluster NN vs size (`size_nn_for_file()`), labelling density
+  (`density_profile_files()`), fiducial scan (`fiducial_scan_file()`) and local density &
+  hotspots (`hotspot_for_points()`). Each panel gives identical results before and after.
 
 ### Multiplex: plain dataset name
 

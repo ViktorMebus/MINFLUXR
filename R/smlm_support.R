@@ -1089,3 +1089,98 @@ debias_support_window <- function(support, n_pts, n_draw = 6L, max_cells = 8L, t
   best
 }
 
+
+# =============================================================================
+# density_profile_files() - PER-FILE LABELLING DENSITY ON ONE COMMON SUPPORT
+# =============================================================================
+# GOAL: the numbers behind the labelling-density panel. For every prepared file:
+# the closing-radius sweep (optional), then ONE gap-fill radius shared by all
+# files (the largest plateau start when auto), then each file's unit density on
+# that radius and a per-unit local-density sample for the distribution plot.
+#
+# The radius must be the same for every file: different denominators measure
+# different kinds of region, and that is exactly what makes a density ratio
+# wrong. The largest plateau is taken because a radius below a file's plateau
+# leaves its support tracking its structures.
+#
+# ARGUMENTS
+#   prepped       named list of filtered (and de-blinked when unit = "cluster")
+#                 tables, NOT thinned
+#   unit          "cluster" (de-blinked molecules) or "tid"
+#   use_3d        volume density instead of area density
+#   support_mode  "grid" or a KDE mode (see compute_unit_density)
+#   h_nm, close_nm, k, support_from, bw_nm, frac
+#                 passed to compute_unit_density; close_nm is overridden when
+#                 auto_close finds plateaus
+#   auto_close    pick close_nm from the sweeps (grid support only)
+#   want_sweep    compute the sweeps (auto_close needs them)
+#   progress      optional function(frac, detail), called once per density file
+#
+# RETURNS list(profile = one row per file or NULL, sweeps = bound sweep table or
+#              NULL, locals = data.frame(dataset, local) or NULL,
+#              close_nm = the radius used)
+# =============================================================================
+density_profile_files <- function(prepped, unit = "tid", use_3d = FALSE,
+                                  support_mode = "grid", h_nm = 100, close_nm = 200,
+                                  auto_close = FALSE, want_sweep = auto_close, k = 3L,
+                                  support_from = "units", bw_nm = 150, frac = 0.99,
+                                  progress = NULL) {
+  # sweep on the same points the support is built from (all localizations), so
+  # the plateau the user reads is the plateau the density uses
+  sweeps <- list()
+  if (want_sweep) {
+    keep <- if (use_3d) c("x", "y", "z") else c("x", "y")
+    for (fname in names(prepped)) {
+      df <- prepped[[fname]]
+      if (!all(keep %in% names(df))) next
+      sp <- df[, keep, drop = FALSE]
+      if (!use_3d) sp$z <- 0
+      sw <- tryCatch(support_closing_sweep(sp[stats::complete.cases(sp), , drop = FALSE],
+                                           use_3d = use_3d, h_nm = h_nm),
+                     error = function(e) NULL)
+      if (!is.null(sw)) { sw$dataset <- fname; sweeps[[fname]] <- sw }
+    }
+  }
+
+  # one common gap-fill radius
+  if (auto_close && length(sweeps)) {
+    pls <- vapply(sweeps, function(s) plateau_close_nm(s), numeric(1))
+    pls <- pls[is.finite(pls)]
+    if (length(pls)) close_nm <- max(pls)
+  }
+
+  # densities, all on that one radius
+  rows <- list(); locals <- list()
+  for (fname in names(prepped)) {
+    if (is.function(progress)) progress(0.4 / max(1L, length(prepped)), fname)
+    df <- prepped[[fname]]
+    r <- tryCatch(compute_unit_density(df, unit = unit, use_3d = use_3d,
+                                      support_mode = support_mode, h_nm = h_nm,
+                                      close_nm = close_nm, k = k,
+                                      support_from = support_from,
+                                      bw_nm = bw_nm, frac = frac),
+                  error = function(e) NULL)
+    if (is.null(r)) next
+    r$dataset    <- fname
+    r$unit       <- unit
+    r$close_auto <- auto_close
+    # the settings this row was measured with, so the status line and the plot
+    # describe the run rather than the live sliders
+    r$run_mode   <- support_mode
+    r$run_bw     <- bw_nm
+    r$run_frac   <- frac
+    r$run_3d     <- use_3d
+    rows[[fname]] <- r
+    # per-unit local density, subsampled to 4000: the plot needs only the shape
+    lv <- tryCatch(unit_local_density(unit_centroids(df, unit, use_3d),
+                                     k = k, use_3d = use_3d),
+                   error = function(e) numeric(0))
+    lv <- lv[is.finite(lv) & lv > 0]
+    if (length(lv) > 4000L) lv <- lv[seq(1, length(lv), length.out = 4000L)]
+    if (length(lv)) locals[[fname]] <- data.frame(dataset = fname, local = lv)
+  }
+  list(profile  = do.call(rbind, rows),
+       sweeps   = if (length(sweeps)) do.call(rbind, sweeps) else NULL,
+       locals   = if (length(locals)) do.call(rbind, locals) else NULL,
+       close_nm = close_nm)
+}

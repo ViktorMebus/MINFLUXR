@@ -632,3 +632,47 @@ hotspot_unit_label <- function(u) switch(u %||% "tid",
   cluster = "de-blinked molecules",
   "units")
 
+
+# =============================================================================
+# hotspot_for_points() - LOCAL DENSITY AND FOCI FOR ONE FILE
+# =============================================================================
+# GOAL: the per-file part of the Local density & hotspots panel, on one point per
+# unit inside an already-built window: local-density enhancement, DBSCAN eps
+# calibrated against CSR in that window, the foci table at that eps and the
+# summary row (with the window mode, so a bounding-box fallback is visible).
+#
+# ARGUMENTS
+#   pts        unit centroids (x, y[, z])
+#   support    the window (spatial support) built from this file's localizations
+#   k          neighbour order of the local density
+#   quadrat_nm quadrat size for the summary row's dispersion index
+#   enh_thresh enhancement that counts as a hotspot
+#   minPts     DBSCAN minPts
+#   target_frac, nsim   false-cluster target and CSR draws for the eps calibration
+#   use_3d     use z
+#   tag        dataset name
+#
+# RETURNS list(tag, pts, support, enh, le, eps_cal, foci, row), or NULL when the
+#         enhancement cannot be computed. Draws random numbers (CSR draws).
+# =============================================================================
+hotspot_for_points <- function(pts, support = NULL, k = 5L, quadrat_nm = 250, enh_thresh = 5,
+                               minPts = 5L, target_frac = 0.05, nsim = 15L,
+                               use_3d = FALSE, tag = NULL) {
+  le <- compute_local_enhancement(pts, k = k, use_3d = use_3d, support = support)
+  if (is.null(le)) return(NULL)
+  ec <- tryCatch(calibrate_dbscan_eps(pts, support = support, minPts = minPts,
+                                      target_frac = target_frac, nsim = nsim,
+                                      use_3d = use_3d),
+                 error = function(e) NULL)
+  ft <- if (!is.null(ec))
+    compute_foci_table(pts, eps = ec$eps, minPts = minPts, use_3d = use_3d) else NULL
+  row <- hotspot_summary_row(pts, support = support, k = k, quadrat_nm = quadrat_nm,
+                             enh_thresh = enh_thresh, eps_cal = ec, minPts = minPts,
+                             use_3d = use_3d, dataset = tag)
+  # bbox_support() returns an all-TRUE mask and a finite area, so a bounding box
+  # does not fail here: it silently measures the imaged FRAME instead of the cell.
+  # Record the mode so the run can say so.
+  row$window_mode <- support$mode %||% NA_character_
+  list(tag = tag, pts = pts, support = support, enh = le$enh, le = le,
+       eps_cal = ec, foci = ft, row = row)
+}

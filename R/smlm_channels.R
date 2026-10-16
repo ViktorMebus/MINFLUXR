@@ -801,3 +801,20 @@ get_tc_pts <- function(df, grp, unit) {
   }
 }
 
+
+# GOAL: the per-channel facets a distribution panel runs on. With `by_channel` on
+# and two or more channels, one facet per channel (labelled with its channel
+# label); otherwise one facet holding everything (label "").
+#   df         : frame carrying `channel` / `channel_label` (resolve_channels)
+#   by_channel : the "analyse each channel separately" switch
+channel_facets <- function(df, by_channel = FALSE) {
+  none <- list(list(label = "", df = df))
+  if (!isTRUE(by_channel)) return(none)
+  if (!is.data.frame(df) || !nrow(df) || !"channel" %in% names(df)) return(none)
+  ids <- sort(unique(df$channel[!is.na(df$channel)]))
+  if (length(ids) < 2L) return(none)
+  lapply(ids, function(ch) {
+    sub <- df[which(df$channel == ch), , drop = FALSE]
+    list(label = as.character(sub$channel_label[1]), df = sub)
+  })
+}
