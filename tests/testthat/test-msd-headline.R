@@ -48,3 +48,13 @@ test_that("the headline D recovers D from the upper regime", {
   expect_equal(hd$D, 200, tolerance = 0.1)
   expect_equal(hd$window, c(5L, 50L))
 })
+
+test_that("the headline reports the lags it fitted, inside the window", {
+  d  <- .free(D = 200, n_tracks = 40, n_locs = 150, seed = 4)
+  hd <- msd_headline(d, t_c = 0.2, sw = 0.01, window = c(5L, 50L), R = 0, coef = 4, min_pts = 50L)
+  expect_length(hd$fit_lags, 2L)
+  expect_equal(hd$fit_lags[1], 5L)
+  expect_lte(hd$fit_lags[2], 50L)
+  expect_equal(diff(hd$fit_lags) + 1L, hd$n_points)     # contiguous lags on complete data
+  expect_equal(hd$fit_tau, hd$fit_lags * 0.2 + 0.01)    # linearised lag times
+})

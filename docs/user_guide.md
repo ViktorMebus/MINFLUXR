@@ -906,7 +906,9 @@ first.
 ### Data Quality & Calibration
 
 The foundation panel. Its **headline D** comes from the upper lag regime of the ensemble MSD, fitted
-with the MSD panel's settings (window, weighting, OLSF). This is the estimator Vogler et al. 2025
+with the MSD panel's settings (window, weighting, OLSF). The OLSF fits the first few lags of the
+window (its optimal point count, often 4 to 6), and the panel names those lags and their lag times.
+Where the MSD bends, D depends on which lags are fitted. This is the estimator Vogler et al. 2025
 validated against TIRF; short lags are left out because they carry non-diffusive motion on top of
 noise (probe wobble, the tracker's own wander). Beside it, the **CVE** (Vestergaard 2014) gives D from
 consecutive single-cycle steps, the lower regime, as a check; a large ratio between the two means the

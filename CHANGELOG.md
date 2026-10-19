@@ -25,6 +25,9 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - **Instrument Calibration plots the immobile MSD** per cell over many cycles, with the noise level 4σ²
   and the fit window. The wander floor in a profile is now the immobile slope **over the MSD fit
   window**, matching the headline D; the short-lag rise is reported beside it.
+- **The headline D names the lags it was fitted on.** The OLSF fits the first few lags of the window
+  (often 4 to 6), so Data Quality now reads e.g. "lags 5–9 (0.98–1.8 ms) of window 5–50" instead of
+  "cycles 5–50", and Compare Cells has an `msd_lags` column. On a bending MSD, D depends on these lags.
 - **The MSD is computed about 25 times faster** (vectorised over index offsets); results are identical.
 - **The filter pipeline always starts from the original upload.** After Plot Data it previously re-ran
   on the rechunked, already-filtered data, so results depended on whether Plot Data had been pressed.
