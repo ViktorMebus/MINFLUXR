@@ -636,9 +636,14 @@ read_minflux_json_as_df <- function(path,
   # localization. Within a trace the rows are in acquisition order and every
   # localization is the run of rows that ends at a final row: 3D imaging writes
   # itr 0..9 for the first localization and then repeats 6,7,8,9 for each further
-  # one. Each final row gets the last finite, positive value of its own run (its
-  # own value when that is positive); a run with no such value keeps the final
-  # row's own value. Non-final rows are left as they are.
+  # one. The measuring iteration is found per file and per column: the last
+  # iteration (up to the final one) whose values vary across rows, i.e.
+  # itr 6 for 3D imaging and the final itr for 2D tracking. Each final row takes
+  # the value of that iteration's row in its own run, whatever its sign: a
+  # negative CFR is a background-subtracted centre rate below zero, a real
+  # measurement left for the user to filter. A run without that row gets NA. A
+  # column no iteration measures (CFR check off) is left as it is. Non-final
+  # rows are left as they are.
   safe_inc(0.08, "Carrying cfr/ecc/efc forward per localization")
 
   carry_cols <- switch(cfr_strategy,
@@ -659,15 +664,30 @@ read_minflux_json_as_df <- function(path,
     starts[is.na(starts)] <- TRUE
     run_start <- cummax(ifelse(starts, pos, 0L))       # sorted position where each row's run begins
     fin_pos   <- which(fin_s)
-    # "itr6" restricts the source rows to iteration 6 (the 3D imaging CFR iteration).
-    src_ok <- if (cfr_strategy == "itr6") df_all$itr[o] %in% 6L else rep(TRUE, n_all)
+    itr_s     <- df_all$itr[o]
+    final_max <- suppressWarnings(max(itr_s[fin_s], na.rm = TRUE))
     for (col in carry_cols) {
-      v  <- df_all[[col]][o]
-      ok <- is.finite(v) & v > 0 & src_ok
-      if (!any(ok)) next
-      last_ok <- cummax(ifelse(ok, pos, 0L))           # latest usable row at or before each row
-      hit <- fin_pos[last_ok[fin_pos] >= run_start[fin_pos]]   # usable row lies in the same run
-      df_all[[col]][o[hit]] <- v[last_ok[hit]]
+      v <- df_all[[col]][o]
+      # The iteration that measures this column; "itr6" fixes it at iteration 6.
+      # An iteration measures when its values vary: most rows differ from its most
+      # common value. Unmeasured iterations hold one placeholder (0, or -3.05e-5
+      # in older exports), and so does a whole column when the CFR check is off.
+      src_itr <- if (cfr_strategy == "itr6") 6L else {
+        varies <- vapply(split(v, itr_s), function(x) {
+          x <- x[is.finite(x)]
+          if (!length(x)) return(0)
+          1 - max(tabulate(match(x, unique(x)))) / length(x)
+        }, numeric(1))
+        its <- as.integer(names(varies))
+        its <- its[varies >= 0.5 & its <= final_max]
+        if (length(its)) max(its) else NA_integer_
+      }
+      src <- itr_s %in% src_itr
+      if (is.na(src_itr) || !any(src)) next
+      last_src <- cummax(ifelse(src, pos, 0L))         # latest measuring row at or before each row
+      in_run   <- last_src[fin_pos] >= run_start[fin_pos]   # it lies in the same localization
+      df_all[[col]][o[fin_pos[in_run]]]  <- v[last_src[fin_pos[in_run]]]
+      df_all[[col]][o[fin_pos[!in_run]]] <- NA
     }
   }
 

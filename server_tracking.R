@@ -610,7 +610,7 @@ tracking_server <- function(input, output, session) {
                       as.numeric(diff(stats::quantile(sig_phot_i, c(.25, .75)))) else NA_real_
     eco_med      <- if (length(ecov)) stats::median(ecov) else NA_real_
     # Headline D: the upper lag regime of the ensemble MSD, with the MSD panel's fit
-    # settings (Vogler et al. 2025 validated this estimator against TIRF). The CVE
+    # settings. The CVE
     # above uses single-cycle steps, the lower regime, and is kept as a check.
     ms  <- .msd_settings(df)
     cch <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
