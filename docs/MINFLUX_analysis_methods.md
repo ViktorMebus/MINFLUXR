@@ -848,7 +848,10 @@ Vestergaard, Blainey & Flyvbjerg 2014). Every estimator that reads single steps 
   `f_b = 2 + 1.35·x^{0.6}, ℓ_b = 0.8 + 0.564·M` for the slope and `f_a = 2 + 1.6·x^{0.51},
   ℓ_a = 3 + (4.5·M^{0.4} − 8.5)^{1.2}` for the intercept (Michalet & Berglund 2012). Two variants: **anchored** (default — anchors x
   on a stable whole-window fit so p is reproducible) and **iterative** (the MinSpt loop — converges onto
-  the lowest, least-noisy lags). Fit window default **5–50 cycles** (Vogler `fit_limits`).
+  the lowest, least-noisy lags). Fit window default **5–50 cycles** (Vogler `fit_limits`). Both variants
+  fit only the **first p lags of the window** (p for the slope is typically 4–6), and Data Quality and
+  Compare Cells report which lags were fitted. The point count is derived for a straight MSD; where the
+  ensemble MSD bends, D falls as later lags are used, so the reported D is the D at those lag times.
 - **Motion blur in the OLSF.** The intercept of a blurred MSD is `β₀ = 2d(σ² − 2D·R_abs)` (Michalet &
   Berglund 2012), so the fits report `σ² = β₀/(2d) + 2D·R_abs`, and R_msd = R_abs/t_c enters the reduced
   error x (§I-B.1a). The slope, and so D, is unaffected; reading the intercept

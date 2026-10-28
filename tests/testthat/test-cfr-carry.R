@@ -55,6 +55,26 @@ test_that("no borrowing across localizations", {
   expect_equal(out$cfr, c(1.34, 0, 0.99))
 })
 
+# CLAIM: a negative or zero CFR at the measuring iteration is kept as measured
+# (older exports store background-subtracted negatives and -0 placeholders); the
+# coarse itr-4 CFR of the first localization is never used instead.
+test_that("negative and zero CFR at itr 6 are kept, itr 4 is not borrowed", {
+  itr <- c(0:9, 6:9, 6:9)
+  cfr <- rep(-3.05e-5, length(itr))   # older-export placeholder at unmeasured iterations
+  cfr[c(5, 7, 11, 15)] <- c(0.85, -0.34, 0, 0.62)
+  out <- .minflux_finalize_df(.raw_rows(1L, itr, cfr), use_fnl = FALSE)
+  expect_equal(out$cfr, c(-0.34, 0, 0.62))
+})
+
+# CLAIM: a localization whose run lacks the measuring iteration gets NA.
+test_that("missing measuring iteration gives NA", {
+  itr <- c(0:9, 7:9, 6:9)
+  cfr <- numeric(length(itr))
+  cfr[c(7, 14)] <- c(0.55, 0.30)
+  out <- .minflux_finalize_df(.raw_rows(1L, itr, cfr), use_fnl = FALSE)
+  expect_equal(out$cfr, c(0.55, NA, 0.30))
+})
+
 # CLAIM: tracking sequences without the CFR check (shorter cycle time) store no
 # CFR; the column becomes 0 throughout so the CFR filter is a no-op.
 test_that("tracking without CFR measurements gives cfr = 0", {

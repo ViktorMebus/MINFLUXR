@@ -393,13 +393,17 @@ msd_ensemble <- function(sums, t_c, sw = 0, track_weight = TRUE) {
 }
 
 # ── msd_headline() ────────────────────────────────────────────────────────────
-# GOAL: D from the upper lag regime of the ensemble MSD, the estimator Vogler et
-# al. 2025 validated against TIRF, with the same fit the MSD panel runs (OLSF over
+# GOAL: D from the upper lag regime of the ensemble MSD, similar to the estimator Vogler et
+# al. 2025 validated, with the same fit the MSD panel runs (OLSF over
 # the fit window, iterative or anchored). Short lags are left out because they carry
 # non-diffusive motion on top of noise (probe wobble, tracker wander).
+# The OLSF fits only the first p lags of the window, p from Michalet's optimal
+# point count (often 4-6), so the lags actually fitted are returned beside the
+# window: on a bending MSD, D depends on which lags those are.
 # window : c(lower, upper) fit window in cycles
 # R      : motion-blur coefficient per step; coef : 2 x effective dimensionality
-# RETURNS list(D (nm^2/ms), sigma (nm), n_points, window) or NULL.
+# RETURNS list(D (nm^2/ms), sigma (nm), n_points, window, fit_lags = first and
+#         last lag fitted, fit_tau = their lag times in ms) or NULL.
 msd_headline <- function(df, t_c, sw = 0, window = c(5L, 50L), track_weight = TRUE,
                          iterative = TRUE, linear_tau = TRUE, R = 0, coef = 4,
                          min_pts = 50L, has_z = FALSE) {
@@ -419,5 +423,9 @@ msd_headline <- function(df, t_c, sw = 0, window = c(5L, 50L), track_weight = TR
     msd_fit_olsf(tau[ok], ens$msd[ok], ens$npairs[ok], k = sum(ok), ndim = ndim,
                  auto_pmin = TRUE, R = R, Npts = 1e4, dt_cycle = t_c, coef_override = coef)
   if (is.null(fr) || !is.finite(fr$D)) return(NULL)
-  list(D = fr$D, sigma = fr$sigma_loc, n_points = fr$n_points %||% NA_integer_, window = c(lo, hi))
+  # the lags the slope fit used: the first n_points of the usable lags in the window
+  np    <- min(sum(ok), as.integer(fr$n_points %||% sum(ok)))
+  used  <- which(ok)[seq_len(max(1L, np))]
+  list(D = fr$D, sigma = fr$sigma_loc, n_points = fr$n_points %||% NA_integer_, window = c(lo, hi),
+       fit_lags = range(ens$lag[used]), fit_tau = range(tau[used]))
 }

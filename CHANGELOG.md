@@ -12,8 +12,10 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
   importer previously took one value per trace (from the trace's last localization) and gave it to
   every localization in that trace. ECC and EFC had the same problem. Within a trace, a localization
   is now the run of rows ending at a final row: 3D imaging writes itr 0 to 9 once, then repeats 6 to 9
-  for each further localization. Each final row takes the last positive value from its own run.
-  Tracking localizations keep the CFR measured at their own final iteration. Applies to `.json` and
+  for each further localization. The measuring iteration is detected per file (the last iteration
+  whose values vary across rows) and each final row takes that iteration's value from its own run,
+  including negative and zero values; filter them with the CFR range if needed. Tracking
+  localizations keep the CFR measured at their own final iteration. Applies to `.json` and
   `.npy` uploads in all tabs. CFR filters and CFR-coloured plots change for any trace with more than
   one localization.
 
@@ -25,6 +27,9 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - **Instrument Calibration plots the immobile MSD** per cell over many cycles, with the noise level 4σ²
   and the fit window. The wander floor in a profile is now the immobile slope **over the MSD fit
   window**, matching the headline D; the short-lag rise is reported beside it.
+- **The headline D names the lags it was fitted on.** The OLSF fits the first few lags of the window
+  (often 4 to 6), so Data Quality now reads e.g. "lags 5–9 (0.98–1.8 ms) of window 5–50" instead of
+  "cycles 5–50", and Compare Cells has an `msd_lags` column. On a bending MSD, D depends on these lags.
 - **The MSD is computed about 25 times faster** (vectorised over index offsets); results are identical.
 - **The filter pipeline always starts from the original upload.** After Plot Data it previously re-ran
   on the rechunked, already-filtered data, so results depended on whether Plot Data had been pressed.

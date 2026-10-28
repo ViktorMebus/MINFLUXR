@@ -610,7 +610,7 @@ tracking_server <- function(input, output, session) {
                       as.numeric(diff(stats::quantile(sig_phot_i, c(.25, .75)))) else NA_real_
     eco_med      <- if (length(ecov)) stats::median(ecov) else NA_real_
     # Headline D: the upper lag regime of the ensemble MSD, with the MSD panel's fit
-    # settings (Vogler et al. 2025 validated this estimator against TIRF). The CVE
+    # settings. The CVE
     # above uses single-cycle steps, the lower regime, and is kept as a check.
     ms  <- .msd_settings(df)
     cch <- tryCatch(trk_cluster_cycle(), error = function(e) NULL)
@@ -638,7 +638,9 @@ tracking_server <- function(input, output, session) {
          n_suspect = n_suspect, n_tracks_pt = n_tracks_pt,
          phot_col = phot_col,   # photon column used for the diagnostics
          r1_norm = r1_norm, noise_frac = noise_frac,
-         D_msd = if (!is.null(hd)) hd$D else NA_real_, msd_window = ms$window)
+         D_msd = if (!is.null(hd)) hd$D else NA_real_, msd_window = ms$window,
+         msd_fit_lags = if (!is.null(hd)) hd$fit_lags else NULL,
+         msd_fit_tau  = if (!is.null(hd)) hd$fit_tau else NULL)
   })
 
   # Publish the calibration result as the app-wide σ_loc.
@@ -766,10 +768,18 @@ tracking_server <- function(input, output, session) {
                          a_used, ideal, "\u03c3", b$sig_phot_med * a_used / ideal)))
     } else NULL
 
+    # The OLSF fits the first few lags of the window, so the label names the lags
+    # (and lag times) actually fitted, then the window they were taken from.
+    fit_txt <- if (length(b$msd_fit_lags) == 2L && length(b$msd_fit_tau) == 2L)
+      sprintf("lags %d\u2013%d (%.2g\u2013%.2g ms) of window %d\u2013%d",
+              as.integer(b$msd_fit_lags[1]), as.integer(b$msd_fit_lags[2]),
+              b$msd_fit_tau[1], b$msd_fit_tau[2],
+              as.integer(b$msd_window[1]), as.integer(b$msd_window[2]))
+    else sprintf("window %d\u2013%d", as.integer(b$msd_window[1]), as.integer(b$msd_window[2]))
     headline_line <- if (is.finite(b$D_msd %||% NA_real_))
       row(htmltools::tags$b(sprintf("D %.3g \u00b5m\u00b2/s", b$D_msd / 1e3)),
-          dim_(sprintf("  upper-regime MSD, cycles %d\u2013%d  \u00b7  lag-1 check (CVE) %.3g%s",
-                       as.integer(b$msd_window[1]), as.integer(b$msd_window[2]), d_use / 1e3,
+          dim_(sprintf("  MSD, %s  \u00b7  lag-1 check (CVE) %.3g%s",
+                       fit_txt, d_use / 1e3,
                        if (is.finite(d_use) && b$D_msd > 0) sprintf(" (\u00d7%.2f)", d_use / b$D_msd) else "")))
     else row(warn("D: too few lags with data in the MSD fit window; only the lag-1 CVE value is available"))
 
@@ -11543,7 +11553,7 @@ tracking_server <- function(input, output, session) {
   output$trk_cmp_results <- DT::renderDT({
     r <- cmp_view(); req(!is.null(r))
     cols <- c("condition", "file", "calibration", "n_tracks", "len_med", "t_c_ms", "frac_single", "eco_med",
-              "sigma_nm", "a", "D_msd_um2_s", "D_um2_s", "D_corr_um2_s", "Dw_frac", "note")
+              "sigma_nm", "a", "D_msd_um2_s", "msd_lags", "D_um2_s", "D_corr_um2_s", "Dw_frac", "note")
     show <- r[, cols, drop = FALSE]
     num  <- vapply(show, is.numeric, logical(1))
     show[num] <- lapply(show[num], function(v) signif(v, 3))

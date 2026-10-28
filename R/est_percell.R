@@ -15,7 +15,7 @@
 # Reported per-cell columns: name -> axis label. Shared by the server's metric
 # picker and plot so the two cannot disagree.
 PERCELL_METRICS <- c(
-  D_msd_um2_s  = "D (upper-regime MSD, µm²/s)",
+  D_msd_um2_s  = "D (MSD, µm²/s)",
   D_um2_s      = "D (CVE, lag 1, µm²/s)",
   D_corr_um2_s = "D − D_w (µm²/s)",
   Dw_frac      = "D_w / D",
@@ -47,14 +47,16 @@ PERCELL_METRICS <- c(
 #           t_c / sw (list(split, trim, gate, ranges, tid_len, dur)). The spatial crop
 #           is not applied: it belongs to one field of view.
 # RETURNS one-row data.frame with the PERCELL_METRICS columns plus file, n_locs,
-#   and a `note` for anything that could not be computed.
+#   msd_lags (the lags the MSD fit used, "lo-hi") and a `note` for anything that
+#   could not be computed.
 percell_summary <- function(df, file, L, pattern = TCP_PATTERN_DEFAULT, a = TCP_CRLB_PREFACTOR,
                             D_w = 0, nu = 0, msd = NULL,
                             filters = list(split = list(enable = TRUE, adaptive = FALSE,
                                                         gap_cycles = 7, min_len = 50L, maxoff_ms = 3.0))) {
   row <- data.frame(file = file, n_locs = nrow(df), n_tracks = NA_integer_, len_med = NA_real_,
                     t_c_ms = NA_real_, frac_single = NA_real_, eco_med = NA_real_,
-                    sigma_nm = NA_real_, D_msd_um2_s = NA_real_, D_um2_s = NA_real_, D_corr_um2_s = NA_real_,
+                    sigma_nm = NA_real_, D_msd_um2_s = NA_real_, msd_lags = NA_character_,
+                    D_um2_s = NA_real_, D_corr_um2_s = NA_real_,
                     Dw_frac = NA_real_, note = "",
                     stringsAsFactors = FALSE)
   if (!nrow(df) || !all(c("tid", "x", "y", "tim") %in% names(df))) {
@@ -89,7 +91,11 @@ percell_summary <- function(df, file, L, pattern = TCP_PATTERN_DEFAULT, a = TCP_
                                 msd$iterative %||% TRUE, msd$linear_tau %||% TRUE, msd$R %||% 0,
                                 if (has_z) msd$coef[["d3"]] else msd$coef[["d2"]],
                                 msd$min_pts %||% 50L, has_z), error = function(e) NULL)
-    if (!is.null(hd)) row$D_msd_um2_s <- hd$D / 1e3
+    if (!is.null(hd)) {
+      row$D_msd_um2_s <- hd$D / 1e3
+      # the lags the fit used differ between cells, and on a bending MSD so does D
+      row$msd_lags <- sprintf("%d-%d", as.integer(hd$fit_lags[1]), as.integer(hd$fit_lags[2]))
+    }
   }
   D_head <- if (is.finite(row$D_msd_um2_s)) row$D_msd_um2_s * 1e3 else D_cve
   if (is.finite(D_w) && D_w > 0) {                       # the floor against the headline D
