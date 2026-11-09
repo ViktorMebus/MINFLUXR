@@ -1763,6 +1763,7 @@ smlm_server <- function(input, output, session) {
   two_color_defaults <- function() {
     list(
       color_by_fluo = SMLM_DEFAULTS$color_by_fluo,
+      dcr_split_manual = SMLM_DEFAULTS$dcr_split_manual,
       dcr_group1 = SMLM_DEFAULTS$dcr_group1,
       dcr_group2 = SMLM_DEFAULTS$dcr_group2,
       
@@ -1792,11 +1793,16 @@ smlm_server <- function(input, output, session) {
     cb_ids <- c(
       # master toggle first, so the restored 2-color parameters take effect
       "enable_two_color",
-      "color_by_fluo", "use_pooled_dcr",
+      "color_by_fluo", "use_pooled_dcr", "dcr_split_manual",
       "show_tc1_alpha"
     )
     for (id in cb_ids) if (!is.null(s[[id]])) updateCheckboxInput(session, id, value = isTRUE(s[[id]]))
-    
+
+    # These widget changes come from a file, so they must not read as the user
+    # typing a range or switching the DCR column (see dcr_track).
+    if (!is.null(s[["use_pooled_dcr"]])) dcr_track$pooled <- isTRUE(s[["use_pooled_dcr"]])
+    dcr_note_written(getv("dcr_group1"), getv("dcr_group2"))
+
     # numeric range inputs (shinyWidgets)
     if (!is.null(getv("dcr_group1")) && length(getv("dcr_group1")) == 2)
       shinyWidgets::updateNumericRangeInput(session, "dcr_group1", value = as.numeric(getv("dcr_group1")))
@@ -2903,6 +2909,7 @@ smlm_server <- function(input, output, session) {
         enable_two_color = isTRUE(input$enable_two_color),
         color_by_fluo = isTRUE(input$color_by_fluo),
         use_pooled_dcr = isTRUE(input$use_pooled_dcr),
+        dcr_split_manual = isTRUE(input$dcr_split_manual),
         dcr_group1 = unname(input$dcr_group1),
         dcr_group2 = unname(input$dcr_group2),
         color_group1 = input$color_group1,
@@ -3099,7 +3106,11 @@ smlm_server <- function(input, output, session) {
       an <- raw$analysis %||% list()
       for (nm in c("use_pooled_dcr", "spatial_edge_correct", "spatial_use_support",
                    "dens_norm_enable", "dens_thin_enable"))
-        if (!is.null(an[[nm]])) updateCheckboxInput(session, nm, value = isTRUE(an[[nm]]))
+        if (!is.null(an[[nm]])) {
+          # A loaded column is not the user switching it (see dcr_track).
+          if (nm == "use_pooled_dcr") dcr_track$pooled <- isTRUE(an[[nm]])
+          updateCheckboxInput(session, nm, value = isTRUE(an[[nm]]))
+        }
       # Which points draw the observation window changes every area on the tab.
       if (!is.null(an$dens_support_from))
         updateRadioButtons(session, "dens_support_from", selected = an$dens_support_from)
@@ -3194,7 +3205,11 @@ smlm_server <- function(input, output, session) {
       switch(plan$widget[i],
         checkbox = updateCheckboxInput(session, id, value = isTRUE(v)),
         numeric  = if (length(v) == 1L && !is.na(v)) updateNumericInput(session, id, value = v),
-        range    = if (length(v) == 2L) shinyWidgets::updateNumericRangeInput(session, id, value = v),
+        range    = if (length(v) == 2L) {
+          # A loaded DCR range is not the user typing one (see dcr_track).
+          if (id %in% c("dcr_group1", "dcr_group2")) dcr_note_written(v)
+          shinyWidgets::updateNumericRangeInput(session, id, value = v)
+        },
         radio    = updateRadioButtons(session, id, selected = v),
         select   = updateSelectInput(session, id, selected = v))
     }
@@ -4104,16 +4119,38 @@ smlm_server <- function(input, output, session) {
   # ------ 2-color: auto-detect DCR split via GMM
   dcr_gmm_result <- reactiveVal(NULL)
 
-  observeEvent(input$auto_detect_dcr, {
+  # DCR RANGE BOXES: WHO WROTE THE NUMBERS
+  # The boxes are filled by the GMM and can be typed over, and typing must switch
+  # on "Use typed DCR ranges". Shiny reports both kinds of change the same way, so
+  # every number the server sends is remembered here, and a value that is NOT on
+  # the list came from the keyboard. Several writes are kept, because the browser
+  # can echo an older write after a newer one has been sent.
+  # A plain environment: this is bookkeeping and must not trigger reactivity.
+  dcr_track <- new.env(parent = emptyenv())
+  dcr_track$seen   <- c(SMLM_DEFAULTS$dcr_group1, SMLM_DEFAULTS$dcr_group2)
+  dcr_track$pooled <- isTRUE(SMLM_DEFAULTS$use_pooled_dcr)
+
+  # GOAL: remember numbers the server is about to put in the boxes.
+  dcr_note_written <- function(...) {
+    dcr_track$seen <- utils::tail(c(dcr_track$seen, as.numeric(unlist(list(...)))), 40L)
+    invisible(NULL)
+  }
+
+  # GOAL: fit the GMM on the column the split uses and put the result in the boxes.
+  # Runs automatically (notify = FALSE) and from the Auto-detect button (notify =
+  # TRUE, which also reports the fit). When the fit fails the boxes are left as
+  # they are, and resolve_channels() falls back to them.
+  dcr_fit_and_fill <- function(notify = FALSE) {
     df <- tryCatch(filtered_df(), error = function(e) NULL)
-    has_dcr <- "dcr" %in% names(df) || "dcr_pooled" %in% names(df)
-    if (is.null(df) || !has_dcr || !"tid" %in% names(df)) {
-      showNotification("No DCR data available for auto-detection.", type = "warning", duration = 5)
-      dcr_gmm_result(list(success = FALSE, reason = "No DCR column in data"))
-      return()
+    .col <- if (!is.null(df) && "tid" %in% names(df))
+      dcr_split_column(df, input$use_pooled_dcr)
+    if (is.null(.col)) {
+      if (notify) {
+        showNotification("No DCR data available for auto-detection.", type = "warning", duration = 5)
+        dcr_gmm_result(list(success = FALSE, reason = "No DCR column in data"))
+      }
+      return(invisible(NULL))
     }
-    # Use dcr_pooled when requested and available; otherwise per-trace median of raw dcr
-    .col <- if (isTRUE(input$use_pooled_dcr) && "dcr_pooled" %in% names(df)) "dcr_pooled" else "dcr"
     dcr_meds <- df %>%
       dplyr::group_by(tid) %>%
       dplyr::summarise(dcr_med = stats::median(.data[[.col]], na.rm = TRUE), .groups = "drop") %>%
@@ -4123,14 +4160,16 @@ smlm_server <- function(input, output, session) {
     dcr_gmm_result(res)
 
     if (!isTRUE(res$success)) {
-      showNotification(paste("GMM auto-detect failed:", res$reason), type = "error", duration = 7)
-      return()
+      if (notify)
+        showNotification(paste("GMM auto-detect failed:", res$reason), type = "error", duration = 7)
+      return(invisible(NULL))
     }
 
     split <- res$split
+    dcr_note_written(c(0, split), c(split + 1e-4, 1))   # before sending, see dcr_track
     shinyWidgets::updateNumericRangeInput(session, "dcr_group1", value = c(0, split))
     shinyWidgets::updateNumericRangeInput(session, "dcr_group2", value = c(split + 1e-4, 1))
-    showNotification(
+    if (notify) showNotification(
       paste0("Split set at DCR = ", split,
              "  |  G1 ", res$mean1, " (SD ", res$sd1, ")",
              "  |  G2 ", res$mean2, " (SD ", res$sd2, ")",
@@ -4140,6 +4179,46 @@ smlm_server <- function(input, output, session) {
                "  |  using RAW dcr - try pooled DCR for a cleaner split" else ""),
       type = if (identical(res$quality, "poor")) "warning" else "message", duration = 9
     )
+    invisible(NULL)
+  }
+
+  # The button always means "use the GMM": it leaves typed mode and refits.
+  observeEvent(input$auto_detect_dcr, {
+    if (isTRUE(input$dcr_split_manual)) updateCheckboxInput(session, "dcr_split_manual", value = FALSE)
+    dcr_fit_and_fill(notify = TRUE)
+  })
+
+  # Keep the boxes on the GMM's numbers whenever the GMM is in charge: on enabling
+  # the split, on a filter or file change, and on switching raw/pooled DCR.
+  observe({
+    if (!isTRUE(input$enable_two_color) || isTRUE(input$color_by_fluo) ||
+        isTRUE(input$dcr_split_manual)) return()
+    dcr_fit_and_fill(notify = FALSE)
+  })
+
+  # A number the server did not write was typed, so the typed ranges take over.
+  # Incomplete input (a box being cleared) is ignored until it is a valid range.
+  observeEvent(list(input$dcr_group1, input$dcr_group2), {
+    if (isTRUE(input$dcr_split_manual)) return()
+    vals <- c(input$dcr_group1, input$dcr_group2)
+    if (length(vals) != 4L || !all(is.finite(vals))) return()
+    from_server <- vapply(vals, function(v) any(abs(v - dcr_track$seen) < 1e-6), logical(1))
+    if (!all(from_server)) updateCheckboxInput(session, "dcr_split_manual", value = TRUE)
+  })
+
+  # Raw and pooled DCR are different scales, so ranges typed for one say nothing
+  # about the other. Changing the column hands the split back to the GMM, which
+  # refills the boxes for the new column. Compared with the last known value
+  # because this widget appears late (renderUI) and a settings load also sets it.
+  observeEvent(input$use_pooled_dcr, {
+    now <- isTRUE(input$use_pooled_dcr)
+    if (identical(now, dcr_track$pooled)) return()
+    dcr_track$pooled <- now
+    if (isTRUE(input$dcr_split_manual)) {
+      updateCheckboxInput(session, "dcr_split_manual", value = FALSE)
+      showNotification("The DCR column changed, so the typed ranges were replaced by a new GMM split.",
+                       type = "message", duration = 6)
+    }
   })
 
   # Per-trace split confidence: which individual molecules sit on the edge of the
@@ -4216,10 +4295,13 @@ smlm_server <- function(input, output, session) {
   # at short r is only meaningful if it is large compared with the contamination.
   output$dcr_gmm_info <- renderUI({
     res <- dcr_gmm_result()
-    if (is.null(res)) return(NULL)
+    typed_note <- if (isTRUE(input$dcr_split_manual))
+      tags$div(style = "font-size:0.85em; margin-top:4px; font-weight:600;",
+               "Using the typed ranges. Any GMM numbers shown here come from the last automatic fit.")
+    if (is.null(res)) return(typed_note)
     if (!isTRUE(res$success))
-      return(tags$div(style = "font-size:0.85em; color:#c0392b;",
-                      paste("GMM failed:", res$reason)))
+      return(tagList(typed_note, tags$div(style = "font-size:0.85em; color:#c0392b;",
+                                          paste("GMM failed:", res$reason))))
 
     col_lbl  <- if (identical(res$col_used, "dcr_pooled")) "pooled DCR" else "raw DCR"
     pooled   <- identical(res$col_used, "dcr_pooled")
@@ -4235,6 +4317,7 @@ smlm_server <- function(input, output, session) {
       "separation unknown")
 
     tagList(
+      typed_note,
       tags$div(style = "font-size:0.85em; margin-top:4px;",
         tags$b("Split: "), res$split, " on ", col_lbl,
         tags$br(),
@@ -4274,6 +4357,18 @@ smlm_server <- function(input, output, session) {
           " A two-component GMM will always produce 2 groups, even if there is only one dye."))))
     })
 
+  # GOAL: the filtered data with each localization's channel, for the histogram.
+  # Calls resolve_channels(), the function the plot's clustering pipeline uses, so
+  # the histogram shows the same split. A reactive of its own so that moving the
+  # bin slider or a color picker does not refit the GMM inside it. Returns NULL
+  # when the split is off or cannot be made; the histogram then draws plain bars.
+  hist_channels_df <- reactive({
+    if (!isTRUE(input$enable_two_color)) return(NULL)
+    df <- filtered_df()
+    if (is.null(df) || !nrow(df)) return(NULL)
+    tryCatch(resolve_channels(df, as_smlm_settings(input)), error = function(e) NULL)
+  })
+
   # ------ HISTOGRAM for filters
   output$metadata_histogram <- renderPlotly({
     req(input$show_metadata_hist, input$hist_variable, uploaded_df_rv())
@@ -4309,22 +4404,58 @@ smlm_server <- function(input, output, session) {
     font_col <- if (isTRUE(input$dark_mode)) "white" else "black"
     
     fig <- plot_ly()
-    
-    # Optional raw overlay (grey)
-    if (isTRUE(input$hist_show_raw)) {
+
+    # With the 2-color split on, DCR and pooled DCR are stacked by channel in the
+    # channel colors. NULL (any other variable, split off or failed) falls through
+    # to the plain histogram below.
+    split_bins <- if (varname %in% c("dcr", "dcr_pooled"))
+      channel_hist_layers(
+        attach_channel_colors(hist_channels_df(), smlm_channel_colors(input)),
+        varname, vals_keep,
+        vals_raw = if (isTRUE(input$hist_show_raw)) vals_full else NULL,
+        n_bins = input$hist_bins
+      )
+
+    if (!is.null(split_bins)) {
+      # One bar series. Empty bins are left out to keep hover and payload clean;
+      # marker line width 0 keeps narrow bins from turning into outlines.
+      add_split_bars <- function(fig, y, base, name, color, opacity) {
+        keep <- y > 0
+        if (!any(keep)) return(fig)
+        add_bars(
+          fig, x = split_bins$mids[keep], y = y[keep], base = base[keep],
+          width = split_bins$width, name = name, opacity = opacity,
+          marker = list(color = color, line = list(width = 0)),
+          hovertext = sprintf("%s: %d<br>%s %.3f to %.3f", name, as.integer(y[keep]), varname,
+                              split_bins$breaks[-length(split_bins$breaks)][keep],
+                              split_bins$breaks[-1L][keep]),
+          hoverinfo = "text"
+        )
+      }
+      if (!is.null(split_bins$raw))
+        fig <- add_split_bars(fig, split_bins$raw, numeric(length(split_bins$raw)),
+                              "Raw data", "lightgray", 0.35)
+      for (lay in split_bins$layers)
+        fig <- add_split_bars(fig, lay$count, lay$base, lay$name, lay$color, 0.85)
+    } else {
+      # Optional raw overlay (grey)
+      if (isTRUE(input$hist_show_raw)) {
+        fig <- fig %>%
+          add_histogram(
+            x = vals_full, nbinsx = input$hist_bins, name = "Raw data",
+            opacity = 0.35, marker = list(color = "lightgray"), bingroup = "x"
+          )
+      }
+
+      # Always show the "filtered" bars (blue)
       fig <- fig %>%
         add_histogram(
-          x = vals_full, nbinsx = input$hist_bins, name = "Raw data",
-          opacity = 0.35, marker = list(color = "lightgray"), bingroup = "x"
+          x = vals_keep, nbinsx = input$hist_bins, name = "Filtered data",
+          opacity = 0.85, marker = list(color = "steelblue"), bingroup = "x"
         )
     }
-    
-    # Always show the "filtered" bars (blue)
+
     fig %>%
-      add_histogram(
-        x = vals_keep, nbinsx = input$hist_bins, name = "Filtered data",
-        opacity = 0.85, marker = list(color = "steelblue"), bingroup = "x"
-      ) %>%
       layout(
         barmode = "overlay",
         title = paste("Histogram of", if (varname == "tid") "Trace lengths" else varname),
@@ -5829,7 +5960,7 @@ smlm_server <- function(input, output, session) {
     # chain - see attach_channel_colors(). This is what keeps the colour pickers
     # out of the prepared-data cache key.
     df <- attach_channel_colors(df, smlm_channel_colors(input))
-    n_ch <- length(unique(df$channel[!is.na(df$channel)]))
+    n_ch <- n_frame_channels(df)
 
     # ── Colours ─────────────────────────────────────────────────────────────
     # Colouring is a display concern, so it stays here rather than moving into
@@ -6635,7 +6766,9 @@ smlm_server <- function(input, output, session) {
       groups <- wrap_groups(cluster2_medians, "cluster2")
       # Decided on the WHOLE dataset, before any single cluster is picked out:
       # a selected channel-B surface must still say "(B)" and still be red.
-      multi_ch <- length(unique(stats::na.omit(groups$channel))) > 1L
+      # Counted over all points, the same test that colors the points. Counting
+      # the clusters instead gets it wrong when only one channel formed any.
+      multi_ch <- n_frame_channels(plottable_data()) > 1L
 
       if (isTRUE(input$cluster2_iso_selected_only)) {
         sel <- .int_input(input$cluster2_iso_id, 1L, 1L)
@@ -7663,7 +7796,8 @@ smlm_server <- function(input, output, session) {
       # One wrap per Median Cluster PER CHANNEL, the same rule the isosurface
       # follows, so an alpha shape can never join two colours (wrap_groups()).
       a_groups   <- wrap_groups(df, "cluster2")
-      a_multi_ch <- length(unique(stats::na.omit(a_groups$channel))) > 1L
+      # All points, the same test that colors the points (see n_frame_channels).
+      a_multi_ch <- n_frame_channels(plottable_data()) > 1L
       for (gi in seq_len(nrow(a_groups))) {
         g   <- a_groups[gi, , drop = FALSE]
         cl2 <- g$id

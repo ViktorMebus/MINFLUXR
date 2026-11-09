@@ -5,6 +5,20 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 
 ## Unreleased
 
+### SMLM: two-color display
+
+- **Median Cluster wraps keep the channel color when only one channel has clusters.** The isosurface
+  and the alpha-shape wrap now decide by-channel coloring from all points in the view, the same test
+  the points use.
+- **The DCR and pooled DCR filter histograms are stacked by channel** when the 2-color split is on,
+  in the colors chosen for the channels. Localizations that the split did not assign appear as a
+  separate grey layer.
+- **Typed DCR ranges now override the GMM.** The GMM used to set the 2-color split whenever its fit
+  succeeded, which ignored the range boxes. It now fills the boxes automatically for the DCR column in
+  use (raw or pooled), and typing a value switches on the new "Use typed DCR ranges" option. Changing
+  between raw and pooled DCR returns to the GMM, since the two are on different scales. Older settings
+  files keep using the GMM, as they did when saved.
+
 ### Import: CFR, ECC and EFC are carried per localization
 
 - **Each final localization now gets the CFR of its own localization.** CFR is measured in one

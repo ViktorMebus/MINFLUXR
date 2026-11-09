@@ -244,6 +244,15 @@ dcr_split_confidence <- function(v, gmm, post_cut = NULL) {
   list(group = grp, post = post, edge = post < post_cut, log_odds = lo)
 }
 
+# GOAL: the column the 2-colour split reads: pooled DCR when asked for and present,
+# otherwise raw DCR, or NULL when the data has neither usable. Shared by
+# resolve_channels() and the GMM that fills the DCR range boxes, so the numbers
+# shown in the boxes always come from the column the split uses.
+dcr_split_column <- function(df, use_pooled = FALSE) {
+  if (isTRUE(use_pooled) && "dcr_pooled" %in% names(df)) return("dcr_pooled")
+  if ("dcr" %in% names(df)) "dcr" else NULL
+}
+
 # GOAL: tag each row with analysis_group 1/2 from its trace's median DCR or fluo.
 #   settings      : smlm_settings or Shiny input (reads use_pooled_dcr,
 #                   color_by_fluo, dcr_group1, dcr_group2)
@@ -357,8 +366,7 @@ resolve_channels <- function(df, settings) {
   # nothing left to decide.
   col_grp <- NULL
   if (two_color_on) {
-    .dcr_col <- if (isTRUE(s$use_pooled_dcr) && "dcr_pooled" %in% names(df))
-      "dcr_pooled" else if ("dcr" %in% names(df)) "dcr" else NULL
+    .dcr_col <- dcr_split_column(df, s$use_pooled_dcr)
 
     med <- df %>%
       dplyr::group_by(tid) %>%
@@ -376,9 +384,16 @@ resolve_channels <- function(df, settings) {
         TRUE ~ NA_integer_
       )
     } else if (!is.null(.dcr_col)) {
-      # Per-dataset GMM split, falling back to the manual ranges if it fails.
-      gmm_res <- tryCatch(auto_detect_dcr_split(med$dcr_med),
-                          error = function(e) list(success = FALSE))
+      # Typed ranges win when the user has set them. Otherwise each dataset gets
+      # its own GMM split, with the ranges as the fallback if the fit fails. The
+      # ranges are read only when used, so that in GMM mode a reactive calling this
+      # does not re-run each time the GMM's own numbers are written into the boxes.
+      use_typed <- isTRUE(s$dcr_split_manual) &&
+        length(s$dcr_group1) == 2 && length(s$dcr_group2) == 2 &&
+        all(is.finite(c(s$dcr_group1, s$dcr_group2)))
+      gmm_res <- if (use_typed) list(success = FALSE) else
+        tryCatch(auto_detect_dcr_split(med$dcr_med),
+                 error = function(e) list(success = FALSE))
       if (isTRUE(gmm_res$success)) {
         sp <- gmm_res$split
         g1 <- c(0, sp); g2 <- c(sp + 1e-4, 1)
@@ -689,6 +704,103 @@ wrap_group_rows <- function(df, id_col, g) {
   if (!is.na(g$channel) && "channel" %in% names(df))
     sel <- sel & !is.na(df$channel) & df$channel == g$channel
   df[sel, , drop = FALSE]
+}
+
+# GOAL: how many channels a frame holds, counted over ALL of its rows.
+#
+# This is the one test for "are points being colored by channel?", shared by the
+# points (plottable_data) and the Median Cluster wraps. The wraps used to count
+# channels among the Median Clusters instead, so a dataset where only one channel
+# formed any cluster looked single-channel to them: its surfaces took the
+# per-cluster palette while the points inside were in the channel color.
+#
+# df : any frame, with or without a `channel` column. Returns an integer >= 1.
+n_frame_channels <- function(df) {
+  if (!is.data.frame(df) || !"channel" %in% names(df)) return(1L)
+  max(1L, length(unique(df$channel[!is.na(df$channel)])))
+}
+
+# =============================================================================
+# channel_hist_layers() - BINS FOR A HISTOGRAM STACKED BY CHANNEL
+# =============================================================================
+#
+# GOAL
+#   Count one variable (DCR or pooled DCR) per channel on a single shared set of
+#   bins, ready to draw as stacked bars whose total height is the histogram of
+#   the filtered data.
+#
+# WHY THE BINS ARE COMPUTED HERE
+#   plotly can only stack or overlay a whole plot, and this one needs both: the
+#   grey raw data sits BEHIND the channels (overlay) while the channels sit on
+#   top of each other (stack). Pre-computed bins solve that: everything is drawn
+#   in overlay mode and each channel is lifted by an explicit `base`. Sending
+#   counts also keeps the bars contiguous at any bin count.
+#
+# WHAT A LAYER MEANS
+#   The split is decided per TRACE, on the trace median, and every localization
+#   inherits its trace's channel. The bins here are per LOCALIZATION, so a
+#   channel can have counts on both sides of the split value. That overlap is
+#   real information about the split, so it is left visible.
+#
+# ARGUMENTS
+#   df        : frame from resolve_channels() + attach_channel_colors(), so it
+#               carries `channel` and attr "channel_table" (channel, label, color)
+#   var       : column to bin
+#   vals_keep : finite values of the filtered data; the height to stack up to
+#   vals_raw  : optional raw values, binned on the same breaks; NULL to omit
+#   n_bins    : number of equal-width bins
+#
+# RETURNS
+#   list(mids, width, breaks, raw, layers), or NULL when there is nothing to
+#   draw. `layers` holds one list(name, color, count, base) per channel, plus a
+#   final "Not assigned" layer when some filtered localizations have no channel
+#   (resolve_channels() drops traces that fall in neither DCR range).
+# =============================================================================
+channel_hist_layers <- function(df, var, vals_keep, vals_raw = NULL, n_bins = 200L) {
+  if (!is.data.frame(df) || !var %in% names(df)) return(NULL)
+  ct <- attr(df, "channel_table")
+  if (!is.data.frame(ct) || !nrow(ct)) return(NULL)
+
+  vals_keep <- vals_keep[is.finite(vals_keep)]
+  vals_raw  <- vals_raw[is.finite(vals_raw)]
+  all_vals  <- c(vals_keep, vals_raw)
+  if (!length(all_vals)) return(NULL)
+
+  # One set of breaks for every layer, or the stack would not line up.
+  rng <- range(all_vals)
+  if (rng[1] == rng[2]) rng <- rng + c(-0.5, 0.5)   # a single value still gets a bin
+  n_bins <- max(1L, as.integer(n_bins))
+  breaks <- seq(rng[1], rng[2], length.out = n_bins + 1L)
+
+  count <- function(v) {
+    v <- v[is.finite(v) & v >= rng[1] & v <= rng[2]]  # honour the histogram range
+    tabulate(findInterval(v, breaks, rightmost.closed = TRUE, all.inside = TRUE),
+             nbins = n_bins)
+  }
+
+  # Walk the channels in order, each one starting where the last one ended.
+  layers <- list()
+  base   <- numeric(n_bins)
+  for (i in seq_len(nrow(ct))) {
+    n <- count(df[[var]][which(df$channel == ct$channel[i])])
+    layers[[length(layers) + 1L]] <- list(name = paste("Channel", ct$label[i]),
+                                          color = as.character(ct$color[i]),
+                                          count = n, base = base)
+    base <- base + n
+  }
+
+  # Whatever the channels do not account for is shown, so the top of the stack
+  # is always the filtered histogram.
+  rest <- pmax(0, count(vals_keep) - base)
+  if (any(rest > 0))
+    layers[[length(layers) + 1L]] <- list(name = "Not assigned", color = "#8c8c8c",
+                                          count = rest, base = base)
+
+  list(mids  = (breaks[-1L] + breaks[-length(breaks)]) / 2,
+       width = breaks[2L] - breaks[1L],
+       breaks = breaks,
+       raw   = if (length(vals_raw)) count(vals_raw) else NULL,
+       layers = layers)
 }
 
 

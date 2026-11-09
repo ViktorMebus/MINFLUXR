@@ -72,7 +72,8 @@ SMLM_SETTINGS_SPEC <- list(
   enable_two_color = .ss(FALSE, "flag", "channels"),
   color_by_fluo    = .ss(FALSE, "flag", "channels"),
   use_pooled_dcr   = .ss(FALSE, "flag", "channels"),
-  dcr_group1       = .ss(c(0, 0.369), "range", "channels"),
+  dcr_split_manual = .ss(FALSE, "flag", "channels"),   # TRUE: dcr_group1/2 replace the GMM
+  dcr_group1      = .ss(c(0, 0.369), "range", "channels"),
   dcr_group2       = .ss(c(0.3691, 1), "range", "channels"),
 
   # ── De-blinking.

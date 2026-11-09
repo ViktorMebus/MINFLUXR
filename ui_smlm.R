@@ -237,6 +237,11 @@ smlm_ui <- fluidPage(
                              choices = c("efo","tid","cfr","tim","eco","dcr","dwell","fluo"),
                              selected = "efo"),
                  plotlyOutput("metadata_histogram", height = "300px"),
+                 conditionalPanel(
+                   condition = "input.enable_two_color == true && (input.hist_variable == 'dcr' || input.hist_variable == 'dcr_pooled')",
+                   helpText("Bars are stacked by channel in the channel colors. Each trace joins one channel ",
+                            "by its median, so a channel's localizations can lie on both sides of the split.")
+                 ),
                  sliderInput("hist_bins","Histogram Bins", min = 10, max = 1000, value = 200),
                  
                  uiOutput("hist_range_ui"),
@@ -992,6 +997,9 @@ smlm_ui <- fluidPage(
                                           value = SMLM_DEFAULTS$dcr_group1, min = 0, max = 2),
           shinyWidgets::numericRangeInput("dcr_group2", "DCR range: Group 2",
                                           value = SMLM_DEFAULTS$dcr_group2, min = 0, max = 2),
+          checkboxInput("dcr_split_manual", "Use typed DCR ranges", value = SMLM_DEFAULTS$dcr_split_manual),
+          helpText("The GMM fills these ranges for the DCR column in use. Typing a value keeps your ",
+                   "ranges for the split; untick this box to return to the GMM."),
           actionButton("auto_detect_dcr", "Auto-detect split (GMM)",
                        icon = icon("wand-magic-sparkles"), class = "btn-sm btn-info"),
           uiOutput("dcr_gmm_info"),

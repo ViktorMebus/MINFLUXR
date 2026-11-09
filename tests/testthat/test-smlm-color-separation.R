@@ -82,6 +82,47 @@ test_that("manual ranges are the fallback and unassigned traces are dropped", {
   expect_equal(unique(rc$channel[rc$tid == 4]), 2L)
 })
 
+# CLAIM: typed ranges replace a GMM that would have succeeded, on whichever DCR
+# column is selected; left off, the GMM decides.
+test_that("typed ranges override a successful GMM, on raw and pooled DCR", {
+  set.seed(9)
+  n <- 40L
+  meds <- c(stats::rnorm(n, 0.30, 0.02), stats::rnorm(n, 0.62, 0.02))
+  df <- data.frame(tid = rep(seq_len(2L * n), each = 3L), x = 0, y = 0, z = 0,
+                   dcr = rep(meds, each = 3L), dcr_pooled = rep(meds + 0.2, each = 3L))
+  expect_true(auto_detect_dcr_split(meds)$success)
+
+  chan <- function(...) {
+    rc <- resolve_channels(df, smlm_input(enable_two_color = TRUE, ...))
+    tapply(rc$channel, rc$tid, `[`, 1L)
+  }
+  # GMM: the two modes separate cleanly, 40 traces each.
+  expect_equal(as.numeric(table(chan())), c(n, n))
+  # Typed on raw DCR: this boundary puts everything but the very top in channel 1.
+  typed <- list(dcr_split_manual = TRUE, dcr_group1 = c(0, 0.9), dcr_group2 = c(0.9001, 1))
+  expect_true(all(do.call(chan, typed) == 1L))
+  # The same switch applies to the pooled column. The modes sit at 0.50 and 0.82
+  # there, so a boundary at 0.7 separates them; on raw DCR (0.30, 0.62) it would not.
+  typed_p <- list(dcr_split_manual = TRUE, use_pooled_dcr = TRUE,
+                  dcr_group1 = c(0, 0.7), dcr_group2 = c(0.7001, 1.2))
+  got <- do.call(chan, typed_p)
+  expect_equal(as.numeric(table(got)), c(n, n))
+  expect_equal(as.vector(got[seq_len(n)]), rep(1L, n))
+  # Ranges left in the boxes do nothing while the GMM is in charge.
+  expect_equal(as.numeric(table(chan(dcr_group1 = c(0, 0.9), dcr_group2 = c(0.9001, 1)))), c(n, n))
+  # A half-cleared range is not usable, so the GMM decides.
+  expect_equal(as.numeric(table(chan(dcr_split_manual = TRUE, dcr_group1 = c(0, NA),
+                                     dcr_group2 = c(0.5, 1)))), c(n, n))
+})
+
+test_that("dcr_split_column picks the column the split reads", {
+  both <- data.frame(dcr = 1, dcr_pooled = 1)
+  expect_identical(dcr_split_column(both, TRUE), "dcr_pooled")
+  expect_identical(dcr_split_column(both, FALSE), "dcr")
+  expect_identical(dcr_split_column(data.frame(dcr = 1), TRUE), "dcr")
+  expect_null(dcr_split_column(data.frame(x = 1), FALSE))
+})
+
 test_that("fluo-based channels follow the fluo column", {
   df <- data.frame(tid = rep(1:3, each = 2), x = 0, y = 0, z = 0, fluo = rep(c(1, 2, 2), each = 2))
   rc <- resolve_channels(df, smlm_input(enable_two_color = TRUE, color_by_fluo = TRUE))
