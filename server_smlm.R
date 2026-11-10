@@ -4804,7 +4804,7 @@ smlm_server <- function(input, output, session) {
   gt_exploratory_note <- function() {
     div(style = "margin-top:8px;padding:6px 8px;border-left:3px solid #e67e22;background:rgba(230,126,34,0.06);font-size:11.5px;color:#7f8c8d;line-height:1.4;",
         HTML(paste0(
-          "<b style='color:#e67e22;'>Exploratory.</b> This is a model-based estimate, not a direct measurement; validate against your own controls. ",
+          "<b>Be aware:</b> This is a model-based estimate, not a direct measurement; validate against your own controls. ",
           "Methods: gyration-tensor shape anisotropy (Rudnick &amp; Gaspari, <i>J. Phys. A</i> <b>19</b>, L191, 1986); ",
           "linear/planar/spherical anisotropy coefficients (Westin et&nbsp;al., <i>MICCAI/Med. Image Anal.</i>, 1997/2002); ",
           "minimum-spanning-tree backbone (Prim, 1957). ",

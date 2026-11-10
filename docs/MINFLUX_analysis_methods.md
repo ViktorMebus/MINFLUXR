@@ -4,8 +4,9 @@
 code and from primary literature (see [Bibliography](#bibliography)).
 
 > **In-app counterpart.** Every analysis panel in the Tracking tab and the SMLM **Analysis** tab carries a
-> collapsible *"Method & MINFLUX adaptation"* box with an Origin / MINFLUX adaptation / Caveat summary
-> and a 🟢/🟡/🟠 chip. Those boxes summarise the entries here.
+> collapsible *"About this method"* box with an Origin / MINFLUX adaptation / Be aware of summary.
+> Those boxes summarise the entries here. The app shows no rating; the Part II verdicts below are a
+> literature review of the textbook methods.
 
 This document has **two layers**, both organised around the app's three method families —
 **SMLM (imaging)**, **Tracking (SPT)**, and **Simulation**:
@@ -1382,8 +1383,8 @@ ways that matter for every downstream estimator:
 
 ## 3a. MSD on MINFLUX — computation, confinement & what is non-standard
 
-The MSD tool follows the MINFLUX MSD workflow of **Vogler et al. 2025** (MinSpt), the only published MSD
-treatment specific to MINFLUX. The research landscape here is sparse;
+The MSD tool follows the MINFLUX MSD workflow of **Vogler et al. 2025** (MinSpt), a published MSD
+treatment written for MINFLUX. The research landscape here is sparse;
 this section records what is *standard* (safe) versus *non-standard/unsolved* (deliberately not done).
 
 ### How MSD is (and should be) computed on MINFLUX — checklist

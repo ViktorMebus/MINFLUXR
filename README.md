@@ -4,6 +4,29 @@ An interactive R/Shiny application for visualization and analysis of **Abberior 
 
 ---
 
+## Statement of need
+
+MINFLUX localizes single fluorophores with nanometre precision, but its data do not behave like
+camera-based single-molecule data. Each molecule produces a trace of repeated localizations, and in
+tracking data the time steps come in fixed multiples of the cycle time. Localization precision differs
+between axes and depends on the photon count at each step. Methods written for camera data ignore
+these properties, and the outputs can look right while being biased.
+
+Open tools for MINFLUX data already exist. [pyMINFLUX](https://github.com/bsse-scf/pyMINFLUX) offers a
+graphical interface in Python for reading, filtering and visualizing Abberior exports, and
+[Toolbox_for_MINFLUX_SPT](https://github.com/Zatyrus/Toolbox_for_MINFLUX_SPT) (Vogler et al. 2025)
+provides a tracking workflow. MINFLUXR builds on ideas from both (see [`THIRD-PARTY.md`](THIRD-PARTY.md))
+and brings fixed-cell imaging and single-particle tracking analysis together in one R application.
+
+It is written for researchers who have MINFLUX data and want to analyse it without writing code. It
+reads Abberior exports directly and covers imaging (filtering, de-blinking, clustering,
+colocalization, spatial statistics) and tracking (MSD, diffusion estimators, confinement, state
+switching). Each analysis explains what it is suited for, what to be aware of and how its output can
+be taken further. A built-in simulator generates data with a known answer, so you can check an
+analysis before applying it to real data.
+
+---
+
 ## Overview
 
 MINFLUXR provides three main analysis environments:
@@ -76,8 +99,8 @@ Or open `app.R` in RStudio and click **Run App**. The maximum upload size is set
 3. **Press Plot** after changing anything in the clustering or filter blocks: the display and every
    analysis read the same filtered data, so they cannot disagree with each other.
 4. **Open the Analysis sub-tab** for the quantitative panels. Each has a collapsed
-   *Method & MINFLUX adaptation* box giving the origin of the method, what was adapted for MINFLUX and
-   what it cannot tell you.
+   *About this method* box giving the origin of the method, what was adapted for MINFLUX and
+   what to be aware of before using the result.
 5. **Save your settings** (Download settings, SMLM tab) to reproduce a figure later: every input that
    changes a number is written to the JSON.
 
@@ -93,13 +116,9 @@ MINFLUXR's own adaptation of an established method to MINFLUX data, and some are
 They are one considered reading of how such data should be handled, not a community standard, so
 check a result against the method box before relying on it.
 
-Every analysis panel carries a rating chip in its method box:
-
-| Chip | Meaning |
-|---|---|
-| 🟢 well-adapted | Standard method, or a faithful port, correctly adapted to MINFLUX sampling |
-| 🟡 adapted, with caution | Sound, but with a stated limitation you need to read before quoting it |
-| 🟠 exploratory for MINFLUX | Research tool. Interpretation is not settled; do not quote it as a result |
+The panels carry no ratings. Whether a method suits your data depends on the dataset (track length,
+labelling density, photon counts), so each method box states its assumptions and limits in words and
+leaves the judgement to you. Tools built for this app say so in their method box.
 
 The estimators behind the tracking panels live in `R/est_*.R` and the SMLM computations in
 `R/smlm_*.R`, all as plain functions, and `tests/` checks them against ground truth from the simulator (`Rscript tests/run_tests.R`;
@@ -119,6 +138,20 @@ results are in `tests/validation/`.
 | [`docs/sigma_loc_model.md`](docs/sigma_loc_model.md) | The tracking localization-precision model: derivation and immobile-sample calibration |
 | [`THIRD-PARTY.md`](THIRD-PARTY.md) | External work this builds on, what was taken and what was changed |
 | File headers in `helpers_*.R`, `server_*.R`, `R/est_*.R`, `R/smlm_*.R` | Code architecture: each file opens with a map of its contents, data flow and conventions |
+
+---
+
+## Getting help and contributing
+
+- **Questions and bug reports:** open an issue at <GITHUB_URL>/issues. Include the MINFLUXR version
+  (in `CITATION.cff`), your R version and operating system, the tab and panel involved, and the steps
+  that led to the problem. If your data cannot be shared, the Simulator tab can usually produce a file
+  that shows the same behaviour.
+- **Feature requests:** open an issue describing the analysis you need and, if possible, the paper or
+  method it comes from.
+- **Code contributions:** see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 

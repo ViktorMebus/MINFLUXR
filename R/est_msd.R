@@ -394,7 +394,7 @@ msd_ensemble <- function(sums, t_c, sw = 0, track_weight = TRUE) {
 
 # ── msd_headline() ────────────────────────────────────────────────────────────
 # GOAL: D from the upper lag regime of the ensemble MSD, similar to the estimator Vogler et
-# al. 2025 validated, with the same fit the MSD panel runs (OLSF over
+# al. 2025. A similar method where the MSD panel runs (OLSF over
 # the fit window, iterative or anchored). Short lags are left out because they carry
 # non-diffusive motion on top of noise (probe wobble, tracker wander).
 # The OLSF fits only the first p lags of the window, p from Michalet's optimal

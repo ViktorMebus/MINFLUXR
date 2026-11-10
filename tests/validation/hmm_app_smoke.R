@@ -1,4 +1,6 @@
-setwd("C:/Users/viktorhm/repos/MINFLUXR")
+# The repository root, two folders above this script, so it runs from any machine.
+root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
+setwd(root)
 suppressMessages(suppressWarnings(source("global.R")))
 # The test data is local and not part of the repository. Point MINFLUXR_TRACK_PATTERN at a
 # filename pattern under "Test data/" to run this on a different tracking acquisition.
@@ -7,9 +9,13 @@ f <- normalizePath(list.files("Test data", Sys.getenv("MINFLUXR_TRACK_PATTERN", 
 stopifnot(!is.na(f))
 cat("file:", basename(f), "
 ")
-d <- utils::read.csv(f); keep <- unique(d$tid)[1:150]; tmp <- file.path(tempdir(), "track_sub.csv")
+d <- utils::read.csv(f); keep <- utils::head(unique(d$tid), 150); tmp <- file.path(tempdir(), "track_sub.csv")
 utils::write.csv(d[d$tid %in% keep, ], tmp, row.names = FALSE)
 shiny::testServer(tracking_server, {
+  # A real session runs once at startup before any upload. The upload observer
+  # uses ignoreInit = TRUE, so without this pass it would treat the upload as
+  # its initial run and skip it.
+  session$flushReact()
   session$setInputs(trk_file = data.frame(name = "track_sub.csv", size = file.size(tmp),
                                           type = "text/csv", datapath = tmp, stringsAsFactors = FALSE))
   cat("rows in trk():", tryCatch(nrow(trk()), error = function(e) paste("ERR", conditionMessage(e))), "\n")

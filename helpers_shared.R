@@ -58,27 +58,31 @@
 # embedded in a string: helpText("use ", sigloc(), " for the floor").
 sigloc <- function(sub = "loc") htmltools::HTML(sprintf("&sigma;<sub>%s</sub>", sub))
 
-# Collapsible per-method infobox: what the method is, where it is from, how it is
-# adapted for MINFLUX (irregular Δt / short tracks / nm precision / blinking), and
-# the honest caution. `rating` is a 🟢/🟡/🟠 chip:
-#   green  = standard method, well-suited to MINFLUX as used here
-#   amber  = standard method, but a MINFLUX property strains an assumption
-#   orange = bespoke to this tool, no published MINFLUX equivalent (exploratory)
+# GOAL: the collapsible per-method infobox shown under every analysis panel.
+# It says where the method comes from, how it is adapted for MINFLUX (irregular Δt,
+# short tracks, nm precision, blinking) and what to be aware of. `use_for` (what
+# the panel is suited for) and `next_steps` (how its output can be taken further)
+# are optional and shown only when given.
+# There is deliberately no rating chip: every method has caveats that depend on
+# the dataset, and a colour reads as a blanket verdict. The text carries the caveat.
 # Lives here (not in a ui_*.R) because helpers_shared.R is sourced first, so both
 # ui_smlm.R and ui_tracking.R can call it at source time.
-.method_box <- function(rating, source, adaptation, caution) {
-  chip <- switch(rating,
-    green  = tags$span("🟢 well-adapted",  style = "color:#1a8a1a;"),
-    amber  = tags$span("🟡 adapted, with caution", style = "color:#b26a00;"),
-    orange = tags$span("🟠 exploratory for MINFLUX", style = "color:#e67e22;"),
-    tags$span(rating))
+.method_box <- function(source, adaptation, caution, use_for = NULL, next_steps = NULL) {
+  # One labelled paragraph; NULL content gives NULL, which tags$div drops.
+  row <- function(label, content, colour = NULL) {
+    if (is.null(content)) return(NULL)
+    tags$p(style = paste0("margin:2px 0;", if (!is.null(colour)) paste0(" color:", colour, ";")),
+           tags$b(label), content)
+  }
   tags$details(style = "margin:4px 0 10px; font-size:0.82em;",
     tags$summary(style = "cursor:pointer; color:#2c3e50; font-weight:600;",
-                 "ℹ Method & MINFLUX adaptation  ", chip),
+                 "ℹ About this method"),
     tags$div(style = "padding:6px 4px 2px 10px; color:#555; line-height:1.5; border-left:3px solid #cfe0ee;",
-      tags$p(style = "margin:2px 0;", tags$b("Origin: "), source),
-      tags$p(style = "margin:2px 0;", tags$b("MINFLUX adaptation: "), adaptation),
-      tags$p(style = "margin:2px 0; color:#7a5c00;", tags$b("Caution: "), caution)))
+      row("Use it for: ", use_for),
+      row("Origin: ", source),
+      row("MINFLUX adaptation: ", adaptation),
+      row("Be aware of: ", caution, "#7a5c00"),
+      row("From here: ", next_steps)))
 }
 
 # Collapsed detail block. The visible text under a control should be one or two

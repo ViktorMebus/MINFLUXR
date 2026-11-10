@@ -17,13 +17,17 @@ f <- normalizePath(list.files("Test data", Sys.getenv("MINFLUXR_TRACK_PATTERN", 
 stopifnot(!is.na(f))
 cat("file:", basename(f), "
 ")
-d <- utils::read.csv(f); keep <- unique(d$tid)[1:150]; tmp <- file.path(tempdir(), "track_sub.csv")
+d <- utils::read.csv(f); keep <- utils::head(unique(d$tid), 150); tmp <- file.path(tempdir(), "track_sub.csv")
 utils::write.csv(d[d$tid %in% keep, ], tmp, row.names = FALSE)
 
 try_out <- function(output, ids) for (o in ids)
   cat(sprintf("  %-28s %s\n", o, tryCatch({ output[[o]]; "ok" }, error = function(e) paste("ERR:", conditionMessage(e)))))
 
 shiny::testServer(tracking_server, {
+  # A real session runs once at startup before any upload. The upload observer
+  # uses ignoreInit = TRUE, so without this pass it would treat the upload as
+  # its initial run and skip it.
+  session$flushReact()
   session$setInputs(trk_file = data.frame(name = "track_sub.csv", size = file.size(tmp), type = "text/csv",
                                           datapath = tmp, stringsAsFactors = FALSE))
   session$setInputs(trk_msd_cycle_ms = 0.1914, trk_L_tcp = 100.8, trk_cve_run = 0)   # 0 = unclicked, as at app start

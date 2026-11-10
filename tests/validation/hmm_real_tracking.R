@@ -1,6 +1,8 @@
 ## Real-data check of est_hmm.R on the tracking test file (K = 1-3, bootstrap over tracks for K = 2).
 ## RUN  Rscript tests/validation/hmm_real_tracking.R > tests/validation/results/hmm_real_tracking.log
-setwd("C:/Users/viktorhm/repos/MINFLUXR")
+# The repository root, two folders above this script, so it runs from any machine.
+root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
+setwd(root)
 source("helpers_shared.R"); source("R/est_hmm.R")
 # The test data is local and not part of the repository. Point MINFLUXR_TRACK_PATTERN at a
 # filename pattern under "Test data/" to run this on a different tracking acquisition.

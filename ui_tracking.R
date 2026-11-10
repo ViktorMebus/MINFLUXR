@@ -3,7 +3,7 @@
 ## All input/output IDs prefixed with trk_ to avoid collisions with SMLM IDs.
 ## ─────────────────────────────────────────────────────────────────────────────
 
-# NOTE: .method_box() (the collapsible "Method & MINFLUX adaptation" infobox used
+# NOTE: .method_box() (the collapsible "About this method" infobox used
 # throughout this file) now lives in helpers_shared.R, so the SMLM tab can use the
 # identical widget - helpers_shared.R is sourced before both ui_*.R files.
 
@@ -528,12 +528,14 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Data Quality & Calibration"),
-          .method_box("amber",
+          .method_box(
             tagList(tags$b("D"), " from the covariance-based estimator, CVE (Vestergaard, Blainey & ",
                     "Flyvbjerg 2014). ", sigloc(), " from the MINFLUX photon budget, L", tags$sub("TCP"),
                     "/(a\u221AN) per localization (Vogler et\u00a0al. 2025)."),
             HTML("The CVE uses only consecutive single-cycle steps, so dark-cycle intervals stay out of the covariance, and D is unaffected by motion blur. &sigma;<sub>loc</sub> is computed per localization from its photon count; motion enters only through the drift of the emitter off the pattern centre during the exposure, scaled for the TCP pattern. The prefactor a is measured on an immobile sample under Instrument Calibration; without a calibration the pattern's ideal-estimator value is used and &sigma; is uncalibrated. Exported positions come out tighter than the ideal unbiased bound (a = &radic;8 for a 2D pattern), so a cannot be derived and has to be measured."),
-            HTML("The tracker wanders even on an immobile target, which puts an instrumental floor under D: measure it and enter it as the wander floor D<sub>w</sub>. The CVE &sigma; shown alongside is a diagnostic only.")),
+            HTML("The tracker wanders even on an immobile target, which puts an instrumental floor under D: measure it and enter it as the wander floor D<sub>w</sub>. The CVE &sigma; shown alongside is a diagnostic only."),
+            use_for = HTML("The cycle time, ensemble D and localization precision of a file, before any other tracking analysis."),
+            next_steps = HTML("The MSD, JDD, confinement, HMM and D-map panels read the &sigma; and cycle time set here. Load a calibration profile for this sequence first if you have one.")),
           actionButton("trk_cve_run", HTML("Estimate &sigma;<sub>loc</sub> &amp; quality"),
                        icon = icon("ruler-combined"),
                        class = "btn-primary", style = "margin-bottom:6px; width:100%;"),
@@ -689,10 +691,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Instrument Calibration"),
-          .method_box("green",
+          .method_box(
             HTML("The photon-budget model &sigma; = L/(a&radic;N) and the wander floor D<sub>w</sub>, measured on an immobile sample acquired with one sequence."),
             HTML("On an immobile sample every apparent motion is instrumental. For each file the short-lag MSD (1–5 single-cycle steps, after the filters set under Display) is fitted as MSD = 4&sigma;² + 4D<sub>w</sub>&tau;: the intercept gives &sigma;, the slope D<sub>w</sub>, and a = L&radic;&lang;1/N&rang; / &sigma;. The profile takes the median across cells and keeps the quartiles."),
-            "a and D_w belong to one sequence (pattern, L, dwell, photon limit, damping) on one instrument. Fixed cells labelled like the live sample are a better calibrant than beads, which are extended and bright."),
+            "a and D_w belong to one sequence (pattern, L, dwell, photon limit, damping) on one instrument. Fixed cells labelled like the live sample are a better calibrant than beads, which are extended and bright.",
+            use_for = HTML("Measuring the precision prefactor a and the wander floor D<sub>w</sub> of one sequence on an immobile sample (e.g. a fixed biological sample)."),
+            next_steps = HTML("Download the profile and load it with live data acquired with the same imaging sequence, so &sigma; and the D floor in the other panels are measured values.")),
           checkboxInput("trk_show_cal", "Enable instrument calibration", FALSE),
           conditionalPanel(
             condition = "input.trk_show_cal == true",
@@ -740,10 +744,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Time Signature Analysis (TSA)"),
-          .method_box("green",
+          .method_box(
             HTML("Time-signature analysis after <b>Vogler et&nbsp;al. 2025</b> (MinSpt)."),
             HTML("Each interval is labelled by the cycles it spans, round((\u0394t \u2212 SW) / cycle): <b>1 is integrated</b>, 2 or more follows dark cycles. It recovers the cycle time the instrument ran at and builds the cycle-index timeline the other panels use."),
-            "Descriptive, with no significance test. The cycle time is estimated from the data; cross-check it against the sequence file."),
+            "Descriptive, with no significance test. The cycle time is estimated from the data; cross-check it against the sequence file.",
+            use_for = HTML("Checking the cycle time the instrument ran at and how often tracks pass through dark cycles."),
+            next_steps = HTML("The other panels use the cycle-index timeline built here. A large share of dark-cycle steps could be a reason to use the integrated-only options in JDD and the D-map.")),
           checkboxInput("trk_show_tsa", "Enable TSA", FALSE),
           conditionalPanel(
             condition = "input.trk_show_tsa == true",
@@ -797,10 +803,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Sample geometry"),
-          .method_box("green",
+          .method_box(
             "The shape the molecules move in or on, and how many directions they can move in.",
             HTML("The shape is three-dimensional and is projected into the image plane for 2D data. The MSD (its conversion to D and its free-diffusion overlay) and the displacement test both read it."),
-            HTML("It matters only when motion is restricted. Choose <b>None</b> when nothing bounds the molecule.")),
+            HTML("It matters only when motion is restricted. Choose <b>None</b> when nothing bounds the molecule."),
+            use_for = HTML("Telling the MSD and displacement panels what shape bounds the molecules, such as a sphere or a rod."),
+            next_steps = HTML("Turn on the geometry overlay in the MSD panel to see the curve a freely diffusing molecule would give inside this shape.")),
           selectInput("trk_geom_type", "Shape",
             choices = c("None (unbounded)"                          = "none",
                         "Sphere / round cell"                       = "sphere",
@@ -877,10 +885,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("MSD (diffusion)"),
-          .method_box("green",
+          .method_box(
             "Mean squared displacement with optimal least-squares fitting (Michalet 2010; Michalet & Berglund 2012), with cycle-based binning after Vogler et al. 2025.",
             HTML("Displacements are binned by <b>integer cycle count</b>, the true elapsed time, so a skipped cycle cannot corrupt the curve. The fit window defaults to 5\u201350 cycles, between the noise-dominated short lags and the sparse long ones; read the lower bound off the kink in your own curve."),
-            HTML("Optimal-point theory holds for free diffusion, so the non-linear models are exploratory. Inside a closed cell a free molecule's MSD bends on its own: use the geometry overlay before reading a bend as trapping.")),
+            HTML("Optimal-point theory holds for free diffusion, so the non-linear models are exploratory. Inside a closed cell a free molecule's MSD bends on its own: use the geometry overlay before reading a bend as trapping."),
+            use_for = HTML("The ensemble D and the shape of the MSD curve over lag time."),
+            next_steps = HTML("Quote D with its fit window and cycle time. Download the per-track fits for per-track D. Check a bend against the geometry overlay.")),
           checkboxInput("trk_show_msd", "Enable MSD", FALSE),
           conditionalPanel(
             condition = "input.trk_show_msd == true",
@@ -939,7 +949,7 @@ tracking_ui <- fluidPage(
                 condition = "input.trk_uni_model != 'linear'",
                 div(style = "margin-top:4px;padding:5px 8px;border-left:3px solid #e67e22;background:rgba(230,126,34,0.06);font-size:11px;color:#7f8c8d;line-height:1.4;",
                     HTML(paste0(
-                      "<b style='color:#e67e22;'>Exploratory.</b> The corral and power-law forms are ",
+                      "<b>Be aware:</b> The corral and power-law forms are ",
                       "standard (Kusumi et&nbsp;al. 1993; Metzler et&nbsp;al. 2014), but their fit to short, ",
                       "cycle-skipped MINFLUX tracks is not established. Treat L_c, v and \u03b1 as exploratory.")))),
               checkboxInput("trk_msd_geom",
@@ -1040,10 +1050,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Confinement (MSD index)"),
-          .method_box("green",
+          .method_box(
             "Per-track confinement index CI = (MSD_late / MSD_early) / (\u03c4_late / \u03c4_early) against a simulated free null (after Simson, Sheets & Jacobson 1995). The primary call on confinement in this tab.",
             HTML("CI compares each track's own short and long lags, so it needs no external D. The free range is simulated for each dataset from the measured &sigma;<sub>loc</sub>, D, cycle time and dark-gap pattern, matched to each track's length and D. <b>Confined</b> is below the free 5th percentile, <b>directed</b> above the 95th."),
-            HTML("Confinement is visible only when a free molecule would travel further than the domain in one track; that distance, \u221a(2dDT), is reported with the result. <b>Confined&nbsp;% is not comparable between datasets with different track lengths or mobilities.</b> The directed tail is insensitive: use Directionality or Speed &amp; Transport for transport.")),
+            HTML("Confinement is visible only when a free molecule would travel further than the domain in one track; that distance, \u221a(2dDT), is reported with the result. <b>Confined&nbsp;% is not comparable between datasets with different track lengths or mobilities.</b> The directed tail is insensitive: use Directionality or Speed &amp; Transport for transport."),
+            use_for = HTML("Classifying each track as confined, consistent with free diffusion, or directed, against a simulated free null matched to that track."),
+            next_steps = HTML("Download the CI table to compare tracks or conditions with similar track lengths. Check confined tracks in Displacement vs Diffusion.")),
           checkboxInput("trk_show_conf", "Enable confinement index", FALSE),
           conditionalPanel(
             condition = "input.trk_show_conf == true",
@@ -1074,10 +1086,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Track Segmentation (Change-Point + GMM)"),
-          .method_box("orange",
+          .method_box(
             "PELT change-point detection (Killick, Fearnhead & Eckley 2012) on the local-D signal, then a Gaussian mixture (BIC-selected) over the per-segment diffusivities.",
             HTML("The segmented signal is <b>log(r\u00b2/\u0394t)</b>, scaled to unit variance, so irregular sampling is handled and the BIC penalty is calibrated. Segment D = mean(r\u00b2/\u0394t)/(2d), corrected for noise and motion blur."),
-            HTML("The mixture treats every segment as equally precise, so one population split into segments of very different lengths can return two components. Treat the component count as exploratory.")),
+            HTML("The mixture treats every segment as equally precise, so one population split into segments of very different lengths can return two components. Treat the component count as exploratory."),
+            use_for = HTML("Finding points within tracks where the diffusivity changes, and the D of each segment."),
+            next_steps = HTML("Download the segments for per-segment D. Use the HMM panel to estimate how many states there are and how fast molecules switch between them.")),
           checkboxInput("trk_show_cpd", "Enable segmentation + GMM", FALSE),
           conditionalPanel(
             condition = "input.trk_show_cpd == true",
@@ -1109,10 +1123,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Jump Distance Distribution (JDD)"),
-          .method_box("green",
+          .method_box(
             "Jump-distance distribution fitted with a mixture of chi distributions, Rayleigh in 2D and Maxwell in 3D (Sch\u00fctz, Schindler & Schmidt 1997).",
             HTML("Irregular \u0394t is handled either by normalizing each jump by <b>\u221a\u0394t</b>, or by keeping <b>integrated steps only</b>, which all cover the same \u0394t. D is corrected for localization error and motion blur."),
-            HTML("The \u221a\u0394t mode assumes free diffusion; use integrated steps when the motion is in question. Each component is modelled as free Brownian motion, so keep the count low. A component near D = 0 is noise, not a slow population.")),
+            HTML("The \u221a\u0394t mode assumes free diffusion; use integrated steps when the motion is in question. Each component is modelled as free Brownian motion, so keep the count low. A component near D = 0 is noise, not a slow population."),
+            use_for = HTML("Testing whether the steps come from one population or several with different D, and their fractions."),
+            next_steps = HTML("Download the JDD table. If the JDD D differs from the CVE D, check the &sigma; in use first: the JDD subtracts it.")),
           checkboxInput("trk_show_jdd", "Enable JDD", FALSE),
           conditionalPanel(
             condition = "input.trk_show_jdd == true",
@@ -1175,10 +1191,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Displacement vs Diffusion"),
-          .method_box("orange",
+          .method_box(
             "Tool-original. Each track's net start-to-end displacement R_net against the free-diffusion spread at the ensemble D.",
             HTML("R<sub>net</sub> uses only the two endpoints and the true elapsed time, so irregular \u0394t does not affect it. The endpoint noise is subtracted, and each track is judged against the whole free distribution (Rayleigh in 2D, Maxwell in 3D)."),
-            HTML("The null is an <b>infinite plane</b> at one ensemble D: a curved cell, or a wide spread of per-track D, pushes free tracks below the band. Step 2 adds the cell shape. Read this panel as corroboration of the confinement index, which is the primary call.")),
+            HTML("The null is an <b>infinite plane</b> at one ensemble D: a curved cell, or a wide spread of per-track D, pushes free tracks below the band. Step 2 adds the cell shape. Read this panel as corroboration of the confinement index, which is the primary call."),
+            use_for = HTML("A second check on confinement, from how far each track gets from its start."),
+            next_steps = HTML("Download the displacement table and read flagged tracks together with their confinement index.")),
           checkboxInput("trk_show_disp", "Enable displacement vs diffusion", FALSE),
           conditionalPanel(
             condition = "input.trk_show_disp == true",
@@ -1239,11 +1257,13 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Directionality / Autocorrelation"),
-          .method_box("green",
+          .method_box(
             "Turn-angle distribution and velocity autocorrelation against an isotropic-Brownian null (Burov et al. 2013).",
             HTML("The autocorrelation is binned by <b>elapsed time</b>, so a skipped cycle lands in the right bin, and both use only steps with few dark cycles."),
             tagList("Read the curves pooled across tracks. A small negative value at the first lag is the ",
-                    sigloc(), " signature and appears in free data too.")),
+                    sigloc(), " signature and appears in free data too."),
+            use_for = HTML("Detecting persistent direction, or a tendency to turn back, in the steps of a population."),
+            next_steps = HTML("Download the angle data. For transport events within single tracks, go to Speed &amp; Transport.")),
           checkboxInput("trk_show_dir", "Enable directionality analysis", FALSE),
           conditionalPanel(
             condition = "input.trk_show_dir == true",
@@ -1277,11 +1297,13 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Diffusion State Segmentation (HMM)"),
-          .method_box("amber",
+          .method_box(
             "Continuous-time hidden Markov model fitted by maximum likelihood over all tracks (Das, Cairo & Coombs 2009; Persson et al. 2013; Jackson 2011).",
             HTML("Each step's transition matrix is <b>exp(Q\u00b7\u0394t)</b>, so dark cycles are handled exactly and the <b>switching rates are fitted parameters</b>. D is corrected for noise and motion blur."),
             tagList("Rates are reliable when a state lasts about ten cycles or more; states outside that range are flagged. ",
-                    "Report the bootstrap intervals: the likelihood ones assume identical molecules. The model reads x and y only.")),
+                    "Report the bootstrap intervals: the likelihood ones assume identical molecules. The model reads x and y only."),
+            use_for = HTML("Estimating the number of diffusive states, their D and the rates of switching between them."),
+            next_steps = HTML("Download the state assignments for per-step states, and quote rates with their bootstrap intervals. Per-Segment MSD shows how each state moves over longer lags.")),
           checkboxInput("trk_show_hmm", "Fit HMM to tracks", FALSE),
           conditionalPanel(
             condition = "input.trk_show_hmm == true",
@@ -1327,10 +1349,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Per-Segment MSD (by HMM state)"),
-          .method_box("orange",
+          .method_box(
             "Pools the same-state runs of each HMM state into a per-state ensemble MSD and fits it with the chosen MSD model.",
             "Binning and fit window come from the MSD panel. Fitting each state separately keeps a slow and a fast phase from being averaged together.",
-            "States are assigned from step sizes, and short runs flatten the MSD, so the slow state can show confinement that the selection produced. It is only as good as the HMM fit."),
+            "States are assigned from step sizes, and short runs flatten the MSD, so the slow state can show confinement that the selection produced. It is only as good as the HMM fit.",
+            use_for = HTML("The MSD of each HMM state on its own, to see whether a state is free, confined or directed over longer lags."),
+            next_steps = HTML("Download the per-state MSD. Confirm a confined slow state on simulated or control data, since the state selection can produce a bend by itself.")),
           checkboxInput("trk_show_seg_msd", "Enable per-segment MSD", FALSE),
           conditionalPanel(
             condition = "input.trk_show_seg_msd == true",
@@ -1360,10 +1384,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Speed & Transport"),
-          .method_box("amber",
+          .method_box(
             "Tool-original. Per-step path speed, a drift velocity averaged over a time window W, and a noise-corrected local exponent \u03b1(t). Sustained fast segments are flagged and scored against evidence from outside the speed signal.",
             tagList("Speeds use each step's real \u0394t, and the local \u03b1 is corrected with ", sigloc(), "."),
-            HTML("Path speed cannot separate diffusion from transport, so segments are flagged on drift velocity. A tracker that has lost its molecule and is searching looks similar; a real event keeps a high integrated fraction, while a search run collects dark cycles. <b>Only a matched negative control settles artefact against signal.</b>")),
+            HTML("Path speed cannot separate diffusion from transport, so segments are flagged on drift velocity. A tracker that has lost its molecule and is searching looks similar; a real event keeps a high integrated fraction, while a search run collects dark cycles. <b>Only a matched negative control settles artefact against signal.</b>"),
+            use_for = HTML("Finding candidate directed segments within tracks and scoring the evidence for each."),
+            next_steps = HTML("Download the per-track summary and per-timepoint curves. Compare the event rate with a matched negative control acquired the same way before calling events transport.")),
           checkboxInput("trk_show_speed", "Enable speed & transport", FALSE),
           conditionalPanel(
             condition = "input.trk_show_speed == true",
@@ -1460,11 +1486,13 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Spatially Resolved D-map"),
-          .method_box("green",
+          .method_box(
             HTML("Single-lag diffusivity per spatial cell, D = [mean(r\u00b2/4\u0394t) \u2212 \u03c3\u00b2\u00b7mean(1/\u0394t)] / [1 \u2212 2R\u00b7t<sub>c</sub>\u00b7mean(1/\u0394t)], the short-lag limit of the CVE (Vestergaard 2014; Vogler 2025)."),
             tagList("The noise floor ", sigloc(), "\u00b2/\u0394t is subtracted and motion blur corrected once per cell. ",
                     "'Integrated only' drops dark-cycle steps, whose midpoint says little about position."),
-            "An instantaneous D, blind to confinement. A mis-linked jump inflates a cell's mean, so check the per-cell SE in the hover. Uneven sampling across the field can imprint its own pattern."),
+            "An instantaneous D, blind to confinement. A mis-linked jump inflates a cell's mean, so check the per-cell SE in the hover. Uneven sampling across the field can imprint its own pattern.",
+            use_for = HTML("Seeing where in the field molecules move faster or slower."),
+            next_steps = HTML("Download the D-map table for per-cell D and SE. Check a spatial pattern on more than one cell before reading it as biology.")),
           checkboxInput("trk_show_dmap", "Compute D-map", FALSE),
           conditionalPanel(
             condition = "input.trk_show_dmap == true",
@@ -1502,10 +1530,12 @@ tracking_ui <- fluidPage(
       fluidRow(
         column(4,
           h4("Compare Cells"),
-          .method_box("green",
+          .method_box(
             HTML("One file is one field of view, i.e. one cell, and the cell is the unit of replication."),
             HTML("Each file is analysed on its own, the way the Data Quality panel analyses a single loaded file: its own cycle time from the data, every filter set under Display except the spatial crop, D from the CVE, &sigma;<sub>loc</sub> from the photon budget with that file's L, pattern and a, and the damping check. Conditions are compared on one value per cell, as the mean with a t-based 95% CI across cells."),
-            "Descriptive, with no significance test. Tracks within one cell are correlated, so the number of cells sets how precisely a condition is known."),
+            "Descriptive, with no significance test. Tracks within one cell are correlated, so the number of cells sets how precisely a condition is known.",
+            use_for = HTML("Comparing D and data quality between conditions, with each cell counted once."),
+            next_steps = HTML("Download the per-cell results to run your own statistics with the cell as the replicate.")),
           checkboxInput("trk_show_cmp", "Enable cell comparison", FALSE),
           conditionalPanel(
             condition = "input.trk_show_cmp == true",

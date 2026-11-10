@@ -1,4 +1,6 @@
-setwd("C:/Users/viktorhm/repos/MINFLUXR")
+# The repository root, two folders above this script, so it runs from any machine.
+root <- normalizePath(file.path(dirname(sub("--file=", "", grep("--file=", commandArgs(), value = TRUE))), "..", ".."))
+setwd(root)
 suppressMessages(suppressWarnings({ source("packages.R"); source("helpers_shared.R"); source("helpers_smlm.R") }))
 src <- readLines("tests/validation/spatial_envelope_coverage.R", encoding = "UTF-8")
 a <- grep("^in_L <- function", src); b <- grep("^r_seq <- seq", src) - 1

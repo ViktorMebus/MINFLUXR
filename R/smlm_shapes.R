@@ -260,7 +260,7 @@ robust_center <- function(X) {
 #   preferred for the small point counts typical of one cluster, and is left
 #   blank when a cluster has too few points to justify that model (n <= params+2).
 #
-# HONEST CAVEAT (mirrored by the EXPLORATORY badge in the UI)
+# HONEST CAVEAT (mirrored by the method box in the UI)
 #   The shape dictionary is IMPOSED by this tool - a cluster is scored only
 #   against the five shapes offered, so "best" means best OF THESE, never proof
 #   of biological geometry. With few, blinking-inflated localizations several

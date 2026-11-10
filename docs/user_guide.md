@@ -557,8 +557,8 @@ that surface. Useful when the sample is tilted or curved.
 The Analysis tab is organised into sections: Labelling Density and the observation window, Dataset
 Groups, Quality Control, Nearest-Neighbour & Spatial Statistics (including Local Density & Hotspots),
 Multi-Panel View, Median Cluster Analyses and Cross-Channel Analysis. Each panel produces an interactive plot and, where
-a table makes sense, an exportable CSV. Panels marked ⚠ carry an *exploratory* badge in the app -
-they are research tools whose interpretation is not settled.
+a table makes sense, an exportable CSV. Panels marked ⚠ here are tools built for this app whose
+interpretation is not settled; their method box in the app says what to be aware of.
 
 **Dataset Groups** sits above everything: analyse **by individual file** (default) or **by named
 group**. In group mode you define up to 6 groups (name, colour, member files) and the distribution
@@ -1025,7 +1025,7 @@ selected track. The first place to look when an aggregate result seems wrong.
 
 Panels on this tab print **numbers and short verdicts only**. Every method's rationale - what it
 assumes, how it is adapted to MINFLUX, and where it fails - is in the collapsed
-**ℹ Method & MINFLUX adaptation** box at the head of each panel, with the maths in *Key Calculations*
+**ℹ About this method** box at the head of each panel, with the maths in *Key Calculations*
 below. Warnings still appear inline, but as one line each, so a result that
 needs attention is visible instead of buried.
 

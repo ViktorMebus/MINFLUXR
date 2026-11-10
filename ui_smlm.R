@@ -2,17 +2,9 @@
 ## ui_smlm.R  -  SMLM analysis tab UI (assigned to smlm_ui)
 ## -----------------------------------------------------------------------------
 
-# Small orange "EXPLORATORY" chip reused by bespoke / not-literature-validated
-# analysis panels (same visual language as the GT-estimation panel).
-.exploratory_badge <- function() {
-  tags$span("EXPLORATORY",
-            style = "margin-left:8px;font-size:10px;font-weight:700;color:#fff;background:#e67e22;border-radius:3px;padding:1px 5px;vertical-align:middle;")
-}
-
-# NOTE: the former .exploratory_note() footnote helper was removed - the per-panel
-# caveats it carried now live in the shared .method_box() (helpers_shared.R), so the
-# Analysis tab no longer stated the same warning twice. The badge above still marks
-# exploratory panels in their headings.
+# NOTE: panels carry no EXPLORATORY badge or rating chip. A label reads as a blanket
+# verdict on every dataset; the per-panel caveats live in the shared .method_box()
+# (helpers_shared.R) instead.
 
 smlm_ui <- fluidPage(
   useShinyjs(),
@@ -1192,10 +1184,8 @@ smlm_ui <- fluidPage(
 
       ### Estimate ground-truth positions (labeling-aware inverse) ===
       tags$details(class = "sim-group",
-        tags$summary(tags$b("Estimate Ground-Truth Positions"),
-                     tags$span("EXPLORATORY",
-                               style = "margin-left:8px;font-size:10px;font-weight:700;color:#fff;background:#e67e22;border-radius:3px;padding:1px 5px;vertical-align:middle;")),
-        helpText("Exploratory. Inverts the labelling model to estimate ground-truth positions, an approximate count and a crowding flag. Circles run green (certain) to red (uncertain)."),
+        tags$summary(tags$b("Estimate Ground-Truth Positions")),
+        helpText("Inverts the assumed labelling model to estimate ground-truth positions, an approximate count and a crowding flag. Circles run green (certain) to red (uncertain)."),
         checkboxInput("show_gt_estimate", "Show estimated GT candidates", value = FALSE),
         conditionalPanel(
           condition = "input.show_gt_estimate == true",
@@ -1446,11 +1436,13 @@ smlm_ui <- fluidPage(
           # -- Labelling-density normalizsation (opt-in) ---------------------------
           fluidRow(
             column(3,
-              h4("Labelling Density", .exploratory_badge()),
-              .method_box("amber",
+              h4("Labelling Density"),
+              .method_box(
                 HTML("<b>Independent random thinning</b>: each unit is kept with a fixed probability, which leaves g(r) and Ripley's K unchanged in expectation (<b>Illian et&nbsp;al. 2008</b>; <b>Chiu et&nbsp;al. 2013</b>). Support from a smoothed-density region (<b>Hyndman 1996</b>) or morphological occupancy (<b>Serra 1982</b>)."),
                 HTML("Whole <b>units</b> are dropped, never single localizations, so traces and de-blinking stay intact. Density divides by the estimated support, since a field includes the cell edge and dark regions. The draw is seeded per file."),
-                HTML("Use it only when density varies for reasons outside the biology. When density is the biology, equalising it removes the effect. Thinning is one-way and can push small clusters below minPts.")),
+                HTML("Use it only when density varies for reasons outside the biology. When density is the biology, equalising it removes the effect. Thinning is one-way and can push small clusters below minPts."),
+            use_for = HTML("Equalising labelling density between files when it differs for technical reasons, before comparing spatial statistics (e.g. transfected cells differ in expression, so the detected density varies from sample to sample)."),
+            next_steps = HTML("The spatial panels below then run on the thinned data. Download the table to report each file's density.")),
               helpText("For cells whose labelling density varies for reasons outside the biology. Leave off otherwise."),
               checkboxInput("dens_norm_enable", "Measure density per file", value = SMLM_DEFAULTS$dens_norm_enable),
               conditionalPanel(
@@ -1613,14 +1605,18 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Localization Precision & Sample drift estimation"),
-          .method_box("green",
+          .method_box(
             HTML("Every localization relative to its own trace centroid, pooled at (0,0). The RMS radius is &sigma;<sub>loc</sub>, drawn as 1&sigma; and 2&sigma; ellipses with a &sigma; per axis."),
             HTML("Runs on the filtered localizations. The ellipses are rotated to the cloud's own axes, so a tilted cloud is not reported as round; a tilt shared across traces points to directional drift or the instrument."),
-            HTML("&sigma; is an <b>upper bound on precision</b>: it also holds label, linker and molecule motion and any drift within a trace. In 3D, &sigma;<sub>z</sub> and &sigma;<sub>xy</sub> can differ in either direction.")),
-          .method_box("amber",
+            HTML("&sigma; is an <b>upper bound on precision</b>: it also holds label, linker and molecule motion and any drift within a trace. In 3D, &sigma;<sub>z</sub> and &sigma;<sub>xy</sub> can differ in either direction."),
+            use_for = HTML("Measuring the localization precision of the data, per axis."),
+            next_steps = HTML("Download &sigma; to report precision, and use it to judge the de-blinking radius and the trace-spread filter.")),
+          .method_box(
             HTML("<b>Sample drift and jitter</b> from the displacement of re-blinks of one molecule, regressed on the time between them."),
             HTML("Within each de-blinked group the first trace is the origin. <b>Drift</b> is the part that grows with time; <b>jitter</b> is the scatter left over. Two molecules merged by mistake widen the interval without tilting the slope. De-blink first; otherwise the tool groups by proximity."),
-            HTML("Blinks further apart than the grouping radius stop pairing, so a large drift is reported as a lower bound. Fiducial-locked acquisitions are already drift-corrected.")),
+            HTML("Blinks further apart than the grouping radius stop pairing, so a large drift is reported as a lower bound. Fiducial-locked acquisitions are already drift-corrected."),
+            use_for = HTML("Checking whether the sample drifted during the acquisition and how much positions jitter."),
+            next_steps = HTML("A slope near zero means de-blinking can use a radius set by precision. A clear slope means one molecule's blinks land further apart over time, so allow for it in the de-blinking radius.")),
           helpText("Per-axis \u03c3, anisotropy, skew and kurtosis of the filtered data, for the active dataset."),
           numericInput("prec_cloud_min_loc", "Min localizations / trace", value = 5, min = 3, step = 1),
           checkboxInput("prec_cloud_use_z", "Include z (report σ_z)", value = FALSE),
@@ -1668,10 +1664,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Fiducial / Contaminant Scan"),
-          .method_box("amber",
+          .method_box(
             HTML("Tool-original. Flags traces that behave like fiducials or bright aggregates. <b>Lifetime</b> first: a fiducial does not bleach, so its trace outlives every real fluorophore in the file. <b>Brightness</b> second, for traces that also persisted."),
             HTML("The lifetime threshold is a multiple of the file's own 99th-percentile trace duration, so it adapts to the acquisition. Brightness is a per-file robust z of log efo. Length, recurrence and spread are reported as evidence."),
-            HTML("Not validated by other groups. It reports only, and removes nothing until you tick the box below.")),
+            HTML("Not validated by other groups. It reports only, and removes nothing until you tick the box below."),
+            use_for = HTML("Finding traces that behave like fiducial beads or bright aggregates."),
+            next_steps = HTML("Download the per-trace table to inspect the flags, and tick the removal box to drop them from all analyses.")),
           helpText("Flags traces that outlive the rest of the file, and bright traces that persist."),
           numericInput("fid_dur_x",    "Lifetime, as a multiple of the file's 99th percentile",
                        value = 5, min = 1.5, max = 50, step = 0.5),
@@ -1702,10 +1700,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Trace Detection over Time"),
-          .method_box("green",
+          .method_box(
             HTML("Unique <b>trace IDs</b> per acquisition-time bin: the detection-event rate over the run."),
             HTML("Each trace counts once, at its median time, so long traces do not crowd the early bins. One series per file, or per group; each line ends where its file's time ends."),
-            HTML("Descriptive QC. A falling rate reflects bleaching, exhausted blinking, drift and depletion.")),
+            HTML("Descriptive QC. A falling rate reflects bleaching, exhausted blinking, drift and depletion."),
+            use_for = HTML("Checking how the detection rate changed over the acquisition, per file or group."),
+            next_steps = HTML("Download the rates. Use the curves to see whether files are comparable and how long an acquisition keeps producing detections.")),
           tags$b("Trace-ID length prefilter", style = "font-size:0.9em;"),
           fluidRow(
             column(6, numericInput("tid_time_len_min", "Min locs/trace", value = 1, min = 1, step = 1)),
@@ -1740,10 +1740,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Batch NN Distance Histogram"),
-          .method_box("green",
+          .method_box(
             HTML("Distribution of the k-th nearest-neighbour distance (<code>dbscan::kNN</code>), after <b>Clark &amp; Evans 1954</b>."),
             HTML("Runs on trace or de-blinked-molecule centroids rather than raw localizations, so re-blinks and multivalent labels do not over-count molecules and the distribution approximates the spacing between molecules."),
-            HTML("A sharp peak below ~40&nbsp;nm usually reflects the label footprint (Annibale et&nbsp;al. 2011; Sengupta et&nbsp;al. 2011). There is no random reference: for significance use Ripley L(r) with its envelope.")),
+            HTML("A sharp peak below ~40&nbsp;nm usually reflects the label footprint (Annibale et&nbsp;al. 2011; Sengupta et&nbsp;al. 2011). There is no random reference: for significance use Ripley L(r) with its envelope."),
+            use_for = HTML("The typical spacing between molecules in each file or group."),
+            next_steps = HTML("Download the distances. Test whether the spacing differs from random with Ripley's L(r) or g(r).")),
           selectInput("nn_batch_unit", "NN unit",
             choices = c(
               "Auto (molecules if de-blinking is on)"  = "auto",
@@ -1825,10 +1827,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Ripley's L(r)"),
-          .method_box("green",
+          .method_box(
             HTML("Ripley's K (<b>Ripley 1977</b>) with the L-transform (<b>Besag 1977</b>), plotted as L(r)&nbsp;\u2212&nbsp;r: 0 under complete spatial randomness, &gt;0 clustering, &lt;0 dispersion. SMLM lineage: <b>Sengupta et&nbsp;al. 2011</b>; <b>Veatch et&nbsp;al. 2012</b>."),
             HTML("Runs on de-blinked units, so repeated appearances of one molecule do not create a short-range peak. Up to 2000 points per file. The Monte-Carlo envelope simulates random points in the same window, so edge effects appear in the band too."),
-            HTML("The shaded band is pointwise; read significance from the dashed <b>global band</b> and the p-value above the plot. Labelling is the main confound: incomplete labelling flattens clustering, multivalent labels create it. In group mode per-file curves are averaged, never pooled.")),
+            HTML("The shaded band is pointwise; read significance from the dashed <b>global band</b> and the p-value above the plot. Labelling is the main confound: incomplete labelling flattens clustering, multivalent labels create it. In group mode per-file curves are averaged, never pooled."),
+            use_for = HTML("Testing whether molecules are clustered or dispersed, and at which length scales."),
+            next_steps = HTML("Download the curves and quote the global-band p-value. Use g(r) to locate the distance at which clustering happens.")),
           helpText("L(r) \u2212 r = 0 under complete spatial randomness; > 0 is clustering, < 0 is regularity."),
           selectInput("ripley_unit", "Unit",
             choices = c(
@@ -1891,10 +1895,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Pair Correlation g(r)"),
-          .method_box("green",
+          .method_box(
             HTML("The pair-correlation function, the derivative form of Ripley's K: pairs in a shell around r, divided by the shell's area (2D) or volume (3D). g = 1 for a random pattern (Illian et&nbsp;al. 2008)."),
             HTML("Runs on the same de-blinked units as Ripley's L. g divides out the intensity, so it compares cells of different labelling density, and it is local in r, so a short-range labelling artefact stays in the first bins."),
-            HTML("Short-r bins hold few pairs and are noisy, so a first-bin peak is often binning. Read significance from the global band and its p-value.")),
+            HTML("Short-r bins hold few pairs and are noisy, so a first-bin peak is often binning. Read significance from the global band and its p-value."),
+            use_for = HTML("Finding the distances at which molecules are found together more often than at random."),
+            next_steps = HTML("Download the curves. A peak gives a length scale for the clustering radius or for comparing structures.")),
           helpText(HTML("The <b>r where g returns to 1</b> is the aggregate size; the height is how many times denser than random.")),
           .detail(HTML("A solid aggregate makes g fall monotonically from the smallest r. A peak further out, with g low at short r, means short-range exclusion.")),
           selectInput("pcf_unit", "Unit",
@@ -1964,10 +1970,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Local Density & Hotspots"),
-          .method_box("amber",
+          .method_box(
             HTML("k-NN local density (<b>Loftsgaarden &amp; Quesenberry 1965</b>), the quadrat index of dispersion (<b>Fisher, Thornton &amp; Mackenzie 1922</b>) and DBSCAN foci (<b>Ester et&nbsp;al. 1996</b>), each relative to the cell's own mean density. The per-cell eps calibration is tool-original."),
             HTML("Dividing by the cell's own density puts a high and a low expresser on the same scale, and eps is set per cell against a randomised pattern in that cell's footprint."),
-            HTML("These read the <b>upper tail</b>: whether a minority of units sit in dense spots, not what those spots are. Focus count and fraction in foci stay density-sensitive; compare cells on <b>Largest focus (\u00d7 random 95th pct)</b>. Quote the quadrat size with the dispersion index.")),
+            HTML("These read the <b>upper tail</b>: whether a minority of units sit in dense spots, not what those spots are. Focus count and fraction in foci stay density-sensitive; compare cells on <b>Largest focus (\u00d7 random 95th pct)</b>. Quote the quadrat size with the dispersion index."),
+            use_for = HTML("Testing whether a subset of molecules sit in dense foci, and comparing that between cells with different expression levels."),
+            next_steps = HTML("Download the per-file and per-focus tables. Compare cells on the largest focus relative to the random 95th percentile.")),
           helpText("Each unit's local density as a multiple of its cell's mean, and the dense spots. Density unevenness is 1.0 for a random pattern."),
           .detail(HTML(
             "<b>Enhancement:</b> local density from the k-th neighbour over the cell mean; 20\u00d7 is twenty times denser than average.<br>",
@@ -2096,10 +2104,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Trace IDs / De-blinked Molecules per Median Cluster"),
-          .method_box("amber",
+          .method_box(
             HTML("Cluster-occupancy counting, in the SMLM molecular-counting lineage (<b>Annibale et&nbsp;al. 2011</b>; <b>Sengupta et&nbsp;al. 2011</b>)."),
             HTML("Counts raw <b>trace IDs</b> or <b>de-blinked molecules</b> inside each median cluster; comparing the two shows how much of the count is blinking."),
-            HTML("An occupancy count, not stoichiometry: blinking inflates it by an unknown, dye- and buffer-dependent factor, and no dark-time calibration is applied. Compare only conditions acquired identically.")),
+            HTML("An occupancy count, not stoichiometry: blinking inflates it by an unknown, dye- and buffer-dependent factor, and no dark-time calibration is applied. Compare only conditions acquired identically."),
+            use_for = HTML("Counting how many detection events and de-blinked molecules each cluster holds."),
+            next_steps = HTML("Download the counts. Compare conditions acquired with the same dye, buffer and settings.")),
           helpText("Counts trace IDs or de-blinked molecules per Median Cluster, across all loaded files."),
           .detail("One fluorophore produces several trace IDs across blinking cycles, so a ",
                   "trace-ID count reflects blinking events. De-blinked molecules are closer to a ",
@@ -2134,11 +2144,13 @@ smlm_ui <- fluidPage(
       # -- Cluster2 Detection over Time --------------------------------------
       fluidRow(
         column(3,
-          h4("Median Clusters Detection over Time", .exploratory_badge()),
-          .method_box("orange",
+          h4("Median Clusters Detection over Time"),
+          .method_box(
             HTML("Tool-original. Detection rate over acquisition time for clustered and background traces, compared with the two-sample <b>Kolmogorov\u2013Smirnov</b> distance."),
             HTML("Each trace counts once, at its median time. Clustered and background traces come from the same file, so acquisition length, laser power and sample cancel; normalized modes compare timing rather than abundance."),
-            HTML("Descriptive: bleaching, blinking, labelling density and re-targeting all shape the curve. The KS gap is a distance, not a test, because the two samples share one detection budget.")),
+            HTML("Descriptive: bleaching, blinking, labelling density and re-targeting all shape the curve. The KS gap is a distance, not a test, because the two samples share one detection budget."),
+            use_for = HTML("Comparing when clustered and background traces were detected in the same acquisition."),
+            next_steps = HTML("Download the curves. Treat a difference as a lead for a control experiment.")),
           helpText("How detection of clustered vs background traces evolves over the acquisition."),
           .detail("Traces inside Median Cluster structures against unclustered background. Requires Median Clustering."),
           numericInput("det_time_bins", "Time bins", value = 40, min = 5, max = 300),
@@ -2169,11 +2181,13 @@ smlm_ui <- fluidPage(
       # -- Cluster2 Crowding vs Detection-Time Shift -------------------------
       fluidRow(
         column(3,
-          h4("Median Clusters Crowding vs Detection-Time Shift", .exploratory_badge()),
-          .method_box("orange",
+          h4("Median Clusters Crowding vs Detection-Time Shift"),
+          .method_box(
             HTML("Tool-original. Per cluster, crowding (median k-NN distance among its members) against the shift of its median detection time from the file's background, with an optional loess trend (<b>Cleveland 1979</b>)."),
             HTML("Both axes are referenced within the same file, so differences in acquisition length, bleaching and labelling cancel. A permutation null corrects for larger clusters landing later by sampling alone."),
-            HTML("A correlation: crowding co-varies with labelling efficiency, structure size and photophysics, so a trend is a hypothesis for a control experiment such as a labelling titration.")),
+            HTML("A correlation: crowding co-varies with labelling efficiency, structure size and photophysics, so a trend is a hypothesis for a control experiment such as a labelling titration."),
+            use_for = HTML("Testing whether more crowded clusters are detected earlier or later than the background."),
+            next_steps = HTML("Download the per-cluster table. Follow a trend up with a labelling titration or another control.")),
           helpText("One point per Median Cluster: does a denser structure get detected later?"),
           .detail("Crowding: median k-NN distance among the cluster's members (smaller is more crowded). ",
                   "Shift: the cluster's median time minus the background median in that file; positive is later."),
@@ -2206,11 +2220,13 @@ smlm_ui <- fluidPage(
       # -- Within-Cluster2 NN vs Cluster Size --------------------------------
       fluidRow(
         column(3,
-          h4("Within Median Clusters NN vs Cluster Size", .exploratory_badge()),
-          .method_box("orange",
+          h4("Within Median Clusters NN vs Cluster Size"),
+          .method_box(
             HTML("Tool-original. Nearest-neighbour spacing inside each cluster (<b>Clark &amp; Evans 1954</b>) against its size, as member count or convex-hull area/volume (Barber, Dobkin &amp; Huhdanpaa 1996)."),
             HTML("Spacing is measured between de-blinked centroids, and each cluster contributes one point regardless of how many localizations it has."),
-            HTML("Under DBSCAN every within-cluster distance is capped by eps2, so a flat trend at large size may be that ceiling; re-run under HDBSCAN or OPTICS first. Hull size is inflated by single outlying members.")),
+            HTML("Under DBSCAN every within-cluster distance is capped by eps2, so a flat trend at large size may be that ceiling; re-run under HDBSCAN or OPTICS first. Hull size is inflated by single outlying members."),
+            use_for = HTML("Seeing whether larger clusters are packed more densely or more loosely."),
+            next_steps = HTML("Download the per-cluster table. Repeat with HDBSCAN or OPTICS before reading a flat trend at large sizes.")),
           helpText("Does a bigger structure pack its members tighter, looser, or the same?"),
           .detail("Y: median over members of the mean distance to their k nearest members. Flat: constant ",
                   "spacing; rising: the structure balloons; falling: it densifies. Requires Median Clustering."),
@@ -2238,11 +2254,13 @@ smlm_ui <- fluidPage(
       # -- Cluster Viewer (2D / 3D + shape fit) ------------------------------
       fluidRow(
         column(3,
-          h4("Cluster Viewer and Shape Fitting", .exploratory_badge()),
-          .method_box("orange",
+          h4("Cluster Viewer and Shape Fitting"),
+          .method_box(
             HTML("Orthogonal-distance maximum-likelihood fits ranked by <b>AICc</b> (Hurvich &amp; Tsai 1989), <b>AIC</b> (Akaike 1974) or <b>BIC</b> (Schwarz 1978); the 2D view is a PCA projection (Pearson 1901). The shape dictionary is tool-original."),
             HTML("Fits run on de-blinked centroids, so a long trace cannot pull the fit, and optionally weight each trace by its photon count. AICc blanks out when a cluster has too few points for a shape."),
-            HTML("The dictionary (sphere, ellipsoid, helix, ring, arc) is imposed, and the ranking always names a winner, even when the true shape is absent. With few points several shapes are indistinguishable. Each parameter is a point estimate without an error bar.")),
+            HTML("The dictionary (sphere, ellipsoid, helix, ring, arc) is imposed, and the ranking always names a winner, even when the true shape is absent. With few points several shapes are indistinguishable. Each parameter is a point estimate without an error bar."),
+            use_for = HTML("Inspecting single clusters and testing which of a set of simple shapes fits each best."),
+            next_steps = HTML("Use the ranked fits to describe individual clusters. Check a shape claim on many clusters and on a simulated structure from the Simulator tab.")),
           helpText("Step through individual Median Cluster structures from every loaded file."),
           .detail("Loads clusters from every file with the current de-blinking and clustering. Points follow ",
                   "de-blinking: one per molecule when it is on, one per trace ID when off, where a molecule ",
@@ -2295,10 +2313,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Radius of Gyration (RoG)"),
-          .method_box("green",
+          .method_box(
             HTML("Rg\u00b2 = \u27e8\u2016p \u2212 p\u0304\u2016\u00b2\u27e9, an RMS size, with gyration-tensor shape descriptors (asphericity, <b>Rudnick &amp; Gaspari 1986</b>; linear/planar/spherical, <b>Westin et&nbsp;al. 1997/2002</b>)."),
             HTML("Points are median positions, never raw localizations. <b>Structure size</b> uses one point per molecule; <b>label footprint</b> uses one per trace of a molecule, so it measures the blink and label scatter."),
-            HTML("Small clusters read low; the n/(n\u22121) correction removes most of that, but 2-member clusters stay indicative. Structure size carries the label footprint as a floor, so compare the two measures.")),
+            HTML("Small clusters read low; the n/(n\u22121) correction removes most of that, but 2-member clusters stay indicative. Structure size carries the label footprint as a floor, so compare the two measures."),
+            use_for = HTML("The size and shape of each cluster, and how much of that size is label footprint."),
+            next_steps = HTML("Download the per-cluster table. Compare structure size with label footprint before reporting a size.")),
           helpText("Per-cluster Rg across all loaded files: structure size, or the labelling footprint."),
           radioButtons("rog_cluster_col", "Measure",
             choices = c(
@@ -2375,10 +2395,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Cross-Channel NN & Co-localization"),
-          .method_box("green",
+          .method_box(
             HTML("For each channel-A point, the distance to its k-th nearest channel-B point (<b>Clark &amp; Evans 1954</b>; <b>Dixon 2002</b>), and its cumulative curve: the fraction of A with a B partner within d. Object-based co-localization after <b>Lachmanovich et&nbsp;al. 2003</b> and <b>Dunn et&nbsp;al. 2011</b>."),
             HTML("Suits MINFLUX, which has coordinates rather than an image. Distances are always between channels, on de-blinked centroids; the Median Cluster modes pair only molecules inside structures."),
-            HTML("No null model: every A point has a nearest B, so judge against L\u2081\u2082 or g\u2081\u2082 with their envelopes. <b>DCR crosstalk</b> puts mis-assigned molecules at near-zero distance; read the co-localized fraction against the per-group contamination from the DCR split.")),
+            HTML("No null model: every A point has a nearest B, so judge against L\u2081\u2082 or g\u2081\u2082 with their envelopes. <b>DCR crosstalk</b> puts mis-assigned molecules at near-zero distance; read the co-localized fraction against the per-group contamination from the DCR split."),
+            use_for = HTML("How far each channel-A molecule is from its nearest channel-B molecule."),
+            next_steps = HTML("Download the distances. Test the co-localization against random with L<sub>12</sub>(r) or g<sub>12</sub>(r).")),
           helpText("Every distance is measured strictly between the two channels."),
           .detail("Each channel is de-blinked and clustered separately. The Median Cluster modes drop ",
                   "unclustered background from both sides, so the result is how far channel-1 structures ",
@@ -2414,10 +2436,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Bivariate Ripley's L\u2081\u2082(r)"),
-          .method_box("green",
+          .method_box(
             HTML("Cross-type K-function (<b>Lotwick &amp; Silverman 1982</b>; <b>Dixon 2002</b>) with the L-transform: L\u2081\u2082(r)&nbsp;\u2212&nbsp;r &gt; 0 is co-localization at scale r, &lt; 0 exclusion."),
             HTML("Runs on de-blinked centroids of the two channels, with the edge correction and window of L(r). The default null shifts channel B as a whole to random positions in the cell, so each channel keeps its own clustering and only their registration is broken. Median Cluster modes average curves computed inside each structure. The DCR split shares one coordinate frame, so there is no channel registration to calibrate."),
-            HTML("<b>DCR crosstalk</b> biases L\u2081\u2082 upward at short r, toward false co-localization: compare a signal with the contamination the DCR split reports, and pool DCR at upload where possible. Asymmetric labelling skews it too, and proximity is not interaction.")),
+            HTML("<b>DCR crosstalk</b> biases L\u2081\u2082 upward at short r, toward false co-localization: compare a signal with the contamination the DCR split reports, and pool DCR at upload where possible. Asymmetric labelling skews it too, and proximity is not interaction."),
+            use_for = HTML("Testing whether the two channels sit together, or apart, more than at random, and at which scales."),
+            next_steps = HTML("Download the curves. Check a short-range signal against the DCR contamination, and use g<sub>12</sub>(r) to find the interaction distance.")),
           helpText("L\u2081\u2082(r) \u2212 r > 0 is co-localization; < 0 is spatial exclusion."),
           .detail("Median Cluster modes average the curves over structures. Up to 2,000 points per ",
                   "channel per file or group."),
@@ -2453,10 +2477,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("Pair Cross-Correlation g\u2081\u2082(r)"),
-          .method_box("green",
+          .method_box(
             HTML("Cross pair-correlation: A\u2013B pairs in a shell around r over the shell's area or volume; g\u2081\u2082 = 1 at random, &gt;1 attraction, &lt;1 repulsion. The PC-PALM statistic (<b>Sengupta et&nbsp;al. 2011</b>; <b>Veatch et&nbsp;al. 2012</b>)."),
             HTML("Local in r, so it puts the interaction distance at a peak and keeps a short-range labelling artefact in the first bins. Same units, window and null as L\u2081\u2082."),
-            HTML("Noisier than L\u2081\u2082, since each shell holds few pairs; a first-bin peak is often binning. DCR crosstalk piles into the first shells, where a real interaction would also appear.")),
+            HTML("Noisier than L\u2081\u2082, since each shell holds few pairs; a first-bin peak is often binning. DCR crosstalk piles into the first shells, where a real interaction would also appear."),
+            use_for = HTML("Finding the distance at which the two channels are most often found together."),
+            next_steps = HTML("Download the curves and report the peak distance together with the L<sub>12</sub> result.")),
           helpText("g\u2081\u2082(r) = 1 at random; > 1 is attraction at scale r, < 1 is repulsion."),
           selectInput("pcf12_unit", "Unit",
             choices = c("TID centroids" = "tid", "De-blinked molecule centroids" = "cluster"),
@@ -2486,10 +2512,12 @@ smlm_ui <- fluidPage(
       fluidRow(
         column(3,
           h4("2D KDE Density Map"),
-          .method_box("amber",
+          .method_box(
             HTML("Kernel density of each channel on a shared grid (<b>Silverman 1986</b>; <code>MASS::kde2d</code>), and the Pearson correlation of the two surfaces as a co-localization index (cf. <b>Dunn et&nbsp;al. 2011</b>), with an optional randomization test."),
             HTML("MINFLUX has no pixels, so the density surface is made by the bandwidth. The r-vs-bandwidth sweep shows the whole family of answers, and the default null is a toroidal random shift of channel 2 (<b>Lotwick &amp; Silverman 1982</b>), which keeps its own clustering."),
-            HTML("<b>r is relative:</b> a small bandwidth drives it toward 0 and a large one toward 1, so compare only at one bandwidth. With the footprint window on the test is conservative; with it off it rejects too readily for a structure filling part of the view. For a positive claim use g\u2081\u2082(r).")),
+            HTML("<b>r is relative:</b> a small bandwidth drives it toward 0 and a large one toward 1, so compare only at one bandwidth. With the footprint window on the test is conservative; with it off it rejects too readily for a structure filling part of the view. For a positive claim use g\u2081\u2082(r)."),
+            use_for = HTML("A visual overview of where the two channels overlap, with a correlation at a chosen bandwidth."),
+            next_steps = HTML("Download the results and quote r with its bandwidth. Base a positive co-localization claim on g<sub>12</sub>(r).")),
           helpText("Density map per channel for the active file: Ch1 as red contours, Ch2 as blue."),
           selectInput("kde_unit", "Unit",
             choices = c("TID centroids" = "tid", "De-blinked molecule centroids" = "cluster"),
@@ -2535,8 +2563,8 @@ smlm_ui <- fluidPage(
       tags$br(),
 
       # -- Methods & References (consolidated citation box) ----------------------
-      # Provenance for the SMLM spatial-analysis tools. Panels flagged EXPLORATORY
-      # (orange) are bespoke to this tool and not literature-validated for MINFLUX.
+      # Provenance for the SMLM spatial-analysis tools. Rows marked "Built for this
+      # app" are bespoke to this tool and not literature-validated for MINFLUX.
       tags$details(
         style = "margin:8px 0 16px; font-size:0.85em; color:#444;",
         tags$summary(style = "cursor:pointer; font-weight:bold; color:#2c3e50;",
@@ -2545,9 +2573,9 @@ smlm_ui <- fluidPage(
           tags$p(style = "color:#666; margin:0 0 6px;",
             "Primary reference for each tool. Analysis methods specific to MINFLUX are thinly covered ",
             "in the literature, so most tools are established SMLM and point-pattern methods adapted ",
-            "to MINFLUX data by this app, one considered reading rather than a community standard. Panels marked ",
-            tags$span("EXPLORATORY", style = "color:#e67e22; font-weight:700;"),
-            " were built for this app and have not been validated by other groups."),
+            "to MINFLUX data by this app, one considered reading rather than a community standard. Tools marked ",
+            tags$b("Built for this app"),
+            " have not been validated by other groups."),
           tags$table(style = "border-collapse:collapse; line-height:1.5;",
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Nearest-neighbour")),
                     tags$td("k-th NN distance distribution via k-d tree; NN distance as a spatial statistic after Clark & Evans 1954; their observed/expected R index is not computed (no null model here)")),
@@ -2566,7 +2594,7 @@ smlm_ui <- fluidPage(
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Pair correlation g(r)")),
                     tags$td("Pair-correlation / radial distribution function (Illian et al. 2008; Stoyan & Stoyan 1994); the SMLM lineage is PC-PALM, Sengupta et al. 2011 and Veatch et al. 2012; density-invariant by construction (normalized by intensity squared)")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Labelling-density normalization")),
-                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                    tags$td("Built for this app",
                             ". Independent p-thinning, whose exact invariance of g(r) and K(r) is standard point-process theory (Illian et al. 2008; Chiu et al. 2013); morphological support estimate after Serra 1982; support-free k-NN intensity after Thompson 1956. Applying it as a between-condition correction, and the choice of thinning target, are this tool's design and validated in silico only")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Bivariate Ripley L₁₂(r)")),
                     tags$td("Lotwick & Silverman 1982; Dixon 2002 (bivariate/cross point-pattern statistics)")),
@@ -2575,13 +2603,13 @@ smlm_ui <- fluidPage(
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("KDE density + Pearson co-loc")),
                     tags$td("Kernel density estimate (Silverman 1986); Pearson coefficient as a bandwidth-dependent, relative co-localization measure (cf. Dunn et al. 2011); significance by structure-preserving random-shift randomization of Ch2 (Lotwick & Silverman 1982), with a uniform-CSR null selectable for comparison")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Shape fitting (viewer)")),
-                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                    tags$td("Built for this app",
                             ". Orthogonal-distance MLE with AICc/BIC model selection (Akaike 1974; Schwarz 1978; Hurvich & Tsai 1989); the shape dictionary and biological reading are bespoke")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Ground-truth estimate & structure size")),
-                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                    tags$td("Built for this app",
                             ". Labelling-model inverse (this app), checked against the simulator; contour via MST (Prim 1957), anisotropy coefficients (Westin et al. 1997/2002)")),
             tags$tr(tags$td(style="padding:1px 14px 1px 0; vertical-align:top; color:#666;", tags$b("Detection-time / crowding / NN-vs-size")),
-                    tags$td(tags$span("EXPLORATORY", style="color:#e67e22;font-weight:700;"),
+                    tags$td("Built for this app",
                             ". Descriptive diagnostics of this tool with no published MINFLUX equivalent; correlational only"))
           ),
           tags$p(style = "color:#888; margin:8px 0 0; font-size:0.95em;",
