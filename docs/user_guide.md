@@ -2017,8 +2017,8 @@ MINFLUXR/
 ## References
 
 The published literature each implemented method follows. Numbers link to the bibliography below.
-`docs/MINFLUX_analysis_methods.md` Part II additionally rates every method for **appropriateness on
-MINFLUX data specifically** (green / amber / red) - the more important read before trusting a number.
+`docs/MINFLUX_analysis_methods.md` Part II additionally lists, for every method, what MINFLUXR adapts for
+MINFLUX data and the **assumptions to check** on your own data before trusting a number.
 
 ### Method → literature
 

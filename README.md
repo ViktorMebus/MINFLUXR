@@ -132,7 +132,7 @@ results are in `tests/validation/`.
 | File | Contents |
 |------|----------|
 | [`docs/user_guide.md`](docs/user_guide.md) | Panel-by-panel reference: every control, every output, and the calculations behind them |
-| [`docs/MINFLUX_analysis_methods.md`](docs/MINFLUX_analysis_methods.md) | Part I: the implementation and maths of every analysis. Part II: a literature review of whether each method suits MINFLUX data, with GREEN / AMBER / RED verdicts |
+| [`docs/MINFLUX_analysis_methods.md`](docs/MINFLUX_analysis_methods.md) | Part I: the implementation and maths of every analysis. Part II: for each method, the published sources it rests on, what MINFLUXR adapts for MINFLUX data, and the assumptions to check on your own data |
 | [`docs/simulator.md`](docs/simulator.md) | The Simulator tab: what each stage models and where it departs from real MINFLUX |
 | [`docs/simulation_module.md`](docs/simulation_module.md) | The ground-truth diffusion simulator: model, validation and the CVE round-trip on D |
 | [`docs/sigma_loc_model.md`](docs/sigma_loc_model.md) | The tracking localization-precision model: derivation and immobile-sample calibration |
