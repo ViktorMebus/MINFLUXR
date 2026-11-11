@@ -109,15 +109,15 @@ localization precision that the MSD, JDD, confinement, HMM and D-map panels all 
 
 ---
 
-## How far to trust a panel
+## Result panels and when to trust them
 
 Analysis methods specific to MINFLUX are thinly covered in the literature. Most panels here are
-MINFLUXR's own adaptation of an established method to MINFLUX data, and some are tools built for it.
-They are one considered reading of how such data should be handled, not a community standard, so
-check a result against the method box before relying on it.
+MINFLUXR's own adaptation and interpretation of an established method to MINFLUX data, and some are 
+tools built for it. Infoboxes and method sections are considered reading for how MINFLUXR approaches
+the data. Always make sure that the data fits a given analysis method.
 
-The panels carry no ratings. Whether a method suits your data depends on the dataset (track length,
-labelling density, photon counts), so each method box states its assumptions and limits in words and
+Whether a method suits your data depends largely on the dataset (track length,
+labelling density, photon counts), so each method box states its assumptions and limits, and
 leaves the judgement to you. Tools built for this app say so in their method box.
 
 The estimators behind the tracking panels live in `R/est_*.R` and the SMLM computations in
