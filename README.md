@@ -143,7 +143,7 @@ results are in `tests/validation/`.
 
 ## Getting help and contributing
 
-- **Questions and bug reports:** open an issue at <GITHUB_URL>/issues. Include the MINFLUXR version
+- **Questions and bug reports:** open an issue at https://github.com/ViktorMebus/MINFLUXR/issues. Include the MINFLUXR version
   (in `CITATION.cff`), your R version and operating system, the tab and panel involved, and the steps
   that led to the problem. If your data cannot be shared, the Simulator tab can usually produce a file
   that shows the same behaviour.

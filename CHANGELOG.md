@@ -3,7 +3,9 @@
 Notable changes to MINFLUXR. Versions follow [semantic versioning](https://semver.org);
 while the app is below 1.0 the panel layout and the settings JSON may still change between releases.
 
-## Unreleased
+## 0.7.0 - 2026-11-11
+
+First public release (Zenodo).
 
 ### SMLM: two-color display
 
@@ -234,10 +236,6 @@ while the app is below 1.0 the panel layout and the settings JSON may still chan
 - The multiplex recipe (source files or time windows, channel labels and colours) is saved with the
   settings and rebuilds on load. A CSV exported from a multiplex keeps its channels and loads back as
   one.
-
-## 0.6.0 — 2026-09-18
-
-First public release (Zenodo).
 
 ### Tracking estimators
 

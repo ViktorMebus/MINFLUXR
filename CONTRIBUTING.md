@@ -5,7 +5,7 @@ Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT
 
 ## Reporting a problem
 
-Open an issue at <GITHUB_URL>/issues with:
+Open an issue at https://github.com/ViktorMebus/MINFLUXR/issues with:
 
 1. The MINFLUXR version, your R version (`R.version.string`) and operating system.
 2. The tab and panel, and what you clicked or changed.

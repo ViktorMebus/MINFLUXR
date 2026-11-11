@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use MINFLUXR in your research, please cite it using the metadata below."
 type: software
 title: "MINFLUXR"
-version: "0.6.0"
-date-released: "2026-09-18"
+version: "0.7.0"
+date-released: "2026-11-11"
 abstract: >-
   An interactive R/Shiny application for visualization and analysis of Abberior
   MINFLUX data: localization quality control, de-blinking, clustering, spatial and
