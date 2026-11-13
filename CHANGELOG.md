@@ -3,7 +3,7 @@
 Notable changes to MINFLUXR. Versions follow [semantic versioning](https://semver.org);
 while the app is below 1.0 the panel layout and the settings JSON may still change between releases.
 
-## 0.7.0 - 2026-11-11
+## 0.7.0 - 2026-11-13
 
 First public release (Zenodo).
 
