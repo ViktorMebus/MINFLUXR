@@ -1,5 +1,7 @@
 # MINFLUXR
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24194196.svg)](https://doi.org/10.5281/zenodo.24194196)
+
 An interactive R/Shiny application for visualization and analysis of **Abberior MINFLUX** data.
 
 ---
@@ -158,7 +160,9 @@ Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT
 ## Citing MINFLUXR
 
 If you use MINFLUXR in published work, please cite it using the metadata in [`CITATION.cff`](CITATION.cff)
-(GitHub's "Cite this repository" button reads it). The time-signature analysis and MSD workflow are R ports
+(GitHub's "Cite this repository" button reads it). Each release is archived on Zenodo; the DOI
+[10.5281/zenodo.24194196](https://doi.org/10.5281/zenodo.24194196) always points to the latest version, and
+the Zenodo page lists a DOI for each individual version. The time-signature analysis and MSD workflow are R ports
 of Bela Vogler's [Toolbox_for_MINFLUX_SPT](https://github.com/Zatyrus/Toolbox_for_MINFLUX_SPT) (GPL-3.0);
 please also cite Vogler et al. 2025 when you use them.
 
